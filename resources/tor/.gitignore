@@ -1,0 +1,9 @@
+# Ignore Tor binaries (downloaded via scripts/download-tor.sh)
+*/tor
+*/tor.exe
+*/*.dylib
+*/*.dylib.*
+
+# Keep the directory structure
+!.gitkeep
+!.gitignore

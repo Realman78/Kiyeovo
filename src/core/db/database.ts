@@ -1,0 +1,3008 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
+import Database from 'better-sqlite3';
+import * as fs from 'fs';
+import * as path from 'path';
+import { errStr, generalErrorHandler } from '../utils/general-error.js';
+import type { FileTransferStatus, NetworkMode, OfflineMessage } from '../types.js';
+import type { AckMessageType, GroupContentMessage, GroupStatus } from '../group/types.js';
+import { assertGroupTransition, isGroupStatus } from '../group/runtime/group-state-machine.js';
+import { DEFAULT_BOOTSTRAP_NODES, DEFAULT_FAST_RELAY_MULTIADDRS } from '../network/default-infrastructure.js';
+import { log } from '../../shared/logger.js';
+import {
+    DEFAULT_NETWORK_MODE,
+    FAST_RELAY_MULTIADDRS_INITIALIZED_SETTING_KEY,
+    FAST_RELAY_MULTIADDRS_SETTING_KEY,
+    NETWORK_MODES,
+    NETWORK_MODE_SETTING_KEY,
+    PENDING_KEY_EXCHANGE_EXPIRATION,
+    getNetworkModeRuntime,
+    isNetworkMode,
+} from '../constants.js';
+
+export interface User {
+    network_mode: NetworkMode
+    peer_id: string
+    signing_public_key: string
+    offline_public_key: string
+    signature: string
+    username: string
+    created_at: Date
+    updated_at: Date
+}
+
+export interface Notification {
+    id: string
+    notification_type: 'group_invitation'
+    notification_data: string // JSON string
+    bucket_key: string
+    network_mode: NetworkMode
+    status?: 'pending' | 'accepted' | 'rejected' | 'expired' // Only for group_invitation
+    created_at: Date
+}
+
+export type PendingGroupInvitationNotification = Notification & {
+    notification_type: 'group_invitation'
+    status: 'pending'
+}
+
+export interface Chat {
+    id: number
+    network_mode: NetworkMode
+    type: 'direct' | 'group'
+    name: string
+    created_by: string
+    offline_bucket_secret: string // Shared secret part of bucket key (full key constructed with peer pubkey)
+    notifications_bucket_key: string
+    group_id?: string // UUID for group chats
+    group_key?: string
+    permanent_key?: string
+    status: 'active' | 'pending'
+    offline_last_read_timestamp: number // Last read timestamp for offline messages (prevents re-reading)
+    offline_last_ack_sent: number // Last ACK timestamp we sent to this peer (to avoid sending redundant ACKs)
+    trusted_out_of_band: boolean // Whether chat was established via out-of-band profile import (uses default inbox)
+    muted: boolean // Whether notifications and sounds are muted for this chat
+    key_version: number
+    group_creator_peer_id?: string
+    group_info_dht_key?: string
+    group_status?: string // GroupStatus from group/types.ts
+    needs_removed_catchup?: boolean
+    removed_at?: number | null
+    created_at: Date
+    updated_at: Date
+}
+
+export interface ChatParticipant {
+    chat_id: number
+    peer_id: string
+    role: 'admin' | 'member'
+    joined_at: Date
+}
+
+export interface Message {
+    id: string // UUID for deduplication
+    chat_id: number
+    sender_peer_id: string
+    content: string // Encrypted
+    message_type: 'text' | 'file' | 'image' | 'system'
+    timestamp: Date
+    event_timestamp?: Date | null
+    created_at: Date
+    file_name?: string
+    file_size?: number
+    file_path?: string
+    transfer_status?: FileTransferStatus
+    transfer_progress?: number
+    transfer_error?: string
+}
+
+export interface EncryptedUserIdentityDb {
+    id: number
+    network_mode: NetworkMode
+    identity_kind: 'primary' | 'recovery'
+    peer_id: string
+    encrypted_data: Buffer  // The encrypted JSON blob (stored as BLOB)
+    salt: Buffer            // Scrypt salt (stored as BLOB)
+    nonce: Buffer           // AES-GCM nonce (stored as BLOB)
+    created_at: Date
+}
+
+export interface ContactAttempt {
+    id: number
+    network_mode: NetworkMode
+    sender_peer_id: string
+    sender_username: string
+    message: string
+    message_body: string
+    timestamp: number
+    created_at: Date
+}
+
+export interface BlockedPeer {
+    network_mode: NetworkMode
+    peer_id: string
+    username: string | null
+    blocked_at: Date
+    reason: string | null
+}
+
+export interface FailedKeyExchange {
+    id: number
+    network_mode: NetworkMode
+    target_peer_id: string
+    target_username: string
+    timestamp: number
+    content: string
+    reason: string
+    created_at: Date
+}
+
+export interface OfflineSentMessages {
+    bucket_key: string
+    messages: OfflineMessage[]
+    version: number
+    updated_at: Date
+}
+
+export interface LoginAttempt {
+    id: number
+    network_mode: NetworkMode
+    peer_id: string
+    attempt_count: number
+    last_attempt_at: Date
+    cooldown_until: Date | null
+    created_at: Date
+}
+
+export interface BootstrapNode {
+    id: number
+    address: string
+    network_mode: NetworkMode
+    created_at: Date
+    updated_at: Date
+}
+
+export interface GroupKeyHistory {
+    group_id: string
+    key_version: number
+    encrypted_key: string
+    group_info_metadata_key: string
+    state_hash: string | null
+    used_until: number | null
+    created_at: string
+}
+
+export interface GroupOfflineCursor {
+    group_id: string
+    key_version: number
+    sender_peer_id: string
+    last_read_timestamp: number
+    last_read_message_id: string
+    updated_at: string
+}
+
+export interface GroupPendingAck {
+    group_id: string
+    target_peer_id: string
+    network_mode: NetworkMode
+    message_type: AckMessageType
+    message_payload: string
+    status: 'active' | 'retired'
+    created_at: string
+    last_published_at: string
+}
+
+export interface GroupPendingInfoPublish {
+    group_id: string
+    key_version: number
+    network_mode: NetworkMode
+    versioned_dht_key: string
+    versioned_payload: string
+    latest_dht_key: string
+    latest_payload: string
+    attempts: number
+    next_retry_at: number
+    last_error: string | null
+    created_at: string
+    updated_at: string
+}
+
+export interface GroupInviteDeliveryAck {
+    group_id: string
+    target_peer_id: string
+    invite_id: string
+    network_mode: NetworkMode
+    created_at: string
+}
+
+export interface GroupSenderSeq {
+    group_id: string
+    key_version: number
+    next_seq: number
+}
+
+export interface GroupEpochBoundary {
+    group_id: string
+    key_version: number
+    sender_peer_id: string
+    boundary_seq: number
+    source: string
+    updated_at: string
+}
+
+export class ChatDatabase {
+    private db: Database.Database;
+    private dbPath: string;
+    private readonly sessionNetworkMode: NetworkMode;
+
+    constructor(dbPath: string) {
+        this.dbPath = dbPath;
+
+        try {
+            const dbDir = path.dirname(dbPath);
+            if (!fs.existsSync(dbDir)) {
+                fs.mkdirSync(dbDir, { recursive: true });
+            }
+
+            this.db = new Database(dbPath);
+
+            this.db.pragma('journal_mode = WAL');
+            this.db.pragma('synchronous = NORMAL');
+            this.db.pragma('cache_size = 10000');
+            this.db.pragma('temp_store = memory');
+            this.db.pragma('mmap_size = 268435456'); // 256MB
+            this.db.pragma('busy_timeout = 5000'); // 5 second timeout
+            this.db.pragma('foreign_keys = ON');
+
+            this.initializeTables();
+            this.sessionNetworkMode = this.getNetworkMode();
+            this.createIndexes();
+
+            this.checkIntegrity();
+        } catch (error) {
+            generalErrorHandler(error);
+            throw error;
+        }
+    }
+
+    private mapChatRow(row: any): Chat {
+        const mode = isNetworkMode(row.network_mode) ? row.network_mode : DEFAULT_NETWORK_MODE;
+        return {
+            ...row,
+            network_mode: mode,
+            created_at: new Date(row.created_at),
+            updated_at: new Date(row.updated_at),
+            trusted_out_of_band: Boolean(row.trusted_out_of_band),
+            muted: Boolean(row.muted),
+            key_version: row.key_version ?? 0,
+            needs_removed_catchup: Boolean(row.needs_removed_catchup),
+            removed_at: row.removed_at ?? null,
+        };
+    }
+
+    private initializeTables(): void {
+        // Enable WAL mode for better concurrent access
+        this.db.pragma('journal_mode = WAL');
+
+        // Users table
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                network_mode TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}' CHECK(network_mode IN ('${NETWORK_MODES.FAST}','${NETWORK_MODES.ANONYMOUS}')),
+                peer_id TEXT NOT NULL,
+                signing_public_key TEXT NOT NULL,
+                offline_public_key TEXT NOT NULL DEFAULT '',
+                signature TEXT NOT NULL,
+                username TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(network_mode, peer_id)
+            )
+        `);
+
+        // Chats table
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS chats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                network_mode TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}' CHECK(network_mode IN ('${NETWORK_MODES.FAST}','${NETWORK_MODES.ANONYMOUS}')),
+                name TEXT NOT NULL,
+                type TEXT NOT NULL CHECK(type IN ('direct','group')),
+                created_by TEXT NOT NULL,
+                offline_bucket_secret TEXT NOT NULL,
+                notifications_bucket_key TEXT NOT NULL,
+                group_id TEXT,
+                group_key TEXT,
+                permanent_key TEXT,
+                status TEXT NOT NULL CHECK(status IN ('active', 'pending')),
+                offline_last_read_timestamp INTEGER DEFAULT 0,
+                offline_last_ack_sent INTEGER DEFAULT 0,
+                trusted_out_of_band INTEGER DEFAULT 0,
+                muted INTEGER DEFAULT 0,
+                key_version INTEGER DEFAULT 0,
+                group_creator_peer_id TEXT,
+                group_info_dht_key TEXT,
+                group_status TEXT,
+                needs_removed_catchup INTEGER NOT NULL DEFAULT 0,
+                removed_at INTEGER,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        this.ensureChatsRemovedCatchupColumns();
+
+
+        // Messages table
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS messages (
+                id TEXT PRIMARY KEY NOT NULL,
+                chat_id INTEGER NOT NULL,
+                sender_peer_id TEXT NOT NULL,
+                content TEXT NOT NULL, -- Decrypted content stored in plaintext (relies on OS disk encryption for at-rest protection)
+                message_type TEXT NOT NULL CHECK(message_type IN ('text', 'file', 'image', 'system')),
+                file_name TEXT,
+                file_size INTEGER,
+                file_path TEXT,
+                transfer_status TEXT,
+                transfer_progress INTEGER,
+                transfer_error TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                event_timestamp DATETIME,
+                FOREIGN KEY (chat_id) REFERENCES chats (id) ON DELETE CASCADE
+            )
+        `);
+        this.ensureEventTimestampColumn();
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS encrypted_user_identities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                network_mode TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}' CHECK(network_mode IN ('${NETWORK_MODES.FAST}','${NETWORK_MODES.ANONYMOUS}')),
+                identity_kind TEXT NOT NULL CHECK(identity_kind IN ('primary','recovery')),
+                peer_id TEXT NOT NULL,
+                encrypted_data BLOB NOT NULL,
+                salt BLOB NOT NULL,
+                nonce BLOB NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(network_mode, identity_kind)
+            )
+        `);
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS chat_participants (
+                chat_id INTEGER NOT NULL,
+                peer_id TEXT NOT NULL,
+                role TEXT DEFAULT 'member',
+                joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (chat_id, peer_id),
+                FOREIGN KEY (chat_id) REFERENCES chats (id) ON DELETE CASCADE
+            )
+        `);
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS notifications (
+                id TEXT PRIMARY KEY NOT NULL,
+                network_mode TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}' CHECK(network_mode IN ('${NETWORK_MODES.FAST}','${NETWORK_MODES.ANONYMOUS}')),
+                notification_type TEXT NOT NULL CHECK(notification_type IN ('group_invitation')),
+                notification_data TEXT NOT NULL, -- JSON string
+                bucket_key TEXT NOT NULL,
+                status TEXT CHECK(status IN ('pending', 'accepted', 'rejected', 'expired')), -- Only for group invitations
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                read BOOLEAN DEFAULT FALSE
+            )
+        `);
+
+        // Contact attempts log table (for silent mode)
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS contact_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                network_mode TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}' CHECK(network_mode IN ('${NETWORK_MODES.FAST}','${NETWORK_MODES.ANONYMOUS}')),
+                sender_peer_id TEXT NOT NULL,
+                sender_username TEXT NOT NULL,
+                message TEXT NOT NULL,
+                message_body TEXT NOT NULL,
+                timestamp INTEGER NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        // Blocked peers table
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS blocked_peers (
+                network_mode TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}' CHECK(network_mode IN ('${NETWORK_MODES.FAST}','${NETWORK_MODES.ANONYMOUS}')),
+                peer_id TEXT NOT NULL,
+                username TEXT,
+                blocked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                reason TEXT,
+                PRIMARY KEY (network_mode, peer_id)
+            )
+        `);
+
+        // Failed key exchanges table (for sender-side rate limiting)
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS failed_key_exchanges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                network_mode TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}' CHECK(network_mode IN ('${NETWORK_MODES.FAST}','${NETWORK_MODES.ANONYMOUS}')),
+                target_peer_id TEXT NOT NULL,
+                target_username TEXT NOT NULL,
+                timestamp INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        // Settings table (for local preferences like contact_mode)
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY NOT NULL,
+                value TEXT NOT NULL,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        // Initialize default contact_mode setting if not exists
+        const contactModeSetting = this.db.prepare('SELECT value FROM settings WHERE key = ?').get('contact_mode');
+        if (!contactModeSetting) {
+            this.db.prepare(`INSERT INTO settings (key, value) VALUES ('contact_mode', 'active')`).run();
+        }
+
+        // Initialize default network mode setting if not exists (U1).
+        const networkModeSetting = this.db.prepare('SELECT value FROM settings WHERE key = ?').get(NETWORK_MODE_SETTING_KEY);
+        if (!networkModeSetting) {
+            this.db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run(NETWORK_MODE_SETTING_KEY, DEFAULT_NETWORK_MODE);
+        }
+
+        // Initialize default fast relays once. Users can later edit/clear via settings UI.
+        const fastRelayInitialized = this.db.prepare('SELECT value FROM settings WHERE key = ?').get(FAST_RELAY_MULTIADDRS_INITIALIZED_SETTING_KEY);
+        if (!fastRelayInitialized) {
+            this.db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(
+                FAST_RELAY_MULTIADDRS_SETTING_KEY,
+                DEFAULT_FAST_RELAY_MULTIADDRS.join(',')
+            );
+            this.db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run(
+                FAST_RELAY_MULTIADDRS_INITIALIZED_SETTING_KEY,
+                'true'
+            );
+        }
+
+        // Offline sent messages table (local cache of messages we've sent to DHT)
+        // This eliminates the need to query DHT before writing
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS offline_sent_messages (
+                bucket_key TEXT PRIMARY KEY NOT NULL,
+                messages TEXT NOT NULL,
+                version INTEGER NOT NULL DEFAULT 0,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        // Group offline sent messages table (local cache of messages we've sent to group DHT buckets)
+        // Allows optimistic local append/write without pre-read DHT GET.
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS group_offline_sent_messages (
+                bucket_key TEXT PRIMARY KEY NOT NULL,
+                messages TEXT NOT NULL,
+                version INTEGER NOT NULL DEFAULT 0,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        // Login attempts table (for progressive cooldown on failed password attempts)
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS login_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                network_mode TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}' CHECK(network_mode IN ('${NETWORK_MODES.FAST}','${NETWORK_MODES.ANONYMOUS}')),
+                peer_id TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                last_attempt_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                cooldown_until DATETIME,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(network_mode, peer_id)
+            )
+        `);
+
+        // Bootstrap nodes table
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS bootstrap_nodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                address TEXT NOT NULL,
+                network_mode TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}' CHECK(network_mode IN ('${NETWORK_MODES.FAST}','${NETWORK_MODES.ANONYMOUS}')),
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(address, network_mode)
+            )
+        `);
+
+        this.ensureColumnExists('bootstrap_nodes', 'sort_order', 'INTEGER NOT NULL DEFAULT 0');
+
+        // Initialize default bootstrap nodes (only once, even if user deletes them later)
+        const bootstrapInitialized = this.db.prepare('SELECT value FROM settings WHERE key = ?').get('bootstrap_nodes_initialized');
+        if (!bootstrapInitialized) {
+            for (let i = 0; i < DEFAULT_BOOTSTRAP_NODES.length; i++) {
+                const node = DEFAULT_BOOTSTRAP_NODES[i]!;
+                const mode = node.includes('/onion')
+                    ? NETWORK_MODES.ANONYMOUS
+                    : NETWORK_MODES.FAST;
+                this.db.prepare('INSERT INTO bootstrap_nodes (address, network_mode, sort_order) VALUES (?, ?, ?)').run(node, mode, i);
+            }
+            this.db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run('bootstrap_nodes_initialized', 'true');
+        }
+
+        // Group key history — stores encrypted group keys per epoch for decrypting old messages
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS group_key_history (
+                group_id TEXT NOT NULL,
+                key_version INTEGER NOT NULL,
+                encrypted_key TEXT NOT NULL,
+                group_info_metadata_key TEXT NOT NULL,
+                state_hash TEXT,
+                used_until INTEGER,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (group_id, key_version)
+            )
+        `);
+
+        // Group offline cursors — tracks last-read position per sender per group
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS group_offline_cursors (
+                group_id TEXT NOT NULL,
+                key_version INTEGER NOT NULL DEFAULT 1,
+                sender_peer_id TEXT NOT NULL,
+                last_read_timestamp INTEGER NOT NULL DEFAULT 0,
+                last_read_message_id TEXT NOT NULL DEFAULT '',
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (group_id, key_version, sender_peer_id)
+            )
+        `);
+
+        // Group pending ACKs — tracks key-bearing control messages awaiting ACK for re-publish
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS group_pending_acks (
+                group_id TEXT NOT NULL,
+                target_peer_id TEXT NOT NULL,
+                network_mode TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}' CHECK(network_mode IN ('${NETWORK_MODES.FAST}','${NETWORK_MODES.ANONYMOUS}')),
+                message_type TEXT NOT NULL CHECK(message_type IN ('GROUP_INVITE', 'GROUP_INVITE_RESPONSE', 'GROUP_WELCOME', 'GROUP_STATE_UPDATE', 'GROUP_KICK', 'GROUP_DISBAND')),
+                message_payload TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'retired')),
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                last_published_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (group_id, target_peer_id, message_type, network_mode)
+            )
+        `);
+
+        // Group info pending publishes — retries for versioned/latest DHT records
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS group_pending_info_publishes (
+                group_id TEXT NOT NULL,
+                key_version INTEGER NOT NULL,
+                network_mode TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}' CHECK(network_mode IN ('${NETWORK_MODES.FAST}','${NETWORK_MODES.ANONYMOUS}')),
+                versioned_dht_key TEXT NOT NULL,
+                versioned_payload TEXT NOT NULL,
+                latest_dht_key TEXT NOT NULL,
+                latest_payload TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_retry_at INTEGER NOT NULL,
+                last_error TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (group_id, key_version, network_mode)
+            )
+        `);
+
+        // Group invite delivery ACKs — recipient confirmed invite was received.
+        // Used to stop invite re-publishing while still keeping invite pending row
+        // for later response validation.
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS group_invite_delivery_acks (
+                group_id TEXT NOT NULL,
+                target_peer_id TEXT NOT NULL,
+                invite_id TEXT NOT NULL,
+                network_mode TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}' CHECK(network_mode IN ('${NETWORK_MODES.FAST}','${NETWORK_MODES.ANONYMOUS}')),
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (group_id, target_peer_id, invite_id, network_mode)
+            )
+        `);
+
+        // Group sender sequence — tracks sender's own monotonic seq per group per keyVersion
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS group_sender_seq (
+                group_id TEXT NOT NULL,
+                key_version INTEGER NOT NULL,
+                next_seq INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (group_id, key_version)
+            )
+        `);
+
+        // Group member seq — tracks highest observed seq from each member per group per keyVersion
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS group_member_seq (
+                group_id TEXT NOT NULL,
+                key_version INTEGER NOT NULL,
+                sender_peer_id TEXT NOT NULL,
+                highest_seq INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (group_id, key_version, sender_peer_id)
+            )
+        `);
+
+        // Group epoch boundaries — finalized sender seq cutoffs for a closed key epoch
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS group_epoch_boundaries (
+                group_id TEXT NOT NULL,
+                key_version INTEGER NOT NULL,
+                sender_peer_id TEXT NOT NULL,
+                boundary_seq INTEGER NOT NULL DEFAULT 0,
+                source TEXT NOT NULL DEFAULT 'local_rotation',
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (group_id, key_version, sender_peer_id)
+            )
+        `);
+
+        this.ensureModeScopedColumns();
+    }
+
+    private createIndexes(): void {
+        // Indexes for better query performance
+        this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages (chat_id);
+      CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages (created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_messages_sender_peer_id ON messages (sender_peer_id);
+      CREATE INDEX IF NOT EXISTS idx_users_mode_username ON users (network_mode, username);
+      CREATE INDEX IF NOT EXISTS idx_users_mode_peer_id ON users (network_mode, peer_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_users_unique_mode_peer ON users(network_mode, peer_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_encrypted_identities_unique_mode_kind ON encrypted_user_identities(network_mode, identity_kind);
+      CREATE INDEX IF NOT EXISTS idx_participants_peer ON chat_participants(peer_id);
+      CREATE INDEX IF NOT EXISTS idx_messages_conv_created ON messages(chat_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON notifications(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_notifications_mode_created_at ON notifications(network_mode, created_at DESC);
+
+      -- Indexes for cleanup queries
+      CREATE INDEX IF NOT EXISTS idx_failed_key_exchanges_timestamp ON failed_key_exchanges(timestamp);
+      CREATE INDEX IF NOT EXISTS idx_failed_key_exchanges_mode_timestamp ON failed_key_exchanges(network_mode, timestamp);
+      CREATE INDEX IF NOT EXISTS idx_contact_attempts_mode_created_at ON contact_attempts(network_mode, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_blocked_peers_mode_blocked_at ON blocked_peers(network_mode, blocked_at DESC);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_login_attempts_unique_mode_peer ON login_attempts(network_mode, peer_id);
+      CREATE INDEX IF NOT EXISTS idx_notifications_status_created ON notifications(status, created_at);
+      CREATE INDEX IF NOT EXISTS idx_notifications_mode_status_created ON notifications(network_mode, status, created_at);
+
+      -- Group indexes
+      CREATE INDEX IF NOT EXISTS idx_group_key_history_group ON group_key_history(group_id);
+      CREATE INDEX IF NOT EXISTS idx_group_pending_acks_group_mode ON group_pending_acks(group_id, network_mode);
+      CREATE INDEX IF NOT EXISTS idx_group_pending_acks_mode_status_created ON group_pending_acks(network_mode, status, created_at);
+      CREATE INDEX IF NOT EXISTS idx_group_pending_info_mode_next_retry ON group_pending_info_publishes(network_mode, next_retry_at);
+      CREATE INDEX IF NOT EXISTS idx_group_invite_delivery_acks_group_mode ON group_invite_delivery_acks(group_id, network_mode);
+      CREATE INDEX IF NOT EXISTS idx_chats_group_id_mode ON chats(group_id, network_mode);
+      CREATE INDEX IF NOT EXISTS idx_chats_mode_updated ON chats(network_mode, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_bootstrap_nodes_mode ON bootstrap_nodes(network_mode);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_bootstrap_nodes_unique_addr_mode ON bootstrap_nodes(address, network_mode);
+        `);
+    }
+
+    private ensureEventTimestampColumn(): void {
+        try {
+            this.db.exec('ALTER TABLE messages ADD COLUMN event_timestamp DATETIME');
+        } catch (error) {
+            if (!errStr(error).toLowerCase().includes('duplicate column name')) {
+                throw error;
+            }
+        }
+    }
+
+    private ensureChatsRemovedCatchupColumns(): void {
+        try {
+            this.db.exec('ALTER TABLE chats ADD COLUMN needs_removed_catchup INTEGER NOT NULL DEFAULT 0');
+        } catch (error) {
+            if (!errStr(error).toLowerCase().includes('duplicate column name')) {
+                throw error;
+            }
+        }
+
+        try {
+            this.db.exec('ALTER TABLE chats ADD COLUMN removed_at INTEGER');
+        } catch (error) {
+            if (!errStr(error).toLowerCase().includes('duplicate column name')) {
+                throw error;
+            }
+        }
+    }
+
+    private ensureModeScopedColumns(): void {
+        this.ensureColumnExists('users', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
+        this.ensureColumnExists('chats', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
+        this.ensureColumnExists('notifications', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
+        this.ensureColumnExists('bootstrap_nodes', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
+        this.ensureColumnExists('group_pending_acks', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
+        this.ensureColumnExists('group_pending_acks', 'status', `TEXT NOT NULL DEFAULT 'active'`);
+        this.ensureColumnExists('group_pending_info_publishes', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
+        this.ensureColumnExists('group_invite_delivery_acks', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
+        this.ensureColumnExists('encrypted_user_identities', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
+        this.ensureColumnExists('encrypted_user_identities', 'identity_kind', `TEXT NOT NULL DEFAULT 'primary'`);
+        this.ensureColumnExists('group_key_history', 'group_info_metadata_key', "TEXT NOT NULL DEFAULT ''");
+        this.ensureColumnExists('contact_attempts', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
+        this.ensureColumnExists('blocked_peers', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
+        this.ensureColumnExists('failed_key_exchanges', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
+        this.ensureColumnExists('login_attempts', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
+        this.db.prepare(`UPDATE bootstrap_nodes SET network_mode = ? WHERE address LIKE '%/onion%'`).run(NETWORK_MODES.ANONYMOUS);
+        this.db.prepare(`UPDATE bootstrap_nodes SET network_mode = ? WHERE address NOT LIKE '%/onion%'`).run(NETWORK_MODES.FAST);
+    }
+
+    private ensureColumnExists(table: string, column: string, definition: string): void {
+        try {
+            this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+        } catch (error) {
+            if (!errStr(error).toLowerCase().includes('duplicate column name')) {
+                throw error;
+            }
+        }
+    }
+
+    private getActiveNetworkMode(mode?: NetworkMode): NetworkMode {
+        return mode ?? this.sessionNetworkMode;
+    }
+
+    // Helper method to retry database operations
+    private async retryOperation<T>(operation: () => T, maxRetries: number = 3, delay: number = 100): Promise<T> {
+        let lastError: any;
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                return operation();
+            } catch (error: any) {
+                lastError = error;
+                // If it's a database locked error, wait and retry
+                if (error.code === 'SQLITE_BUSY' || error.message.includes('database is locked')) {
+                    log(`Database locked, retrying... (attempt ${attempt}/${maxRetries})`);
+                    // Try to reconnect on the second attempt
+                    if (attempt === 2) {
+                        try {
+                            this.reconnect();
+                        } catch (reconnectError) {
+                            console.error('Failed to reconnect:', reconnectError);
+                        }
+                    }
+                    await new Promise(resolve => setTimeout(resolve, delay * attempt));
+                    continue;
+                }
+                // For other errors, don't retry
+                throw error;
+            }
+        }
+        throw lastError;
+    }
+
+    // Encrypted user identity operations
+    createEncryptedUserIdentityForMode(
+        mode: NetworkMode,
+        identityKind: 'primary' | 'recovery',
+        encryptedUserIdentity: Omit<EncryptedUserIdentityDb, 'id' | 'created_at' | 'network_mode' | 'identity_kind'>
+    ): void {
+        try {
+            const stmt = this.db.prepare(
+                `INSERT INTO encrypted_user_identities (network_mode, identity_kind, peer_id, encrypted_data, salt, nonce)
+                 VALUES (?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(network_mode, identity_kind) DO UPDATE SET
+                   peer_id = excluded.peer_id,
+                   encrypted_data = excluded.encrypted_data,
+                   salt = excluded.salt,
+                   nonce = excluded.nonce`
+            );
+            stmt.run(
+                mode,
+                identityKind,
+                encryptedUserIdentity.peer_id,
+                encryptedUserIdentity.encrypted_data,
+                encryptedUserIdentity.salt,
+                encryptedUserIdentity.nonce
+            );
+        } catch (error) {
+            generalErrorHandler(error);
+        }
+    }
+
+    getEncryptedUserIdentityForMode(
+        mode: NetworkMode,
+        identityKind: 'primary' | 'recovery'
+    ): EncryptedUserIdentityDb | null {
+        const stmt = this.db.prepare(
+            'SELECT * FROM encrypted_user_identities WHERE network_mode = ? AND identity_kind = ? LIMIT 1'
+        );
+        const row = stmt.get(mode, identityKind) as any;
+        return row ? {
+            id: row.id,
+            network_mode: row.network_mode,
+            identity_kind: row.identity_kind,
+            peer_id: row.peer_id,
+            encrypted_data: row.encrypted_data,
+            salt: row.salt,
+            nonce: row.nonce,
+            created_at: new Date(row.created_at)
+        } : null;
+    }
+
+    // Kept only for targeted recovery lookups.
+    getEncryptedUserIdentityByPeerId(peerId: string, mode?: NetworkMode): EncryptedUserIdentityDb | null {
+        const activeMode = this.getActiveNetworkMode(mode);
+        const stmt = this.db.prepare(
+            'SELECT * FROM encrypted_user_identities WHERE peer_id = ? AND network_mode = ? LIMIT 1'
+        );
+        const row = stmt.get(peerId, activeMode) as any;
+        return row ? {
+            id: row.id,
+            network_mode: row.network_mode,
+            identity_kind: row.identity_kind,
+            peer_id: row.peer_id,
+            encrypted_data: row.encrypted_data,
+            salt: row.salt,
+            nonce: row.nonce,
+            created_at: new Date(row.created_at)
+        } : null;
+    }
+
+    // User operations
+    async createUser(
+        user: Omit<User, 'created_at' | 'updated_at' | 'network_mode'> & { network_mode?: NetworkMode }
+    ): Promise<string> {
+        const mode = this.getActiveNetworkMode(user.network_mode);
+        return this.retryOperation(() => {
+            const stmt = this.db.prepare(`
+                INSERT INTO users (network_mode, peer_id, signing_public_key, offline_public_key, signature, username)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(network_mode, peer_id) DO UPDATE SET
+                    signing_public_key = excluded.signing_public_key,
+                    offline_public_key = excluded.offline_public_key,
+                    signature = excluded.signature,
+                    username = excluded.username,
+                    updated_at = CURRENT_TIMESTAMP
+            `);
+
+            try {
+                stmt.run(mode, user.peer_id, user.signing_public_key, user.offline_public_key, user.signature, user.username);
+                return user.peer_id;
+            } catch (error: any) {
+                console.error('Error creating user:', error);
+                if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+                    return user.peer_id;
+                }
+                throw error;
+            }
+        });
+    }
+
+    updateUserKeys(
+        user: Omit<User, 'username' | 'created_at' | 'updated_at' | 'network_mode'> & { network_mode?: NetworkMode }
+    ): void {
+        const mode = this.getActiveNetworkMode(user.network_mode);
+        const stmt = this.db.prepare(
+            'UPDATE users SET signing_public_key = ?, offline_public_key = ?, signature = ? WHERE peer_id = ? AND network_mode = ?'
+        );
+        stmt.run(user.signing_public_key, user.offline_public_key, user.signature, user.peer_id, mode);
+        log(`Updated user keys for ${user.peer_id}`);
+    }
+
+    updateUsername(peerId: string, username: string, mode?: NetworkMode): void {
+        const activeMode = this.getActiveNetworkMode(mode);
+        const stmt = this.db.prepare('UPDATE users SET username = ? WHERE peer_id = ? AND network_mode = ?');
+        stmt.run(username, peerId, activeMode);
+        log(`Updated username for ${peerId} to ${username}`);
+    }
+
+    getUserByUsername(username: string, mode?: NetworkMode): User | null {
+        const activeMode = this.getActiveNetworkMode(mode);
+        const stmt = this.db.prepare('SELECT * FROM users WHERE username = ? AND network_mode = ?');
+        const row = stmt.get(username, activeMode) as any;
+
+        if (!row) return null;
+
+        return {
+            network_mode: row.network_mode,
+            peer_id: row.peer_id,
+            signing_public_key: row.signing_public_key,
+            offline_public_key: row.offline_public_key || '',
+            signature: row.signature,
+            username: row.username,
+            created_at: new Date(row.created_at),
+            updated_at: new Date(row.updated_at)
+        };
+    }
+
+    getUserByPeerId(peerId: string, mode?: NetworkMode): User | null {
+        const activeMode = this.getActiveNetworkMode(mode);
+        const stmt = this.db.prepare('SELECT * FROM users WHERE peer_id = ? AND network_mode = ?');
+        const row = stmt.get(peerId, activeMode) as any;
+
+        if (!row) return null;
+
+        return {
+            network_mode: row.network_mode,
+            peer_id: row.peer_id,
+            signing_public_key: row.signing_public_key,
+            offline_public_key: row.offline_public_key || '',
+            signature: row.signature,
+            username: row.username,
+            created_at: new Date(row.created_at),
+            updated_at: new Date(row.updated_at)
+        };
+    }
+
+    getUserByPeerIdOrUsername(peerIdOrUsername: string, mode?: NetworkMode): User | null {
+        const activeMode = this.getActiveNetworkMode(mode);
+        const stmt = this.db.prepare('SELECT * FROM users WHERE network_mode = ? AND (peer_id = ? OR username = ?)');
+        const row = stmt.get(activeMode, peerIdOrUsername, peerIdOrUsername) as any;
+
+        if (!row) return null;
+
+        return {
+            network_mode: row.network_mode,
+            peer_id: row.peer_id,
+            signing_public_key: row.signing_public_key,
+            offline_public_key: row.offline_public_key || '',
+            signature: row.signature,
+            username: row.username,
+            created_at: new Date(row.created_at),
+            updated_at: new Date(row.updated_at)
+        };
+    }
+
+    getUserByPeerIdThenUsername(peerIdOrUsername: string, mode?: NetworkMode): User | null {
+        const activeMode = this.getActiveNetworkMode(mode);
+        const stmt = this.db.prepare('SELECT * FROM users WHERE peer_id = ? AND network_mode = ?');
+        let row = stmt.get(peerIdOrUsername, activeMode) as any;
+        if (!row) {
+            row = this.getUserByUsername(peerIdOrUsername, activeMode) as any;
+        }
+
+        if (!row) return null;
+
+        return {
+            network_mode: row.network_mode,
+            peer_id: row.peer_id,
+            signing_public_key: row.signing_public_key,
+            offline_public_key: row.offline_public_key || '',
+            signature: row.signature,
+            username: row.username,
+            created_at: new Date(row.created_at),
+            updated_at: new Date(row.updated_at)
+        };
+    }
+
+    getLastUsername(peerId: string, mode?: NetworkMode): string | null {
+        const activeMode = this.getActiveNetworkMode(mode);
+        const stmt = this.db.prepare('SELECT username FROM users WHERE peer_id = ? AND network_mode = ? AND username IS NOT NULL');
+        const row = stmt.get(peerId, activeMode) as { username: string } | undefined;
+        return row?.username ?? null;
+    }
+
+    getUsersPeerIds(usernamesOrPeerIds: string[], mode?: NetworkMode): string[] {
+        const activeMode = this.getActiveNetworkMode(mode);
+        const placeholders = usernamesOrPeerIds.map(() => '?').join(',');
+        const stmt = this.db.prepare(
+            `SELECT DISTINCT peer_id FROM users WHERE network_mode = ? AND (username IN (${placeholders}) OR peer_id IN (${placeholders}))`
+        );
+        const rows = stmt.all(activeMode, ...usernamesOrPeerIds, ...usernamesOrPeerIds) as { peer_id: string }[];
+        return rows.map((row: { peer_id: string }) => row.peer_id);
+    }
+
+    getUsernamesForPeerIds(peerIds: string[], mode?: NetworkMode): Map<string, string> {
+        if (peerIds.length === 0) return new Map();
+        const activeMode = this.getActiveNetworkMode(mode);
+        const placeholders = peerIds.map(() => '?').join(',');
+        const stmt = this.db.prepare(`SELECT peer_id, username FROM users WHERE network_mode = ? AND peer_id IN (${placeholders})`);
+        const rows = stmt.all(activeMode, ...peerIds) as { peer_id: string, username: string }[];
+        return new Map(rows.map(row => [row.peer_id, row.username]));
+    }
+
+    getAllUsers(mode?: NetworkMode): User[] {
+        const activeMode = this.getActiveNetworkMode(mode);
+        const stmt = this.db.prepare('SELECT * FROM users WHERE network_mode = ? ORDER BY username');
+        return (stmt.all(activeMode) as any[]).map(row => ({
+            ...row,
+            network_mode: row.network_mode,
+            created_at: new Date(row.created_at),
+            updated_at: new Date(row.updated_at),
+        }));
+    }
+
+    deleteUserByPeerId(peerId: string, mode?: NetworkMode): void {
+        const activeMode = this.getActiveNetworkMode(mode);
+        const stmt = this.db.prepare('DELETE FROM users WHERE peer_id = ? AND network_mode = ?');
+        stmt.run(peerId, activeMode);
+    }
+
+    // Legacy helper kept for one-time diagnostics; use mode-scoped methods above.
+    getAllUsersAcrossModes(): User[] {
+        const stmt = this.db.prepare('SELECT * FROM users ORDER BY network_mode, username');
+        return (stmt.all() as any[]).map(row => ({
+            ...row,
+            network_mode: row.network_mode,
+            created_at: new Date(row.created_at),
+            updated_at: new Date(row.updated_at),
+        }));
+    }
+
+    // Generic settings operations
+    setSetting(key: string, value: string): void {
+        const stmt = this.db.prepare('INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)');
+        stmt.run(key, value);
+    }
+
+    getSetting(key: string): string | null {
+        const stmt = this.db.prepare('SELECT value FROM settings WHERE key = ?');
+        const row = stmt.get(key) as { value: string } | undefined;
+        return row?.value ?? null;
+    }
+
+    getContactMode(): 'active' | 'silent' | 'block' {
+        const value = this.getSetting('contact_mode');
+        return (value as 'active' | 'silent' | 'block') || 'active';
+    }
+
+    setNetworkMode(mode: NetworkMode): void {
+        if (!isNetworkMode(mode)) {
+            throw new Error(`Invalid network mode: ${mode}`);
+        }
+        this.setSetting(NETWORK_MODE_SETTING_KEY, mode);
+    }
+
+    getNetworkMode(): NetworkMode {
+        const value = this.getSetting(NETWORK_MODE_SETTING_KEY);
+        if (isNetworkMode(value)) return value;
+
+        // Self-heal invalid/missing value to default.
+        this.setSetting(NETWORK_MODE_SETTING_KEY, DEFAULT_NETWORK_MODE);
+        return DEFAULT_NETWORK_MODE;
+    }
+
+    getSessionNetworkMode(): NetworkMode {
+        return this.sessionNetworkMode;
+    }
+
+    // Contact attempt operations (silent mode logging)
+    logContactAttempt(attempt: Omit<ContactAttempt, 'id' | 'created_at' | 'network_mode'>): number {
+        const stmt = this.db.prepare(`
+            INSERT INTO contact_attempts (network_mode, sender_peer_id, sender_username, message, message_body, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?)
+        `);
+        const result = stmt.run(
+            this.getActiveNetworkMode(),
+            attempt.sender_peer_id,
+            attempt.sender_username,
+            attempt.message,
+            attempt.message_body,
+            attempt.timestamp
+        );
+
+        // FIFO cap at 1000 entries - delete oldest if limit exceeded
+        const deleteOldStmt = this.db.prepare(`
+            DELETE FROM contact_attempts
+            WHERE id IN (
+                SELECT id FROM contact_attempts
+                WHERE network_mode = ?
+                ORDER BY timestamp DESC
+                LIMIT -1 OFFSET 1000
+            )
+        `);
+        deleteOldStmt.run(this.getActiveNetworkMode());
+
+        return result.lastInsertRowid as number;
+    }
+
+    getActiveContactAttempts(): ContactAttempt[] {
+        // Active are the ones who are not older than PENDING_KEY_EXCHANGE_EXPIRATION (2 minutes)
+        return this.getContactAttempts().filter(attempt => attempt.timestamp > Date.now() - PENDING_KEY_EXCHANGE_EXPIRATION);
+    }
+
+    getContactAttempts(limit: number = 50, page: number = 1): ContactAttempt[] {
+        const stmt = this.db.prepare('SELECT * FROM contact_attempts WHERE network_mode = ? ORDER BY created_at DESC LIMIT ? OFFSET ?');
+        const rows = stmt.all(this.getActiveNetworkMode(), limit, (page - 1) * limit) as any[];
+        return rows.map(row => ({
+            id: row.id,
+            network_mode: row.network_mode,
+            sender_peer_id: row.sender_peer_id,
+            sender_username: row.sender_username,
+            message: row.message,
+            message_body: row.message_body,
+            timestamp: row.timestamp,
+            created_at: new Date(row.created_at)
+        }));
+    }
+
+    getContactAttemptsByPeerId(peerId: string): ContactAttempt[] {
+        const stmt = this.db.prepare('SELECT * FROM contact_attempts WHERE sender_peer_id = ? AND network_mode = ?');
+        const rows = stmt.all(peerId, this.getActiveNetworkMode()) as any[];
+        return rows.map(row => ({
+            id: row.id,
+            network_mode: row.network_mode,
+            sender_peer_id: row.sender_peer_id,
+            sender_username: row.sender_username,
+            message: row.message,
+            message_body: row.message_body,
+            timestamp: row.timestamp,
+            created_at: new Date(row.created_at)
+        }));
+    }
+
+    deleteContactAttempt(id: number): void {
+        const stmt = this.db.prepare('DELETE FROM contact_attempts WHERE id = ? AND network_mode = ?');
+        stmt.run(id, this.getActiveNetworkMode());
+    }
+
+    // Blocked peer operations
+    blockPeer(peerId: string, username: string | null = null, reason: string | null = null): void {
+        const stmt = this.db.prepare(`
+            INSERT OR REPLACE INTO blocked_peers (network_mode, peer_id, username, reason)
+            VALUES (?, ?, ?, ?)
+        `);
+        stmt.run(this.getActiveNetworkMode(), peerId, username, reason);
+    }
+
+    unblockPeer(peerId: string): void {
+        const stmt = this.db.prepare('DELETE FROM blocked_peers WHERE peer_id = ? AND network_mode = ?');
+        stmt.run(peerId, this.getActiveNetworkMode());
+    }
+
+    isBlocked(peerId: string): boolean {
+        const stmt = this.db.prepare('SELECT 1 FROM blocked_peers WHERE peer_id = ? AND network_mode = ?');
+        const row = stmt.get(peerId, this.getActiveNetworkMode());
+        return row !== undefined;
+    }
+
+    getBlockedPeers(limit: number = 1000): BlockedPeer[] {
+        const stmt = this.db.prepare('SELECT * FROM blocked_peers WHERE network_mode = ? ORDER BY blocked_at DESC LIMIT ?');
+        const rows = stmt.all(this.getActiveNetworkMode(), limit) as any[];
+        return rows.map(row => ({
+            network_mode: row.network_mode,
+            peer_id: row.peer_id,
+            username: row.username,
+            blocked_at: new Date(row.blocked_at),
+            reason: row.reason
+        }));
+    }
+
+    // Failed key exchange operations (sender-side rate limiting)
+    logFailedKeyExchange(targetPeerId: string, targetUsername: string, content: string, reason: string): void {
+        const stmt = this.db.prepare(`
+            INSERT INTO failed_key_exchanges (network_mode, target_peer_id, target_username, timestamp, content, reason)
+            VALUES (?, ?, ?, ?, ?, ?)
+        `);
+        stmt.run(this.getActiveNetworkMode(), targetPeerId, targetUsername, Date.now(), content, reason);
+    }
+
+    getRecentFailedKeyExchange(targetPeerId: string, withinMinutes: number = 5): FailedKeyExchange | null {
+        const cutoffTime = Date.now() - (withinMinutes * 60 * 1000);
+        const stmt = this.db.prepare(`
+            SELECT * FROM failed_key_exchanges
+            WHERE target_peer_id = ? AND timestamp > ? AND network_mode = ?
+            ORDER BY timestamp DESC
+            LIMIT 1
+        `);
+        const row = stmt.get(targetPeerId, cutoffTime, this.getActiveNetworkMode()) as FailedKeyExchange;
+        if (!row) return null;
+        return {
+            id: row.id,
+            network_mode: row.network_mode,
+            target_peer_id: row.target_peer_id,
+            target_username: row.target_username,
+            timestamp: row.timestamp,
+            content: row.content,
+            reason: row.reason,
+            created_at: new Date(row.created_at)
+        };
+    }
+
+    cleanupOldFailedKeyExchanges(olderThanMinutes: number = 60): void {
+        const cutoffTime = Date.now() - (olderThanMinutes * 60 * 1000);
+        const stmt = this.db.prepare('DELETE FROM failed_key_exchanges WHERE timestamp < ? AND network_mode = ?');
+        const result = stmt.run(cutoffTime, this.getActiveNetworkMode());
+        if (result.changes > 0) {
+            log(`[CLEANUP] Removed ${result.changes} old failed key exchange records`);
+        }
+    }
+
+    cleanupExpiredNotifications(olderThanDays: number = 30): void {
+        const cutoffTime = new Date(Date.now() - (olderThanDays * 24 * 60 * 60 * 1000)).toISOString();
+        const stmt = this.db.prepare(`DELETE FROM notifications WHERE network_mode = ? AND status IN ('accepted', 'rejected', 'expired') AND created_at < ?`);
+        const result = stmt.run(this.getActiveNetworkMode(), cutoffTime);
+        if (result.changes > 0) {
+            log(`[CLEANUP] Removed ${result.changes} old notification records`);
+        }
+    }
+
+    runCleanupTasks(): void {
+        this.cleanupOldFailedKeyExchanges(60); // Remove failed attempts older than 1 hour
+        this.cleanupExpiredNotifications(30); // Remove old processed notifications after 30 days
+    }
+
+    // Chat operations
+    async createChat(chat: Omit<Chat, 'id' | 'updated_at' | 'network_mode'> & { participants: string[] }): Promise<number> {
+        return this.retryOperation(() => {
+            log(`Creating chat: created_by=${chat.created_by}, participants=${chat.participants}`);
+            const mode = this.getActiveNetworkMode();
+            const createdByUser = this.db
+                .prepare('SELECT peer_id FROM users WHERE peer_id = ? AND network_mode = ?')
+                .get(chat.created_by, mode);
+            if (!createdByUser) {
+                throw new Error(`User with peer_id '${chat.created_by}' not found in database`);
+            }
+
+            this.db.exec('BEGIN TRANSACTION');
+            const stmt = this.db.prepare(`
+                INSERT INTO chats (network_mode, created_by, type, name, offline_bucket_secret, notifications_bucket_key, status, group_id, group_key, permanent_key, trusted_out_of_band, group_creator_peer_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `);
+
+            const createdAt = chat.created_at instanceof Date ? chat.created_at.toISOString() : chat.created_at;
+            const result = stmt.run(
+                mode,
+                chat.created_by,
+                chat.type,
+                chat.type === 'group' ? chat.name : chat.created_by,
+                chat.offline_bucket_secret,
+                chat.notifications_bucket_key,
+                chat.status ?? (chat.type === 'group' ? 'pending' : 'active'),
+                chat.type === 'group' && chat?.group_id ? chat.group_id : null,
+                chat.type === 'group' && chat?.group_key ? chat.group_key : null,
+                chat.type === 'group' && chat?.permanent_key ? chat.permanent_key : null,
+                chat.trusted_out_of_band ? 1 : 0,
+                chat.group_creator_peer_id ?? null,
+                createdAt,
+                createdAt
+            );
+            const chatId = result.lastInsertRowid as number;
+
+            for (const participant of chat.participants) {
+                const stmt = this.db.prepare('INSERT INTO chat_participants (chat_id, peer_id, role) VALUES (?, ?, ?)');
+                stmt.run(chatId, participant, chat.created_by === participant ? 'admin' : 'member');
+            }
+
+            this.db.exec('COMMIT');
+
+            log(`Created chat with ID: ${chatId}`);
+            return chatId;
+        });
+    }
+
+    getAllChats(): Chat[] {
+        const stmt = this.db.prepare(`
+            SELECT * FROM chats
+            WHERE network_mode = ?
+            ORDER BY updated_at DESC
+        `);
+        const rows = stmt.all(this.getActiveNetworkMode()) as any[];
+
+        if (!rows) return [];
+        return rows.map(row => this.mapChatRow(row));
+    }
+
+    getAllChatsWithUsernames(myPeerId: string): Array<Chat & { username?: string }> {
+        const stmt = this.db.prepare(`
+            SELECT
+                c.*,
+                u.username
+            FROM chats c
+            LEFT JOIN chat_participants cp ON c.id = cp.chat_id AND c.type = 'direct' AND cp.peer_id != ?
+            LEFT JOIN users u ON cp.peer_id = u.peer_id AND u.network_mode = c.network_mode
+            WHERE c.network_mode = ?
+            ORDER BY c.updated_at DESC
+        `);
+        const rows = stmt.all(myPeerId, this.getActiveNetworkMode()) as any[];
+
+        if (!rows) return [];
+        return rows.map(row => ({
+            ...this.mapChatRow(row),
+            username: row.username || undefined
+        }));
+    }
+
+    searchChats(query: string, myPeerId: string): number[] {
+        const pattern = `%${query}%`;
+        const mode = this.getActiveNetworkMode();
+        const stmt = this.db.prepare(`
+            SELECT DISTINCT c.id FROM chats c
+            LEFT JOIN chat_participants cp ON c.id = cp.chat_id AND c.type = 'direct' AND cp.peer_id != ?
+            LEFT JOIN users u ON cp.peer_id = u.peer_id AND u.network_mode = c.network_mode
+            WHERE c.network_mode = ? AND (
+                -- Direct chat: match other party's username or peerId
+                (c.type = 'direct' AND (u.username LIKE ? OR cp.peer_id LIKE ?))
+                OR
+                -- Group chat: match group name
+                (c.type = 'group' AND c.name LIKE ?)
+                OR
+                -- Group chat: match any participant's username or peerId
+                (c.type = 'group' AND c.id IN (
+                    SELECT gcp.chat_id FROM chat_participants gcp
+                    LEFT JOIN users gu ON gcp.peer_id = gu.peer_id AND gu.network_mode = ?
+                    WHERE gcp.peer_id != ? AND (gu.username LIKE ? OR gcp.peer_id LIKE ?)
+                ))
+            )
+        `);
+        const rows = stmt.all(myPeerId, mode, pattern, pattern, pattern, mode, myPeerId, pattern, pattern) as { id: number }[];
+        return rows.map(row => row.id);
+    }
+
+    getAllChatsWithUsernameAndLastMsg(myPeerId: string): Array<Chat & {
+        username?: string | undefined;
+        group_creator_username?: string | undefined;
+        other_peer_id?: string | undefined;
+        last_message_content?: string | undefined;
+        last_message_timestamp?: Date | undefined;
+        last_inbound_activity_timestamp?: Date | undefined;
+        last_message_sender?: string | undefined;
+        blocked?: boolean | undefined;
+    }> {
+        const stmt = this.db.prepare(`
+            SELECT
+                c.*,
+                u.username,
+                creator_u.username as group_creator_username,
+                cp.peer_id as other_peer_id,
+                last_msg.content as last_message_content,
+                last_msg.timestamp as last_message_timestamp,
+                inbound_activity.last_inbound_activity_timestamp as last_inbound_activity_timestamp,
+                last_msg.sender_peer_id as last_message_sender,
+                CASE WHEN bp.peer_id IS NOT NULL THEN 1 ELSE 0 END as blocked
+            FROM chats c
+            LEFT JOIN (
+                SELECT
+                    m.chat_id,
+                    MAX(m.timestamp) as last_inbound_activity_timestamp
+                FROM messages m
+                JOIN chats c2 ON c2.id = m.chat_id
+                WHERE c2.type = 'direct'
+                  AND c2.network_mode = ?
+                  AND m.sender_peer_id != ?
+                GROUP BY m.chat_id
+            ) inbound_activity ON inbound_activity.chat_id = c.id
+            LEFT JOIN chat_participants cp ON c.id = cp.chat_id AND c.type = 'direct' AND cp.peer_id != ?
+            LEFT JOIN users u ON cp.peer_id = u.peer_id AND u.network_mode = c.network_mode
+            LEFT JOIN users creator_u ON c.type = 'group' AND creator_u.peer_id = c.group_creator_peer_id AND creator_u.network_mode = c.network_mode
+            LEFT JOIN blocked_peers bp ON cp.peer_id = bp.peer_id AND bp.network_mode = c.network_mode
+            LEFT JOIN messages last_msg ON last_msg.id = (
+                SELECT id FROM messages
+                WHERE chat_id = c.id
+                ORDER BY timestamp DESC
+                LIMIT 1
+            )
+            WHERE c.network_mode = ?
+            ORDER BY c.updated_at DESC
+        `);
+        const mode = this.getActiveNetworkMode();
+        const rows = stmt.all(mode, myPeerId, myPeerId, mode) as any[];
+
+        if (!rows) return [];
+        return rows.map(row => ({
+            ...this.mapChatRow(row),
+            username: row.username || undefined,
+            group_creator_username: row.group_creator_username || undefined,
+            other_peer_id: row.other_peer_id || undefined,
+            last_message_content: row.last_message_content || undefined,
+            last_message_timestamp: row.last_message_timestamp ? new Date(row.last_message_timestamp) : undefined,
+            last_inbound_activity_timestamp: row.last_inbound_activity_timestamp ? new Date(row.last_inbound_activity_timestamp) : undefined,
+            last_message_sender: row.last_message_sender || undefined,
+            blocked: Boolean(row.blocked)
+        }));
+    }
+
+    getChatByIdWithUsernameAndLastMsg(chatId: number, myPeerId: string): (Chat & {
+        username?: string | undefined;
+        group_creator_username?: string | undefined;
+        other_peer_id?: string | undefined;
+        last_message_content?: string | undefined;
+        last_message_timestamp?: Date | undefined;
+        last_inbound_activity_timestamp?: Date | undefined;
+        last_message_sender?: string | undefined;
+        blocked?: boolean | undefined;
+    }) | null {
+        const stmt = this.db.prepare(`
+            SELECT
+                c.*,
+                u.username,
+                creator_u.username as group_creator_username,
+                cp.peer_id as other_peer_id,
+                last_msg.content as last_message_content,
+                last_msg.timestamp as last_message_timestamp,
+                inbound_activity.last_inbound_activity_timestamp as last_inbound_activity_timestamp,
+                last_msg.sender_peer_id as last_message_sender,
+                CASE WHEN bp.peer_id IS NOT NULL THEN 1 ELSE 0 END as blocked
+            FROM chats c
+            LEFT JOIN (
+                SELECT
+                    m.chat_id,
+                    MAX(m.timestamp) as last_inbound_activity_timestamp
+                FROM messages m
+                JOIN chats c2 ON c2.id = m.chat_id
+                WHERE c2.type = 'direct'
+                  AND c2.network_mode = ?
+                  AND m.sender_peer_id != ?
+                GROUP BY m.chat_id
+            ) inbound_activity ON inbound_activity.chat_id = c.id
+            LEFT JOIN chat_participants cp ON c.id = cp.chat_id AND c.type = 'direct' AND cp.peer_id != ?
+            LEFT JOIN users u ON cp.peer_id = u.peer_id AND u.network_mode = c.network_mode
+            LEFT JOIN users creator_u ON c.type = 'group' AND creator_u.peer_id = c.group_creator_peer_id AND creator_u.network_mode = c.network_mode
+            LEFT JOIN blocked_peers bp ON cp.peer_id = bp.peer_id AND bp.network_mode = c.network_mode
+            LEFT JOIN messages last_msg ON last_msg.id = (
+                SELECT id FROM messages
+                WHERE chat_id = c.id
+                ORDER BY timestamp DESC
+                LIMIT 1
+            )
+            WHERE c.id = ? AND c.network_mode = ?
+        `);
+        const mode = this.getActiveNetworkMode();
+        const row = stmt.get(mode, myPeerId, myPeerId, chatId, mode) as any;
+
+        if (!row) return null;
+        return {
+            ...this.mapChatRow(row),
+            username: row.username || undefined,
+            group_creator_username: row.group_creator_username || undefined,
+            other_peer_id: row.other_peer_id || undefined,
+            last_message_content: row.last_message_content || undefined,
+            last_message_timestamp: row.last_message_timestamp ? new Date(row.last_message_timestamp) : undefined,
+            last_inbound_activity_timestamp: row.last_inbound_activity_timestamp ? new Date(row.last_inbound_activity_timestamp) : undefined,
+            last_message_sender: row.last_message_sender || undefined,
+            blocked: Boolean(row.blocked)
+        };
+    }
+
+    getChats(chatIds: number[], mode?: NetworkMode): Chat[] {
+        if (chatIds.length === 0) return [];
+        const stmt = this.db.prepare(`SELECT * FROM chats WHERE id IN (${chatIds.map(() => '?').join(',')}) AND network_mode = ?`);
+        const rows = stmt.all(...chatIds, this.getActiveNetworkMode(mode)) as any[];
+
+        if (!rows) return [];
+        return rows.map(row => this.mapChatRow(row));
+    }
+
+    getChatByName(name: string, type: 'direct' | 'group' = 'group'): Chat | null {
+        const stmt = this.db.prepare('SELECT * FROM chats WHERE name = ? AND type = ? AND network_mode = ?');
+        const row = stmt.get(name, type, this.getActiveNetworkMode()) as any;
+
+        if (!row) return null;
+
+        return this.mapChatRow(row);
+    }
+
+    getChatByGroupId(groupId: string, mode?: NetworkMode): Chat | null {
+        const stmt = this.db.prepare('SELECT * FROM chats WHERE group_id = ? AND network_mode = ?');
+        const row = stmt.get(groupId, this.getActiveNetworkMode(mode)) as any;
+
+        if (!row) return null;
+
+        return this.mapChatRow(row);
+    }
+
+    deleteChatById(chatId: number): void {
+        const stmt = this.db.prepare('DELETE FROM chats WHERE id = ?');
+        stmt.run(chatId);
+    }
+
+    deleteChatByGroupId(groupId: string): void {
+        const stmt = this.db.prepare('DELETE FROM chats WHERE group_id = ? AND network_mode = ?');
+        stmt.run(groupId, this.getActiveNetworkMode());
+    }
+
+    getAllGroupChats(limit: number = 1000): Chat[] {
+        const stmt = this.db.prepare(`
+            SELECT * FROM chats
+            WHERE type = 'group' AND network_mode = ?
+            ORDER BY updated_at DESC
+            LIMIT ?
+        `);
+        const rows = stmt.all(this.getActiveNetworkMode(), limit) as any[];
+
+        if (!rows) return [];
+
+        return rows.map(row => this.mapChatRow(row));
+    }
+
+    getAllPendingGroupChatsCreatedByMe(myPeerId: string, limit: number = 100): Chat[] {
+        const stmt = this.db.prepare(`
+            SELECT * FROM chats
+            WHERE type = 'group' AND status = 'pending' AND created_by = ? AND network_mode = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+        `);
+        const rows = stmt.all(myPeerId, this.getActiveNetworkMode(), limit) as any[];
+
+        if (!rows) return [];
+
+        return rows.map(row => this.mapChatRow(row));
+    }
+
+    /**
+     * Update group permanent key and participants after key rotation
+     * Also updates status to 'active'
+     */
+    updateGroupPermanentKey(chatId: number, permanentKey: string, participants: string[], adminPeerId: string): void {
+        const updateChatStmt = this.db.prepare(`
+            UPDATE chats
+            SET permanent_key = ?, status = 'active', updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            WHERE id = ?
+        `);
+        updateChatStmt.run(permanentKey, chatId);
+
+        // Delete existing participants
+        const deleteParticipantsStmt = this.db.prepare('DELETE FROM chat_participants WHERE chat_id = ?');
+        deleteParticipantsStmt.run(chatId);
+
+        // Insert new participants
+        for (const peerId of participants) {
+            const role = peerId === adminPeerId ? 'admin' : 'member';
+            const insertParticipantStmt = this.db.prepare(`
+                INSERT INTO chat_participants (chat_id, peer_id, role, joined_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            `);
+            insertParticipantStmt.run(chatId, peerId, role);
+        }
+
+        log(`Updated group permanent key and ${participants.length} participants for chat ${chatId}`);
+    }
+
+    getChatParticipants(chatId: number): ChatParticipant[] {
+        const stmt = this.db.prepare('SELECT * FROM chat_participants WHERE chat_id = ?');
+        const rows = stmt.all(chatId) as ChatParticipant[];
+        return rows;
+    }
+
+    getCountOfChatParticipants(chatId: number): number {
+        const stmt = this.db.prepare('SELECT COUNT(*) FROM chat_participants WHERE chat_id = ?');
+        const row = stmt.get(chatId) as { count: number };
+        return row.count;
+    }
+
+    // get chat by peer id - for single direct chat
+    getChatByPeerId(otherPeerId: string, mode?: NetworkMode): Chat | null {
+        const stmt = this.db.prepare('SELECT * FROM chat_participants WHERE peer_id = ?');
+        const rows = stmt.all(otherPeerId) as ChatParticipant[];
+        const chatIds = rows.map((row: ChatParticipant) => row.chat_id);
+
+        const chats = this.getChats(chatIds, mode);
+        return chats.find((chat: Chat) => chat.type === 'direct') ?? null;
+    }
+
+    getAllOfflineBucketSecrets(includeGroupChats: boolean = true, limit: number = 25): string[] {
+        let query = 'SELECT offline_bucket_secret FROM chats WHERE network_mode = ?';
+        if (!includeGroupChats) {
+            query += " AND type = 'direct'";
+        }
+        query += ' ORDER BY updated_at DESC LIMIT ?';
+
+        const stmt = this.db.prepare(query);
+        const rows = stmt.all(this.getActiveNetworkMode(), limit) as { offline_bucket_secret: string }[];
+        return rows.map(row => row.offline_bucket_secret);
+    }
+
+    getOfflineReadBucketInfo(limit: number = 25): Array<{
+        offline_bucket_secret: string;
+        peer_id: string;
+        signing_public_key: string;
+        offline_last_read_timestamp: number;
+    }> {
+        const query = `
+            SELECT c.offline_bucket_secret, cp.peer_id, u.signing_public_key, c.offline_last_read_timestamp
+            FROM chats c
+            JOIN chat_participants cp ON c.id = cp.chat_id
+            JOIN users u ON cp.peer_id = u.peer_id AND u.network_mode = c.network_mode
+            WHERE c.type = 'direct'
+            AND c.network_mode = ?
+            AND cp.peer_id != c.created_by
+            AND cp.peer_id NOT IN (SELECT peer_id FROM blocked_peers WHERE network_mode = c.network_mode)
+            ORDER BY c.updated_at DESC
+            LIMIT ?
+        `;
+        const stmt = this.db.prepare(query);
+        return stmt.all(this.getActiveNetworkMode(), limit) as Array<{
+            offline_bucket_secret: string;
+            peer_id: string;
+            signing_public_key: string;
+            offline_last_read_timestamp: number;
+        }>;
+    }
+
+    getOfflineReadBucketInfoForChats(chatIds: number[]): Array<{
+        chat_id: number;
+        offline_bucket_secret: string;
+        peer_id: string;
+        signing_public_key: string;
+        offline_last_read_timestamp: number;
+    }> {
+        if (chatIds.length === 0) return [];
+
+        const placeholders = chatIds.map(() => '?').join(',');
+        const query = `
+            SELECT c.id as chat_id, c.offline_bucket_secret, cp.peer_id, u.signing_public_key, c.offline_last_read_timestamp
+            FROM chats c
+            JOIN chat_participants cp ON c.id = cp.chat_id
+            JOIN users u ON cp.peer_id = u.peer_id AND u.network_mode = c.network_mode
+            WHERE c.id IN (${placeholders})
+            AND c.type = 'direct'
+            AND c.network_mode = ?
+            AND cp.peer_id != c.created_by
+            AND cp.peer_id NOT IN (SELECT peer_id FROM blocked_peers WHERE network_mode = c.network_mode)
+        `;
+        const stmt = this.db.prepare(query);
+        return stmt.all(...chatIds, this.getActiveNetworkMode()) as Array<{
+            chat_id: number;
+            offline_bucket_secret: string;
+            peer_id: string;
+            signing_public_key: string;
+            offline_last_read_timestamp: number;
+        }>;
+    }
+
+    getAllNotificationsBucketKeys(): string[] {
+        const stmt = this.db.prepare('SELECT notifications_bucket_key FROM chats WHERE network_mode = ?');
+        const rows = stmt.all(this.getActiveNetworkMode()) as Chat[];
+        return rows.map(row => row.notifications_bucket_key);
+    }
+
+    getGroupNotificationBuckerKeysNotCreatedBy(ownerPeerId: string): string[] {
+        const stmt = this.db.prepare(`SELECT notifications_bucket_key FROM chats WHERE type = 'group' AND created_by != ? AND network_mode = ?`);
+        const rows = stmt.all(ownerPeerId, this.getActiveNetworkMode()) as Chat[];
+        return rows.map(row => row.notifications_bucket_key);
+    }
+
+
+    getNotificationsBucketKeysByPeerIds(peerIds: string[]): string[] {
+        const placeholders = peerIds.map(() => '?').join(',');
+        // get all notifications bucket keys for the given peer ids (in chats that are only direct chats)
+        const stmt = this.db.prepare(`
+            SELECT DISTINCT c.notifications_bucket_key 
+            FROM chats c
+            JOIN chat_participants cp ON c.id = cp.chat_id
+            WHERE c.type = 'direct' AND c.network_mode = ? AND cp.peer_id IN (${placeholders})
+        `);
+        const rows = stmt.all(this.getActiveNetworkMode(), ...peerIds) as { notifications_bucket_key: string }[];
+        return rows.map((row: { notifications_bucket_key: string }) => row.notifications_bucket_key);
+    }
+
+    getOfflineBucketSecretByPeerId(otherPeerId: string): string | null {
+        const chat = this.getChatByPeerId(otherPeerId);
+        if (!chat) return null;
+        return chat.offline_bucket_secret;
+    }
+
+    countTrustedDirectChatsByOfflineSecret(offlineBucketSecret: string): number {
+        const stmt = this.db.prepare(`
+            SELECT COUNT(*) as count
+            FROM chats
+            WHERE network_mode = ?
+              AND type = 'direct'
+              AND trusted_out_of_band = 1
+              AND offline_bucket_secret = ?
+        `);
+        const row = stmt.get(this.getActiveNetworkMode(), offlineBucketSecret) as { count: number } | undefined;
+        return row?.count ?? 0;
+    }
+
+    // Offline message last read timestamp operations
+    getOfflineLastReadTimestamp(chatId: number): number {
+        const stmt = this.db.prepare('SELECT offline_last_read_timestamp FROM chats WHERE id = ?');
+        const row = stmt.get(chatId) as { offline_last_read_timestamp: number };
+        return row.offline_last_read_timestamp;
+    }
+
+    updateOfflineLastReadTimestamp(chatId: number, timestamp: number): void {
+        const stmt = this.db.prepare('UPDATE chats SET offline_last_read_timestamp = ? WHERE id = ?');
+        stmt.run(timestamp, chatId);
+    }
+
+    getOfflineLastReadTimestampByPeerId(peerId: string): number {
+        const chat = this.getChatByPeerId(peerId);
+        if (!chat) return 0;
+        return chat.offline_last_read_timestamp;
+    }
+
+    updateOfflineLastReadTimestampByPeerId(peerId: string, timestamp: number): void {
+        const chat = this.getChatByPeerId(peerId);
+        if (!chat) return;
+        this.updateOfflineLastReadTimestamp(chat.id, timestamp);
+    }
+
+    // Offline ACK sent tracking (to avoid sending redundant ACKs)
+    getOfflineLastAckSentByPeerId(peerId: string): number {
+        const chat = this.getChatByPeerId(peerId);
+        if (!chat) return 0;
+        return chat.offline_last_ack_sent;
+    }
+
+    updateOfflineLastAckSentByPeerId(peerId: string, timestamp: number): void {
+        const chat = this.getChatByPeerId(peerId);
+        if (!chat) return;
+        const stmt = this.db.prepare('UPDATE chats SET offline_last_ack_sent = ? WHERE id = ?');
+        stmt.run(timestamp, chat.id);
+    }
+
+    // Used when upgrading from out-of-band trust
+    updateChatEncryptionKeys(chatId: number, keys: {
+        offline_bucket_secret: string;
+        notifications_bucket_key: string;
+        trusted_out_of_band: boolean;
+    }): void {
+        const stmt = this.db.prepare(`
+            UPDATE chats 
+            SET offline_bucket_secret = ?, 
+                notifications_bucket_key = ?,
+                trusted_out_of_band = ?,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            WHERE id = ?
+        `);
+        stmt.run(
+            keys.offline_bucket_secret,
+            keys.notifications_bucket_key,
+            keys.trusted_out_of_band ? 1 : 0,
+            chatId
+        );
+    }
+
+    // Offline sent messages operations (local cache to avoid DHT reads before writes)
+    getOfflineSentMessages(bucketKey: string): { messages: OfflineMessage[]; version: number } {
+        const stmt = this.db.prepare('SELECT messages, version FROM offline_sent_messages WHERE bucket_key = ?');
+        const row = stmt.get(bucketKey) as { messages: string; version: number } | undefined;
+        if (!row) {
+            return { messages: [], version: 0 };
+        }
+        return {
+            messages: JSON.parse(row.messages) as OfflineMessage[],
+            version: row.version
+        };
+    }
+
+    saveOfflineSentMessages(bucketKey: string, messages: OfflineMessage[], version: number): void {
+        const stmt = this.db.prepare(`
+            INSERT INTO offline_sent_messages (bucket_key, messages, version, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(bucket_key) DO UPDATE SET
+                messages = excluded.messages,
+                version = excluded.version,
+                updated_at = CURRENT_TIMESTAMP
+        `);
+        stmt.run(bucketKey, JSON.stringify(messages), version);
+    }
+
+    deleteOfflineSentMessages(bucketKey: string): void {
+        const stmt = this.db.prepare('DELETE FROM offline_sent_messages WHERE bucket_key = ?');
+        stmt.run(bucketKey);
+    }
+
+    // Group offline sent messages operations (local cache to avoid DHT reads before writes)
+    getGroupOfflineSentMessages(bucketKey: string): { messages: GroupContentMessage[]; version: number } {
+        const stmt = this.db.prepare('SELECT messages, version FROM group_offline_sent_messages WHERE bucket_key = ?');
+        const row = stmt.get(bucketKey) as { messages: string; version: number } | undefined;
+        if (!row) {
+            return { messages: [], version: 0 };
+        }
+        return {
+            messages: JSON.parse(row.messages) as GroupContentMessage[],
+            version: row.version
+        };
+    }
+
+    saveGroupOfflineSentMessages(bucketKey: string, messages: GroupContentMessage[], version: number): void {
+        const stmt = this.db.prepare(`
+            INSERT INTO group_offline_sent_messages (bucket_key, messages, version, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(bucket_key) DO UPDATE SET
+                messages = excluded.messages,
+                version = excluded.version,
+                updated_at = CURRENT_TIMESTAMP
+        `);
+        stmt.run(bucketKey, JSON.stringify(messages), version);
+    }
+
+    deleteGroupOfflineSentMessages(bucketKey: string): void {
+        const stmt = this.db.prepare('DELETE FROM group_offline_sent_messages WHERE bucket_key = ?');
+        stmt.run(bucketKey);
+    }
+
+    deleteGroupOfflineSentMessagesByPrefix(bucketKeyPrefix: string): void {
+        const stmt = this.db.prepare('DELETE FROM group_offline_sent_messages WHERE bucket_key LIKE ?');
+        stmt.run(`${bucketKeyPrefix}%`);
+    }
+
+    // Message operations
+    messageExists(messageId: string): boolean {
+        const stmt = this.db.prepare(`SELECT id FROM messages WHERE id = ?`);
+        const row = stmt.get(messageId);
+        return !!row;
+    }
+
+    async createMessage(message: Omit<Message, 'created_at'>): Promise<string> {
+        return this.retryOperation(() => {
+            const stmt = this.db.prepare(`
+                INSERT INTO messages (
+                    id,
+                    chat_id,
+                    sender_peer_id,
+                    content,
+                    message_type,
+                    timestamp,
+                    file_name,
+                    file_size,
+                    file_path,
+                    transfer_status,
+                    transfer_progress,
+                    transfer_error,
+                    event_timestamp
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `);
+
+            stmt.run(
+                message.id,
+                message.chat_id,
+                message.sender_peer_id,
+                message.content,
+                message.message_type,
+                message.timestamp instanceof Date ? message.timestamp.toISOString() : message.timestamp,
+                message.file_name ?? null,
+                message.file_size ?? null,
+                message.file_path ?? null,
+                message.transfer_status ?? null,
+                message.transfer_progress ?? null,
+                message.transfer_error ?? null,
+                message.event_timestamp
+                    ? (message.event_timestamp instanceof Date
+                        ? message.event_timestamp.toISOString()
+                        : message.event_timestamp)
+                    : null
+            );
+
+            // Update the chat's updated_at to match the message timestamp
+            const updateChatStmt = this.db.prepare(`
+                UPDATE chats SET updated_at = ? WHERE id = ?
+            `);
+            updateChatStmt.run(
+                message.timestamp instanceof Date ? message.timestamp.toISOString() : message.timestamp,
+                message.chat_id
+            );
+
+            return message.id;
+        });
+    }
+
+    updateMessageTransfer(messageId: string, updates: {
+        file_name?: string;
+        file_size?: number;
+        file_path?: string;
+        transfer_status?: FileTransferStatus;
+        transfer_progress?: number;
+        transfer_error?: string;
+    }): void {
+        const stmt = this.db.prepare(`
+            UPDATE messages SET
+                file_name = COALESCE(?, file_name),
+                file_size = COALESCE(?, file_size),
+                file_path = COALESCE(?, file_path),
+                transfer_status = COALESCE(?, transfer_status),
+                transfer_progress = COALESCE(?, transfer_progress),
+                transfer_error = COALESCE(?, transfer_error)
+            WHERE id = ?
+        `);
+
+        stmt.run(
+            updates.file_name ?? null,
+            updates.file_size ?? null,
+            updates.file_path ?? null,
+            updates.transfer_status ?? null,
+            updates.transfer_progress ?? null,
+            updates.transfer_error ?? null,
+            messageId
+        );
+    }
+
+    expirePendingFileOffers(timeoutMs: number): number {
+        const cutoff = new Date(Date.now() - timeoutMs).toISOString();
+        const stmt = this.db.prepare(`
+            UPDATE messages
+            SET transfer_status = 'expired', transfer_error = 'Offer expired'
+            WHERE message_type = 'file'
+              AND transfer_status IN ('pending', 'awaiting_acceptance', 'incoming_pending_user')
+              AND timestamp < ?
+        `);
+        const result = stmt.run(cutoff);
+        return result.changes ?? 0;
+    }
+
+    failInProgressFileTransfers(): number {
+        const stmt = this.db.prepare(`
+            UPDATE messages
+            SET transfer_status = 'failed', transfer_error = 'Transfer interrupted'
+            WHERE message_type = 'file'
+              AND transfer_status = 'in_progress'
+        `);
+        const result = stmt.run();
+        return result.changes ?? 0;
+    }
+
+    failNonTerminalFileTransfers(reason: string = 'Transfer interrupted'): number {
+        const stmt = this.db.prepare(`
+            UPDATE messages
+            SET transfer_status = 'failed', transfer_error = ?
+            WHERE message_type = 'file'
+              AND transfer_status IN (
+                'pending',
+                'in_progress',
+                'connecting',
+                'awaiting_acceptance',
+                'uploading',
+                'awaiting_confirmation',
+                'incoming_pending_user',
+                'downloading'
+              )
+        `);
+        const result = stmt.run(reason);
+        return result.changes ?? 0;
+    }
+
+    getMessagesByChatId(chatId: number, limit: number = 50, offset: number = 0): Array<Message & { sender_username?: string | undefined }> {
+        const stmt = this.db.prepare(`
+            SELECT * FROM (
+                SELECT
+                    m.*,
+                    u.username as sender_username
+                FROM messages m
+                JOIN chats c ON c.id = m.chat_id
+                LEFT JOIN users u ON m.sender_peer_id = u.peer_id AND u.network_mode = c.network_mode
+                WHERE m.chat_id = ?
+                ORDER BY m.timestamp DESC
+                LIMIT ? OFFSET ?
+            ) AS recent_messages
+            ORDER BY timestamp ASC
+        `);
+
+        const rows = stmt.all(chatId, limit, offset) as any[];
+
+        return rows.map(row => ({
+            ...row,
+            timestamp: new Date(row.timestamp),
+            event_timestamp: row.event_timestamp ? new Date(row.event_timestamp) : null,
+            created_at: new Date(row.created_at),
+            sender_username: row.sender_username || undefined
+        }));
+    }
+
+    getLatestMessageForChat(chatId: number): Message | null {
+        const stmt = this.db.prepare(`
+            SELECT * FROM messages 
+            WHERE chat_id = ? 
+            ORDER BY timestamp DESC 
+            LIMIT 1
+        `);
+
+        const row = stmt.get(chatId) as any;
+
+        if (!row) return null;
+
+        return {
+            ...row,
+            timestamp: new Date(row.timestamp),
+            event_timestamp: row.event_timestamp ? new Date(row.event_timestamp) : null,
+            created_at: new Date(row.created_at)
+        };
+    }
+
+    searchMessages(query: string, chatId?: number): Message[] {
+        let stmt: Database.Statement;
+        let params: any[];
+
+        if (chatId) {
+            stmt = this.db.prepare(`
+                SELECT m.* FROM messages m
+                JOIN chats c ON c.id = m.chat_id
+                WHERE m.chat_id = ? AND m.content LIKE ? AND c.network_mode = ?
+                ORDER BY timestamp DESC 
+                LIMIT 100
+            `);
+            params = [chatId, `%${query}%`, this.getActiveNetworkMode()];
+        } else {
+            stmt = this.db.prepare(`
+                SELECT m.* FROM messages m
+                JOIN chats c ON c.id = m.chat_id
+                WHERE m.content LIKE ? AND c.network_mode = ?
+                ORDER BY timestamp DESC 
+                LIMIT 100
+            `);
+            params = [`%${query}%`, this.getActiveNetworkMode()];
+        }
+
+        const rows = stmt.all(...params) as any[];
+        return rows.map(row => ({
+            ...row,
+            timestamp: new Date(row.timestamp),
+            event_timestamp: row.event_timestamp ? new Date(row.event_timestamp) : null,
+            created_at: new Date(row.created_at)
+        }));
+    }
+
+    // Utility methods
+    deleteMessage(messageId: number): void {
+        const stmt = this.db.prepare('DELETE FROM messages WHERE id = ?');
+        stmt.run(messageId);
+    }
+
+    deleteAllMessagesForChat(chatId: number): void {
+        const stmt = this.db.prepare('DELETE FROM messages WHERE chat_id = ?');
+        stmt.run(chatId);
+    }
+
+    deleteChatAndUser(chatId: number, userPeerId: string): void {
+        const deleteChatStmt = this.db.prepare('DELETE FROM chats WHERE id = ?');
+        const hasAnyChatWithPeerStmt = this.db.prepare(`
+            SELECT 1
+            FROM chat_participants
+            JOIN chats c ON c.id = chat_participants.chat_id
+            WHERE chat_participants.peer_id = ?
+            AND c.network_mode = ?
+            LIMIT 1
+        `);
+        const deleteUserStmt = this.db.prepare('DELETE FROM users WHERE peer_id = ? AND network_mode = ?');
+        const mode = this.getActiveNetworkMode();
+
+        const txn = this.db.transaction((cId: number, peerId: string) => {
+            deleteChatStmt.run(cId);
+            const stillHasChats = hasAnyChatWithPeerStmt.get(peerId, mode) !== undefined;
+            if (!stillHasChats) {
+                deleteUserStmt.run(peerId, mode);
+            }
+        });
+
+        txn(chatId, userPeerId);
+    }
+
+    deleteContactAttemptsByPeerId(peerId: string): void {
+        const stmt = this.db.prepare('DELETE FROM contact_attempts WHERE sender_peer_id = ? AND network_mode = ?');
+        stmt.run(peerId, this.getActiveNetworkMode());
+    }
+
+    deleteChatParticipantByChatId(chatId: number): void {
+        const stmt = this.db.prepare('DELETE FROM chat_participants WHERE chat_id = ?');
+        stmt.run(chatId);
+    }
+
+    deleteBlockedPeer(peerId: string): void {
+        const stmt = this.db.prepare('DELETE FROM blocked_peers WHERE peer_id = ? AND network_mode = ?');
+        stmt.run(peerId, this.getActiveNetworkMode());
+    }
+
+    deleteChat(chatId: number): void {
+        // Messages will be deleted automatically due to CASCADE
+        const stmt = this.db.prepare('DELETE FROM chats WHERE id = ?');
+        stmt.run(chatId);
+    }
+
+    getMessageCount(chatId: number): number {
+        const stmt = this.db.prepare('SELECT COUNT(*) as count FROM messages WHERE chat_id = ?');
+        const result = stmt.get(chatId) as { count: number };
+        return result.count;
+    }
+
+    // Notification operations
+    createNotification(notification: Omit<Notification, 'created_at' | 'network_mode'>): string {
+        const mode = this.getActiveNetworkMode();
+        const stmt = this.db.prepare('INSERT INTO notifications (id, network_mode, notification_type, notification_data, bucket_key, status) VALUES (?, ?, ?, ?, ?, ?)');
+        stmt.run(notification.id, mode, notification.notification_type, notification.notification_data, notification.bucket_key, notification.status || 'pending');
+        return notification.id;
+    }
+
+    updateNotificationStatus(
+        notificationId: string,
+        status: 'pending' | 'accepted' | 'rejected' | 'expired',
+        mode?: NetworkMode,
+    ): void {
+        const stmt = this.db.prepare('UPDATE notifications SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND network_mode = ?');
+        stmt.run(status, notificationId, this.getActiveNetworkMode(mode));
+    }
+
+    getNotificationById(notificationId: string): Notification | null {
+        const stmt = this.db.prepare('SELECT * FROM notifications WHERE id = ? AND network_mode = ?');
+        const row = stmt.get(notificationId, this.getActiveNetworkMode()) as any;
+        if (!row) return null;
+        return row as Notification;
+    }
+
+    getNotificationsByBucketKey(bucketKey: string): Notification[] {
+        const stmt = this.db.prepare('SELECT * FROM notifications WHERE bucket_key = ? AND network_mode = ?');
+        const rows = stmt.all(bucketKey, this.getActiveNetworkMode()) as any[];
+        return rows.map(row => ({
+            ...row,
+            created_at: new Date(row.created_at)
+        }));
+    }
+
+    getAllNotifications(): Notification[] {
+        const stmt = this.db.prepare('SELECT * FROM notifications WHERE network_mode = ? ORDER BY created_at DESC');
+        const rows = stmt.all(this.getActiveNetworkMode()) as any[];
+        return rows.map(row => ({
+            ...row,
+            created_at: new Date(row.created_at)
+        }));
+    }
+
+    getPendingGroupInvitationNotifications(): PendingGroupInvitationNotification[] {
+        const stmt = this.db.prepare(`
+            SELECT *
+            FROM notifications
+            WHERE network_mode = ?
+              AND notification_type = 'group_invitation'
+              AND status = 'pending'
+            ORDER BY created_at DESC
+        `);
+        const rows = stmt.all(this.getActiveNetworkMode()) as any[];
+        return rows.map(row => ({
+            ...row,
+            status: 'pending' as const,
+            notification_type: 'group_invitation' as const,
+            created_at: new Date(row.created_at)
+        }));
+    }
+
+    // Bootstrap nodes operations
+    getBootstrapNodes(): { address: string }[] {
+        const stmt = this.db.prepare('SELECT address FROM bootstrap_nodes WHERE network_mode = ? ORDER BY sort_order ASC, id ASC');
+        return stmt.all(this.getActiveNetworkMode()) as { address: string }[];
+    }
+
+    removeBootstrapNode(address: string): void {
+        const stmt = this.db.prepare('DELETE FROM bootstrap_nodes WHERE address = ? AND network_mode = ?');
+        stmt.run(address, this.getActiveNetworkMode());
+    }
+
+    addBootstrapNode(address: string): void {
+        const mode = this.getActiveNetworkMode();
+        const existsStmt = this.db.prepare('SELECT 1 FROM bootstrap_nodes WHERE address = ? AND network_mode = ? LIMIT 1');
+        const exists = existsStmt.get(address, mode) as { 1: number } | undefined;
+        if (exists) {
+            throw new Error('Bootstrap node already exists');
+        }
+
+        const maxOrder = (this.db.prepare('SELECT MAX(sort_order) as max_order FROM bootstrap_nodes WHERE network_mode = ?').get(mode) as { max_order: number | null })?.max_order ?? -1;
+        const stmt = this.db.prepare('INSERT INTO bootstrap_nodes (address, network_mode, sort_order) VALUES (?, ?, ?)');
+        stmt.run(address, mode, maxOrder + 1);
+    }
+
+    reorderBootstrapNodes(addresses: string[]): void {
+        const mode = this.getActiveNetworkMode();
+        const existingRows = this.db
+            .prepare('SELECT address FROM bootstrap_nodes WHERE network_mode = ?')
+            .all(mode) as Array<{ address: string }>;
+        const existingAddresses = existingRows.map((row) => row.address);
+        const existingSet = new Set(existingAddresses);
+
+        if (addresses.length !== existingSet.size) {
+            throw new Error('Invalid bootstrap reorder payload: address count mismatch');
+        }
+        for (const address of addresses) {
+            if (!existingSet.has(address)) {
+                throw new Error(`Invalid bootstrap reorder payload: unknown address "${address}"`);
+            }
+        }
+
+        const updateStmt = this.db.prepare('UPDATE bootstrap_nodes SET sort_order = ? WHERE address = ? AND network_mode = ?');
+        const transaction = this.db.transaction(() => {
+            for (let i = 0; i < addresses.length; i++) {
+                const info = updateStmt.run(i, addresses[i], mode);
+                if (info.changes !== 1) {
+                    throw new Error(`Failed to reorder bootstrap node: "${addresses[i]}"`);
+                }
+            }
+        });
+        transaction();
+    }
+
+    isHealthy(): boolean {
+        try {
+            this.db.prepare('SELECT 1').get();
+            return true;
+        } catch (error) {
+            console.error('Database health check failed:', error);
+            return false;
+        }
+    }
+
+    checkIntegrity(): { ok: boolean; errors: string[] } {
+        try {
+            const result = this.db.pragma('integrity_check') as Array<{ integrity_check: string }>;
+
+            // integrity_check returns array with single "ok" if healthy, or array of error messages
+            const isOk = result.length === 1 && result[0]?.integrity_check === 'ok';
+            const errors = isOk ? [] : result.map(r => r.integrity_check);
+
+            if (!isOk) {
+                const errorMsg = `Database corruption detected: ${errors.join(', ')}`;
+                console.error(`[DATABASE] ${errorMsg}`);
+            } else {
+                log('[DATABASE] Integrity check passed');
+            }
+
+            return { ok: isOk, errors };
+        } catch (error) {
+            const errorMsg = `Database integrity check failed: ${errStr(error)}`;
+            console.error(`[DATABASE] ${errorMsg}`);
+            return { ok: false, errors: [errorMsg] };
+        }
+    }
+
+    private reconnect(): void {
+        try {
+            this.db.close();
+        } catch (error) {
+            // Ignore close errors
+        }
+        try {
+            this.db = new Database(this.dbPath);
+            this.db.pragma('journal_mode = WAL');
+            this.db.pragma('synchronous = NORMAL');
+            this.db.pragma('cache_size = 10000');
+            this.db.pragma('temp_store = memory');
+            this.db.pragma('mmap_size = 268435456'); // 256MB
+            log('Database reconnected successfully');
+        } catch (error) {
+            console.error('Failed to reconnect to database:', error);
+            throw error;
+        }
+    }
+
+    // Login attempts methods
+    getLoginAttempt(peerId: string, mode?: NetworkMode): LoginAttempt | undefined {
+        const activeMode = this.getActiveNetworkMode(mode);
+        const stmt = this.db.prepare('SELECT * FROM login_attempts WHERE peer_id = ? AND network_mode = ?');
+        const row = stmt.get(peerId, activeMode) as any;
+        if (!row) return undefined;
+
+        return {
+            ...row,
+            network_mode: row.network_mode,
+            last_attempt_at: new Date(row.last_attempt_at),
+            cooldown_until: row.cooldown_until ? new Date(row.cooldown_until) : null,
+            created_at: new Date(row.created_at)
+        };
+    }
+
+    recordFailedLoginAttempt(peerId: string, mode?: NetworkMode): void {
+        const activeMode = this.getActiveNetworkMode(mode);
+        const existing = this.getLoginAttempt(peerId, activeMode);
+        const now = new Date();
+
+        if (existing) {
+            const newCount = existing.attempt_count + 1;
+            const cooldownMinutes = this.calculateCooldown(newCount);
+
+            // Only apply cooldown if we've reached 5 or more attempts
+            const cooldownUntil = cooldownMinutes > 0
+                ? new Date(now.getTime() + cooldownMinutes * 60000)
+                : null;
+
+            const stmt = this.db.prepare(`
+                UPDATE login_attempts
+                SET attempt_count = ?,
+                    last_attempt_at = ?,
+                    cooldown_until = ?
+                WHERE peer_id = ? AND network_mode = ?
+            `);
+            stmt.run(newCount, now.toISOString(), cooldownUntil?.toISOString() || null, peerId, activeMode);
+        } else {
+            // First attempt - no cooldown
+            const stmt = this.db.prepare(`
+                INSERT INTO login_attempts (network_mode, peer_id, attempt_count, last_attempt_at, cooldown_until)
+                VALUES (?, ?, ?, ?, ?)
+            `);
+            stmt.run(activeMode, peerId, 1, now.toISOString(), null);
+        }
+    }
+
+    clearLoginAttempts(peerId: string, mode?: NetworkMode): void {
+        const activeMode = this.getActiveNetworkMode(mode);
+        const stmt = this.db.prepare('DELETE FROM login_attempts WHERE peer_id = ? AND network_mode = ?');
+        stmt.run(peerId, activeMode);
+    }
+
+    private calculateCooldown(attemptCount: number): number {
+        if (attemptCount <= 4) return 0; // No cooldown for first 4 attempts
+        if (attemptCount === 5) return 5;
+        if (attemptCount === 6) return 10;
+        if (attemptCount === 7) return 20;
+        if (attemptCount === 8) return 30;
+        return 60; // 9+ attempts = 60 minutes
+    }
+
+    checkLoginCooldown(peerId: string, mode?: NetworkMode): { isLocked: boolean; remainingSeconds: number } {
+        const attempt = this.getLoginAttempt(peerId, mode);
+        if (!attempt || !attempt.cooldown_until) {
+            return { isLocked: false, remainingSeconds: 0 };
+        }
+
+        const now = new Date();
+        const remainingMs = attempt.cooldown_until.getTime() - now.getTime();
+
+        if (remainingMs <= 0) {
+            // Cooldown expired
+            return { isLocked: false, remainingSeconds: 0 };
+        }
+
+        return {
+            isLocked: true,
+            remainingSeconds: Math.ceil(remainingMs / 1000)
+        };
+    }
+
+    // Toggle mute status for a chat
+    toggleChatMute(chatId: number): boolean {
+        const stmt = this.db.prepare('UPDATE chats SET muted = NOT muted WHERE id = ?');
+        stmt.run(chatId);
+
+        // Return new muted status
+        const chat = this.db.prepare('SELECT muted FROM chats WHERE id = ?').get(chatId) as { muted: number } | undefined;
+        return Boolean(chat?.muted);
+    }
+
+    // --- Group key history ---
+
+    insertGroupKeyHistory(
+        groupId: string,
+        keyVersion: number,
+        encryptedKey: string,
+        groupInfoMetadataKey: string,
+    ): void {
+        const stmt = this.db.prepare(`
+            INSERT OR REPLACE INTO group_key_history (group_id, key_version, encrypted_key, group_info_metadata_key)
+            VALUES (?, ?, ?, ?)
+        `);
+        if (!groupInfoMetadataKey) {
+            throw new Error('groupInfoMetadataKey is required');
+        }
+        stmt.run(groupId, keyVersion, encryptedKey, groupInfoMetadataKey);
+    }
+
+    getGroupKeyForEpoch(groupId: string, keyVersion: number): string | null {
+        const stmt = this.db.prepare('SELECT encrypted_key FROM group_key_history WHERE group_id = ? AND key_version = ?');
+        const row = stmt.get(groupId, keyVersion) as { encrypted_key: string } | undefined;
+        return row?.encrypted_key ?? null;
+    }
+
+    getGroupInfoMetadataKeyForEpoch(groupId: string, keyVersion: number): string | null {
+        const stmt = this.db.prepare('SELECT group_info_metadata_key FROM group_key_history WHERE group_id = ? AND key_version = ?');
+        const row = stmt.get(groupId, keyVersion) as { group_info_metadata_key: string } | undefined;
+        return row?.group_info_metadata_key ?? null;
+    }
+
+    getGroupKeyHistory(groupId: string): GroupKeyHistory[] {
+        const stmt = this.db.prepare('SELECT * FROM group_key_history WHERE group_id = ? ORDER BY key_version ASC');
+        return stmt.all(groupId) as GroupKeyHistory[];
+    }
+
+    deleteGroupKeyHistory(groupId: string): void {
+        this.db.prepare('DELETE FROM group_key_history WHERE group_id = ?').run(groupId);
+        this.db.prepare('DELETE FROM group_epoch_boundaries WHERE group_id = ?').run(groupId);
+    }
+
+    deleteGroupKeyHistoryForEpoch(groupId: string, keyVersion: number): void {
+        this.db.prepare('DELETE FROM group_key_history WHERE group_id = ? AND key_version = ?')
+            .run(groupId, keyVersion);
+        this.db.prepare('DELETE FROM group_epoch_boundaries WHERE group_id = ? AND key_version = ?')
+            .run(groupId, keyVersion);
+    }
+
+    updateGroupKeyStateHash(groupId: string, keyVersion: number, stateHash: string): void {
+        this.db.prepare('UPDATE group_key_history SET state_hash = ? WHERE group_id = ? AND key_version = ?')
+            .run(stateHash, groupId, keyVersion);
+    }
+
+    getGroupKeyStateHash(groupId: string, keyVersion: number): string | null {
+        const row = this.db.prepare('SELECT state_hash FROM group_key_history WHERE group_id = ? AND key_version = ?')
+            .get(groupId, keyVersion) as { state_hash: string | null } | undefined;
+        return row?.state_hash ?? null;
+    }
+
+    markGroupKeyUsedUntil(groupId: string, keyVersion: number, usedUntil: number): void {
+        this.db.prepare('UPDATE group_key_history SET used_until = ? WHERE group_id = ? AND key_version = ?')
+            .run(usedUntil, groupId, keyVersion);
+    }
+
+    // --- Group offline cursors ---
+
+    upsertGroupOfflineCursor(groupId: string, keyVersion: number, senderPeerId: string, timestamp: number, messageId: string): void {
+        const stmt = this.db.prepare(`
+            INSERT INTO group_offline_cursors (group_id, key_version, sender_peer_id, last_read_timestamp, last_read_message_id, updated_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(group_id, key_version, sender_peer_id) DO UPDATE SET
+                last_read_timestamp = excluded.last_read_timestamp,
+                last_read_message_id = excluded.last_read_message_id,
+                updated_at = CURRENT_TIMESTAMP
+        `);
+        stmt.run(groupId, keyVersion, senderPeerId, timestamp, messageId);
+    }
+
+    getGroupOfflineCursor(groupId: string, keyVersion: number, senderPeerId: string): GroupOfflineCursor | null {
+        const stmt = this.db.prepare('SELECT * FROM group_offline_cursors WHERE group_id = ? AND key_version = ? AND sender_peer_id = ?');
+        const row = stmt.get(groupId, keyVersion, senderPeerId) as GroupOfflineCursor | undefined;
+        return row ?? null;
+    }
+
+    getGroupOfflineCursors(groupId: string, keyVersion?: number): GroupOfflineCursor[] {
+        if (keyVersion === undefined) {
+            const stmt = this.db.prepare('SELECT * FROM group_offline_cursors WHERE group_id = ?');
+            return stmt.all(groupId) as GroupOfflineCursor[];
+        }
+        const stmt = this.db.prepare('SELECT * FROM group_offline_cursors WHERE group_id = ? AND key_version = ?');
+        return stmt.all(groupId, keyVersion) as GroupOfflineCursor[];
+    }
+
+    deleteGroupOfflineCursors(groupId: string): void {
+        this.db.prepare('DELETE FROM group_offline_cursors WHERE group_id = ?').run(groupId);
+    }
+
+    deleteGroupOfflineCursorsForEpoch(groupId: string, keyVersion: number): void {
+        this.db.prepare('DELETE FROM group_offline_cursors WHERE group_id = ? AND key_version = ?')
+            .run(groupId, keyVersion);
+    }
+
+    // --- Group pending ACKs ---
+
+    insertPendingAck(groupId: string, targetPeerId: string, messageType: AckMessageType, payload: string, mode?: NetworkMode): void {
+        const activeMode = this.getActiveNetworkMode(mode);
+        const stmt = this.db.prepare(`
+            INSERT INTO group_pending_acks (group_id, target_peer_id, message_type, network_mode, message_payload, status)
+            VALUES (?, ?, ?, ?, ?, 'active')
+            ON CONFLICT(group_id, target_peer_id, message_type, network_mode) DO UPDATE SET
+                message_payload = excluded.message_payload,
+                status = 'active',
+                last_published_at = CURRENT_TIMESTAMP
+        `);
+        stmt.run(groupId, targetPeerId, messageType, activeMode, payload);
+    }
+
+    removePendingAck(groupId: string, targetPeerId: string, messageType: AckMessageType, mode?: NetworkMode): void {
+        const stmt = this.db.prepare('DELETE FROM group_pending_acks WHERE group_id = ? AND target_peer_id = ? AND message_type = ? AND network_mode = ?');
+        stmt.run(groupId, targetPeerId, messageType, this.getActiveNetworkMode(mode));
+    }
+
+    removePendingAcksForMember(groupId: string, targetPeerId: string, mode?: NetworkMode): void {
+        const stmt = this.db.prepare('DELETE FROM group_pending_acks WHERE group_id = ? AND target_peer_id = ? AND network_mode = ?');
+        stmt.run(groupId, targetPeerId, this.getActiveNetworkMode(mode));
+    }
+
+    removePendingAcksForGroup(groupId: string, mode?: NetworkMode): void {
+        this.db.prepare('DELETE FROM group_pending_acks WHERE group_id = ? AND network_mode = ?')
+            .run(groupId, this.getActiveNetworkMode(mode));
+    }
+
+    getAllPendingAcks(mode?: NetworkMode): GroupPendingAck[] {
+        const stmt = this.db.prepare(`SELECT * FROM group_pending_acks WHERE network_mode = ? AND status = 'active'`);
+        return stmt.all(this.getActiveNetworkMode(mode)) as GroupPendingAck[];
+    }
+
+    getPendingAcksForGroup(groupId: string, mode?: NetworkMode): GroupPendingAck[] {
+        const stmt = this.db.prepare(`SELECT * FROM group_pending_acks WHERE group_id = ? AND network_mode = ? AND status = 'active'`);
+        return stmt.all(groupId, this.getActiveNetworkMode(mode)) as GroupPendingAck[];
+    }
+
+    getPendingAcksForTargets(targetPeerIds: string[], mode?: NetworkMode): GroupPendingAck[] {
+        if (targetPeerIds.length === 0) return [];
+        const placeholders = targetPeerIds.map(() => '?').join(',');
+        const stmt = this.db.prepare(`
+            SELECT *
+            FROM group_pending_acks
+            WHERE network_mode = ?
+              AND status = 'active'
+              AND target_peer_id IN (${placeholders})
+        `);
+        return stmt.all(this.getActiveNetworkMode(mode), ...targetPeerIds) as GroupPendingAck[];
+    }
+
+    updatePendingAckLastPublished(groupId: string, targetPeerId: string, messageType: AckMessageType, mode?: NetworkMode): void {
+        const stmt = this.db.prepare('UPDATE group_pending_acks SET last_published_at = CURRENT_TIMESTAMP WHERE group_id = ? AND target_peer_id = ? AND message_type = ? AND network_mode = ?');
+        stmt.run(groupId, targetPeerId, messageType, this.getActiveNetworkMode(mode));
+    }
+
+    retireStalePendingAcks(maxAgeMs: number, mode?: NetworkMode): number {
+        const cutoffSeconds = Math.floor((Date.now() - Math.max(0, maxAgeMs)) / 1000);
+        const stmt = this.db.prepare(`
+            UPDATE group_pending_acks
+            SET status = 'retired'
+            WHERE network_mode = ?
+              AND status = 'active'
+              AND CAST(strftime('%s', created_at) AS INTEGER) <= ?
+        `);
+        const result = stmt.run(this.getActiveNetworkMode(mode), cutoffSeconds);
+        return result.changes ?? 0;
+    }
+
+    reactivateRetiredPendingAcksForTarget(targetPeerId: string, mode?: NetworkMode, groupId?: string): number {
+        const activeMode = this.getActiveNetworkMode(mode);
+        if (groupId) {
+            const stmt = this.db.prepare(`
+                UPDATE group_pending_acks
+                SET status = 'active',
+                    created_at = CURRENT_TIMESTAMP
+                WHERE network_mode = ?
+                  AND group_id = ?
+                  AND target_peer_id = ?
+                  AND status = 'retired'
+            `);
+            const result = stmt.run(activeMode, groupId, targetPeerId);
+            return result.changes ?? 0;
+        }
+
+        const stmt = this.db.prepare(`
+            UPDATE group_pending_acks
+            SET status = 'active',
+                created_at = CURRENT_TIMESTAMP
+            WHERE network_mode = ?
+              AND target_peer_id = ?
+              AND status = 'retired'
+        `);
+        const result = stmt.run(activeMode, targetPeerId);
+        return result.changes ?? 0;
+    }
+
+    // --- Group info pending publishes ---
+
+    upsertPendingGroupInfoPublish(
+        groupId: string,
+        keyVersion: number,
+        versionedDhtKey: string,
+        versionedPayload: string,
+        latestDhtKey: string,
+        latestPayload: string,
+        nextRetryAt: number,
+        lastError?: string | null,
+        mode?: NetworkMode,
+    ): void {
+        const activeMode = this.getActiveNetworkMode(mode);
+        const stmt = this.db.prepare(`
+            INSERT INTO group_pending_info_publishes (
+                group_id, key_version, network_mode, versioned_dht_key, versioned_payload, latest_dht_key, latest_payload, attempts, next_retry_at, last_error
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+            ON CONFLICT(group_id, key_version, network_mode) DO UPDATE SET
+                versioned_dht_key = excluded.versioned_dht_key,
+                versioned_payload = excluded.versioned_payload,
+                latest_dht_key = excluded.latest_dht_key,
+                latest_payload = excluded.latest_payload,
+                next_retry_at = excluded.next_retry_at,
+                last_error = excluded.last_error,
+                updated_at = CURRENT_TIMESTAMP
+        `);
+        stmt.run(groupId, keyVersion, activeMode, versionedDhtKey, versionedPayload, latestDhtKey, latestPayload, nextRetryAt, lastError ?? null);
+    }
+
+    markPendingGroupInfoPublishAttempt(groupId: string, keyVersion: number, nextRetryAt: number, lastError: string, mode?: NetworkMode): void {
+        const stmt = this.db.prepare(`
+            UPDATE group_pending_info_publishes
+            SET attempts = attempts + 1,
+                next_retry_at = ?,
+                last_error = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE group_id = ? AND key_version = ? AND network_mode = ?
+        `);
+        stmt.run(nextRetryAt, lastError, groupId, keyVersion, this.getActiveNetworkMode(mode));
+    }
+
+    removePendingGroupInfoPublish(groupId: string, keyVersion: number, mode?: NetworkMode): void {
+        this.db.prepare('DELETE FROM group_pending_info_publishes WHERE group_id = ? AND key_version = ? AND network_mode = ?')
+            .run(groupId, keyVersion, this.getActiveNetworkMode(mode));
+    }
+
+    getDuePendingGroupInfoPublishes(nowMs: number, limit = 50, mode?: NetworkMode): GroupPendingInfoPublish[] {
+        const stmt = this.db.prepare(`
+            SELECT * FROM group_pending_info_publishes
+            WHERE next_retry_at <= ? AND network_mode = ?
+            ORDER BY next_retry_at ASC
+            LIMIT ?
+        `);
+        return stmt.all(nowMs, this.getActiveNetworkMode(mode), limit) as GroupPendingInfoPublish[];
+    }
+
+    markInviteDeliveryAckReceived(groupId: string, targetPeerId: string, inviteId: string, mode?: NetworkMode): void {
+        const stmt = this.db.prepare(`
+            INSERT OR IGNORE INTO group_invite_delivery_acks (group_id, target_peer_id, invite_id, network_mode)
+            VALUES (?, ?, ?, ?)
+        `);
+        stmt.run(groupId, targetPeerId, inviteId, this.getActiveNetworkMode(mode));
+    }
+
+    isInviteDeliveryAckReceived(groupId: string, targetPeerId: string, inviteId: string, mode?: NetworkMode): boolean {
+        const stmt = this.db.prepare(`
+            SELECT 1
+            FROM group_invite_delivery_acks
+            WHERE group_id = ? AND target_peer_id = ? AND invite_id = ? AND network_mode = ?
+        `);
+        const row = stmt.get(groupId, targetPeerId, inviteId, this.getActiveNetworkMode(mode));
+        return row !== undefined;
+    }
+
+    removeInviteDeliveryAcksForMember(groupId: string, targetPeerId: string, mode?: NetworkMode): void {
+        const stmt = this.db.prepare(`
+            DELETE FROM group_invite_delivery_acks
+            WHERE group_id = ? AND target_peer_id = ? AND network_mode = ?
+        `);
+        stmt.run(groupId, targetPeerId, this.getActiveNetworkMode(mode));
+    }
+
+    // --- Group sender sequence ---
+
+    getNextSeqAndIncrement(groupId: string, keyVersion: number): number {
+        const upsert = this.db.prepare(`
+            INSERT INTO group_sender_seq (group_id, key_version, next_seq) VALUES (?, ?, 2)
+            ON CONFLICT(group_id, key_version) DO UPDATE SET next_seq = next_seq + 1
+        `);
+        const select = this.db.prepare('SELECT next_seq - 1 AS seq FROM group_sender_seq WHERE group_id = ? AND key_version = ?');
+
+        const txn = this.db.transaction((gId: string, kv: number) => {
+            upsert.run(gId, kv);
+            const row = select.get(gId, kv) as { seq: number };
+            return row.seq;
+        });
+
+        return txn(groupId, keyVersion);
+    }
+
+    getCurrentSeq(groupId: string, keyVersion: number): number {
+        const row = this.db.prepare('SELECT next_seq FROM group_sender_seq WHERE group_id = ? AND key_version = ?')
+            .get(groupId, keyVersion) as { next_seq: number } | undefined;
+        return row ? row.next_seq - 1 : 0;
+    }
+
+    deleteGroupSenderSeqs(groupId: string): void {
+        this.db.prepare('DELETE FROM group_sender_seq WHERE group_id = ?').run(groupId);
+    }
+
+    deleteGroupSenderSeqForEpoch(groupId: string, keyVersion: number): void {
+        this.db.prepare('DELETE FROM group_sender_seq WHERE group_id = ? AND key_version = ?')
+            .run(groupId, keyVersion);
+    }
+
+    // --- Group member seq (observed seqs from all members) ---
+
+    updateMemberSeq(groupId: string, keyVersion: number, senderPeerId: string, seq: number): void {
+        this.db.prepare(`
+            INSERT INTO group_member_seq (group_id, key_version, sender_peer_id, highest_seq) VALUES (?, ?, ?, ?)
+            ON CONFLICT(group_id, key_version, sender_peer_id) DO UPDATE SET
+                highest_seq = MAX(highest_seq, excluded.highest_seq)
+        `).run(groupId, keyVersion, senderPeerId, seq);
+    }
+
+    getMemberSeq(groupId: string, keyVersion: number, senderPeerId: string): number {
+        const row = this.db.prepare('SELECT highest_seq FROM group_member_seq WHERE group_id = ? AND key_version = ? AND sender_peer_id = ?')
+            .get(groupId, keyVersion, senderPeerId) as { highest_seq: number } | undefined;
+        return row?.highest_seq ?? 0;
+    }
+
+    getAllMemberSeqs(groupId: string, keyVersion: number): Record<string, number> {
+        const rows = this.db.prepare('SELECT sender_peer_id, highest_seq FROM group_member_seq WHERE group_id = ? AND key_version = ?')
+            .all(groupId, keyVersion) as Array<{ sender_peer_id: string; highest_seq: number }>;
+        const result: Record<string, number> = {};
+        for (const row of rows) {
+            result[row.sender_peer_id] = row.highest_seq;
+        }
+        return result;
+    }
+
+    deleteGroupMemberSeqs(groupId: string): void {
+        this.db.prepare('DELETE FROM group_member_seq WHERE group_id = ?').run(groupId);
+    }
+
+    deleteGroupMemberSeqsForEpoch(groupId: string, keyVersion: number): void {
+        this.db.prepare('DELETE FROM group_member_seq WHERE group_id = ? AND key_version = ?')
+            .run(groupId, keyVersion);
+    }
+
+    // --- Group epoch boundaries (finalized per-sender seq cutoffs for old epochs) ---
+
+    upsertGroupEpochBoundary(
+        groupId: string,
+        keyVersion: number,
+        senderPeerId: string,
+        boundarySeq: number,
+        source = 'local_rotation',
+    ): void {
+        this.db.prepare(`
+            INSERT INTO group_epoch_boundaries (group_id, key_version, sender_peer_id, boundary_seq, source, updated_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(group_id, key_version, sender_peer_id) DO UPDATE SET
+                boundary_seq = MAX(boundary_seq, excluded.boundary_seq),
+                source = excluded.source,
+                updated_at = CURRENT_TIMESTAMP
+        `).run(groupId, keyVersion, senderPeerId, boundarySeq, source);
+    }
+
+    upsertGroupEpochBoundaries(
+        groupId: string,
+        keyVersion: number,
+        boundaries: Record<string, number>,
+        source = 'local_rotation',
+    ): void {
+        const entries = Object.entries(boundaries);
+        if (entries.length === 0) return;
+
+        const stmt = this.db.prepare(`
+            INSERT INTO group_epoch_boundaries (group_id, key_version, sender_peer_id, boundary_seq, source, updated_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(group_id, key_version, sender_peer_id) DO UPDATE SET
+                boundary_seq = MAX(boundary_seq, excluded.boundary_seq),
+                source = excluded.source,
+                updated_at = CURRENT_TIMESTAMP
+        `);
+
+        const txn = this.db.transaction((rows: Array<[string, number]>) => {
+            for (const [senderPeerId, boundarySeq] of rows) {
+                if (!senderPeerId) continue;
+                const normalized = Number.isFinite(boundarySeq) ? Math.max(0, Math.floor(boundarySeq)) : 0;
+                stmt.run(groupId, keyVersion, senderPeerId, normalized, source);
+            }
+        });
+        txn(entries);
+    }
+
+    getGroupEpochBoundaries(groupId: string, keyVersion: number): Record<string, number> {
+        const rows = this.db.prepare(`
+            SELECT sender_peer_id, boundary_seq
+            FROM group_epoch_boundaries
+            WHERE group_id = ? AND key_version = ?
+        `).all(groupId, keyVersion) as Array<{ sender_peer_id: string; boundary_seq: number }>;
+
+        const result: Record<string, number> = {};
+        for (const row of rows) {
+            result[row.sender_peer_id] = row.boundary_seq;
+        }
+        return result;
+    }
+
+    getAllGroupEpochBoundaries(groupId: string, keyVersion: number): GroupEpochBoundary[] {
+        const stmt = this.db.prepare(`
+            SELECT *
+            FROM group_epoch_boundaries
+            WHERE group_id = ? AND key_version = ?
+            ORDER BY sender_peer_id ASC
+        `);
+        return stmt.all(groupId, keyVersion) as GroupEpochBoundary[];
+    }
+
+    deleteGroupEpochBoundaries(groupId: string): void {
+        this.db.prepare('DELETE FROM group_epoch_boundaries WHERE group_id = ?').run(groupId);
+    }
+
+    deleteGroupEpochBoundariesForEpoch(groupId: string, keyVersion: number): void {
+        this.db.prepare('DELETE FROM group_epoch_boundaries WHERE group_id = ? AND key_version = ?')
+            .run(groupId, keyVersion);
+    }
+
+    // --- Group chat column helpers ---
+
+    updateChatStatus(chatId: number, status: string): void {
+        this.db.prepare("UPDATE chats SET status = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?")
+            .run(status, chatId);
+    }
+
+    updateChatGroupStatus(chatId: number, groupStatus: string): void {
+        if (groupStatus === 'removed') {
+            this.db.prepare(`
+                UPDATE chats
+                SET group_status = ?,
+                    needs_removed_catchup = 1,
+                    removed_at = ?,
+                    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+                WHERE id = ?
+            `).run(groupStatus, Date.now(), chatId);
+            return;
+        }
+
+        this.db.prepare(`
+            UPDATE chats
+            SET group_status = ?,
+                needs_removed_catchup = 0,
+                removed_at = NULL,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            WHERE id = ?
+        `).run(groupStatus, chatId);
+    }
+
+    transitionChatGroupStatus(chatId: number, nextStatus: GroupStatus, reason: string): void {
+        const row = this.db.prepare('SELECT group_status FROM chats WHERE id = ?')
+            .get(chatId) as { group_status: string | null } | undefined;
+        if (!row) {
+            throw new Error(`Chat ${chatId} not found`);
+        }
+
+        const current = row.group_status;
+        if (current === nextStatus) {
+            return;
+        }
+
+        if (current !== null) {
+            if (!isGroupStatus(current)) {
+                throw new Error(
+                    `Unknown group status in DB for chat ${chatId}: ${current} (reason=${reason})`,
+                );
+            }
+            assertGroupTransition(current, nextStatus, reason);
+        }
+
+        this.updateChatGroupStatus(chatId, nextStatus);
+        log(
+            `[GROUP][STATE][TRANSITION] chatId=${chatId} from=${current ?? 'null'} to=${nextStatus} reason=${reason}`,
+        );
+    }
+
+    markRemovedCatchupCompleted(chatId: number): void {
+        this.db.prepare(`
+            UPDATE chats
+            SET needs_removed_catchup = 0
+            WHERE id = ? AND group_status = 'removed'
+        `).run(chatId);
+    }
+
+    recoverRekeyingGroupsOnStartup(): number {
+        const result = this.db.prepare(`
+            UPDATE chats
+            SET group_status = 'active',
+                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            WHERE type = 'group'
+              AND status = 'active'
+              AND group_status = 'rekeying'
+              AND network_mode = ?
+              AND (key_version > 0 OR permanent_key IS NOT NULL)
+        `).run(this.getActiveNetworkMode());
+
+        return Number(result.changes ?? 0);
+    }
+
+    updateChatKeyVersion(chatId: number, keyVersion: number): void {
+        this.db.prepare("UPDATE chats SET key_version = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?")
+            .run(keyVersion, chatId);
+    }
+
+    updateChatGroupInfoDhtKey(chatId: number, dhtKey: string): void {
+        this.db.prepare("UPDATE chats SET group_info_dht_key = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?")
+            .run(dhtKey, chatId);
+    }
+
+    restoreGroupChatFromInvite(chatId: number, inviterPeerId: string, groupName: string): void {
+        this.db.prepare(`
+            UPDATE chats
+            SET name = ?,
+                created_by = ?,
+                status = 'pending',
+                group_status = 'invited_pending',
+                needs_removed_catchup = 0,
+                removed_at = NULL,
+                group_creator_peer_id = ?,
+                permanent_key = NULL,
+                group_key = NULL,
+                group_info_dht_key = NULL,
+                key_version = 0,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            WHERE id = ?
+        `).run(groupName, inviterPeerId, inviterPeerId, chatId);
+    }
+
+    clearGroupChatRuntimeState(chatId: number): void {
+        this.db.prepare(`
+            UPDATE chats
+            SET permanent_key = NULL,
+                group_key = NULL,
+                group_info_dht_key = NULL,
+                key_version = 0,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            WHERE id = ?
+        `).run(chatId);
+    }
+
+    resetGroupRuntimeForReinvite(chatId: number, groupId: string): void {
+        const modeRow = this.db.prepare('SELECT network_mode FROM chats WHERE id = ?').get(chatId) as { network_mode?: unknown } | undefined;
+        const mode = isNetworkMode(modeRow?.network_mode) ? modeRow.network_mode : this.getActiveNetworkMode();
+        const groupOfflineBucketPrefix = getNetworkModeRuntime(mode).config.dhtNamespaces.groupOffline;
+        const clearChatRuntimeStmt = this.db.prepare(`
+            UPDATE chats
+            SET permanent_key = NULL,
+                group_key = NULL,
+                group_info_dht_key = NULL,
+                key_version = 0,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            WHERE id = ?
+        `);
+        const deleteKeyHistoryStmt = this.db.prepare('DELETE FROM group_key_history WHERE group_id = ?');
+        const deleteOfflineCursorsStmt = this.db.prepare('DELETE FROM group_offline_cursors WHERE group_id = ?');
+        const deleteSenderSeqStmt = this.db.prepare('DELETE FROM group_sender_seq WHERE group_id = ?');
+        const deleteMemberSeqStmt = this.db.prepare('DELETE FROM group_member_seq WHERE group_id = ?');
+        const deleteEpochBoundariesStmt = this.db.prepare('DELETE FROM group_epoch_boundaries WHERE group_id = ?');
+        const deleteOfflineSentStmt = this.db.prepare('DELETE FROM group_offline_sent_messages WHERE bucket_key LIKE ?');
+
+        const txn = this.db.transaction((cId: number, gId: string) => {
+            clearChatRuntimeStmt.run(cId);
+            deleteKeyHistoryStmt.run(gId);
+            deleteOfflineCursorsStmt.run(gId);
+            deleteSenderSeqStmt.run(gId);
+            deleteMemberSeqStmt.run(gId);
+            deleteEpochBoundariesStmt.run(gId);
+            deleteOfflineSentStmt.run(`${groupOfflineBucketPrefix}/${gId}/%`);
+        });
+
+        txn(chatId, groupId);
+    }
+
+    updateGroupParticipants(chatId: number, peerIds: string[]): void {
+        this.db.prepare('DELETE FROM chat_participants WHERE chat_id = ?').run(chatId);
+        const insert = this.db.prepare(
+            'INSERT INTO chat_participants (chat_id, peer_id, role, joined_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)'
+        );
+        for (const peerId of peerIds) {
+            insert.run(chatId, peerId, 'member');
+        }
+    }
+
+    close(): void {
+        try {
+            log('[DATABASE] Shutting down database...');
+
+            // Checkpoint WAL to ensure all data is persisted
+            // TRUNCATE mode: checkpoint and truncate WAL file
+            this.db.pragma('wal_checkpoint(TRUNCATE)');
+            log('[DATABASE] WAL checkpoint completed');
+
+            this.db.close();
+            log('[DATABASE] Database connection closed successfully');
+        } catch (error) {
+            console.error('[DATABASE] Error during shutdown:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Wipes all data from the database
+     */
+    async wipeDatabase(): Promise<void> {
+        try {
+            console.warn('[DATABASE] WARNING: Wiping all database data...');
+
+            this.db.pragma('foreign_keys = OFF');
+
+            const tables = this.db.prepare(`
+                SELECT name FROM sqlite_master
+                WHERE type='table' AND name NOT LIKE 'sqlite_%'
+            `).all() as Array<{ name: string }>;
+
+            this.db.exec('BEGIN TRANSACTION');
+
+            for (const table of tables) {
+                log(`[DATABASE] Deleting data from table: ${table.name}`);
+                this.db.prepare(`DELETE FROM ${table.name}`).run();
+            }
+
+            this.db.exec('COMMIT');
+
+            this.db.pragma('foreign_keys = ON');
+
+            this.db.exec('VACUUM');
+
+            log('[DATABASE] All data wiped successfully');
+        } catch (error) {
+            this.db.exec('ROLLBACK');
+            // Re-enable foreign keys even on error
+            this.db.pragma('foreign_keys = ON');
+            console.error('[DATABASE] Error wiping database:', error);
+            throw error;
+        }
+    }
+
+    async backup(backupPath: string): Promise<void> {
+        await this.db.backup(backupPath);
+    }
+
+    async restore(backupPath: string): Promise<void> {
+        this.close();
+
+        const fs = await import('fs/promises');
+        await fs.copyFile(backupPath, this.dbPath);
+
+        this.db = new Database(this.dbPath);
+
+        this.db.pragma('journal_mode = WAL');
+        this.db.pragma('synchronous = NORMAL');
+        this.db.pragma('cache_size = 10000');
+        this.db.pragma('temp_store = memory');
+        this.db.pragma('mmap_size = 268435456'); // 256MB
+        this.db.pragma('busy_timeout = 30000'); // 30 second timeout
+        this.db.pragma('foreign_keys = ON');
+
+        log('Database restored from backup');
+    }
+}

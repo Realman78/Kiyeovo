@@ -1,0 +1,380 @@
+@import "tailwindcss";
+
+@font-face {
+  font-family: 'Inter';
+  src: url('/fonts/Inter/Inter-VariableFont_opsz,wght.ttf') format('truetype');
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Inter';
+  src: url('/fonts/Inter/Inter-Italic-VariableFont_opsz,wght.ttf') format('truetype');
+  font-style: italic;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('/fonts/JetBrains_Mono/JetBrainsMono-VariableFont_wght.ttf') format('truetype');
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('/fonts/JetBrains_Mono/JetBrainsMono-Italic-VariableFont_wght.ttf') format('truetype');
+  font-style: italic;
+  font-weight: 100 800;
+  font-display: swap;
+}
+
+/* Tailwind v4 theme configuration - defines custom colors and utilities */
+@theme {
+  /* Core colors */
+  --color-background: hsl(220 25% 6%);
+  --color-foreground: hsl(200 20% 90%);
+
+  /* Card colors */
+  --color-card: hsl(220 25% 8%);
+  --color-card-foreground: hsl(200 20% 90%);
+
+  /* Popover colors */
+  --color-popover: hsl(220 30% 10%);
+  --color-popover-foreground: hsl(200 20% 90%);
+
+  /* Primary colors - cyan/teal neon */
+  --color-primary: hsl(185 80% 50%);
+  --color-primary-foreground: hsl(220 25% 6%);
+
+  /* Secondary colors */
+  --color-secondary: hsl(220 20% 12%);
+  --color-secondary-foreground: hsl(200 15% 70%);
+
+  /* Muted colors */
+  --color-muted: hsl(220 20% 14%);
+  --color-muted-foreground: hsl(200 10% 50%);
+
+  /* Accent colors */
+  --color-accent: hsl(185 70% 40%);
+  --color-accent-foreground: hsl(200 20% 95%);
+
+  /* Destructive colors */
+  --color-destructive: hsl(0 70% 50%);
+  --color-destructive-foreground: hsl(0 0% 100%);
+
+  /* Success colors - terminal green */
+  --color-success: hsl(150 70% 45%);
+  --color-success-foreground: hsl(150 100% 95%);
+
+  /* Warning colors */
+  --color-warning: hsl(45 90% 50%);
+  --color-warning-foreground: hsl(45 100% 10%);
+
+  /* UI element colors */
+  --color-border: hsl(220 20% 18%);
+  --color-input: hsl(220 25% 12%);
+  --color-ring: hsl(185 80% 50%);
+
+  /* Sidebar colors */
+  --color-sidebar-background: hsl(220 25% 7%);
+  --color-sidebar-foreground: hsl(200 15% 75%);
+  --color-sidebar-primary: hsl(185 80% 50%);
+  --color-sidebar-primary-foreground: hsl(220 25% 6%);
+  --color-sidebar-accent: hsl(220 20% 12%);
+  --color-sidebar-accent-foreground: hsl(200 20% 90%);
+  --color-sidebar-border: hsl(220 20% 15%);
+  --color-sidebar-ring: hsl(185 80% 50%);
+
+  /* Message bubble colors */
+  --color-message-sent: hsl(185 60% 25%);
+  --color-message-sent-foreground: hsl(200 20% 95%);
+  --color-message-received: hsl(220 20% 14%);
+  --color-message-received-foreground: hsl(200 20% 90%);
+}
+
+@layer base {
+  :root {
+    /* Dark cybersecurity theme - no light mode needed */
+    --background: 220 25% 6%;
+    --foreground: 200 20% 90%;
+
+    --card: 220 25% 8%;
+    --card-foreground: 200 20% 90%;
+
+    --popover: 220 30% 10%;
+    --popover-foreground: 200 20% 90%;
+
+    /* Cyan/teal neon primary */
+    --primary: 185 80% 50%;
+    --primary-foreground: 220 25% 6%;
+
+    /* Muted dark surfaces */
+    --secondary: 220 20% 12%;
+    --secondary-foreground: 200 15% 70%;
+
+    --muted: 220 20% 14%;
+    --muted-foreground: 200 10% 50%;
+
+    --accent: 185 70% 40%;
+    --accent-foreground: 200 20% 95%;
+
+    --destructive: 0 70% 50%;
+    --destructive-foreground: 0 0% 100%;
+
+    /* Success/online - terminal green */
+    --success: 150 70% 45%;
+    --success-foreground: 150 100% 95%;
+
+    /* Warning */
+    --warning: 45 90% 50%;
+    --warning-foreground: 45 100% 10%;
+
+    --border: 220 20% 18%;
+    --input: 220 25% 12%;
+    --ring: 185 80% 50%;
+
+    --radius: 0.5rem;
+
+    /* Custom glow effects */
+    --glow-primary: 0 0 20px hsl(185 80% 50% / 0.3);
+    --glow-primary-intense: 0 0 30px hsl(185 80% 50% / 0.5);
+    --glow-tor: 0 0 20px hsl(270 40% 40% / 0.3);
+    --glow-tor-intense: 0 0 30px hsl(270 40% 40% / 0.5);
+    --glow-success: 0 0 15px hsl(150 70% 45% / 0.4);
+
+    /* Sidebar */
+    --sidebar-background: 220 25% 7%;
+    --sidebar-foreground: 200 15% 75%;
+    --sidebar-primary: 185 80% 50%;
+    --sidebar-primary-foreground: 220 25% 6%;
+    --sidebar-accent: 220 20% 12%;
+    --sidebar-accent-foreground: 200 20% 90%;
+    --sidebar-border: 220 20% 15%;
+    --sidebar-ring: 185 80% 50%;
+
+    /* Message bubbles */
+    --message-sent: 185 60% 25%;
+    --message-sent-foreground: 200 20% 95%;
+    --message-received: 220 20% 14%;
+    --message-received-foreground: 200 20% 90%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: 'Inter', sans-serif;
+    min-width: 420px;
+    min-height: 100vh;
+  }
+
+  .font-mono {
+    font-family: 'JetBrains Mono', monospace;
+  }
+}
+
+@layer components {
+  /* Dialog animations */
+  @keyframes dialogOverlayShow {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  @keyframes dialogContentShow {
+    from {
+      opacity: 0;
+      transform: translate(0, 75vh);
+    }
+    to {
+      opacity: 1;
+      transform: translate(0, 0);
+    }
+  }
+  @keyframes dialogContentHide {
+    from {
+      opacity: 1;
+      transform: translate(0, 0);
+    }
+    to {
+      opacity: 0;
+      transform: translate(0, 75vh);
+    }
+  }
+
+  .dialog-overlay-animate {
+    animation: dialogOverlayShow 250ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .dialog-content-animate[data-state="open"] {
+    animation: dialogContentShow 250ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .dialog-content-animate[data-state="closed"] {
+    animation: dialogContentHide 300ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  /* Toast animations */
+  @keyframes toastSlideIn {
+    from {
+      transform: translateX(calc(100% + 1rem));
+      opacity: 0;
+    }
+    to {
+      transform: translateX(0);
+      opacity: 1;
+    }
+  }
+
+  @keyframes toastSlideOut {
+    from {
+      transform: translateX(0);
+      opacity: 1;
+    }
+    to {
+      transform: translateX(calc(100% + 1rem));
+      opacity: 0;
+    }
+  }
+
+  .toast-animate[data-state="open"] {
+    animation: toastSlideIn 200ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .toast-animate[data-state="closed"] {
+    animation: toastSlideOut 200ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  /* Glow animations */
+  .glow-border {
+    box-shadow: var(--glow-primary);
+    transition: box-shadow 0.3s ease-in-out;
+  }
+  .glow-border:hover {
+    transition: box-shadow 0.3s ease-in-out;
+    box-shadow: var(--glow-primary-intense);
+  }
+
+  .glow-border-tor {
+    box-shadow: var(--glow-tor);
+    transition: box-shadow 0.3s ease-in-out;
+  }
+  .glow-border-tor:hover {
+    transition: box-shadow 0.3s ease-in-out;
+    box-shadow: var(--glow-tor-intense);
+  }
+
+  .glow-border-intense {
+    box-shadow: var(--glow-primary-intense);
+  }
+
+  .glow-text {
+    text-shadow: var(--glow-primary);
+  }
+
+  /* Cyber grid background */
+  .cyber-grid {
+    background-image: 
+      linear-gradient(hsl(var(--border) / 0.3) 1px, transparent 1px),
+      linear-gradient(90deg, hsl(var(--border) / 0.3) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+
+  /* Scanline effect */
+  .scanlines::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      hsl(var(--foreground) / 0.02) 2px,
+      hsl(var(--foreground) / 0.02) 4px
+    );
+    pointer-events: none;
+  }
+
+  /* Pulse animation for status indicators */
+  @keyframes pulse-glow {
+    0%, 100% {
+      opacity: 1;
+      box-shadow: var(--glow-success);
+    }
+    50% {
+      opacity: 0.7;
+      box-shadow: 0 0 25px hsl(150 70% 45% / 0.6);
+    }
+  }
+
+  .pulse-online {
+    animation: pulse-glow 2s ease-in-out infinite;
+  }
+
+  /* Typing cursor animation */
+  @keyframes blink {
+    0%, 50% { opacity: 1; }
+    51%, 100% { opacity: 0; }
+  }
+
+  .cursor-blink {
+    animation: blink 1s step-end infinite;
+  }
+
+  /* Fade in animation */
+  @keyframes fade-in {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .animate-fade-in {
+    animation: fade-in 0.3s ease-out forwards;
+  }
+
+  /* Loading spinner */
+  @keyframes spin-slow {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+
+  .animate-spin-slow {
+    animation: spin-slow 3s linear infinite;
+  }
+
+  /* Glitch effect for loading */
+  @keyframes glitch {
+    0%, 90%, 100% { transform: translate(0); }
+    92% { transform: translate(-2px, 1px); }
+    94% { transform: translate(2px, -1px); }
+    96% { transform: translate(-1px, 2px); }
+    98% { transform: translate(1px, -2px); }
+  }
+
+  .glitch-hover:hover {
+    animation: glitch 0.3s ease-in-out;
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: hsl(var(--background));
+}
+
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--border));
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground));
+}
