@@ -190,4 +190,10 @@ The desktop app is built with Electron, React, and libp2p.
 
 These nodes will be shut down on April 19th 2026.
 
+1. Frankfurt
+    - Bootstrap: /ip4/188.166.161.63/tcp/9000/p2p/12D3KooWHhZDapttnphEpmqA8EKa6S2petfdNQTtMKtpS7SuGs3n
+    - Relay: /ip4/188.166.161.63/tcp/4002/p2p/12D3KooWJEDJPBEbX1EGvFCzEGRwivjGvKSbZJPuzoTWqfjkrHr6
+    - STUN: stun:188.166.161.63
+    - TURN: turn:188.166.161.63:3478?transport=udp kiyeovo:marinparin
+
 ... Coming on 31st of March (today)
