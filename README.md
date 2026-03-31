@@ -33,6 +33,7 @@ The full version will come with:
 ## Quick start
 
 > If you want to try out the beta without self-hosting immediately, you can do that by connecting to one of my nodes listed [here](#connect-to-already-existing-nodes).
+> There is also a tutorial [here](https://marindedic.com/blog/p2p-messenger/), but you can just follow the steps below
 
 Requirements for running:
 
@@ -187,3 +188,9 @@ The desktop app is built with Electron, React, and libp2p.
 ## Connect to already existing nodes
 
 These nodes will be shut down on April 19th 2026.
+
+1. Amsterdam
+    - Bootstrap: /ip4/68.183.15.8/tcp/9000/p2p/12D3KooWEL2tNuaYNxKE9fh4KufvW9TnjzmnS1xBFdbUYtq8N5qx
+    - Relay: /ip4/68.183.15.8/tcp/4002/p2p/12D3KooWRpVU72wHWFEQidYtNhGNvWNHq4rYgk4a8oy2gsEDitcU
+    - STUN: stun:68.183.15.8:3478
+    - TURN: turn:188.166.161.63:3478?transport=udp kiyeovo:marinparin
