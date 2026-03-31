@@ -44,8 +44,8 @@ Requirements for running:
 Clone the repo:
 
 ```
-git clone https://github.com/Realman78/kiyeovo-desktop.git
-cd kiyeovo-desktop/
+git clone https://github.com/Realman78/Kiyeovo.git
+cd Kiyeovo
 ```
 
 ### Local non-dev run

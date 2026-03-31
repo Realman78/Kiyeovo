@@ -1,4 +1,4 @@
-## Kiyeovo Desktop — Technical Documentation (EN)
+## Kiyeovo — Technical Documentation (EN)
 
 ### Purpose of the document
 
@@ -9,7 +9,7 @@ Its goal is to provide complete context quickly in new AI conversations without 
 
 ### TL;DR (quick context)
 
-- Kiyeovo Desktop is an Electron + React + libp2p P2P messenger.
+- Kiyeovo is an Electron + React + libp2p P2P messenger.
 - It supports two network modes:
   - `fast` (TCP + Circuit Relay v2 + DCUtR)
   - `anonymous` (Tor onion path)
@@ -39,7 +39,7 @@ Its goal is to provide complete context quickly in new AI conversations without 
 
 ### 1. High-level architecture
 
-Kiyeovo Desktop runs across two runtime processes:
+Kiyeovo runs across two runtime processes:
 
 1. Electron Main process (Node.js runtime)
    - initializes P2P core
