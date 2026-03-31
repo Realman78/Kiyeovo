@@ -195,3 +195,5 @@ These nodes will be shut down on April 19th 2026.
     - Relay: /ip4/68.183.15.8/tcp/4002/p2p/12D3KooWRpVU72wHWFEQidYtNhGNvWNHq4rYgk4a8oy2gsEDitcU
     - STUN: stun:68.183.15.8:3478
     - TURN: turn:188.166.161.63:3478?transport=udp kiyeovo:marinparin
+
+... More coming on 31st of March (today)
