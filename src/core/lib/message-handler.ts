@@ -1953,7 +1953,7 @@ export class MessageHandler {
   }
 
   private shouldFallbackOfflineSend(errorText: string): boolean {
-    return /econnrefused|user is offline|all multiaddr dials failed|message timeout|socks|tor transport|enetunreach|no valid addresses|ehostunreach|etimedout|limited connection|no_reservation|no reservation|failed to connect via relay with status/.test(errorText);
+    return /econnrefused|user is offline|all multiaddr dials failed|message timeout|dial timeout|socks|tor transport|enetunreach|no valid addresses|ehostunreach|etimedout|limited connection|no_reservation|no reservation|failed to connect via relay with status/.test(errorText);
   }
 
   private async storeOfflineMessageFallback(

@@ -37,6 +37,14 @@ export type FastRelayStatusSnapshot = {
   skipped: boolean;
 };
 
+type TransportManagerLike = {
+  listen: (addrs: ReturnType<typeof multiaddr>[]) => Promise<void>;
+};
+
+function getTransportManager(node: ChatNode): TransportManagerLike {
+  return (node as ChatNode & { components: { transportManager: TransportManagerLike } }).components.transportManager;
+}
+
 export function parseFastRelayAddressList(raw: string): string[] {
   return dedupe(
     raw
@@ -58,12 +66,30 @@ export function serializeFastRelayAddressList(addresses: string[]): string {
   return normalizeFastRelayAddressList(addresses).join(',');
 }
 
-function logFastCircuitState(node: ChatNode): void {
-  const circuitAddrs = node
+function toConfiguredFastRelayListenAddr(address: string): string | null {
+  const peerId = parsePeerIdFromAddress(address);
+  if (peerId === null) {
+    console.warn(`[CONFIG][FAST][RELAY] invalid relay address (missing peer id): ${address}`);
+    return null;
+  }
+
+  try {
+    return multiaddr(address).encapsulate('/p2p-circuit').toString();
+  } catch {
+    console.warn(`[CONFIG][FAST][RELAY] invalid relay address ignored: ${address}`);
+    return null;
+  }
+}
+
+function getLocalCircuitAddresses(node: ChatNode): string[] {
+  return node
     .getMultiaddrs()
     .map((addr) => addr.toString())
     .filter((addr) => addr.includes('/p2p-circuit'));
+}
 
+function logFastCircuitState(node: ChatNode): void {
+  const circuitAddrs = getLocalCircuitAddresses(node);
   log(
     `[CONFIG][FAST][RELAY] localCircuitAddrs=${circuitAddrs.length} values=${circuitAddrs.join(',') || 'none'}`
   );
@@ -101,16 +127,12 @@ export function getFastRelayStatusSnapshot(node: ChatNode, database: ChatDatabas
   }
 
   const relayConfig = getConfiguredFastRelayAddrs(database);
-  const connectedPeerIds = new Set(
-    node.getConnections().map((connection) => connection.remotePeer.toString()),
-  );
   const reservedRelayPeerIds = getReservedRelayPeerIds(node);
 
   return {
     nodes: relayConfig.addresses.map((address) => {
       const peerId = parsePeerIdFromAddress(address);
-      const connected = peerId !== null
-        && (connectedPeerIds.has(peerId) || reservedRelayPeerIds.has(peerId));
+      const connected = peerId !== null && reservedRelayPeerIds.has(peerId);
       return { address, connected };
     }),
     source: relayConfig.source,
@@ -146,27 +168,40 @@ export async function dialConfiguredFastRelays(node: ChatNode, database: ChatDat
 
   const concurrency = Math.min(5, fastRelayAddrs.length);
   log(
-    `[CONFIG][FAST] attempting deterministic relay dials count=${fastRelayAddrs.length} concurrency=${concurrency} source=${fastRelayConfig.source}`
+    `[CONFIG][FAST] attempting deterministic relay reservations count=${fastRelayAddrs.length} concurrency=${concurrency} source=${fastRelayConfig.source}`
   );
   let connected = 0;
   let cursor = 0;
+  const transportManager = getTransportManager(node);
 
   const runWorker = async (): Promise<void> => {
     while (cursor < fastRelayAddrs.length) {
       const relayAddr = fastRelayAddrs[cursor++];
-      try {
-        await node.dial(multiaddr(relayAddr));
+      if (relayAddr == null) continue;
+
+      const relayPeerId = parsePeerIdFromAddress(relayAddr);
+      const relayListenAddr = toConfiguredFastRelayListenAddr(relayAddr);
+      if (relayListenAddr === null) continue;
+
+      if (relayPeerId !== null && getReservedRelayPeerIds(node).has(relayPeerId)) {
         connected++;
-        log(`[CONFIG][FAST][RELAY] connected ${relayAddr}`);
+        log(`[CONFIG][FAST][RELAY] reservation already active ${relayAddr}`);
+        continue;
+      }
+
+      try {
+        await transportManager.listen([multiaddr(relayListenAddr)]);
+        connected++;
+        log(`[CONFIG][FAST][RELAY] reserved ${relayAddr} via=${relayListenAddr}`);
       } catch (error) {
         const reason = errStr(error, 'unknown');
-        console.warn(`[CONFIG][FAST][RELAY] failed ${relayAddr} reason=${reason}`);
+        console.warn(`[CONFIG][FAST][RELAY] reservation failed ${relayAddr} via=${relayListenAddr} reason=${reason}`);
       }
     }
   };
 
   await Promise.all(Array.from({ length: concurrency }, () => runWorker()));
-  log(`[CONFIG][FAST][RELAY] connected=${connected}/${fastRelayAddrs.length}`);
+  log(`[CONFIG][FAST][RELAY] reserved=${connected}/${fastRelayAddrs.length}`);
   logFastCircuitState(node);
 
   return {

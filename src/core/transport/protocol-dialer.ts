@@ -10,6 +10,7 @@ import { errStr } from '../utils/general-error.js';
 
 const PRIVATE_ONLY_DIRECT_DIAL_TIMEOUT_MS = 2_000;
 const FAST_MODE_DIRECT_DIAL_TIMEOUT_MS = 10_000;
+const FAST_MODE_RELAY_DIAL_TIMEOUT_MS = 10_000;
 
 type DialProtocolWithRelayFallbackParams = {
   node: ChatNode;
@@ -225,7 +226,13 @@ export async function dialProtocolWithRelayFallback(
         }
 
         const circuitAddr = `${relayBase}/p2p-circuit/p2p/${targetPeer}`;
-        const stream = await node.dialProtocol(multiaddr(circuitAddr), protocol, dialOptions);
+        const stream = await dialWithTimeout(
+          node,
+          multiaddr(circuitAddr),
+          protocol,
+          dialOptions,
+          FAST_MODE_RELAY_DIAL_TIMEOUT_MS,
+        );
         log(`[DIAL][${context}] relay fallback succeeded target=${targetPeer} via=${relayBase}`);
         return stream;
       } catch (relayError: unknown) {
