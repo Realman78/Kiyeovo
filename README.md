@@ -90,7 +90,9 @@ BOOTSTRAP_ANNOUNCE_ADDRS=/ip4/YOUR_PUBLIC_IP/tcp/9000 \
 npm run bootstrap
 ```
 
-3. Start a relay node:
+The fast bootstrap listener defaults to `0.0.0.0:9000`. If you need a different local port, set `BOOTSTRAP_LISTEN_ADDRESS`.
+
+3. Start a relay node (if you already ran `ROLE=bootstrap npm install`):
 
 ```bash
 RELAY_ANNOUNCE_ADDRS=/ip4/YOUR_PUBLIC_IP/tcp/4002 \
@@ -120,17 +122,39 @@ npm run relay
 ROLE=bootstrap npm run setup
 ```
 
-2. Start a bootstrap node in anonymous mode:
+2. Install and start a Tor daemon on the host. Example on linux:
+
+```
+apt update
+apt install tor
+systemctl start tor
+systemctl enable tor # if you want to enable it on startup
+systemctl status tor # verify it's running
+```
+
+3. Configure a hidden service that forwards the public onion port to the local bootstrap listener. Example on linux - add the below config to `/etc/tor/torrc`:
+
+```conf
+HiddenServiceDir /var/lib/tor/kiyeovo-bootstrap/ # you will find your onion hostname here later
+HiddenServicePort 9000 127.0.0.1:9001
+```
+
+After changes, restart the tor service: `systemctl restart tor`
+
+Find your onion host: `cat /var/lib/tor/kiyeovo-bootstrap/hostname`
+
+4. Start a bootstrap node in anonymous mode:
 
 ```bash
 BOOTSTRAP_NETWORK_MODE=anonymous \
+BOOTSTRAP_LISTEN_ADDRESS=/ip4/127.0.0.1/tcp/9001 \
 BOOTSTRAP_ANNOUNCE_ADDRS=/onion3/YOUR_ONION_HOST:9000 \
 npm run bootstrap
 ```
 
-3. The bootstrap process itself still listens on local TCP port `9000`. Your onion service must forward that port to the bootstrap process.
+If you host both fast and anonymous bootstrap nodes on the same machine, keep fast mode on `0.0.0.0:9000` and anonymous mode on local `127.0.0.1:9001`.
 
-4. Add the client-facing bootstrap address in Kiyeovo:
+5. Add the client-facing bootstrap address in Kiyeovo:
 
 ```text
 /onion3/YOUR_ONION_HOST:9000/p2p/<BOOTSTRAP_PEER_ID>
@@ -144,34 +168,32 @@ Calls are currently fast-mode direct 1:1 calls.
 
 If you want to self-host calls, the simple path is:
 
-1. Set up a TURN server such as coturn.
-2. Open `3478` on UDP/TCP and a relay port range such as `49160-49200`.
-3. In Kiyeovo, open `Connection status -> Calls` and add your STUN/TURN servers there.
-
-You can add multiple ICE servers. Kiyeovo supports `stun`, `turn`, and `turns` entries.
-
-Make sure your firewall rules allow traffic on:
-
-```text
-3478/tcp
-3478/udp
-49160-49200/tcp
-49160-49200/udp
+1. Set up a TURN server such as coturn. Example on linux:
+    - install coturn with `apt install coturn`
+    - run `sed -i 's/^#TURNSERVER_ENABLED=.*/TURNSERVER_ENABLED=1/' /etc/default/coturn`
+    - add the configuration below to `/etc/turnserver.conf`:
 ```
-
-Minimal coturn example:
-
-```conf
 listening-port=3478
 fingerprint
 lt-cred-mech
 realm=kiyeovo
-user=kiyeovo:change-me
+user=USERNAME:PASSWORD
+external-ip=PUBLIC_IP
 min-port=49160
 max-port=49200
+no-cli
 ```
 
-Then run `sudo systemctl enable --now coturn`
+2. Set up firewall (if firewall is enabled)
+    - ALLOW TCP and UDP on port 3478
+    - ALLOW UDP on port range 49160:49200.
+    - From before: if you are running bootstrap and relay, ALLOW TCP on ports 9000 (bootstrap) and 4002 (relay)
+
+3. Run `systemctl enable --now coturn`
+
+4. In Kiyeovo, open `Connection status -> Calls` and add your STUN/TURN servers there.
+
+You can add multiple ICE servers. Kiyeovo supports `stun`, `turn`, and `turns` entries.
 
 ## Technical note
 
@@ -191,15 +213,29 @@ The desktop app is built with Electron, React, and libp2p.
 These nodes will be shut down on April 19th 2026.
 
 1. Frankfurt
-    - Bootstrap: /ip4/188.166.161.63/tcp/9000/p2p/12D3KooWHhZDapttnphEpmqA8EKa6S2petfdNQTtMKtpS7SuGs3n
+    - Anonymous mode Bootstrap: Coming on April 1st 2026
+    - Fast mode Bootstrap: /ip4/188.166.161.63/tcp/9000/p2p/12D3KooWHhZDapttnphEpmqA8EKa6S2petfdNQTtMKtpS7SuGs3n
     - Relay: /ip4/188.166.161.63/tcp/4002/p2p/12D3KooWJEDJPBEbX1EGvFCzEGRwivjGvKSbZJPuzoTWqfjkrHr6
     - STUN: stun:188.166.161.63
     - TURN: turn:188.166.161.63:3478?transport=udp kiyeovo:marinparin
 
 2. Amsterdam
-    - Bootstrap: /ip4/68.183.15.8/tcp/9000/p2p/12D3KooWEL2tNuaYNxKE9fh4KufvW9TnjzmnS1xBFdbUYtq8N5qx
+    - Anonymous mode Bootstrap: Coming on April 1st 2026
+    - Fast mode Bootstrap: /ip4/68.183.15.8/tcp/9000/p2p/12D3KooWEL2tNuaYNxKE9fh4KufvW9TnjzmnS1xBFdbUYtq8N5qx
     - Relay: /ip4/68.183.15.8/tcp/4002/p2p/12D3KooWRpVU72wHWFEQidYtNhGNvWNHq4rYgk4a8oy2gsEDitcU
     - STUN: stun:68.183.15.8:3478
     - TURN: turn:68.183.15.8:3478?transport=udp kiyeovo:marinparin
 
-... Coming on 31st of March (today)
+3. New York
+    - Anonymous mode Bootstrap: /onion3/yzwpxyhhydqka3zbip4om6ufhsbhoyp4bvzakimtj6eeqothaybrayyd:9000/p2p/12D3KooWDXLMQhUJQ3CQzhkQTwN8PiCYvdACfUXmV4tvdy79SfLp
+    - Fast mode Bootstrap: /ip4/157.230.222.64/tcp/9000/p2p/12D3KooWRDGQrpo1rFBLuhjzkj5dX89u1UuRizKYcYtdwop3rc8V
+    - Relay: /ip4/157.230.222.64/tcp/4002/p2p/12D3KooWBEEs9DJiBSExDYdT92FBeDuAnABrBQgN9WB6k98UAUPF
+    - STUN: stun:157.230.222.64:3478
+    - TURN: turn:157.230.222.64:3478?transport=udp kiyeovo:marinparin
+
+4. San Francisco
+    - Anonymous mode Bootstrap: Coming on April 1st 2026
+    - Fast mode Bootstrap: Coming on April 1st 2026
+    - Relay: Coming on April 1st 2026
+    - STUN: Coming on April 1st 2026
+    - TURN: Coming on April 1st 2026

@@ -360,7 +360,7 @@ Current behavior:
 Operational notes:
 - bootstrap announce addresses are raw announce multiaddrs, not client-facing `/p2p/...` addresses
 - the process prints its Peer ID on startup; client-facing bootstrap entries are formed as `<announce_addr>/p2p/<peerId>`
-- anonymous bootstrap does not spawn Tor by itself; if you run `BOOTSTRAP_NETWORK_MODE=anonymous`, your onion service must forward the announced onion address to the local bootstrap listener on TCP 9000
+- anonymous bootstrap does not spawn Tor by itself; if you run `BOOTSTRAP_NETWORK_MODE=anonymous`, your onion service must forward the announced onion address to the local bootstrap listener (default: TCP 9001)
 
 #### 11.2 Relay node
 

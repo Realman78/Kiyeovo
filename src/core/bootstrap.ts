@@ -53,8 +53,10 @@ type BootstrapRuntimeConfig = {
   modeRuntime: ReturnType<typeof getNetworkModeRuntime>;
   torConfig: ReturnType<typeof getTorConfig>;
   isAnonymousMode: boolean;
+  listenAddr: string;
   announceAddrs: string[];
   datastorePath: string;
+  peerIdFile: string;
 };
 
 function readBootstrapNetworkMode(): 'fast' | 'anonymous' {
@@ -117,6 +119,32 @@ function readBootstrapAnnounceAddrs(isAnonymousMode: boolean): string[] {
     .filter((address): address is string => address !== null);
 }
 
+function readBootstrapListenAddr(networkMode: 'fast' | 'anonymous'): string {
+  const defaultListenAddr = networkMode === NETWORK_MODES.ANONYMOUS
+    ? '/ip4/127.0.0.1/tcp/9001'
+    : BOOTSTRAP_LISTEN_ADDRESS;
+
+  const raw = process.env.BOOTSTRAP_LISTEN_ADDRESS?.trim();
+  if (!raw) return defaultListenAddr;
+
+  try {
+    multiaddr(raw);
+    return raw;
+  } catch {
+    console.warn(`[CONFIG][BOOTSTRAP] invalid BOOTSTRAP_LISTEN_ADDRESS="${raw}", defaulting to ${defaultListenAddr}`);
+    return defaultListenAddr;
+  }
+}
+
+function readBootstrapPeerIdFile(networkMode: 'fast' | 'anonymous'): string {
+  const raw = process.env.BOOTSTRAP_PEER_ID_FILE?.trim();
+  if (raw) return raw;
+
+  return networkMode === NETWORK_MODES.ANONYMOUS 
+    ? BOOTSTRAP_PEER_ID_FILE.replace(/\.bin$/, '-anonymous.bin') 
+    : BOOTSTRAP_PEER_ID_FILE;
+}
+
 function readBootstrapRuntimeConfig(): BootstrapRuntimeConfig {
   const networkMode = readBootstrapNetworkMode();
   const isAnonymousMode = networkMode === NETWORK_MODES.ANONYMOUS;
@@ -127,8 +155,10 @@ function readBootstrapRuntimeConfig(): BootstrapRuntimeConfig {
     modeRuntime: getNetworkModeRuntime(networkMode),
     torConfig: getTorConfig(),
     isAnonymousMode,
+    listenAddr: readBootstrapListenAddr(networkMode),
     announceAddrs,
     datastorePath: resolve(join('./bootstrap-datastore', networkMode)),
+    peerIdFile: readBootstrapPeerIdFile(networkMode),
   };
 
   if (runtimeConfig.isAnonymousMode && runtimeConfig.announceAddrs.length === 0) {
@@ -142,8 +172,10 @@ function logBootstrapRuntimeConfig(runtimeConfig: BootstrapRuntimeConfig): void 
   console.log(`[CONFIG][BOOTSTRAP] mode=${runtimeConfig.networkMode}`);
   console.log('[CONFIG][BOOTSTRAP] transport=tcp');
   console.log(`[CONFIG][BOOTSTRAP] dhtProtocol=${runtimeConfig.modeConfig.dhtProtocol}`);
+  console.log(`[CONFIG][BOOTSTRAP] listen=${runtimeConfig.listenAddr}`);
   console.log(`[CONFIG][BOOTSTRAP] announceCount=${runtimeConfig.announceAddrs.length}`);
   console.log(`[CONFIG][BOOTSTRAP] datastore=${runtimeConfig.datastorePath}`);
+  console.log(`[CONFIG][BOOTSTRAP] peer_id_file=${runtimeConfig.peerIdFile}`);
   console.log(
     `[CONFIG][BOOTSTRAP] tor_defaults_proxy=${runtimeConfig.torConfig.socksHost}:${runtimeConfig.torConfig.socksPort}`
   );
@@ -272,8 +304,8 @@ function registerBootstrapShutdownHandlers({ node, datastore }: BootstrapRuntime
 }
 
 async function createBootstrapNode(): Promise<BootstrapRuntime> {
-  const { privateKey } = await PeerIdManager.loadOrCreate(BOOTSTRAP_PEER_ID_FILE);
   const runtimeConfig = readBootstrapRuntimeConfig();
+  const { privateKey } = await PeerIdManager.loadOrCreate(runtimeConfig.peerIdFile);
 
   await mkdir(runtimeConfig.datastorePath, { recursive: true });
   const datastore = new LevelDatastore(runtimeConfig.datastorePath);
@@ -286,7 +318,7 @@ async function createBootstrapNode(): Promise<BootstrapRuntime> {
       privateKey: privateKey,
       datastore: libp2pDatastore,
       addresses: {
-        listen: [BOOTSTRAP_LISTEN_ADDRESS],
+        listen: [runtimeConfig.listenAddr],
         announce: runtimeConfig.announceAddrs
       },
       transports: [tcp()],
