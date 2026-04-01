@@ -234,8 +234,8 @@ These nodes will be shut down on April 19th 2026.
     - TURN: turn:157.230.222.64:3478?transport=udp kiyeovo:marinparin
 
 4. San Francisco
-    - Anonymous mode Bootstrap: Coming on April 1st 2026
-    - Fast mode Bootstrap: Coming on April 1st 2026
-    - Relay: Coming on April 1st 2026
-    - STUN: Coming on April 1st 2026
-    - TURN: Coming on April 1st 2026
+    - Anonymous mode Bootstrap: /onion3/pxp6m3daukt7yrn7h76vryazz3azurwspnc75rtduphyo5qua77g7iqd:9000/p2p/12D3KooWPoLM2YyAgfACU27Dds7ELL4DwabrsUH39kdjv9SKRuFw
+    - Fast mode Bootstrap: /ip4/143.198.137.240/tcp/9000/p2p/12D3KooWL9V168N9rzJ2HP5aWKdJMUDtbYWca5ojDtELWWggddVu
+    - Relay: /ip4/143.198.137.240/tcp/4002/p2p/12D3KooWKx9xPFweD6isahRpjkNR6BxEtJKpbZvvfskb44E8q83x
+    - STUN: stun:143.198.137.240:3478
+    - TURN: turn:143.198.137.240:3478?transport=udp kiyeovo:antique_cash_123
