@@ -15,6 +15,9 @@ Kiyeovo is a decentralized peer-to-peer messenger.
 For technical readers, contributors, and coding agents, start with [Kiyeovo_desktop_technical_documentation.md](./Kiyeovo_desktop_technical_documentation.md). That is the source-of-truth architecture overview.
 
 
+<img width="1274" height="739" alt="image" src="https://github.com/user-attachments/assets/787f23da-9317-4e70-a44b-cdf504163e8f" />
+
+
 ## Beta status
 
 The purpose of this beta release is to gain feedback on the core app functionality and feel.
