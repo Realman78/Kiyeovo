@@ -213,14 +213,14 @@ The desktop app is built with Electron, React, and libp2p.
 These nodes will be shut down on April 19th 2026.
 
 1. Frankfurt
-    - Anonymous mode Bootstrap: Coming on April 1st 2026
-    - Fast mode Bootstrap: /ip4/188.166.161.63/tcp/9000/p2p/12D3KooWHhZDapttnphEpmqA8EKa6S2petfdNQTtMKtpS7SuGs3n
-    - Relay: /ip4/188.166.161.63/tcp/4002/p2p/12D3KooWJEDJPBEbX1EGvFCzEGRwivjGvKSbZJPuzoTWqfjkrHr6
+    - Anonymous mode Bootstrap: /onion3/rnuq4snx4mpxu26z5t6kkimba2gkjmvuqbc3p5vkgwzafc346fxwb3yd:9000/p2p/12D3KooWM8ZWvVdr2SGo7S2zZ2mCfJoeg6YH6x9KYnM1adzq56Uu
+    - Fast mode Bootstrap: /ip4/188.166.161.63/tcp/9000/p2p/12D3KooWBWfaXd9YLkA2VwRAggsiG3ccTmEwGCdn7uJc3fE8qai9
+    - Relay: /ip4/188.166.161.63/tcp/4002/p2p/12D3KooWLYvrbj3mXSM32Jfie9apftrNsBsJN2Ewv1EPWsGY5nei
     - STUN: stun:188.166.161.63
     - TURN: turn:188.166.161.63:3478?transport=udp kiyeovo:marinparin
 
 2. Amsterdam
-    - Anonymous mode Bootstrap: Coming on April 1st 2026
+    - Anonymous mode Bootstrap: Coming on April 2nd 2026
     - Fast mode Bootstrap: /ip4/68.183.15.8/tcp/9000/p2p/12D3KooWEL2tNuaYNxKE9fh4KufvW9TnjzmnS1xBFdbUYtq8N5qx
     - Relay: /ip4/68.183.15.8/tcp/4002/p2p/12D3KooWRpVU72wHWFEQidYtNhGNvWNHq4rYgk4a8oy2gsEDitcU
     - STUN: stun:68.183.15.8:3478
