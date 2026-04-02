@@ -106,7 +106,7 @@ npm run relay
 4002  # relay
 ```
 
-5. Each process prints its Peer ID. Add the client-facing addresses in Kiyeovo's Connection Status dialog:
+5. You should be all set now. You can add the addresses to the list of known bootstrap and/or relay addresses in Kiyeovo by clicking on the network status text in the sidebar header - a dialog shall open up:
 
 ```text
 /ip4/YOUR_PUBLIC_IP/tcp/9000/p2p/<BOOTSTRAP_PEER_ID>
@@ -154,7 +154,7 @@ npm run bootstrap
 
 If you host both fast and anonymous bootstrap nodes on the same machine, keep fast mode on `0.0.0.0:9000` and anonymous mode on local `127.0.0.1:9001`.
 
-5. Add the client-facing bootstrap address in Kiyeovo:
+5. The setup is done. Now you can add the address to the list of known bootstrap addresses in Kiyeovo by clicking on the network status text in the sidebar header - a dialog shall open up:
 
 ```text
 /onion3/YOUR_ONION_HOST:9000/p2p/<BOOTSTRAP_PEER_ID>
@@ -166,7 +166,7 @@ The relay is not needed in anonymous mode.
 
 Calls are currently fast-mode direct 1:1 calls.
 
-If you want to self-host calls, the simple path is:
+If you want to self-host calls, a simple path is outlined below. Keep in mind, depending on your and the other party's router setting, you might not even need the TURN server.
 
 1. Set up a TURN server such as coturn. Example on linux:
     - install coturn with `apt install coturn`
@@ -191,7 +191,7 @@ no-cli
 
 3. Run `systemctl enable --now coturn`
 
-4. In Kiyeovo, open `Connection status -> Calls` and add your STUN/TURN servers there.
+4. The servers should be running now. You can add the server addresses inside Kiyeovo by clicking on the network status text in the sidebar header - a dialog shall open up:
 
 You can add multiple ICE servers. Kiyeovo supports `stun`, `turn`, and `turns` entries.
 
