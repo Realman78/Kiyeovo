@@ -223,7 +223,7 @@ These nodes will be shut down on April 19th 2026.
     - TURN: turn:188.166.161.63:3478?transport=udp kiyeovo:marinparin
 
 2. Amsterdam
-    - Anonymous mode Bootstrap: Coming on April 3rd 2026
+    - Anonymous mode Bootstrap: /onion3/iwear2jljjwcjunmwipd5ibusoifbxgreir6brfuot3imk37yor2sfad:9000/p2p/12D3KooWQ5ezKjZ1zYqCsHYdh2tqZ9rxXmXb3URPVrLbCqCWDdBY
     - Fast mode Bootstrap: /ip4/68.183.15.8/tcp/9000/p2p/12D3KooWEL2tNuaYNxKE9fh4KufvW9TnjzmnS1xBFdbUYtq8N5qx
     - Relay: /ip4/68.183.15.8/tcp/4002/p2p/12D3KooWRpVU72wHWFEQidYtNhGNvWNHq4rYgk4a8oy2gsEDitcU
     - STUN: stun:68.183.15.8:3478
