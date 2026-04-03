@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import { IPC_CHANNELS } from '../core/types.js';
 import type {
     InitStatus,
@@ -25,13 +25,18 @@ import type {
     IceServerConfig,
     IceServersResponse,
     NetworkMode,
+    FileTransferProgressEvent,
+    FileTransferCompleteEvent,
+    FileTransferFailedEvent,
+    OutgoingFileOfferPendingEvent,
+    PendingFileReceivedEvent,
 } from '../core/types.js';
 import type { ContactAttempt, Message } from '../core/db/database.js';
 
 contextBridge.exposeInMainWorld('kiyeovoAPI', {
     // Password authentication
     onPasswordRequest: (callback: (request: PasswordRequest) => void) => {
-        const listener = (_event: any, request: PasswordRequest) => callback(request);
+        const listener = (_event: IpcRendererEvent, request: PasswordRequest) => callback(request);
         ipcRenderer.on(IPC_CHANNELS.PASSWORD_REQUEST, listener);
         return () => ipcRenderer.removeListener(IPC_CHANNELS.PASSWORD_REQUEST, listener);
     },
@@ -41,7 +46,7 @@ contextBridge.exposeInMainWorld('kiyeovoAPI', {
 
     // Initialization status
     onInitStatus: (callback: (status: InitStatus) => void) => {
-        const listener = (_event: any, status: InitStatus) => callback(status);
+        const listener = (_event: IpcRendererEvent, status: InitStatus) => callback(status);
         ipcRenderer.on(IPC_CHANNELS.INIT_STATUS, listener);
         return () => ipcRenderer.removeListener(IPC_CHANNELS.INIT_STATUS, listener);
     },
@@ -51,7 +56,7 @@ contextBridge.exposeInMainWorld('kiyeovoAPI', {
         return () => ipcRenderer.removeListener(IPC_CHANNELS.INIT_COMPLETE, listener);
     },
     onInitError: (callback: (error: string) => void) => {
-        const listener = (_event: any, error: string) => callback(error);
+        const listener = (_event: IpcRendererEvent, error: string) => callback(error);
         ipcRenderer.on(IPC_CHANNELS.INIT_ERROR, listener);
         return () => ipcRenderer.removeListener(IPC_CHANNELS.INIT_ERROR, listener);
     },
@@ -64,7 +69,7 @@ contextBridge.exposeInMainWorld('kiyeovoAPI', {
 
     // DHT connection status
     onDHTConnectionStatus: (callback: (status: { connected: boolean | null }) => void) => {
-        const listener = (_event: any, status: { connected: boolean | null }) => callback(status);
+        const listener = (_event: IpcRendererEvent, status: { connected: boolean | null }) => callback(status);
         ipcRenderer.on(IPC_CHANNELS.DHT_CONNECTION_STATUS, listener);
         return () => ipcRenderer.removeListener(IPC_CHANNELS.DHT_CONNECTION_STATUS, listener);
     },
@@ -102,7 +107,7 @@ contextBridge.exposeInMainWorld('kiyeovoAPI', {
     },
 
     onRestoreUsername: (callback: (username: string) => void) => {
-        const listener = (_event: any, username: string) => callback(username);
+        const listener = (_event: IpcRendererEvent, username: string) => callback(username);
         ipcRenderer.on(IPC_CHANNELS.RESTORE_USERNAME, listener);
         return () => ipcRenderer.removeListener(IPC_CHANNELS.RESTORE_USERNAME, listener);
     },
@@ -156,41 +161,41 @@ contextBridge.exposeInMainWorld('kiyeovoAPI', {
         return ipcRenderer.invoke(IPC_CHANNELS.CALL_SIGNAL_SEND, signal);
     },
     onCallIncoming: (callback: (data: CallIncomingEvent) => void) => {
-        const listener = (_event: any, data: CallIncomingEvent) => callback(data);
+        const listener = (_event: IpcRendererEvent, data: CallIncomingEvent) => callback(data);
         ipcRenderer.on(IPC_CHANNELS.CALL_INCOMING, listener);
         return () => ipcRenderer.removeListener(IPC_CHANNELS.CALL_INCOMING, listener);
     },
     onCallSignalReceived: (callback: (data: CallSignalReceivedEvent) => void) => {
-        const listener = (_event: any, data: CallSignalReceivedEvent) => callback(data);
+        const listener = (_event: IpcRendererEvent, data: CallSignalReceivedEvent) => callback(data);
         ipcRenderer.on(IPC_CHANNELS.CALL_SIGNAL_RECEIVED, listener);
         return () => ipcRenderer.removeListener(IPC_CHANNELS.CALL_SIGNAL_RECEIVED, listener);
     },
     onCallStateChanged: (callback: (data: CallStateChangedEvent) => void) => {
-        const listener = (_event: any, data: CallStateChangedEvent) => callback(data);
+        const listener = (_event: IpcRendererEvent, data: CallStateChangedEvent) => callback(data);
         ipcRenderer.on(IPC_CHANNELS.CALL_STATE_CHANGED, listener);
         return () => ipcRenderer.removeListener(IPC_CHANNELS.CALL_STATE_CHANGED, listener);
     },
     onCallError: (callback: (data: CallErrorEvent) => void) => {
-        const listener = (_event: any, data: CallErrorEvent) => callback(data);
+        const listener = (_event: IpcRendererEvent, data: CallErrorEvent) => callback(data);
         ipcRenderer.on(IPC_CHANNELS.CALL_ERROR, listener);
         return () => ipcRenderer.removeListener(IPC_CHANNELS.CALL_ERROR, listener);
     },
 
     // Key exchange event
     onKeyExchangeSent: (callback: (data: KeyExchangeEvent) => void) => {
-        const listener = (_event: any, data: KeyExchangeEvent) => callback(data);
+        const listener = (_event: IpcRendererEvent, data: KeyExchangeEvent) => callback(data);
         ipcRenderer.on(IPC_CHANNELS.KEY_EXCHANGE_SENT, listener);
         return () => ipcRenderer.removeListener(IPC_CHANNELS.KEY_EXCHANGE_SENT, listener);
     },
 
     // Contact request events
     onContactRequestReceived: (callback: (data: ContactRequestEvent) => void) => {
-        const listener = (_event: any, data: ContactRequestEvent) => callback(data);
+        const listener = (_event: IpcRendererEvent, data: ContactRequestEvent) => callback(data);
         ipcRenderer.on(IPC_CHANNELS.CONTACT_REQUEST_RECEIVED, listener);
         return () => ipcRenderer.removeListener(IPC_CHANNELS.CONTACT_REQUEST_RECEIVED, listener);
     },
     onContactRequestCancelled: (callback: (data: ContactRequestCancelledEvent) => void) => {
-        const listener = (_event: any, data: ContactRequestCancelledEvent) => callback(data);
+        const listener = (_event: IpcRendererEvent, data: ContactRequestCancelledEvent) => callback(data);
         ipcRenderer.on(IPC_CHANNELS.CONTACT_REQUEST_CANCELLED, listener);
         return () => ipcRenderer.removeListener(IPC_CHANNELS.CONTACT_REQUEST_CANCELLED, listener);
     },
@@ -374,31 +379,31 @@ contextBridge.exposeInMainWorld('kiyeovoAPI', {
 
     // Chat created event
     onChatCreated: (callback: (data: ChatCreatedEvent) => void) => {
-        const listener = (_event: any, data: ChatCreatedEvent) => callback(data);
+        const listener = (_event: IpcRendererEvent, data: ChatCreatedEvent) => callback(data);
         ipcRenderer.on(IPC_CHANNELS.CHAT_CREATED, listener);
         return () => ipcRenderer.removeListener(IPC_CHANNELS.CHAT_CREATED, listener);
     },
 
     // Group chat activated event (GROUP_WELCOME processed successfully on receiver side)
     onGroupChatActivated: (callback: (data: GroupChatActivatedEvent) => void) => {
-        const listener = (_event: any, data: GroupChatActivatedEvent) => callback(data);
+        const listener = (_event: IpcRendererEvent, data: GroupChatActivatedEvent) => callback(data);
         ipcRenderer.on(IPC_CHANNELS.GROUP_CHAT_ACTIVATED, listener);
         return () => ipcRenderer.removeListener(IPC_CHANNELS.GROUP_CHAT_ACTIVATED, listener);
     },
     onGroupMembersUpdated: (callback: (data: GroupMembersUpdatedEvent) => void) => {
-        const listener = (_event: any, data: GroupMembersUpdatedEvent) => callback(data);
+        const listener = (_event: IpcRendererEvent, data: GroupMembersUpdatedEvent) => callback(data);
         ipcRenderer.on(IPC_CHANNELS.GROUP_MEMBERS_UPDATED, listener);
         return () => ipcRenderer.removeListener(IPC_CHANNELS.GROUP_MEMBERS_UPDATED, listener);
     },
 
     onKeyExchangeFailed: (callback: (data: KeyExchangeFailedEvent) => void) => {
-        const listener = (_event: any, data: KeyExchangeFailedEvent) => callback(data);
+        const listener = (_event: IpcRendererEvent, data: KeyExchangeFailedEvent) => callback(data);
         ipcRenderer.on(IPC_CHANNELS.KEY_EXCHANGE_FAILED, listener);
         return () => ipcRenderer.removeListener(IPC_CHANNELS.KEY_EXCHANGE_FAILED, listener);
     },
 
     onMessageReceived: (callback: (data: MessageReceivedEvent) => void) => {
-        const listener = (_event: any, data: MessageReceivedEvent) => callback(data);
+        const listener = (_event: IpcRendererEvent, data: MessageReceivedEvent) => callback(data);
         ipcRenderer.on(IPC_CHANNELS.MESSAGE_RECEIVED, listener);
         return () => ipcRenderer.removeListener(IPC_CHANNELS.MESSAGE_RECEIVED, listener);
     },
@@ -438,12 +443,12 @@ contextBridge.exposeInMainWorld('kiyeovoAPI', {
         return ipcRenderer.invoke(IPC_CHANNELS.CHECK_GROUP_OFFLINE_MESSAGES_FOR_CHAT, chatId);
     },
     onOfflineMessagesFetchStart: (callback: (data: { chatIds: number[] }) => void) => {
-        const listener = (_event: any, data: { chatIds: number[] }) => callback(data);
+        const listener = (_event: IpcRendererEvent, data: { chatIds: number[] }) => callback(data);
         ipcRenderer.on(IPC_CHANNELS.OFFLINE_MESSAGES_FETCH_START, listener);
         return () => ipcRenderer.removeListener(IPC_CHANNELS.OFFLINE_MESSAGES_FETCH_START, listener);
     },
     onOfflineMessagesFetchComplete: (callback: (data: { chatIds: number[] }) => void) => {
-        const listener = (_event: any, data: { chatIds: number[] }) => callback(data);
+        const listener = (_event: IpcRendererEvent, data: { chatIds: number[] }) => callback(data);
         ipcRenderer.on(IPC_CHANNELS.OFFLINE_MESSAGES_FETCH_COMPLETE, listener);
         return () => ipcRenderer.removeListener(IPC_CHANNELS.OFFLINE_MESSAGES_FETCH_COMPLETE, listener);
     },
@@ -459,7 +464,7 @@ contextBridge.exposeInMainWorld('kiyeovoAPI', {
         return ipcRenderer.invoke(IPC_CHANNELS.FOCUS_WINDOW);
     },
     onNotificationClicked: (callback: (chatId: number) => void) => {
-        const listener = (_event: any, chatId: number) => callback(chatId);
+        const listener = (_event: IpcRendererEvent, chatId: number) => callback(chatId);
         ipcRenderer.on('notification:clicked', listener);
         return () => ipcRenderer.removeListener('notification:clicked', listener);
     },
@@ -520,7 +525,7 @@ contextBridge.exposeInMainWorld('kiyeovoAPI', {
         return ipcRenderer.invoke(IPC_CHANNELS.SET_NOTIFICATIONS_ENABLED, enabled);
     },
     onNotificationsEnabledChanged: (callback: (enabled: boolean) => void) => {
-        const listener = (_event: any, enabled: boolean) => callback(enabled);
+        const listener = (_event: IpcRendererEvent, enabled: boolean) => callback(enabled);
         ipcRenderer.on(IPC_CHANNELS.NOTIFICATIONS_ENABLED_CHANGED, listener);
         return () => ipcRenderer.removeListener(IPC_CHANNELS.NOTIFICATIONS_ENABLED_CHANGED, listener);
     },
@@ -604,28 +609,28 @@ contextBridge.exposeInMainWorld('kiyeovoAPI', {
     },
 
     // File transfer events
-    onFileTransferProgress: (callback: (data: any) => void) => {
-        const listener = (_event: any, data: any) => callback(data);
+    onFileTransferProgress: (callback: (data: FileTransferProgressEvent) => void) => {
+        const listener = (_event: IpcRendererEvent, data: FileTransferProgressEvent) => callback(data);
         ipcRenderer.on(IPC_CHANNELS.FILE_TRANSFER_PROGRESS, listener);
         return () => ipcRenderer.removeListener(IPC_CHANNELS.FILE_TRANSFER_PROGRESS, listener);
     },
-    onFileTransferComplete: (callback: (data: any) => void) => {
-        const listener = (_event: any, data: any) => callback(data);
+    onFileTransferComplete: (callback: (data: FileTransferCompleteEvent) => void) => {
+        const listener = (_event: IpcRendererEvent, data: FileTransferCompleteEvent) => callback(data);
         ipcRenderer.on(IPC_CHANNELS.FILE_TRANSFER_COMPLETE, listener);
         return () => ipcRenderer.removeListener(IPC_CHANNELS.FILE_TRANSFER_COMPLETE, listener);
     },
-    onFileTransferFailed: (callback: (data: any) => void) => {
-        const listener = (_event: any, data: any) => callback(data);
+    onFileTransferFailed: (callback: (data: FileTransferFailedEvent) => void) => {
+        const listener = (_event: IpcRendererEvent, data: FileTransferFailedEvent) => callback(data);
         ipcRenderer.on(IPC_CHANNELS.FILE_TRANSFER_FAILED, listener);
         return () => ipcRenderer.removeListener(IPC_CHANNELS.FILE_TRANSFER_FAILED, listener);
     },
-    onOutgoingFileOfferPending: (callback: (data: any) => void) => {
-        const listener = (_event: any, data: any) => callback(data);
+    onOutgoingFileOfferPending: (callback: (data: OutgoingFileOfferPendingEvent) => void) => {
+        const listener = (_event: IpcRendererEvent, data: OutgoingFileOfferPendingEvent) => callback(data);
         ipcRenderer.on(IPC_CHANNELS.OUTGOING_FILE_OFFER_PENDING, listener);
         return () => ipcRenderer.removeListener(IPC_CHANNELS.OUTGOING_FILE_OFFER_PENDING, listener);
     },
-    onPendingFileReceived: (callback: (data: any) => void) => {
-        const listener = (_event: any, data: any) => callback(data);
+    onPendingFileReceived: (callback: (data: PendingFileReceivedEvent) => void) => {
+        const listener = (_event: IpcRendererEvent, data: PendingFileReceivedEvent) => callback(data);
         ipcRenderer.on(IPC_CHANNELS.PENDING_FILE_RECEIVED, listener);
         return () => ipcRenderer.removeListener(IPC_CHANNELS.PENDING_FILE_RECEIVED, listener);
     },

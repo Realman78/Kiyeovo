@@ -542,10 +542,17 @@ const ConnectionStatusDialog = ({
   const handleCopy = (address: string) => {
     setCopiedAddress(address);
     navigator.clipboard.writeText(address);
-    setTimeout(() => {
-      setCopiedAddress((current) => (current === address ? null : current));
-    }, 2000);
   };
+
+  // Reset copied address after 2 seconds when it changes
+  useEffect(() => {
+    if (copiedAddress) {
+      const timeoutId = setTimeout(() => {
+        setCopiedAddress(null);
+      }, 2000);
+      return () => clearTimeout(timeoutId);
+    }
+  }, [copiedAddress]);
 
   const bootstrapConnectedCount = bootstrapNodes.filter((node) => node.connected).length;
   const relayConnectedCount = relayNodes.filter((node) => node.connected).length;

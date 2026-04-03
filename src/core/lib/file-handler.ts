@@ -88,6 +88,7 @@ export class FileHandler {
   private onOutgoingFileOfferPending: (data: OutgoingFileOfferPendingEvent) => void;
   private onPendingFileReceived: (data: PendingFileReceivedEvent) => void;
   private readonly fileTransferProtocol: string;
+  private rejectionCounterResetInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     node: ChatNode,
@@ -149,7 +150,7 @@ export class FileHandler {
 
   // Reset rejection counters every 10 minutes to give users a fresh start
   #setupRejectionCounterReset(): void {
-    setInterval(() => {
+    this.rejectionCounterResetInterval = setInterval(() => {
       this.perPeerPendingRejections.clear();
       this.globalPendingRejectionsCount = 0;
     }, FILE_REJECTION_COUNTER_RESET_INTERVAL);
@@ -1024,6 +1025,12 @@ export class FileHandler {
   }
 
   cleanup(): void {
+    // Clear the rejection counter reset interval
+    if (this.rejectionCounterResetInterval) {
+      clearInterval(this.rejectionCounterResetInterval);
+      this.rejectionCounterResetInterval = null;
+    }
+
     for (const [fileId, stream] of this.activeTransferStreams.entries()) {
       try {
         stream.abort(new Error('File transfer interrupted: application shutdown'));
