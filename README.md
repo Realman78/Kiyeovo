@@ -32,6 +32,7 @@ The full version will come with:
 - easier self-hosted infrastructure setup
 - local API interface for agents and external tools
 - emojis 🪐
+- Platform-specific installers
 
 ## Quick start
 
