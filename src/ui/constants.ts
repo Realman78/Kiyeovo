@@ -1,3 +1,5 @@
+import { type CategoryConfig, Categories } from "emoji-picker-react";
+
 export const MAX_FILE_MESSAGE_SIZE = 1 * 1024 * 1024; // 1MB for JSON overhead
 export const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB max file size
 export const FILE_ACCEPTANCE_TIMEOUT = 5 * 60 * 1000;
@@ -32,3 +34,14 @@ export const MAX_GROUP_MEMBERS = 10;
 
 // String constants
 export const UNEXPECTED_ERROR = 'Unexpected error occurred';
+
+export const EMOJI_CATEGORIES: CategoryConfig[] = [
+  { category: Categories.SMILEYS_PEOPLE, name: 'Smileys & People' },
+  { category: Categories.ANIMALS_NATURE, name: 'Animals & Nature' },
+  { category: Categories.FOOD_DRINK, name: 'Food & Drink' },
+  { category: Categories.TRAVEL_PLACES, name: 'Travel & Places' },
+  { category: Categories.ACTIVITIES, name: 'Activities' },
+  { category: Categories.OBJECTS, name: 'Objects' },
+  { category: Categories.SYMBOLS, name: 'Symbols' },
+  { category: Categories.FLAGS, name: 'Flags' },
+];

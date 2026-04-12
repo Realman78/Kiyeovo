@@ -56,6 +56,7 @@
     "daisyui": "^5.5.14",
     "datastore-level": "^12.0.2",
     "dotenv": "^17.2.0",
+    "emoji-picker-react": "^4.18.0",
     "it-pipe": "^3.0.1",
     "keytar": "^7.9.0",
     "libp2p": "^2.8.12",

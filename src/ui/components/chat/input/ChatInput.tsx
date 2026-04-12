@@ -1,15 +1,16 @@
 import { useState, useEffect, useRef, type FC } from "react";
 import { Button } from "../../ui/Button";
-import { Paperclip, Send } from "lucide-react";
+import { Paperclip, Send, Smile } from "lucide-react";
 import { Input } from "../../ui/Input";
 import { useToast } from "../../ui/use-toast";
 import { useDispatch, useSelector } from "react-redux";
 import type { RootState } from "../../../state/store";
 import { SendFileDialog } from "./SendFileDialog";
 import { addMessage, addSendingMessage, finalizeSendingMessage, removeMessageById, updateChat, updateFileTransferStatus, updateLocalMessageSendState } from "../../../state/slices/chatSlice";
-import { MAX_MESSAGE_CONTENT_LENGTH, UNEXPECTED_ERROR } from "../../../constants";
+import { EMOJI_CATEGORIES, MAX_MESSAGE_CONTENT_LENGTH, UNEXPECTED_ERROR } from "../../../constants";
 import { getGroupStatusMessage } from "../../../utils/groupStatusMessages";
 import { errStr } from '../../../../core/utils/general-error';
+import EmojiPicker, { EmojiStyle, Theme, type EmojiClickData } from "emoji-picker-react";
 
 type PendingSendJob =
     | { type: 'direct'; chatId: number; peerId: string; content: string; localMessageId: string }
@@ -29,6 +30,7 @@ export const ChatInput: FC = () => {
     const dispatch = useDispatch();
     const [draftByChatId, setDraftByChatId] = useState<Record<number, string>>({});
     const [fileDialogOpen, setFileDialogOpen] = useState(false);
+    const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
     const activeChat = useSelector((state: RootState) => state.chat.activeChat);
     const myPeerId = useSelector((state: RootState) => state.user.peerId);
     const myUsername = useSelector((state: RootState) => state.user.username);
@@ -91,6 +93,12 @@ export const ChatInput: FC = () => {
     const sendQueueRef = useRef<Record<number, PendingSendJob[]>>({});
     const processingQueueRef = useRef<Record<number, boolean>>({});
     const inputRef = useRef<HTMLInputElement>(null);
+    const sendButtonRef = useRef<HTMLButtonElement>(null);
+    const emojiPickerRef = useRef<HTMLDivElement>(null);
+    const selectionRef = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
+    const caretRestoreFrameRef = useRef<number | null>(null);
+    const selectionSyncUnlockFrameRef = useRef<number | null>(null);
+    const suppressSelectionSyncRef = useRef(false);
 
     // Auto-focus input when chat changes
     useEffect(() => {
@@ -99,11 +107,118 @@ export const ChatInput: FC = () => {
         }
     }, [activeChat?.id, isDisabled]);
 
+    useEffect(() => {
+        return () => {
+            if (caretRestoreFrameRef.current !== null) {
+                cancelAnimationFrame(caretRestoreFrameRef.current);
+            }
+            if (selectionSyncUnlockFrameRef.current !== null) {
+                cancelAnimationFrame(selectionSyncUnlockFrameRef.current);
+            }
+        };
+    }, []);
+
+    useEffect(() => {
+        setEmojiPickerOpen(false);
+    }, [activeChat?.id]);
+
+    useEffect(() => {
+        if (isDisabled) {
+            setEmojiPickerOpen(false);
+        }
+    }, [isDisabled]);
+
+    useEffect(() => {
+        if (!emojiPickerOpen) return;
+
+        const handlePointerDown = (event: MouseEvent) => {
+            const target = event.target;
+            if (!(target instanceof Node)) return;
+            if (emojiPickerRef.current?.contains(target)) return;
+            setEmojiPickerOpen(false);
+        };
+
+        const handleKeyDown = (event: KeyboardEvent) => {
+            if (event.key !== 'Escape') return;
+            setEmojiPickerOpen(false);
+            inputRef.current?.focus();
+        };
+
+        document.addEventListener('mousedown', handlePointerDown);
+        document.addEventListener('keydown', handleKeyDown);
+
+        return () => {
+            document.removeEventListener('mousedown', handlePointerDown);
+            document.removeEventListener('keydown', handleKeyDown);
+        };
+    }, [emojiPickerOpen]);
+
     const activeChatId = activeChat?.id;
     const inputQuery = activeChatId ? (draftByChatId[activeChatId] ?? "") : "";
 
-    const setDraftForChat = (chatId: number, value: string) => {
-        setDraftByChatId((prev) => ({ ...prev, [chatId]: value }));
+    const setDraftForChat = (
+        chatId: number,
+        value: string | ((currentValue: string) => string)
+    ) => {
+        setDraftByChatId((prev) => {
+            const currentValue = prev[chatId] ?? "";
+            const nextValue = typeof value === 'function' ? value(currentValue) : value;
+            return { ...prev, [chatId]: nextValue };
+        });
+    };
+
+    const syncSelectionFromInput = (target?: HTMLInputElement | null) => {
+        if (suppressSelectionSyncRef.current) return;
+        const input = target ?? inputRef.current;
+        const currentLength = input?.value.length ?? inputQuery.length;
+        const fallbackPosition = currentLength;
+        const start = Math.min(input?.selectionStart ?? fallbackPosition, currentLength);
+        const end = Math.min(input?.selectionEnd ?? start, currentLength);
+        selectionRef.current = { start, end };
+    };
+
+    const handleEmojiButtonMouseDown = (event: React.MouseEvent<HTMLButtonElement>) => {
+        event.preventDefault();
+        syncSelectionFromInput();
+    };
+
+    const handleEmojiButtonClick = () => {
+        if (!activeChat || isDisabled) return;
+        syncSelectionFromInput();
+        setEmojiPickerOpen((prev) => !prev);
+    };
+
+    const handleEmojiClick = (emojiData: EmojiClickData) => {
+        if (!activeChat) return;
+        let nextCursor = selectionRef.current.end;
+
+        setDraftForChat(activeChat.id, (currentDraft) => {
+            const start = Math.min(selectionRef.current.start, currentDraft.length);
+            const end = Math.min(selectionRef.current.end, currentDraft.length);
+            nextCursor = start + emojiData.emoji.length;
+            selectionRef.current = { start: nextCursor, end: nextCursor };
+            return `${currentDraft.slice(0, start)}${emojiData.emoji}${currentDraft.slice(end)}`;
+        });
+
+        if (caretRestoreFrameRef.current !== null) {
+            cancelAnimationFrame(caretRestoreFrameRef.current);
+        }
+
+        caretRestoreFrameRef.current = requestAnimationFrame(() => {
+            caretRestoreFrameRef.current = null;
+            suppressSelectionSyncRef.current = true;
+            inputRef.current?.focus();
+            inputRef.current?.setSelectionRange(nextCursor, nextCursor);
+            selectionRef.current = { start: nextCursor, end: nextCursor };
+
+            if (selectionSyncUnlockFrameRef.current !== null) {
+                cancelAnimationFrame(selectionSyncUnlockFrameRef.current);
+            }
+            selectionSyncUnlockFrameRef.current = requestAnimationFrame(() => {
+                selectionSyncUnlockFrameRef.current = null;
+                suppressSelectionSyncRef.current = false;
+            });
+        });
     };
 
     const performSendMessage = async (peerIdOrUsername: string, messageContent: string): Promise<SendResult> => {
@@ -242,6 +357,15 @@ export const ChatInput: FC = () => {
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
 
+        const activeElement = document.activeElement;
+        if (
+            activeElement &&
+            activeElement !== inputRef.current &&
+            activeElement !== sendButtonRef.current
+        ) {
+            return;
+        }
+
         if (!activeChat) {
             toast.error('No active chat selected');
             return;
@@ -281,6 +405,8 @@ export const ChatInput: FC = () => {
             enqueueSendJob({ type: 'direct', chatId, peerId: activeChat.peerId, content: messageContent, localMessageId });
         }
         setDraftForChat(chatId, '');
+        selectionRef.current = { start: 0, end: 0 };
+        setEmojiPickerOpen(false);
     };
 
     const handleSendFile = async (filePath: string, fileName: string, fileSize: number) => {
@@ -379,40 +505,84 @@ export const ChatInput: FC = () => {
     }
 
     return <>
-        <form
-            onSubmit={handleSubmit}
-            className={`h-20 px-4 flex items-center justify-between border-t border-border gap-4`}
-        >
-            {activeChat?.type !== 'group' && <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                disabled={isDisabled || hasActiveFileTransfer}
-                onClick={() => setFileDialogOpen(true)}
-                className="text-sidebar-foreground hover:text-foreground"
+        <div className="relative">
+            <form
+                onSubmit={handleSubmit}
+                className={`h-20 px-4 flex items-center justify-between border-t border-border gap-4`}
             >
-                <Paperclip className="w-4 h-4" />
-            </Button>}
-            <Input
-                ref={inputRef}
-                placeholder={isBlocked ? "Cannot send messages to blocked users" : groupBlockedReason ?? "Type a message..."}
-                parentClassName="flex flex-1 w-full"
-                value={inputQuery}
-                disabled={isDisabled}
-                onChange={(e) => {
-                    if (!activeChat) return;
-                    setDraftForChat(activeChat.id, e.target.value);
-                }}
-            />
-            <Button
-                type="submit"
-                disabled={!inputQuery.trim() || isDisabled}
-                size="icon"
-                className={isTorActive ? 'bg-[#5a3184] hover:bg-[#4d2a72] text-white' : ''}
-            >
-                <Send className="w-4 h-4" />
-            </Button>
-        </form>
+                <div ref={emojiPickerRef} className="relative flex items-center gap-2">
+                    {activeChat?.type !== 'group' && <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        disabled={isDisabled || hasActiveFileTransfer}
+                        onClick={() => setFileDialogOpen(true)}
+                        className="text-sidebar-foreground hover:text-foreground"
+                        aria-label="Open file picker"
+                        title="Files"
+                    >
+                        <Paperclip className="w-4 h-4" />
+                    </Button>}
+                    <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        disabled={!activeChat || isDisabled}
+                        onMouseDown={handleEmojiButtonMouseDown}
+                        onClick={handleEmojiButtonClick}
+                        className={`text-sidebar-foreground hover:text-foreground ${emojiPickerOpen ? 'bg-secondary text-foreground' : ''}`}
+                        aria-label="Open emoji picker"
+                        title="Emoji"
+                    >
+                        <Smile className="w-4 h-4" />
+                    </Button>
+                    {emojiPickerOpen && (
+                        <div className="chat-emoji-picker-panel absolute bottom-full left-0 mb-3 z-40">
+                            <EmojiPicker
+                                onEmojiClick={handleEmojiClick}
+                                theme={Theme.DARK}
+                                emojiStyle={EmojiStyle.NATIVE}
+                                autoFocusSearch={false}
+                                searchPlaceholder="Search emojis"
+                                skinTonesDisabled={true}
+                                previewConfig={{ showPreview: false }}
+                                lazyLoadEmojis={true}
+                                width={320}
+                                height={380}
+                                categories={EMOJI_CATEGORIES}
+                                className="emoji-picker"
+                            />
+                        </div>
+                    )}
+                </div>
+                <Input
+                    ref={inputRef}
+                    placeholder={isBlocked ? "Cannot send messages to blocked users" : groupBlockedReason ?? "Type a message..."}
+                    parentClassName="flex flex-1 w-full"
+                    value={inputQuery}
+                    disabled={isDisabled}
+                    onChange={(e) => {
+                        if (!activeChat) return;
+                        setDraftForChat(activeChat.id, e.target.value);
+                        syncSelectionFromInput(e.target);
+                    }}
+                    onClick={(e) => syncSelectionFromInput(e.currentTarget)}
+                    onFocus={(e) => syncSelectionFromInput(e.currentTarget)}
+                    onKeyUp={(e) => syncSelectionFromInput(e.currentTarget)}
+                    onSelect={(e) => syncSelectionFromInput(e.currentTarget)}
+                />
+                <Button
+                    ref={sendButtonRef}
+                    type="submit"
+                    disabled={!inputQuery.trim() || isDisabled}
+                    size="icon"
+                    className={isTorActive ? 'bg-[#5a3184] hover:bg-[#4d2a72] text-white' : ''}
+                    aria-label="Send message"
+                >
+                    <Send className="w-4 h-4" />
+                </Button>
+            </form>
+        </div>
 
         <SendFileDialog
             open={fileDialogOpen}
