@@ -31,7 +31,7 @@ The full version will come with:
 - security hardening
 - easier self-hosted infrastructure setup
 - local API interface for agents and external tools
-- emojis 🪐
+- emojis 🪐 *(Added 12th of April)*
 - Platform-specific installers
 
 ## Quick start
