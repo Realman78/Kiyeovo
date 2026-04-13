@@ -1,7 +1,7 @@
-import { app, BrowserWindow, ipcMain, Menu } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, shell } from 'electron';
 import path from 'path';
 import fs from 'fs';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { isDev } from './util.js';
 import {
   initializeP2PCore,
@@ -158,6 +158,8 @@ function createMainWindow() {
   const savedBounds = loadWindowBounds();
   const startupNetworkMode = readPersistedNetworkMode();
   const branding = getWindowBrandingForMode(startupNetworkMode);
+  const appEntryFile = path.join(__dirname, '..', '..', 'dist-ui', 'index.html');
+  const appEntryUrl = pathToFileURL(appEntryFile).toString();
 
   const win = new BrowserWindow({
     // Use saved bounds if available, otherwise Electron will use defaults (centered)
@@ -202,6 +204,30 @@ function createMainWindow() {
   });
   win.webContents.on('did-finish-load', enforceWindowTitle);
 
+  const isAllowedNavigationUrl = (targetUrl: string) => {
+    if (isDev()) {
+      return targetUrl.startsWith('http://localhost:3000');
+    }
+    return targetUrl.startsWith(appEntryUrl);
+  };
+
+  win.webContents.on('will-navigate', (event, targetUrl) => {
+    if (isAllowedNavigationUrl(targetUrl)) {
+      return;
+    }
+    event.preventDefault();
+    if (targetUrl.startsWith('http://') || targetUrl.startsWith('https://')) {
+      void shell.openExternal(targetUrl);
+    }
+  });
+
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      void shell.openExternal(url);
+    }
+    return { action: 'deny' };
+  });
+
   // Restore maximized state or maximize on first run
   if (savedBounds?.isMaximized || !savedBounds) {
     win.maximize();
@@ -217,7 +243,7 @@ function createMainWindow() {
     win.loadURL('http://localhost:3000');
     win.webContents.openDevTools(); // Auto-open DevTools in development
   } else {
-    win.loadFile(path.join(__dirname, '..', '..', 'dist-ui', 'index.html'));
+    win.loadFile(appEntryFile);
   }
 
   win.on('closed', () => {

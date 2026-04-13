@@ -464,6 +464,12 @@ UI is event-driven while core remains authoritative.
    - `webPreferences.sandbox: true`
    - preload is bundled as a standalone artifact so it remains compatible with sandboxed Electron preload constraints
    - unpackaged Linux development may still require machine-level `chrome-sandbox` helper setup on some VM/distro combinations
+   - IPC sender validation in the main process:
+     - only the main app window's main frame can invoke privileged IPC handlers
+     - untrusted IPC senders are rejected and logged in the main process
+   - navigation blocking in the main window:
+     - deny unexpected navigations away from the trusted app UI
+     - external `http`/`https` links are opened via the OS browser
 
 ---
 
