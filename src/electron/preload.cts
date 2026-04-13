@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import { IPC_CHANNELS } from '../core/types.js';
+import { IPC_CHANNELS } from '../shared/ipc/channels.js';
 import type {
     InitStatus,
     KeyExchangeEvent,
