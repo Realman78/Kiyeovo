@@ -461,8 +461,9 @@ UI is event-driven while core remains authoritative.
    - `contextIsolation: true`
    - `nodeIntegration: false`
    - renderer CSP present in `index.html`
-   - `webPreferences.sandbox` is currently disabled for compatibility across Linux environments
-   - development launch currently uses Electron `--no-sandbox` for broader VM/distro compatibility
+   - `webPreferences.sandbox: true`
+   - preload is bundled as a standalone artifact so it remains compatible with sandboxed Electron preload constraints
+   - unpackaged Linux development may still require machine-level `chrome-sandbox` helper setup on some VM/distro combinations
 
 ---
 
@@ -486,7 +487,8 @@ Current resilience layers:
 - Group control delivery is ACK/republish based (not strict real-time consensus).
 - Calls are currently fast-mode direct-chat only (1:1, no group call).
 - STUN/TURN validation is format-only; there is no live health-check/testing UI yet.
-- Electron renderer sandboxing is still a follow-up hardening task rather than the current release default.
+- On some Linux environments, sandboxed unpackaged Electron runs may still require host-specific sandbox-helper setup during development.
+- Unpackaged restart now uses an explicit relaunch path for Linux development robustness; packaged releases still target the standard Electron relaunch behavior.
 
 ---
 

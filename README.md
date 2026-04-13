@@ -70,7 +70,9 @@ DEBUG_MODE=true npm run dev
 
 > You can omit `DEBUG_MODE=true` if you don't plan on reporting any bugs
 
-Technical detail: In the beta version, `npm run dev` starts Electron with `--no-sandbox`.
+Technical detail: local and development runs now use Electron renderer sandboxing.
+
+Linux note: on some Linux VMs/distros (for example, Lubuntu), sandboxed Electron may require a one-time machine setup for the Chromium `chrome-sandbox` helper before `npm run dev` / `npm run start:local` will launch successfully.
 
 ### Scrypt note (optional)
 
