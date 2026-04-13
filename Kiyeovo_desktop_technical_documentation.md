@@ -469,7 +469,9 @@ UI is event-driven while core remains authoritative.
      - untrusted IPC senders are rejected and logged in the main process
    - navigation blocking in the main window:
      - deny unexpected navigations away from the trusted app UI
-     - external `http`/`https` links are opened via the OS browser
+     - `target="_blank"` / new-window requests are denied inside Electron
+     - only an explicit allowlist of trusted external `https` URLs is opened via the OS browser
+     - the policy is centralized in the Electron layer rather than embedded inline in startup orchestration
 
 ---
 

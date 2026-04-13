@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath, pathToFileURL } from 'url';
@@ -39,6 +39,7 @@ import { log } from '../shared/logger.js';
 import { errStr } from '../core/utils/general-error.js';
 import { scheduleAppRelaunch } from './relaunch.js';
 import { createTrustedIpcMainHandle } from './trusted-ipc.js';
+import { applyWindowSecurityPolicies } from './window-security.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -203,30 +204,7 @@ function createMainWindow() {
     enforceWindowTitle();
   });
   win.webContents.on('did-finish-load', enforceWindowTitle);
-
-  const isAllowedNavigationUrl = (targetUrl: string) => {
-    if (isDev()) {
-      return targetUrl.startsWith('http://localhost:3000');
-    }
-    return targetUrl.startsWith(appEntryUrl);
-  };
-
-  win.webContents.on('will-navigate', (event, targetUrl) => {
-    if (isAllowedNavigationUrl(targetUrl)) {
-      return;
-    }
-    event.preventDefault();
-    if (targetUrl.startsWith('http://') || targetUrl.startsWith('https://')) {
-      void shell.openExternal(targetUrl);
-    }
-  });
-
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith('http://') || url.startsWith('https://')) {
-      void shell.openExternal(url);
-    }
-    return { action: 'deny' };
-  });
+  applyWindowSecurityPolicies(win, { appEntryUrl, isDevelopment: isDev() });
 
   // Restore maximized state or maximize on first run
   if (savedBounds?.isMaximized || !savedBounds) {
