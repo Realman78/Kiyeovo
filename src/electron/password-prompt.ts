@@ -1,5 +1,7 @@
+import type { IpcMainEvent } from 'electron';
 import { BrowserWindow, ipcMain } from 'electron';
 import { PasswordResponse, IPC_CHANNELS, PasswordRequest } from '../core/types.js';
+import { assertTrustedRendererEvent } from './trusted-ipc.js';
 
 /**
  * Request password from the UI instead of terminal
@@ -29,17 +31,30 @@ export function requestPasswordFromUI(
       ...(keychainAvailable !== undefined && { keychainAvailable }),
     };
 
-    const handlePasswordResponse = (_event: any, response: PasswordResponse) => {
+    const handlePasswordResponse = (event: IpcMainEvent, response: PasswordResponse) => {
+      try {
+        assertTrustedRendererEvent(event, () => window, IPC_CHANNELS.PASSWORD_RESPONSE);
+      } catch {
+        return;
+      }
+
       cleanup();
       resolve(response);
     };
 
     const cleanup = () => {
       ipcMain.removeListener(IPC_CHANNELS.PASSWORD_RESPONSE, handlePasswordResponse);
+      window.removeListener('closed', handleWindowClosed);
       onRequestStateChange?.(null);
     };
 
-    ipcMain.once(IPC_CHANNELS.PASSWORD_RESPONSE, handlePasswordResponse);
+    const handleWindowClosed = () => {
+      cleanup();
+      reject(new Error('Password prompt window closed'));
+    };
+
+    ipcMain.on(IPC_CHANNELS.PASSWORD_RESPONSE, handlePasswordResponse);
+    window.once('closed', handleWindowClosed);
 
     onRequestStateChange?.(request);
     window.webContents.send(IPC_CHANNELS.PASSWORD_REQUEST, request);

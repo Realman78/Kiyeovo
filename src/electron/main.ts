@@ -38,6 +38,7 @@ import type { NetworkMode } from '../core/types.js';
 import { log } from '../shared/logger.js';
 import { errStr } from '../core/utils/general-error.js';
 import { scheduleAppRelaunch } from './relaunch.js';
+import { createTrustedIpcMainHandle } from './trusted-ipc.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -604,6 +605,7 @@ async function initializeP2PAfterWindow() {
 async function initializeApp() {
   try {
     log('[Electron] Starting Kiyeovo...');
+    const trustedIpcMain = createTrustedIpcMainHandle(ipcMain, () => mainWindow);
 
     // Setup minimal menu (keeps keyboard shortcuts working)
     setupMinimalMenu();
@@ -611,7 +613,7 @@ async function initializeApp() {
     // Setup IPC handlers
     setupIPCHandlers(ipcMain, () => p2pCore, () => mainWindow);
     log('[Electron] IPC handlers registered');
-    ipcMain.handle(IPC_CHANNELS.INIT_STATE, () => {
+    trustedIpcMain.handle(IPC_CHANNELS.INIT_STATE, () => {
       return {
         initialized: isCoreInitialized,
         initStarted: hasStartedInitialization,
@@ -621,7 +623,7 @@ async function initializeApp() {
         pendingPasswordRequest,
       };
     });
-    ipcMain.handle(IPC_CHANNELS.INIT_START, async () => {
+    trustedIpcMain.handle(IPC_CHANNELS.INIT_START, async () => {
       try {
         if (isCoreInitialized) {
           return { success: true, error: null };
