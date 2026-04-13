@@ -36,8 +36,10 @@ import { copyFile, stat } from 'fs/promises';
 import { log } from '../shared/logger.js';
 import { errStr } from '../core/utils/general-error.js';
 import { ChatDatabase } from '../core/db/database.js';
+import { scheduleAppRelaunch } from './relaunch.js';
 
 function requestAppRestart(): void {
+  scheduleAppRelaunch();
   (app as typeof app & { __kiyeovoRestartRequested?: boolean }).__kiyeovoRestartRequested = true;
   app.quit();
 }

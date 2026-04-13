@@ -37,6 +37,7 @@ import { ChatDatabase } from '../core/db/database.js';
 import type { NetworkMode } from '../core/types.js';
 import { log } from '../shared/logger.js';
 import { errStr } from '../core/utils/general-error.js';
+import { scheduleAppRelaunch } from './relaunch.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -711,7 +712,7 @@ app.on('before-quit', async (event) => {
     const restartRequested = Boolean((app as typeof app & { __kiyeovoRestartRequested?: boolean }).__kiyeovoRestartRequested);
     if (restartRequested) {
       (app as typeof app & { __kiyeovoRestartRequested?: boolean }).__kiyeovoRestartRequested = false;
-      app.relaunch();
+      scheduleAppRelaunch();
     }
 
     app.exit(0);
@@ -721,11 +722,17 @@ app.on('before-quit', async (event) => {
   const restartRequested = Boolean((app as typeof app & { __kiyeovoRestartRequested?: boolean }).__kiyeovoRestartRequested);
   if (restartRequested) {
     (app as typeof app & { __kiyeovoRestartRequested?: boolean }).__kiyeovoRestartRequested = false;
-    app.relaunch();
+    scheduleAppRelaunch();
+    app.exit(0);
+    return;
   }
 });
 
 // Handle unhandled promise rejections
 process.on('unhandledRejection', (reason: unknown, promise: Promise<unknown>) => {
   console.error('[Electron] Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (error: Error) => {
+  console.error('[Electron] Uncaught Exception:', error);
 });
