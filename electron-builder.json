@@ -1,5 +1,12 @@
 {
     "appId": "com.marin-dedic.kiyeovo",
+    "electronFuses": {
+        "runAsNode": false,
+        "enableNodeOptionsEnvironmentVariable": false,
+        "enableNodeCliInspectArguments": false,
+        "grantFileProtocolExtraPrivileges": false,
+        "enableEmbeddedAsarIntegrityValidation": true
+    },
     "files": ["dist-electron/**", "dist-ui/**", "package.json"],
     "extraResources": [
         {
