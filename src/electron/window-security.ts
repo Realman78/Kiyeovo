@@ -38,6 +38,11 @@ export function applyWindowSecurityPolicies(
   win: BrowserWindow,
   options: AppUrlPolicyOptions,
 ): void {
+  win.webContents.on('will-attach-webview', (event, _webPreferences, params) => {
+    event.preventDefault();
+    console.warn(`[Electron][SECURITY] Blocked webview attachment src=${params.src || 'unknown'}`);
+  });
+
   win.webContents.on('will-navigate', (event, targetUrl) => {
     if (isTrustedAppUrl(targetUrl, options)) {
       return;
