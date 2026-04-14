@@ -1,3 +1,5 @@
+export const APP_PROTOCOL_SCHEME = 'kiyeovo';
+export const APP_PROTOCOL_HOST = 'app';
 export const DEV_SERVER_URL = 'http://localhost:3000/';
 
 export const ALLOWED_EXTERNAL_URLS = new Set([

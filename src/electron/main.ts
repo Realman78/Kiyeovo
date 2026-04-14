@@ -1,7 +1,7 @@
 import { app, BrowserWindow, ipcMain, Menu, session } from 'electron';
 import path from 'path';
 import fs from 'fs';
-import { fileURLToPath, pathToFileURL } from 'url';
+import { fileURLToPath } from 'url';
 import { isDev } from './util.js';
 import {
   initializeP2PCore,
@@ -41,6 +41,8 @@ import { scheduleAppRelaunch } from './relaunch.js';
 import { createTrustedIpcMainHandle } from './trusted-ipc.js';
 import { applyWindowSecurityPolicies } from './window-security.js';
 import { applySessionSecurityPolicies } from './session-security.js';
+import { DEV_SERVER_URL } from './constants.js';
+import { getPackagedAppEntryUrl, registerAppProtocolHandler, registerAppProtocolScheme } from './app-protocol.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -54,6 +56,10 @@ let isCoreInitialized = false;
 let hasStartedInitialization = false;
 let requiresNetworkModeSelection = false;
 let pendingPasswordRequest: PasswordRequest | null = null;
+
+if (!isDev()) {
+  registerAppProtocolScheme();
+}
 
 // Enforce single instance
 const gotTheLock = app.requestSingleInstanceLock();
@@ -160,8 +166,8 @@ function createMainWindow() {
   const savedBounds = loadWindowBounds();
   const startupNetworkMode = readPersistedNetworkMode();
   const branding = getWindowBrandingForMode(startupNetworkMode);
-  const appEntryFile = path.join(__dirname, '..', '..', 'dist-ui', 'index.html');
-  const appEntryUrl = pathToFileURL(appEntryFile).toString();
+  const isDevelopment = isDev();
+  const appEntryUrl = isDevelopment ? DEV_SERVER_URL : getPackagedAppEntryUrl();
 
   const win = new BrowserWindow({
     // Use saved bounds if available, otherwise Electron will use defaults (centered)
@@ -206,7 +212,7 @@ function createMainWindow() {
     enforceWindowTitle();
   });
   win.webContents.on('did-finish-load', enforceWindowTitle);
-  applyWindowSecurityPolicies(win, { appEntryUrl, isDevelopment: isDev() });
+  applyWindowSecurityPolicies(win, { appEntryUrl, isDevelopment });
 
   // Restore maximized state or maximize on first run
   if (savedBounds?.isMaximized || !savedBounds) {
@@ -219,11 +225,11 @@ function createMainWindow() {
   win.on('close', () => saveWindowBounds(win));
 
   // Load UI
-  if (isDev()) {
-    win.loadURL('http://localhost:3000');
+  if (isDevelopment) {
+    win.loadURL(DEV_SERVER_URL);
     win.webContents.openDevTools(); // Auto-open DevTools in development
   } else {
-    win.loadFile(appEntryFile);
+    win.loadURL(appEntryUrl);
   }
 
   win.on('closed', () => {
@@ -612,14 +618,19 @@ async function initializeApp() {
   try {
     log('[Electron] Starting Kiyeovo...');
     const trustedIpcMain = createTrustedIpcMainHandle(ipcMain, () => mainWindow);
-    const appEntryUrl = pathToFileURL(path.join(__dirname, '..', '..', 'dist-ui', 'index.html')).toString();
+    const isDevelopment = isDev();
+    const appEntryUrl = isDevelopment ? DEV_SERVER_URL : getPackagedAppEntryUrl();
 
     // Setup minimal menu (keeps keyboard shortcuts working)
     setupMinimalMenu();
 
+    if (!isDevelopment) {
+      registerAppProtocolHandler();
+    }
+
     applySessionSecurityPolicies(session.defaultSession, {
       appEntryUrl,
-      isDevelopment: isDev(),
+      isDevelopment,
       getMainWindow: () => mainWindow,
     });
 

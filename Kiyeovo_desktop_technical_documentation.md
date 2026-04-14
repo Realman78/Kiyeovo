@@ -462,6 +462,7 @@ UI is event-driven while core remains authoritative.
    - `nodeIntegration: false`
    - renderer CSP present in `index.html`
    - `webPreferences.sandbox: true`
+   - packaged UI is served via a custom `kiyeovo://app/...` protocol instead of `file://`
    - preload is bundled as a standalone artifact so it remains compatible with sandboxed Electron preload constraints
    - the renderer bridge is an explicit whitelist exposed through `contextBridge`; raw `ipcRenderer` is not exposed to the UI
    - unpackaged Linux development may still require machine-level `chrome-sandbox` helper setup on some VM/distro combinations
