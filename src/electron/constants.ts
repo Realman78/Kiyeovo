@@ -4,3 +4,8 @@ export const ALLOWED_EXTERNAL_URLS = new Set([
   'https://github.com/Realman78/Kiyeovo',
   'https://github.com/Realman78/Kiyeovo/issues',
 ]);
+
+export const ALLOWED_RENDERER_PERMISSIONS = new Set([
+  'media',
+  'clipboard-sanitized-write',
+]);

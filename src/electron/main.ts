@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, session } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath, pathToFileURL } from 'url';
@@ -40,6 +40,7 @@ import { errStr } from '../core/utils/general-error.js';
 import { scheduleAppRelaunch } from './relaunch.js';
 import { createTrustedIpcMainHandle } from './trusted-ipc.js';
 import { applyWindowSecurityPolicies } from './window-security.js';
+import { applySessionSecurityPolicies } from './session-security.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -610,9 +611,16 @@ async function initializeApp() {
   try {
     log('[Electron] Starting Kiyeovo...');
     const trustedIpcMain = createTrustedIpcMainHandle(ipcMain, () => mainWindow);
+    const appEntryUrl = pathToFileURL(path.join(__dirname, '..', '..', 'dist-ui', 'index.html')).toString();
 
     // Setup minimal menu (keeps keyboard shortcuts working)
     setupMinimalMenu();
+
+    applySessionSecurityPolicies(session.defaultSession, {
+      appEntryUrl,
+      isDevelopment: isDev(),
+      getMainWindow: () => mainWindow,
+    });
 
     // Setup IPC handlers
     setupIPCHandlers(ipcMain, () => p2pCore, () => mainWindow);

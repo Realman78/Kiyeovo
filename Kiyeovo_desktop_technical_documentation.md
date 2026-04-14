@@ -472,6 +472,9 @@ UI is event-driven while core remains authoritative.
      - `target="_blank"` / new-window requests are denied inside Electron
      - only an explicit allowlist of trusted external `https` URLs is opened via the OS browser
      - the policy is centralized in the Electron layer rather than embedded inline in startup orchestration
+   - explicit session permission handling:
+     - deny renderer permission requests by default
+     - allow only trusted main-frame requests for `media` and sanitized clipboard writes, preserving calls and copy actions without broad renderer permission grants
 
 ---
 

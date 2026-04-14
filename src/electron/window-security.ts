@@ -1,10 +1,6 @@
 import { shell, type BrowserWindow } from 'electron';
-import { ALLOWED_EXTERNAL_URLS, DEV_SERVER_URL } from './constants.js';
-
-type WindowSecurityOptions = {
-  appEntryUrl: string;
-  isDevelopment: boolean;
-};
+import { ALLOWED_EXTERNAL_URLS } from './constants.js';
+import { isTrustedAppUrl, type AppUrlPolicyOptions } from './app-url-policy.js';
 
 function normalizeExternalUrl(targetUrl: string): string | null {
   try {
@@ -38,39 +34,12 @@ function openAllowedExternalUrl(targetUrl: string): void {
   void shell.openExternal(targetUrl);
 }
 
-function isAllowedNavigationUrl(
-  targetUrl: string,
-  { appEntryUrl, isDevelopment }: WindowSecurityOptions,
-): boolean {
-  try {
-    const parsedTargetUrl = new URL(targetUrl);
-
-    if (isDevelopment) {
-      const parsedDevServerUrl = new URL(DEV_SERVER_URL);
-      return (
-        parsedTargetUrl.protocol === parsedDevServerUrl.protocol
-        && parsedTargetUrl.hostname === parsedDevServerUrl.hostname
-        && parsedTargetUrl.port === parsedDevServerUrl.port
-      );
-    }
-
-    const parsedAppEntryUrl = new URL(appEntryUrl);
-    return (
-      parsedTargetUrl.protocol === parsedAppEntryUrl.protocol
-      && parsedTargetUrl.hostname === parsedAppEntryUrl.hostname
-      && parsedTargetUrl.pathname === parsedAppEntryUrl.pathname
-    );
-  } catch {
-    return false;
-  }
-}
-
 export function applyWindowSecurityPolicies(
   win: BrowserWindow,
-  options: WindowSecurityOptions,
+  options: AppUrlPolicyOptions,
 ): void {
   win.webContents.on('will-navigate', (event, targetUrl) => {
-    if (isAllowedNavigationUrl(targetUrl, options)) {
+    if (isTrustedAppUrl(targetUrl, options)) {
       return;
     }
 
