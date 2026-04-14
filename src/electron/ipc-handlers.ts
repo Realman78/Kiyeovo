@@ -1395,7 +1395,7 @@ function setupNotificationHandlers(
 
           // Send chat ID to renderer so it can navigate
           if (options.chatId) {
-            mainWindow.webContents.send('notification:clicked', options.chatId);
+            mainWindow.webContents.send(IPC_CHANNELS.NOTIFICATION_CLICKED, options.chatId);
           }
         }
       });

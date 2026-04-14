@@ -100,6 +100,7 @@ export const IPC_CHANNELS = {
 
   // Notifications
   SHOW_NOTIFICATION: 'notification:show',
+  NOTIFICATION_CLICKED: 'notification:clicked',
   IS_WINDOW_FOCUSED: 'window:isFocused',
   FOCUS_WINDOW: 'window:focus',
 

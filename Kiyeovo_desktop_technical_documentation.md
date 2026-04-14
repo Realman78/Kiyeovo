@@ -289,7 +289,7 @@ Behavior highlights:
 - media controls: mute/deafen
 - video UI includes compact/fullscreen variants and stream swap controls
 - ICE servers default from `DEFAULT_WEBRTC_ICE_SERVERS` in `src/core/network/default-infrastructure.ts`
-- fast mode now has a runtime ICE editor in `Connection status -> Calls`
+- fast mode has a runtime ICE editor in `Connection status -> Calls`
 - runtime overrides are stored in the settings table and loaded by renderer `CallService` when a call starts or is accepted
 - validation is format-based only; there is no built-in health check for STUN/TURN reachability
 
@@ -463,6 +463,7 @@ UI is event-driven while core remains authoritative.
    - renderer CSP present in `index.html`
    - `webPreferences.sandbox: true`
    - preload is bundled as a standalone artifact so it remains compatible with sandboxed Electron preload constraints
+   - the renderer bridge is an explicit whitelist exposed through `contextBridge`; raw `ipcRenderer` is not exposed to the UI
    - unpackaged Linux development may still require machine-level `chrome-sandbox` helper setup on some VM/distro combinations
    - IPC sender validation in the main process:
      - only the main app window's main frame can invoke privileged IPC handlers
@@ -500,7 +501,7 @@ Current resilience layers:
 - Calls are currently fast-mode direct-chat only (1:1, no group call).
 - STUN/TURN validation is format-only; there is no live health-check/testing UI yet.
 - On some Linux environments, sandboxed unpackaged Electron runs may still require host-specific sandbox-helper setup during development.
-- Unpackaged restart now uses an explicit relaunch path for Linux development robustness; packaged releases still target the standard Electron relaunch behavior.
+- Unpackaged restart uses an explicit relaunch path for Linux development robustness; packaged releases still target the standard Electron relaunch behavior.
 
 ---
 
@@ -527,7 +528,7 @@ To quickly bootstrap a new AI chat:
 
 ### 18. Conclusion
 
-Kiyeovo Desktop MVP now combines:
+Kiyeovo Desktop MVP combines:
 - mode-aware P2P messaging
 - robust offline fallback
 - group state reconciliation and encrypted group metadata distribution
