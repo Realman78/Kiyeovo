@@ -188,6 +188,7 @@ function createMainWindow() {
       nodeIntegration: false,
       sandbox: true,
       webviewTag: false,
+      autoplayPolicy: 'no-user-gesture-required',
     }
   });
 
@@ -230,6 +231,7 @@ function createMainWindow() {
     win.webContents.openDevTools(); // Auto-open DevTools in development
   } else {
     win.loadURL(appEntryUrl);
+    win.webContents.openDevTools(); // Auto-open DevTools in development
   }
 
   win.on('closed', () => {

@@ -1,7 +1,8 @@
-import { net, protocol } from 'electron';
+import { protocol } from 'electron';
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath, pathToFileURL } from 'url';
+import { fileURLToPath } from 'url';
+import mime from 'mime-types';
 import { APP_PROTOCOL_HOST, APP_PROTOCOL_SCHEME } from './constants.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -61,7 +62,7 @@ export function registerAppProtocolHandler(): void {
     return;
   }
 
-  protocol.handle(APP_PROTOCOL_SCHEME, (request) => {
+  protocol.handle(APP_PROTOCOL_SCHEME, async (request) => {
     try {
       const requestUrl = new URL(request.url);
       const assetPath = resolveAppAssetPath(requestUrl);
@@ -69,7 +70,15 @@ export function registerAppProtocolHandler(): void {
         return new Response('Not Found', { status: 404 });
       }
 
-      return net.fetch(pathToFileURL(assetPath).toString());
+      const data = await fs.promises.readFile(assetPath);
+      const contentType = mime.lookup(assetPath) || 'application/octet-stream';
+      return new Response(data, {
+        status: 200,
+        headers: {
+          'Content-Type': contentType,
+          'Content-Length': String(data.length),
+        },
+      });
     } catch (error) {
       console.warn('[Electron][SECURITY] Failed to resolve custom protocol request:', error);
       return new Response('Bad Request', { status: 400 });

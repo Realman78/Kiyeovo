@@ -72,7 +72,30 @@ DEBUG_MODE=true npm run dev
 
 Technical detail: local and development runs now use Electron renderer sandboxing.
 
-Linux note: on some Linux VMs/distros (for example, Lubuntu), sandboxed Electron may require a one-time machine setup for the Chromium `chrome-sandbox` helper before `npm run dev` / `npm run start:local` will launch successfully.
+#### Linux sandbox helper for development
+
+On some Linux VMs/distros (for example, Lubuntu), unpackaged Electron may fail to start with a `chrome-sandbox` ownership/mode error:
+
+```bash
+The SUID sandbox helper binary was found, but is not configured correctly. Rather than run without sandboxing I'm aborting now. You need to make sure that .../Kiyeovo/node_modules/electron/dist/chrome-sandbox is owned by root and has mode 4755.
+```
+
+This marks Chromium's small Linux sandbox helper as setuid-root so Electron can create sandbox boundaries and then run the app as your normal user.
+
+For local development, fix it once after installing dependencies:
+
+```bash
+sudo chown root:root node_modules/electron/dist/chrome-sandbox
+sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
+```
+
+Verify that the helper is root-owned and has the setuid bit:
+
+```bash
+ls -l node_modules/electron/dist/chrome-sandbox
+```
+
+The output should start with something like `-rwsr-xr-x 1 root root`. You may need to repeat this after deleting or reinstalling `node_modules`. This should not be automated in `postinstall`; production Linux installs should handle sandbox setup through proper distro/package installer behavior.
 
 ### Scrypt note (optional)
 
