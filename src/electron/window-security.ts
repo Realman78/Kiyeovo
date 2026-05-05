@@ -16,22 +16,22 @@ function normalizeExternalUrl(targetUrl: string): string | null {
   }
 }
 
-function isAllowedExternalUrl(targetUrl: string): boolean {
+function resolveAllowedExternalUrl(targetUrl: string): string | null {
   const normalizedUrl = normalizeExternalUrl(targetUrl);
-  if (!normalizedUrl) {
-    return false;
+  if (!normalizedUrl || !ALLOWED_EXTERNAL_URLS.has(normalizedUrl)) {
+    return null;
   }
-
-  return ALLOWED_EXTERNAL_URLS.has(normalizedUrl);
+  return normalizedUrl;
 }
 
 function openAllowedExternalUrl(targetUrl: string): void {
-  if (!isAllowedExternalUrl(targetUrl)) {
+  const allowedUrl = resolveAllowedExternalUrl(targetUrl);
+  if (!allowedUrl) {
     console.warn(`[Electron][SECURITY] Blocked external URL: ${targetUrl}`);
     return;
   }
 
-  void shell.openExternal(targetUrl);
+  void shell.openExternal(allowedUrl);
 }
 
 export function applyWindowSecurityPolicies(
@@ -44,6 +44,15 @@ export function applyWindowSecurityPolicies(
   });
 
   win.webContents.on('will-navigate', (event, targetUrl) => {
+    if (isTrustedAppUrl(targetUrl, options)) {
+      return;
+    }
+
+    event.preventDefault();
+    openAllowedExternalUrl(targetUrl);
+  });
+
+  win.webContents.on('will-redirect', (event, targetUrl) => {
     if (isTrustedAppUrl(targetUrl, options)) {
       return;
     }

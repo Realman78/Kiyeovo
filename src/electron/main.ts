@@ -700,7 +700,7 @@ app.on('window-all-closed', () => {
 // Handle app activation (macOS)
 app.on('activate', () => {
   if (mainWindow === null && p2pCore !== null) {
-    void createMainWindow();
+    mainWindow = createMainWindow();
   }
 });
 

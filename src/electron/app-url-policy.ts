@@ -31,3 +31,21 @@ export function isTrustedAppUrl(
     return false;
   }
 }
+
+export function isTrustedAppOrigin(
+  targetUrl: string,
+  { appEntryUrl, isDevelopment }: AppUrlPolicyOptions,
+): boolean {
+  try {
+    const parsedTargetUrl = new URL(targetUrl);
+    const parsedReferenceUrl = new URL(isDevelopment ? DEV_SERVER_URL : appEntryUrl);
+
+    if (parsedTargetUrl.protocol !== parsedReferenceUrl.protocol) return false;
+    if (parsedTargetUrl.hostname !== parsedReferenceUrl.hostname) return false;
+    if (isDevelopment && parsedTargetUrl.port !== parsedReferenceUrl.port) return false;
+
+    return true;
+  } catch {
+    return false;
+  }
+}

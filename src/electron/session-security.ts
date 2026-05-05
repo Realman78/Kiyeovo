@@ -1,6 +1,6 @@
 import type { BrowserWindow, Session, WebContents } from 'electron';
 import { ALLOWED_RENDERER_PERMISSIONS } from './constants.js';
-import { isTrustedAppUrl, type AppUrlPolicyOptions } from './app-url-policy.js';
+import { isTrustedAppOrigin, type AppUrlPolicyOptions } from './app-url-policy.js';
 
 type SessionSecurityOptions = AppUrlPolicyOptions & {
   getMainWindow: () => BrowserWindow | null;
@@ -37,7 +37,7 @@ function isAllowedRendererPermission(
     return false;
   }
 
-  return isTrustedAppUrl(requestingUrl, options);
+  return isTrustedAppOrigin(requestingUrl, options);
 }
 
 function logBlockedPermission(permission: string, requestingUrl: string): void {

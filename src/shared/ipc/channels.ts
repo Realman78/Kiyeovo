@@ -152,10 +152,6 @@ export const IPC_CHANNELS = {
   OUTGOING_FILE_OFFER_PENDING: 'file:outgoingOfferPending',
   PENDING_FILE_RECEIVED: 'file:pendingReceived',
 
-  // Tor status
-  TOR_STATUS: 'tor:status',
-  GET_TOR_STATUS: 'tor:getStatus',
-
   // Group chats
   GET_CONTACTS: 'group:getContacts',
   CREATE_GROUP: 'group:create',

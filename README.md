@@ -36,7 +36,7 @@ The full version will come with:
 
 ## Quick start
 
-> If you want to try out the beta without self-hosting immediately, you can do that by connecting to one of my nodes listed [here](#connect-to-already-existing-nodes).
+> The default public bootstrap/relay nodes are temporarily offline. To run the beta, see [Bootstrap and relay setup](#bootstrap-and-relay-setup) for self-hosting your own infrastructure.
 
 > There is also a tutorial [here](https://marindedic.com/blog/p2p-messenger/), but you can just follow the steps below
 

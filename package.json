@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "npm-run-all --parallel dev:ui dev:electron",
     "dev:ui": "vite",
-    "dev:electron": "npm run transpile:electron; NODE_ENV=development electron .",
+    "dev:electron": "npm run transpile:electron && NODE_ENV=development electron .",
     "start:local": "npm run transpile:electron && npm run build && electron .",
     "start:local:debug": "npm run transpile:electron && npm run build && DEBUG_MODE=true electron .",
     "build": "tsc -b && vite build",
@@ -17,7 +17,8 @@
     "bootstrap": "tsx src/core/bootstrap.ts",
     "relay": "tsx src/core/relay.ts",
     "preview": "vite preview",
-    "transpile:electron": "tsc -p src/electron/tsconfig.json && node scripts/build-preload.mjs",
+    "clean:electron": "node -e \"require('fs').rmSync('dist-electron', { recursive: true, force: true })\"",
+    "transpile:electron": "npm run clean:electron && tsc -p src/electron/tsconfig.json && node scripts/build-preload.mjs",
     "dist:linux": "npm run transpile:electron && npm run build && electron-builder --linux --x64",
     "download:tor": "bash scripts/download-tor.sh",
     "download:tor:all": "bash scripts/download-tor.sh all",
