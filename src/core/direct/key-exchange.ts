@@ -1650,6 +1650,10 @@ export class KeyExchange {
 
       if (message.type !== 'key_exchange') {
         console.warn(`[KEY-EXCHANGE][INIT_STREAM][UNEXPECTED] peer=${peerId} type=${message.type}`);
+        this.rejectPendingKeyExchangeResult(
+          peerId,
+          new Error(`Key exchange init stream returned unexpected type: ${message.type}`),
+        );
         return;
       }
 
@@ -1658,6 +1662,10 @@ export class KeyExchange {
       }
 
       console.warn(`[KEY-EXCHANGE][INIT_STREAM][UNEXPECTED] peer=${peerId} content=${message.content}`);
+      this.rejectPendingKeyExchangeResult(
+        peerId,
+        new Error(`Key exchange init stream returned unexpected content: ${message.content}`),
+      );
     } catch (streamError: unknown) {
       const activeConnections = this.node
         .getConnections()
@@ -1669,6 +1677,10 @@ export class KeyExchange {
         `sinceInitMs=${keyExchangeStartedAt === undefined ? 'unknown' : String(Date.now() - keyExchangeStartedAt)} ` +
         `activeConns=${activeConnections.length > 0 ? activeConnections.join(',') : 'none'} ` +
         `error=${errStr(streamError)}`,
+      );
+      this.rejectPendingKeyExchangeResult(
+        peerId,
+        new Error(`Key exchange init stream failed: ${errStr(streamError)}`),
       );
     } finally {
       try {
