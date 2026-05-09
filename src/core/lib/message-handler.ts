@@ -75,6 +75,7 @@ import type { GroupOfflineCheckOptions } from '../group/runtime/group-offline-ma
 import { GroupAckRepublisher } from '../group/control/group-ack-republisher.js';
 import { GroupInfoRepublisher } from '../group/dht/group-info-republisher.js';
 import { dialProtocolWithRelayFallback } from '../transport/protocol-dialer.js';
+import { STALE_DIAL_ERROR_PATTERN } from '../transport/dial-errors.js';
 import { EncryptedUserIdentity } from '../identity/encrypted-user-identity.js';
 import { log } from '../../shared/logger.js';
 
@@ -102,6 +103,10 @@ type ActiveCall = {
  * Main message handler that orchestrates all message handling components
  */
 export class MessageHandler {
+  private static readonly OFFLINE_FALLBACK_REGEX = new RegExp(
+    `econnrefused|user is offline|all multiaddr dials failed|message timeout|dial timeout|socks|tor transport|enetunreach|no valid addresses|ehostunreach|etimedout|limited connection|no_reservation|no reservation|failed to connect via relay with status|${STALE_DIAL_ERROR_PATTERN}`,
+    'i',
+  );
   private static readonly GROUP_CONTROL_MAX_RETRIES = 3;
   private static readonly GROUP_CONTROL_RETRY_TTL_MS = 10 * 60 * 1000;
   private static readonly GROUP_CONTROL_RETRY_CACHE_MAX_ENTRIES = 200;
@@ -1953,7 +1958,7 @@ export class MessageHandler {
   }
 
   private shouldFallbackOfflineSend(errorText: string): boolean {
-    return /econnrefused|user is offline|all multiaddr dials failed|message timeout|dial timeout|socks|tor transport|enetunreach|no valid addresses|ehostunreach|etimedout|limited connection|no_reservation|no reservation|failed to connect via relay with status/.test(errorText);
+    return MessageHandler.OFFLINE_FALLBACK_REGEX.test(errorText);
   }
 
   private async storeOfflineMessageFallback(

@@ -5,6 +5,8 @@ import type { ChatNode } from '../types.js';
 import { NETWORK_MODES, getNetworkModeConfig } from '../constants.js';
 import type { ChatDatabase } from '../db/database.js';
 import { getConfiguredFastRelayAddrs } from '../network/node-relays.js';
+import { triggerFastRelayRefresh } from '../network/relay-keepalive.js';
+import { isStaleDialError } from './dial-errors.js';
 import { log } from '../../shared/logger.js';
 import { errStr } from '../utils/general-error.js';
 
@@ -126,7 +128,90 @@ async function dialWithTimeout(
   }
 }
 
+async function closeTargetPeerConnections(
+  node: ChatNode,
+  targetPeer: string,
+  context: string,
+): Promise<void> {
+  const connections = node
+    .getConnections()
+    .filter((connection) => connection.remotePeer.toString() === targetPeer);
+
+  if (connections.length === 0) {
+    log(`[DIAL][${context}] stale recovery found no active connections to close target=${targetPeer}`);
+    return;
+  }
+
+  log(`[DIAL][${context}] stale recovery closing ${connections.length} connection(s) target=${targetPeer}`);
+
+  const closeResults = await Promise.allSettled(connections.map((connection) => connection.close()));
+  const failed = closeResults.filter((result) => result.status === 'rejected');
+  if (failed.length > 0) {
+    console.warn(`[DIAL][${context}] stale recovery failed to close ${failed.length}/${connections.length} connection(s)`);
+  }
+}
+
+const inFlightRecoveriesByPeer = new Map<string, Promise<void>>();
+
+async function recoverFromStaleMuxerDialError(
+  params: DialProtocolWithRelayFallbackParams,
+  error: unknown,
+): Promise<void> {
+  const { node, database, targetPeerId, context } = params;
+  const targetPeer = targetPeerId.toString();
+  const networkMode = database.getSessionNetworkMode();
+  const existingRecovery = inFlightRecoveriesByPeer.get(targetPeer);
+
+  if (existingRecovery !== undefined) {
+    log(`[DIAL][${context}] stale recovery already in flight target=${targetPeer}`);
+    await existingRecovery;
+    return;
+  }
+
+  console.warn(
+    `[DIAL][${context}] stale muxer detected target=${targetPeer} reason=${errStr(error)}; ` +
+    'recovering and retrying once',
+  );
+
+  const recovery = (async () => {
+    await closeTargetPeerConnections(node, targetPeer, context);
+
+    if (networkMode === NETWORK_MODES.FAST) {
+      try {
+        await triggerFastRelayRefresh();
+      } catch (refreshError: unknown) {
+        console.warn(`[DIAL][${context}] stale recovery relay refresh failed reason=${errStr(refreshError)}`);
+      }
+    }
+  })();
+
+  inFlightRecoveriesByPeer.set(targetPeer, recovery);
+
+  try {
+    await recovery;
+  } finally {
+    if (inFlightRecoveriesByPeer.get(targetPeer) === recovery) {
+      inFlightRecoveriesByPeer.delete(targetPeer);
+    }
+  }
+}
+
 export async function dialProtocolWithRelayFallback(
+  params: DialProtocolWithRelayFallbackParams
+): Promise<Stream> {
+  try {
+    return await dialProtocolWithRelayFallbackOnce(params);
+  } catch (error: unknown) {
+    if (!isStaleDialError(error)) {
+      throw error;
+    }
+
+    await recoverFromStaleMuxerDialError(params, error);
+    return dialProtocolWithRelayFallbackOnce(params);
+  }
+}
+
+async function dialProtocolWithRelayFallbackOnce(
   params: DialProtocolWithRelayFallbackParams
 ): Promise<Stream> {
   const {

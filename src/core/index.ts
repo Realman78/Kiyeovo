@@ -13,6 +13,7 @@ import { EncryptedUserIdentity } from './identity/encrypted-user-identity.js';
 import { ChatDatabase } from './db/database.js';
 import { createNetworkHealthMonitor } from './network/network-health.js';
 import { createReconnectController } from './network/reconnect-controller.js';
+import { startFastRelayKeepAlive } from './network/relay-keepalive.js';
 import { DATABASE_CLEANUP_INTERVAL, getNetworkModeConfig, MAX_BOOTSTRAP_NODES_FAST, MAX_BOOTSTRAP_NODES_TOR, SECOND } from './constants.js';
 import type {
   ChatNode,
@@ -327,6 +328,7 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
   const dhtStatusInterval = setInterval(() => {
     void checkDHTStatus('timer_30s');
   }, 30 * SECOND);
+  const relayKeepAlive = startFastRelayKeepAlive(node, database);
 
   // Initialize username registry
   sendStatus('Initializing username registry...', 'registry');
@@ -483,6 +485,7 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     cleanup: async () => {
       console.log('[Core] Shutting down...');
       try {
+        await relayKeepAlive.stop();
         await messageHandler.cleanup();
         reconnectController.clearPostRetryVerifyTimeout();
         clearInterval(cleanupInterval);
