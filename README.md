@@ -28,7 +28,7 @@ The full version will come with:
 - group audio/video calls (fast mode)
 - screen sharing in calls (fast mode)
 - performance improvements
-- security hardening
+- security hardening *(Electron hardening added 11th of May)*
 - easier self-hosted infrastructure setup
 - local API interface for agents and external tools
 - emojis 🪐 *(Added 12th of April)*
