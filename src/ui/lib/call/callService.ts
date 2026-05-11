@@ -18,6 +18,7 @@ type CurrentCall = {
 };
 
 const SCREEN_SHARE_UNSUPPORTED_MESSAGE = 'Screen sharing is not supported yet';
+const SCREEN_SHARE_MAX_BITRATE_BPS = 4_000_000;
 
 export type CallServiceEvent =
   | {
@@ -54,6 +55,8 @@ class CallService {
   private localStream: MediaStream | null = null;
   private remoteStream: MediaStream | null = null;
   private screenStream: MediaStream | null = null;
+  private sharedVideoTransceiver: RTCRtpTransceiver | null = null;
+  private sharedVideoSender: RTCRtpSender | null = null;
   private remoteAudio: HTMLAudioElement | null = null;
   private localScreenShareState: ScreenShareLifecycleState = 'idle';
   private isRemoteScreenSharing = false;
@@ -84,7 +87,7 @@ class CallService {
       callId: context.callId,
       peerId: context.peerId,
       mediaType: context.mediaType,
-      localStream: this.localStream,
+      localStream: this.getLocalDisplayStream(),
       remoteStream: this.remoteStream,
     });
   }
@@ -157,6 +160,78 @@ class CallService {
     });
   }
 
+  private getLocalDisplayStream(): MediaStream | null {
+    return this.screenStream ?? this.localStream;
+  }
+
+  private getCameraTrack(): MediaStreamTrack | null {
+    return this.localStream?.getVideoTracks()[0] ?? null;
+  }
+
+  private ensureSharedVideoTransceiver(pc: RTCPeerConnection): RTCRtpSender {
+    if (!this.sharedVideoTransceiver) {
+      this.sharedVideoTransceiver = pc.addTransceiver('video', { direction: 'sendrecv' });
+      this.sharedVideoSender = this.sharedVideoTransceiver.sender;
+    }
+
+    if (!this.sharedVideoSender) {
+      throw new Error('Screen sharing video sender is not available');
+    }
+
+    return this.sharedVideoSender;
+  }
+
+  private async applyScreenShareSenderParameters(sender: RTCRtpSender): Promise<void> {
+    try {
+      const parameters = sender.getParameters() as RTCRtpSendParameters & {
+        degradationPreference?: 'balanced' | 'maintain-framerate' | 'maintain-resolution';
+      };
+      if (parameters.encodings.length > 0) {
+        parameters.encodings[0].maxBitrate = SCREEN_SHARE_MAX_BITRATE_BPS;
+      }
+      parameters.degradationPreference = 'maintain-resolution';
+      await sender.setParameters(parameters);
+    } catch (error: unknown) {
+      console.warn('[CallService] Failed to tune screen share sender parameters:', error);
+    }
+  }
+
+  private async resetSharedVideoSenderParameters(sender: RTCRtpSender): Promise<void> {
+    try {
+      const parameters = sender.getParameters() as RTCRtpSendParameters & {
+        degradationPreference?: 'balanced' | 'maintain-framerate' | 'maintain-resolution';
+      };
+      if (parameters.encodings.length > 0) {
+        delete parameters.encodings[0].maxBitrate;
+      }
+      parameters.degradationPreference = 'balanced';
+      await sender.setParameters(parameters);
+    } catch (error: unknown) {
+      console.warn('[CallService] Failed to reset shared video sender parameters:', error);
+    }
+  }
+
+  private async replaceSharedVideoTrack(
+    track: MediaStreamTrack | null,
+    content: 'camera' | 'screen' | 'none',
+  ): Promise<void> {
+    if (!this.sharedVideoSender) {
+      throw new Error('Screen sharing video sender is not available');
+    }
+
+    await this.sharedVideoSender.replaceTrack(track);
+    if (track && content === 'screen') {
+      await this.applyScreenShareSenderParameters(this.sharedVideoSender);
+    } else {
+      await this.resetSharedVideoSenderParameters(this.sharedVideoSender);
+    }
+  }
+
+  private async restoreSharedVideoTrack(context: CurrentCall): Promise<void> {
+    const cameraTrack = context.mediaType === 'video' ? this.getCameraTrack() : null;
+    await this.replaceSharedVideoTrack(cameraTrack, cameraTrack ? 'camera' : 'none');
+  }
+
   private toRtcIceServers(servers: IceServerConfig[]): RTCIceServer[] {
     return servers.map((server) => ({
       urls: server.url,
@@ -209,13 +284,22 @@ class CallService {
       if (!this.remoteStream) {
         this.remoteStream = new MediaStream();
       }
-      event.streams.forEach((stream) => {
-        stream.getTracks().forEach((track) => {
-          if (!this.remoteStream?.getTracks().some((existing) => existing.id === track.id)) {
-            this.remoteStream?.addTrack(track);
-          }
+
+      const addRemoteTrack = (track: MediaStreamTrack) => {
+        if (!this.remoteStream?.getTracks().some((existing) => existing.id === track.id)) {
+          this.remoteStream?.addTrack(track);
+        }
+      };
+
+      if (event.streams.length === 0) {
+        addRemoteTrack(event.track);
+      } else {
+        event.streams.forEach((stream) => {
+          stream.getTracks().forEach((track) => {
+            addRemoteTrack(track);
+          });
         });
-      });
+      }
       this.attachRemoteAudio();
       this.emitMediaUpdate(context);
     };
@@ -314,9 +398,14 @@ class CallService {
 
   private async addLocalTracks(pc: RTCPeerConnection, mediaType: CallMediaType): Promise<void> {
     const stream = await this.getLocalStream(mediaType);
-    stream.getTracks().forEach((track) => {
+    stream.getAudioTracks().forEach((track) => {
       pc.addTrack(track, stream);
     });
+    const videoSender = this.ensureSharedVideoTransceiver(pc);
+    const cameraTrack = mediaType === 'video' ? this.getCameraTrack() : null;
+    if (cameraTrack) {
+      await videoSender.replaceTrack(cameraTrack);
+    }
     this.emitMediaUpdate();
   }
 
@@ -409,6 +498,8 @@ class CallService {
       // Best-effort close.
     }
     this.peerConnection = null;
+    this.sharedVideoTransceiver = null;
+    this.sharedVideoSender = null;
     this.pendingRemoteIce = [];
   }
 
@@ -749,11 +840,29 @@ class CallService {
       };
 
       this.screenStream = stream;
+      this.emitMediaUpdate(context);
+
+      try {
+        await this.replaceSharedVideoTrack(screenTrack, 'screen');
+      } catch (replaceError: unknown) {
+        this.stopScreenCaptureTracks();
+        this.emitMediaUpdate(context);
+        this.setLocalScreenShareState('idle', context);
+        return {
+          success: false,
+          error: errStr(replaceError, 'Could not attach screen sharing to the call'),
+        };
+      }
+
       try {
         await this.sendScreenShareStartedSignal(context);
         this.localScreenShareAnnounced = true;
       } catch (signalError: unknown) {
+        await this.restoreSharedVideoTrack(context).catch((restoreError: unknown) => {
+          console.warn('[CallService] Failed to restore video sender after screen share signaling failed:', restoreError);
+        });
         this.stopScreenCaptureTracks();
+        this.emitMediaUpdate(context);
         this.setLocalScreenShareState('idle', context);
         return {
           success: false,
@@ -773,7 +882,11 @@ class CallService {
           // The call is already changing state; cleanup below is the important part.
         }
         this.localScreenShareAnnounced = false;
+        await this.restoreSharedVideoTrack(context).catch((restoreError: unknown) => {
+          console.warn('[CallService] Failed to restore video sender after screen share race cleanup:', restoreError);
+        });
         this.stopScreenCaptureTracks();
+        this.emitMediaUpdate(context);
         this.setLocalScreenShareState('idle', context);
         return { success: false, canceled: true, error: 'Call ended before screen sharing started' };
       }
@@ -812,7 +925,15 @@ class CallService {
     const shouldAnnounceStopped = this.localScreenShareAnnounced;
     this.localScreenShareAnnounced = false;
     this.setLocalScreenShareState('stopping', context);
+
+    try {
+      await this.restoreSharedVideoTrack(context);
+    } catch (error: unknown) {
+      console.warn('[CallService] Failed to restore video sender while stopping screen share:', error);
+    }
+
     this.stopScreenCaptureTracks();
+    this.emitMediaUpdate(context);
 
     let signalError: string | null = null;
     if (shouldAnnounceStopped) {
