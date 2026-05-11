@@ -1,4 +1,4 @@
-import type { BrowserWindow, Session, WebContents } from 'electron';
+import type { BrowserWindow, Session, WebContents, WebFrameMain } from 'electron';
 import { ALLOWED_RENDERER_PERMISSIONS } from './constants.js';
 import { isTrustedAppOrigin, type AppUrlPolicyOptions } from './app-url-policy.js';
 
@@ -16,6 +16,31 @@ function isTrustedMainWindowWebContents(
   }
 
   return webContents === mainWindow.webContents;
+}
+
+function isTrustedMainWindowFrame(
+  frame: WebFrameMain | null,
+  getMainWindow: SessionSecurityOptions['getMainWindow'],
+): boolean {
+  const mainWindow = getMainWindow();
+  if (!mainWindow || mainWindow.isDestroyed() || !frame) {
+    return false;
+  }
+
+  try {
+    if (frame.isDestroyed()) {
+      return false;
+    }
+
+    const mainFrame = mainWindow.webContents.mainFrame;
+    return frame === mainFrame
+      || (
+        frame.processId === mainFrame.processId
+        && frame.frameToken === mainFrame.frameToken
+      );
+  } catch {
+    return false;
+  }
 }
 
 function isAllowedRendererPermission(
@@ -44,6 +69,22 @@ function logBlockedPermission(permission: string, requestingUrl: string): void {
   console.warn(
     `[Electron][SECURITY] Blocked renderer permission: ${permission} requestingUrl=${requestingUrl || 'unknown'}`,
   );
+}
+
+function isAllowedDisplayMediaRequest(
+  request: Electron.DisplayMediaRequestHandlerHandlerRequest,
+  options: SessionSecurityOptions,
+): boolean {
+  if (!request.videoRequested || request.audioRequested || !request.userGesture) {
+    return false;
+  }
+
+  if (!isTrustedMainWindowFrame(request.frame, options.getMainWindow)) {
+    return false;
+  }
+
+  const requestingUrl = request.securityOrigin || request.frame?.url || '';
+  return isTrustedAppOrigin(requestingUrl, options);
 }
 
 export function applySessionSecurityPolicies(
@@ -86,4 +127,18 @@ export function applySessionSecurityPolicies(
 
     callback(allowed);
   });
+
+  session.setDisplayMediaRequestHandler((request, callback) => {
+    const requestingUrl = request.securityOrigin || request.frame?.url || '';
+    if (!isAllowedDisplayMediaRequest(request, options)) {
+      logBlockedPermission('display-capture', requestingUrl);
+      callback({});
+      return;
+    }
+
+    console.warn(
+      '[Electron][SECURITY] Display capture request reached the fallback handler; no desktopCapturer source picker is implemented yet.',
+    );
+    callback({});
+  }, { useSystemPicker: true });
 }

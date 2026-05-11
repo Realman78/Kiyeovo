@@ -1,4 +1,4 @@
-import type { CallDirection, CallMediaType, CallSignal, CallStateChangedEvent } from '../../types';
+import type { CallDirection, CallMediaType, CallSignal, CallStateChangedEvent, ScreenShareLifecycleState } from '../../types';
 import type { IceServerConfig } from '../../../core/types';
 import { DEFAULT_WEBRTC_ICE_SERVERS } from '../../../core/network/default-infrastructure';
 import { errStr } from '../../../core/utils/general-error';
@@ -9,6 +9,10 @@ type CurrentCall = {
   direction: CallDirection;
   mediaType: CallMediaType;
 };
+
+type ScreenShareStopReason = 'manual' | 'track-ended' | 'call-ended' | 'failed';
+
+const SCREEN_SHARE_UNSUPPORTED_MESSAGE = 'Screen sharing is not supported yet';
 
 export type CallServiceEvent =
   | {
@@ -29,6 +33,13 @@ export type CallServiceEvent =
     mediaType: CallMediaType;
     localStream: MediaStream | null;
     remoteStream: MediaStream | null;
+  }
+  | {
+    type: 'screen-share';
+    callId: string;
+    peerId: string;
+    localState: ScreenShareLifecycleState;
+    remoteSharing: boolean;
   };
 
 class CallService {
@@ -37,7 +48,10 @@ class CallService {
   private currentCall: CurrentCall | null = null;
   private localStream: MediaStream | null = null;
   private remoteStream: MediaStream | null = null;
+  private screenStream: MediaStream | null = null;
   private remoteAudio: HTMLAudioElement | null = null;
+  private localScreenShareState: ScreenShareLifecycleState = 'idle';
+  private isRemoteScreenSharing = false;
   private muted = false;
   private deafened = false;
   private pendingRemoteIce: RTCIceCandidateInit[] = [];
@@ -66,6 +80,26 @@ class CallService {
       localStream: this.localStream,
       remoteStream: this.remoteStream,
     });
+  }
+
+  private emitScreenShareUpdate(context: CurrentCall | null = this.currentCall): void {
+    if (!context) return;
+    this.emit({
+      type: 'screen-share',
+      callId: context.callId,
+      peerId: context.peerId,
+      localState: this.localScreenShareState,
+      remoteSharing: this.isRemoteScreenSharing,
+    });
+  }
+
+  private setLocalScreenShareState(
+    state: ScreenShareLifecycleState,
+    context: CurrentCall | null = this.currentCall,
+  ): void {
+    if (this.localScreenShareState === state) return;
+    this.localScreenShareState = state;
+    this.emitScreenShareUpdate(context);
   }
 
   private toRtcIceServers(servers: IceServerConfig[]): RTCIceServer[] {
@@ -270,7 +304,27 @@ class CallService {
     await this.peerConnection.addIceCandidate(candidate);
   }
 
-  private stopStreams(): void {
+  private stopScreenCaptureTracks(): void {
+    if (!this.screenStream) return;
+    this.screenStream.getTracks().forEach((track) => {
+      track.onended = null;
+      track.stop();
+    });
+    this.screenStream = null;
+  }
+
+  private resetScreenShare(context: CurrentCall | null = this.currentCall): void {
+    const hadScreenShareState = this.localScreenShareState !== 'idle' || this.isRemoteScreenSharing;
+    this.stopScreenCaptureTracks();
+    this.localScreenShareState = 'idle';
+    this.isRemoteScreenSharing = false;
+    if (hadScreenShareState) {
+      this.emitScreenShareUpdate(context);
+    }
+  }
+
+  private stopStreams(context: CurrentCall | null = this.currentCall): void {
+    this.resetScreenShare(context);
     if (this.localStream) {
       this.localStream.getTracks().forEach((track) => track.stop());
       this.localStream = null;
@@ -540,6 +594,142 @@ class CallService {
     };
   }
 
+  getScreenShareState(): { localState: ScreenShareLifecycleState; remoteSharing: boolean } {
+    return {
+      localState: this.localScreenShareState,
+      remoteSharing: this.isRemoteScreenSharing,
+    };
+  }
+
+  async startScreenShare(): Promise<{ success: boolean; error?: string; canceled?: boolean; unsupported?: boolean }> {
+    const context = this.currentCall;
+    if (!context) {
+      return { success: false, error: 'No active call' };
+    }
+
+    if (this.peerConnection?.connectionState !== 'connected') {
+      return { success: false, error: 'Screen sharing is available once the call is connected' };
+    }
+
+    const currentScreenShareState = this.getScreenShareState().localState;
+    if (currentScreenShareState === 'starting' || currentScreenShareState === 'sharing') {
+      return { success: true };
+    }
+
+    if (currentScreenShareState === 'stopping') {
+      return { success: false, error: 'Screen sharing is still stopping' };
+    }
+
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      return { success: false, unsupported: true, error: SCREEN_SHARE_UNSUPPORTED_MESSAGE };
+    }
+
+    try {
+      const support = await window.kiyeovoAPI.getScreenShareSupport();
+      if (!support.success || !support.supported) {
+        return {
+          success: false,
+          unsupported: true,
+          error: support.message || support.error || SCREEN_SHARE_UNSUPPORTED_MESSAGE,
+        };
+      }
+    } catch {
+      return {
+        success: false,
+        unsupported: true,
+        error: SCREEN_SHARE_UNSUPPORTED_MESSAGE,
+      };
+    }
+
+    if (this.localScreenShareState === 'starting' || this.localScreenShareState === 'sharing') {
+      return { success: true };
+    }
+
+    if (this.localScreenShareState === 'stopping') {
+      return { success: false, error: 'Screen sharing is still stopping' };
+    }
+
+    const stillCurrentCallBeforePicker = this.currentCall?.callId === context.callId
+      && this.currentCall.peerId === context.peerId
+      && this.peerConnection?.connectionState === 'connected';
+    if (!stillCurrentCallBeforePicker) {
+      return { success: false, canceled: true, error: 'Call ended before screen sharing started' };
+    }
+
+    this.setLocalScreenShareState('starting', context);
+
+    let stream: MediaStream | null = null;
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video: {
+          width: { max: 1920 },
+          height: { max: 1080 },
+          frameRate: { max: 30 },
+        },
+        audio: false,
+      });
+
+      const latestScreenShareState = this.getScreenShareState().localState;
+      const stillCurrentCall = this.currentCall?.callId === context.callId
+        && this.currentCall.peerId === context.peerId
+        && this.peerConnection?.connectionState === 'connected'
+        && latestScreenShareState === 'starting';
+      if (!stillCurrentCall) {
+        stream.getTracks().forEach((track) => track.stop());
+        return { success: false, canceled: true, error: 'Call ended before screen sharing started' };
+      }
+
+      const [screenTrack] = stream.getVideoTracks();
+      if (!screenTrack) {
+        throw new Error('No screen video track was selected');
+      }
+
+      screenTrack.contentHint = 'detail';
+      screenTrack.onended = () => {
+        void this.stopScreenShare('track-ended');
+      };
+
+      this.screenStream = stream;
+      this.setLocalScreenShareState('sharing', context);
+      return { success: true };
+    } catch (error: unknown) {
+      stream?.getTracks().forEach((track) => track.stop());
+      if (this.currentCall?.callId === context.callId && this.currentCall.peerId === context.peerId) {
+        this.setLocalScreenShareState('idle', context);
+      }
+
+      if (error instanceof DOMException && (error.name === 'AbortError' || error.name === 'NotAllowedError')) {
+        return { success: false, canceled: true, error: 'Screen sharing cancelled' };
+      }
+
+      return { success: false, error: errStr(error, 'Could not start screen sharing') };
+    }
+  }
+
+  async stopScreenShare(reason: ScreenShareStopReason = 'manual'): Promise<{ success: boolean; error?: string }> {
+    // Phase 2 will send this reason over signed screen-share signaling.
+    void reason;
+
+    const context = this.currentCall;
+    if (!context) {
+      this.stopScreenCaptureTracks();
+      this.localScreenShareState = 'idle';
+      return { success: true };
+    }
+
+    if (this.localScreenShareState === 'idle') {
+      this.stopScreenCaptureTracks();
+      return { success: true };
+    }
+
+    this.setLocalScreenShareState('stopping', context);
+    this.stopScreenCaptureTracks();
+
+    // Phase 1 is local lifecycle only. Phase 3 will update the WebRTC sender here.
+    this.setLocalScreenShareState('idle', context);
+    return { success: true };
+  }
+
   toggleMute(): boolean {
     this.muted = !this.muted;
     if (this.localStream) {
@@ -617,7 +807,7 @@ class CallService {
       this.clearRingTimeout();
     }
 
-    if (event.state === 'ended') {
+    if (event.state === 'idle' || event.state === 'ended') {
       if (this.currentCall && this.currentCall.callId === event.callId && this.currentCall.peerId === event.peerId) {
         this.clearDisconnectTimer();
         this.clearRingTimeout();

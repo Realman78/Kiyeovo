@@ -15,6 +15,7 @@ export type MessageSentStatus = 'online' | 'offline' | null;
 export type CallDirection = 'incoming' | 'outgoing';
 export type CallLifecycleState = 'idle' | 'ringing_out' | 'ringing_in' | 'connecting' | 'active' | 'ended';
 export type CallMediaType = 'audio' | 'video';
+export type ScreenShareLifecycleState = 'idle' | 'starting' | 'sharing' | 'stopping';
 
 export type IncomingCallSignal = {
   type: 'CALL_OFFER';

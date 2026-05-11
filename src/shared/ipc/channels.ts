@@ -58,6 +58,7 @@ export const IPC_CHANNELS = {
   CALL_SIGNAL_RECEIVED: 'call:signalReceived',
   CALL_STATE_CHANGED: 'call:stateChanged',
   CALL_ERROR: 'call:error',
+  GET_SCREEN_SHARE_SUPPORT: 'call:getScreenShareSupport',
 
   // Bootstrap nodes
   BOOTSTRAP_NODES: 'bootstrap:nodes',

@@ -61,6 +61,7 @@ const kiyeovoAPI: KiyeovoAPI = {
   rejectCall: (peerId, callId, reason) => invoke(IPC_CHANNELS.CALL_REJECT, peerId, callId, reason),
   hangupCall: (peerId, callId, reason) => invoke(IPC_CHANNELS.CALL_HANGUP, peerId, callId, reason),
   sendCallSignal: (signal) => invoke(IPC_CHANNELS.CALL_SIGNAL_SEND, signal),
+  getScreenShareSupport: () => invoke(IPC_CHANNELS.GET_SCREEN_SHARE_SUPPORT),
   onCallIncoming: (callback) => subscribe(IPC_CHANNELS.CALL_INCOMING, callback),
   onCallSignalReceived: (callback) => subscribe(IPC_CHANNELS.CALL_SIGNAL_RECEIVED, callback),
   onCallStateChanged: (callback) => subscribe(IPC_CHANNELS.CALL_STATE_CHANGED, callback),

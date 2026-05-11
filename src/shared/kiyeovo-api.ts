@@ -53,6 +53,13 @@ export type KiyeovoMessage = Message & {
   sender_username?: string;
 };
 
+export type ScreenShareSupportResponse = {
+  success: boolean;
+  supported: boolean;
+  message: string;
+  error: string | null;
+};
+
 export interface KiyeovoAPI {
   getAppConfig: () => Promise<{ success: boolean; config: AppConfig; error: string | null }>;
   setAppConfig: (config: AppConfig) => Promise<{ success: boolean; error: string | null }>;
@@ -113,6 +120,7 @@ export interface KiyeovoAPI {
     reason?: 'hangup' | 'disconnect' | 'failed',
   ) => Promise<{ success: boolean; error: string | null }>;
   sendCallSignal: (signal: CallSignalOutgoingInput) => Promise<{ success: boolean; error: string | null }>;
+  getScreenShareSupport: () => Promise<ScreenShareSupportResponse>;
   onCallIncoming: (callback: (data: CallIncomingEvent) => void) => Unsubscribe;
   onCallSignalReceived: (callback: (data: CallSignalReceivedEvent) => void) => Unsubscribe;
   onCallStateChanged: (callback: (data: CallStateChangedEvent) => void) => Unsubscribe;

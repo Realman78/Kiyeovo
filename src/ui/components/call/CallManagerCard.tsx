@@ -8,6 +8,8 @@ import {
   Minimize2,
   PhoneCall,
   PhoneOff,
+  ScreenShare,
+  ScreenShareOff,
   Video,
   Volume2,
   VolumeX,
@@ -48,6 +50,7 @@ export const CallManagerCard = () => {
   const { toast } = useToast();
   const activeCall = useAppSelector((state) => state.call.activeCall);
   const incomingCall = useAppSelector((state) => state.call.incomingCall);
+  const screenShare = useAppSelector((state) => state.call.screenShare);
   const [isMuted, setIsMuted] = useState(false);
   const [isDeafened, setIsDeafened] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -140,6 +143,16 @@ export const CallManagerCard = () => {
   }, [activeCall?.callId, activeCall?.peerId]);
 
   const isVideoCall = activeCall?.mediaType === 'video';
+
+  const isScreenShareForActiveCall = !!activeCall
+    && screenShare.callId === activeCall.callId
+    && screenShare.peerId === activeCall.peerId;
+  const localScreenShareState = isScreenShareForActiveCall ? screenShare.localState : 'idle';
+  const isLocalScreenShareStarting = localScreenShareState === 'starting';
+  const isLocalScreenSharing = localScreenShareState === 'sharing';
+  const isLocalScreenShareStopping = localScreenShareState === 'stopping';
+  const isRemoteScreenSharing = isScreenShareForActiveCall && screenShare.remoteSharing;
+
   const largeVideoStream = isVideoCall
     ? (isVideoStreamsSwapped ? localVideoStream : remoteVideoStream)
     : null;
@@ -206,6 +219,17 @@ export const CallManagerCard = () => {
   const smallHasVideo = Boolean(smallVideoStream && smallVideoStream.getVideoTracks().length > 0);
   const remotePreviewHasVideo = Boolean(remoteVideoStream && remoteVideoStream.getVideoTracks().length > 0);
   const showCompactPreview = isVideoCall && activeCall.state === 'active' && !isVideoExpanded;
+  const canToggleScreenShare = activeCall.state === 'active'
+    && !isLocalScreenShareStarting
+    && !isLocalScreenShareStopping
+    && !isRemoteScreenSharing;
+  const screenShareTitle = isRemoteScreenSharing
+    ? `${activeCall.peerName} is already sharing`
+    : activeCall.state !== 'active'
+      ? 'Screen sharing is available once the call is connected'
+      : isLocalScreenSharing
+        ? 'Stop sharing screen'
+        : 'Share screen';
 
   const handleHangup = async () => {
     if (isVideoExpanded) {
@@ -225,6 +249,28 @@ export const CallManagerCard = () => {
 
   const handleToggleDeafen = () => {
     setIsDeafened(callService.toggleDeafen());
+  };
+
+  const handleToggleScreenShare = async () => {
+    if (!canToggleScreenShare) return;
+
+    if (isLocalScreenSharing) {
+      const result = await callService.stopScreenShare('manual');
+      if (!result.success) {
+        toast.error(result.error || 'Failed to stop screen sharing');
+      }
+      return;
+    }
+
+    const result = await callService.startScreenShare();
+    if (!result.success && result.unsupported) {
+      toast.info(result.error || 'Screen sharing is not supported yet');
+      return;
+    }
+
+    if (!result.success && !result.canceled) {
+      toast.error(result.error || 'Could not start screen sharing');
+    }
   };
 
   const handleAnchorPointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
@@ -387,6 +433,27 @@ export const CallManagerCard = () => {
         </div>
 
         <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
+          {(isLocalScreenShareStarting || isLocalScreenSharing || isLocalScreenShareStopping || isRemoteScreenSharing) && (
+            <div className="mr-auto inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-1 text-[10px] font-mono uppercase tracking-wide text-primary">
+              <ScreenShare className="h-3 w-3" />
+              {isLocalScreenShareStarting
+                ? 'Starting share'
+                : isLocalScreenShareStopping
+                  ? 'Stopping share'
+                  : isLocalScreenSharing
+                    ? 'You are sharing'
+                    : `${activeCall.peerName} is sharing`}
+            </div>
+          )}
+          <Button
+            variant={isLocalScreenSharing ? 'secondary' : 'outline'}
+            size="sm"
+            onClick={handleToggleScreenShare}
+            disabled={!canToggleScreenShare}
+            title={screenShareTitle}
+          >
+            {isLocalScreenSharing ? <ScreenShareOff className="w-4 h-4" /> : <ScreenShare className="w-4 h-4" />}
+          </Button>
           {isVideoCall && (
             <Button
               variant="outline"

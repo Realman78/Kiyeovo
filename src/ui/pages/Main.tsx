@@ -4,7 +4,7 @@ import Sidebar from '../components/sidebar/Sidebar';
 import ChatWrapper from '../components/chat/ChatWrapper';
 import { setChats, addChat, removePendingKeyExchange, setActiveChat, markOfflineFetched, markOfflineFetchFailed, updateFileTransferProgress, updateFileTransferStatus, updateFileTransferError, setPendingFileStatus, updateChat, setActivePendingKeyExchange, setOfflineFetchStatus } from '../state/slices/chatSlice';
 import { removeContactAttempt, setActiveContactAttempt, addMessage, type Chat } from '../state/slices/chatSlice';
-import { applyCoreCallState, applyLocalCallState, setCallError, setIncomingCall, setCallPeerName } from '../state/slices/callSlice';
+import { applyCoreCallState, applyLocalCallState, applyScreenShareState, setCallError, setIncomingCall, setCallPeerName } from '../state/slices/callSlice';
 import { useToast } from '../components/ui/use-toast';
 import type { RootState } from '../state/store';
 import { useNotifications } from '../hooks/useNotifications';
@@ -463,6 +463,17 @@ export const Main = () => {
           state: event.state,
           reason: event.reason,
         }));
+        return;
+      }
+
+      if (event.type === 'screen-share') {
+        dispatch(applyScreenShareState({
+          callId: event.callId,
+          peerId: event.peerId,
+          localState: event.localState,
+          remoteSharing: event.remoteSharing,
+        }));
+        return;
       }
     });
 

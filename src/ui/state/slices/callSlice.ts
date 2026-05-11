@@ -1,5 +1,5 @@
 import { createSlice, type PayloadAction } from '@reduxjs/toolkit';
-import type { CallDirection, CallLifecycleState, CallMediaType } from '../../types';
+import type { CallDirection, CallLifecycleState, CallMediaType, ScreenShareLifecycleState } from '../../types';
 
 export interface IncomingCall {
   callId: string;
@@ -24,14 +24,35 @@ export interface ActiveCall {
 interface CallState {
   incomingCall: IncomingCall | null;
   activeCall: ActiveCall | null;
+  screenShare: {
+    callId: string | null;
+    peerId: string | null;
+    localState: ScreenShareLifecycleState;
+    remoteSharing: boolean;
+  };
   lastError: string | null;
 }
 
 const initialState: CallState = {
   incomingCall: null,
   activeCall: null,
+  screenShare: {
+    callId: null,
+    peerId: null,
+    localState: 'idle',
+    remoteSharing: false,
+  },
   lastError: null,
 };
+
+function resetScreenShareState(state: CallState): void {
+  state.screenShare = {
+    callId: null,
+    peerId: null,
+    localState: 'idle',
+    remoteSharing: false,
+  };
+}
 
 const callSlice = createSlice({
   name: 'call',
@@ -44,6 +65,7 @@ const callSlice = createSlice({
         || state.activeCall.callId !== action.payload.callId
         || state.activeCall.peerId !== action.payload.peerId
       ) {
+        resetScreenShareState(state);
         state.activeCall = {
           callId: action.payload.callId,
           peerId: action.payload.peerId,
@@ -80,6 +102,7 @@ const callSlice = createSlice({
           && state.activeCall.peerId === payload.peerId
         ) {
           state.activeCall = null;
+          resetScreenShareState(state);
         }
         if (
           state.incomingCall
@@ -96,6 +119,7 @@ const callSlice = createSlice({
         || state.activeCall.callId !== payload.callId
         || state.activeCall.peerId !== payload.peerId
       ) {
+        resetScreenShareState(state);
         state.activeCall = {
           callId: payload.callId,
           peerId: payload.peerId,
@@ -140,6 +164,7 @@ const callSlice = createSlice({
           && state.activeCall.peerId === payload.peerId
         ) {
           state.activeCall = null;
+          resetScreenShareState(state);
         }
         if (
           state.incomingCall
@@ -175,9 +200,42 @@ const callSlice = createSlice({
         state.incomingCall.peerName = peerName;
       }
     },
+    applyScreenShareState: (
+      state,
+      action: PayloadAction<{
+        callId: string;
+        peerId: string;
+        localState: ScreenShareLifecycleState;
+        remoteSharing: boolean;
+      }>
+    ) => {
+      const payload = action.payload;
+      if (
+        !state.activeCall
+        || state.activeCall.callId !== payload.callId
+        || state.activeCall.peerId !== payload.peerId
+      ) {
+        if (payload.localState === 'idle' && !payload.remoteSharing) {
+          resetScreenShareState(state);
+        }
+        return;
+      }
+
+      state.screenShare = {
+        callId: payload.callId,
+        peerId: payload.peerId,
+        localState: payload.localState,
+        remoteSharing: payload.remoteSharing,
+      };
+
+      if (payload.localState === 'idle' && !payload.remoteSharing) {
+        resetScreenShareState(state);
+      }
+    },
     resetCallState: (state) => {
       state.incomingCall = null;
       state.activeCall = null;
+      resetScreenShareState(state);
       state.lastError = null;
     },
   },
@@ -191,6 +249,7 @@ export const {
   setCallError,
   clearCallError,
   setCallPeerName,
+  applyScreenShareState,
   resetCallState,
 } = callSlice.actions;
 
