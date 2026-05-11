@@ -28,7 +28,7 @@ The full version will come with:
 - group audio/video calls (fast mode)
 - screen sharing in calls (fast mode)
 - performance improvements
-- security hardening
+- security hardening *(Electron hardening added 11th of May)*
 - easier self-hosted infrastructure setup
 - local API interface for agents and external tools
 - emojis 🪐 *(Added 12th of April)*
@@ -36,7 +36,7 @@ The full version will come with:
 
 ## Quick start
 
-> If you want to try out the beta without self-hosting immediately, you can do that by connecting to one of my nodes listed [here](#connect-to-already-existing-nodes).
+> The default public bootstrap/relay nodes are temporarily offline. To run the beta, see [Bootstrap and relay setup](#bootstrap-and-relay-setup) for self-hosting your own infrastructure.
 
 > There is also a tutorial [here](https://marindedic.com/blog/p2p-messenger/), but you can just follow the steps below
 
@@ -70,7 +70,32 @@ DEBUG_MODE=true npm run dev
 
 > You can omit `DEBUG_MODE=true` if you don't plan on reporting any bugs
 
-Technical detail: In the beta version, `npm run dev` starts Electron with `--no-sandbox`.
+Technical detail: local and development runs now use Electron renderer sandboxing.
+
+#### Linux sandbox helper for development
+
+On some Linux VMs/distros (for example, Lubuntu), unpackaged Electron may fail to start with a `chrome-sandbox` ownership/mode error:
+
+```bash
+The SUID sandbox helper binary was found, but is not configured correctly. Rather than run without sandboxing I'm aborting now. You need to make sure that .../Kiyeovo/node_modules/electron/dist/chrome-sandbox is owned by root and has mode 4755.
+```
+
+This marks Chromium's small Linux sandbox helper as setuid-root so Electron can create sandbox boundaries and then run the app as your normal user.
+
+For local development, fix it once after installing dependencies:
+
+```bash
+sudo chown root:root node_modules/electron/dist/chrome-sandbox
+sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
+```
+
+Verify that the helper is root-owned and has the setuid bit:
+
+```bash
+ls -l node_modules/electron/dist/chrome-sandbox
+```
+
+The output should start with something like `-rwsr-xr-x 1 root root`. You may need to repeat this after deleting or reinstalling `node_modules`. This should not be automated in `postinstall`; production Linux installs should handle sandbox setup through proper distro/package installer behavior.
 
 ### Scrypt note (optional)
 
@@ -211,35 +236,3 @@ The desktop app is built with Electron, React, and libp2p.
 - Session: Session uses its own network of nodes to send and store messages. Kiyeovo uses pure libp2p and stores offline messages in the DHT - simpler, but not guaranteed "always-on".
 - Tox: Tox runs as one global P2P network. Kiyeovo splits things into two separate networks depending on the mode.
 - Ricochet: Ricochet is simple Tor-based messaging. Kiyeovo is more full-featured, with groups, offline messages, file transfer, and calls (in fast mode).
-
-## Connect to already existing nodes
-
-These nodes will be shut down on April 19th 2026.
-
-1. Frankfurt
-    - Anonymous mode Bootstrap: /onion3/rnuq4snx4mpxu26z5t6kkimba2gkjmvuqbc3p5vkgwzafc346fxwb3yd:9000/p2p/12D3KooWM8ZWvVdr2SGo7S2zZ2mCfJoeg6YH6x9KYnM1adzq56Uu
-    - Fast mode Bootstrap: /ip4/188.166.161.63/tcp/9000/p2p/12D3KooWBWfaXd9YLkA2VwRAggsiG3ccTmEwGCdn7uJc3fE8qai9
-    - Relay: /ip4/188.166.161.63/tcp/4002/p2p/12D3KooWLYvrbj3mXSM32Jfie9apftrNsBsJN2Ewv1EPWsGY5nei
-    - STUN: stun:188.166.161.63
-    - TURN: turn:188.166.161.63:3478?transport=udp kiyeovo:marinparin
-
-2. Amsterdam
-    - Anonymous mode Bootstrap: /onion3/iwear2jljjwcjunmwipd5ibusoifbxgreir6brfuot3imk37yor2sfad:9000/p2p/12D3KooWQ5ezKjZ1zYqCsHYdh2tqZ9rxXmXb3URPVrLbCqCWDdBY
-    - Fast mode Bootstrap: /ip4/68.183.15.8/tcp/9000/p2p/12D3KooWEL2tNuaYNxKE9fh4KufvW9TnjzmnS1xBFdbUYtq8N5qx
-    - Relay: /ip4/68.183.15.8/tcp/4002/p2p/12D3KooWRpVU72wHWFEQidYtNhGNvWNHq4rYgk4a8oy2gsEDitcU
-    - STUN: stun:68.183.15.8:3478
-    - TURN: turn:68.183.15.8:3478?transport=udp kiyeovo:marinparin
-
-3. New York
-    - Anonymous mode Bootstrap: /onion3/yzwpxyhhydqka3zbip4om6ufhsbhoyp4bvzakimtj6eeqothaybrayyd:9000/p2p/12D3KooWDXLMQhUJQ3CQzhkQTwN8PiCYvdACfUXmV4tvdy79SfLp
-    - Fast mode Bootstrap: /ip4/157.230.222.64/tcp/9000/p2p/12D3KooWRDGQrpo1rFBLuhjzkj5dX89u1UuRizKYcYtdwop3rc8V
-    - Relay: /ip4/157.230.222.64/tcp/4002/p2p/12D3KooWBEEs9DJiBSExDYdT92FBeDuAnABrBQgN9WB6k98UAUPF
-    - STUN: stun:157.230.222.64:3478
-    - TURN: turn:157.230.222.64:3478?transport=udp kiyeovo:marinparin
-
-4. San Francisco
-    - Anonymous mode Bootstrap: /onion3/pxp6m3daukt7yrn7h76vryazz3azurwspnc75rtduphyo5qua77g7iqd:9000/p2p/12D3KooWPoLM2YyAgfACU27Dds7ELL4DwabrsUH39kdjv9SKRuFw
-    - Fast mode Bootstrap: /ip4/143.198.137.240/tcp/9000/p2p/12D3KooWL9V168N9rzJ2HP5aWKdJMUDtbYWca5ojDtELWWggddVu
-    - Relay: /ip4/143.198.137.240/tcp/4002/p2p/12D3KooWKx9xPFweD6isahRpjkNR6BxEtJKpbZvvfskb44E8q83x
-    - STUN: stun:143.198.137.240:3478
-    - TURN: turn:143.198.137.240:3478?transport=udp kiyeovo:antique_cash_123

@@ -30,5 +30,6 @@
   "include": [
     "../electron/**/*",
     "../core/**/*",
+    "../shared/**/*"
   ]
 }

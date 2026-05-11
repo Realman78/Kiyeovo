@@ -1,16 +1,19 @@
-import type { PeerId, Stream } from '@libp2p/interface';
+import type { Connection, PeerId, Stream } from '@libp2p/interface';
 import { multiaddr } from '@multiformats/multiaddr';
 
 import type { ChatNode } from '../types.js';
 import { NETWORK_MODES, getNetworkModeConfig } from '../constants.js';
 import type { ChatDatabase } from '../db/database.js';
 import { getConfiguredFastRelayAddrs } from '../network/node-relays.js';
+import { triggerFastRelayRefresh } from '../network/relay-keepalive.js';
+import { isStaleDialError } from './dial-errors.js';
 import { log } from '../../shared/logger.js';
 import { errStr } from '../utils/general-error.js';
 
 const PRIVATE_ONLY_DIRECT_DIAL_TIMEOUT_MS = 2_000;
 const FAST_MODE_DIRECT_DIAL_TIMEOUT_MS = 10_000;
 const FAST_MODE_RELAY_DIAL_TIMEOUT_MS = 10_000;
+const REUSE_EXISTING_CONNECTION_TIMEOUT_MS = 5_000;
 
 type DialProtocolWithRelayFallbackParams = {
   node: ChatNode;
@@ -80,6 +83,34 @@ async function getKnownAddressSnapshot(node: ChatNode, targetPeerId: PeerId): Pr
   }
 }
 
+async function tryReuseExistingConnection(
+  existingConnections: Connection[],
+  protocol: string,
+  dialOptions: { runOnLimitedConnection: boolean },
+  targetPeer: string,
+  context: string,
+): Promise<Stream | null> {
+  for (const existingConnection of existingConnections) {
+    const connAddr = existingConnection.remoteAddr.toString();
+    const startedAt = Date.now();
+    try {
+      return await existingConnection.newStream(protocol, {
+        ...dialOptions,
+        signal: AbortSignal.timeout(REUSE_EXISTING_CONNECTION_TIMEOUT_MS),
+      });
+    } catch (reuseError: unknown) {
+      console.warn(
+        `[DIAL][${context}] existing connection newStream failed via=${connAddr} ` +
+        `target=${targetPeer} durationMs=${Date.now() - startedAt} reason=${errStr(reuseError)}`,
+      );
+      if (isStaleDialError(reuseError)) {
+        throw reuseError;
+      }
+    }
+  }
+  return null;
+}
+
 async function shouldUseShortDirectTimeout(node: ChatNode, targetPeerId: PeerId): Promise<boolean> {
   const targetPeer = targetPeerId.toString();
   const hasActiveConnection = node.getConnections().some((connection) => connection.remotePeer.toString() === targetPeer);
@@ -126,7 +157,90 @@ async function dialWithTimeout(
   }
 }
 
+async function closeTargetPeerConnections(
+  node: ChatNode,
+  targetPeer: string,
+  context: string,
+): Promise<void> {
+  const connections = node
+    .getConnections()
+    .filter((connection) => connection.remotePeer.toString() === targetPeer);
+
+  if (connections.length === 0) {
+    log(`[DIAL][${context}] stale recovery found no active connections to close target=${targetPeer}`);
+    return;
+  }
+
+  log(`[DIAL][${context}] stale recovery closing ${connections.length} connection(s) target=${targetPeer}`);
+
+  const closeResults = await Promise.allSettled(connections.map((connection) => connection.close()));
+  const failed = closeResults.filter((result) => result.status === 'rejected');
+  if (failed.length > 0) {
+    console.warn(`[DIAL][${context}] stale recovery failed to close ${failed.length}/${connections.length} connection(s)`);
+  }
+}
+
+const inFlightRecoveriesByPeer = new Map<string, Promise<void>>();
+
+async function recoverFromStaleMuxerDialError(
+  params: DialProtocolWithRelayFallbackParams,
+  error: unknown,
+): Promise<void> {
+  const { node, database, targetPeerId, context } = params;
+  const targetPeer = targetPeerId.toString();
+  const networkMode = database.getSessionNetworkMode();
+  const existingRecovery = inFlightRecoveriesByPeer.get(targetPeer);
+
+  if (existingRecovery !== undefined) {
+    log(`[DIAL][${context}] stale recovery already in flight target=${targetPeer}`);
+    await existingRecovery;
+    return;
+  }
+
+  console.warn(
+    `[DIAL][${context}] stale muxer detected target=${targetPeer} reason=${errStr(error)}; ` +
+    'recovering and retrying once',
+  );
+
+  const recovery = (async () => {
+    await closeTargetPeerConnections(node, targetPeer, context);
+
+    if (networkMode === NETWORK_MODES.FAST) {
+      try {
+        await triggerFastRelayRefresh();
+      } catch (refreshError: unknown) {
+        console.warn(`[DIAL][${context}] stale recovery relay refresh failed reason=${errStr(refreshError)}`);
+      }
+    }
+  })();
+
+  inFlightRecoveriesByPeer.set(targetPeer, recovery);
+
+  try {
+    await recovery;
+  } finally {
+    if (inFlightRecoveriesByPeer.get(targetPeer) === recovery) {
+      inFlightRecoveriesByPeer.delete(targetPeer);
+    }
+  }
+}
+
 export async function dialProtocolWithRelayFallback(
+  params: DialProtocolWithRelayFallbackParams
+): Promise<Stream> {
+  try {
+    return await dialProtocolWithRelayFallbackOnce(params);
+  } catch (error: unknown) {
+    if (!isStaleDialError(error)) {
+      throw error;
+    }
+
+    await recoverFromStaleMuxerDialError(params, error);
+    return dialProtocolWithRelayFallbackOnce(params);
+  }
+}
+
+async function dialProtocolWithRelayFallbackOnce(
   params: DialProtocolWithRelayFallbackParams
 ): Promise<Stream> {
   const {
@@ -150,10 +264,10 @@ export async function dialProtocolWithRelayFallback(
 
   const dialOptions = { runOnLimitedConnection: true };
   const targetPeer = targetPeerId.toString();
-  const activeConnections = node
+  const existingConnections = node
     .getConnections()
-    .filter((connection) => connection.remotePeer.toString() === targetPeer)
-    .map((connection) => connection.remoteAddr.toString());
+    .filter((connection) => connection.remotePeer.toString() === targetPeer);
+  const activeConnections = existingConnections.map((connection) => connection.remoteAddr.toString());
   const knownAddressSnapshot = await getKnownAddressSnapshot(node, targetPeerId);
   log(
     `[DIAL][${context}] decision target=${targetPeer} ` +
@@ -163,6 +277,19 @@ export async function dialProtocolWithRelayFallback(
     `directPublic=${knownAddressSnapshot.directPublic.length > 0 ? knownAddressSnapshot.directPublic.join(',') : 'none'} ` +
     `circuit=${knownAddressSnapshot.circuit.length > 0 ? knownAddressSnapshot.circuit.join(',') : 'none'}`,
   );
+
+  if (existingConnections.length > 0) {
+    const reusedStream = await tryReuseExistingConnection(
+      existingConnections,
+      protocol,
+      dialOptions,
+      targetPeer,
+      context,
+    );
+    if (reusedStream !== null) {
+      return reusedStream;
+    }
+  }
   const directDialOptions = {
     ...dialOptions,
     ...(networkMode === NETWORK_MODES.FAST && await shouldUseShortDirectTimeout(node, targetPeerId)

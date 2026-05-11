@@ -289,7 +289,7 @@ Behavior highlights:
 - media controls: mute/deafen
 - video UI includes compact/fullscreen variants and stream swap controls
 - ICE servers default from `DEFAULT_WEBRTC_ICE_SERVERS` in `src/core/network/default-infrastructure.ts`
-- fast mode now has a runtime ICE editor in `Connection status -> Calls`
+- fast mode has a runtime ICE editor in `Connection status -> Calls`
 - runtime overrides are stored in the settings table and loaded by renderer `CallService` when a call starts or is accepted
 - validation is format-based only; there is no built-in health check for STUN/TURN reachability
 
@@ -461,8 +461,30 @@ UI is event-driven while core remains authoritative.
    - `contextIsolation: true`
    - `nodeIntegration: false`
    - renderer CSP present in `index.html`
-   - `webPreferences.sandbox` is currently disabled for compatibility across Linux environments
-   - development launch currently uses Electron `--no-sandbox` for broader VM/distro compatibility
+   - `webPreferences.sandbox: true`
+   - packaged UI is served via a custom `kiyeovo://app/...` protocol instead of `file://`
+   - packaged builds flip a minimal Electron fuse set via `electron-builder`:
+     - disable `runAsNode`
+     - disable `NODE_OPTIONS` / `NODE_EXTRA_CA_CERTS`
+     - disable Node inspector CLI flags
+     - disable extra `file://` privileges
+     - enable embedded ASAR integrity validation
+     - leave `OnlyLoadAppFromAsar` for a later follow-up
+   - preload is bundled as a standalone artifact so it remains compatible with sandboxed Electron preload constraints
+   - the renderer bridge is an explicit whitelist exposed through `contextBridge`; raw `ipcRenderer` is not exposed to the UI
+   - unpackaged Linux development may still require machine-level `chrome-sandbox` helper setup on some VM/distro combinations
+   - IPC sender validation in the main process:
+     - only the main app window's main frame can invoke privileged IPC handlers
+     - untrusted IPC senders are rejected and logged in the main process
+   - navigation blocking in the main window:
+     - deny unexpected navigations away from the trusted app UI
+     - `target="_blank"` / new-window requests are denied inside Electron
+     - only an explicit allowlist of trusted external `https` URLs is opened via the OS browser
+     - the policy is centralized in the Electron layer rather than embedded inline in startup orchestration
+   - embedded `webview` usage is explicitly blocked because Kiyeovo does not rely on in-app website embedding
+   - explicit session permission handling:
+     - deny renderer permission requests by default
+     - allow only trusted main-frame requests for `media` and sanitized clipboard writes, preserving calls and copy actions without broad renderer permission grants
 
 ---
 
@@ -486,7 +508,8 @@ Current resilience layers:
 - Group control delivery is ACK/republish based (not strict real-time consensus).
 - Calls are currently fast-mode direct-chat only (1:1, no group call).
 - STUN/TURN validation is format-only; there is no live health-check/testing UI yet.
-- Electron renderer sandboxing is still a follow-up hardening task rather than the current release default.
+- On some Linux environments, sandboxed unpackaged Electron runs may still require host-specific sandbox-helper setup during development.
+- Unpackaged restart uses an explicit relaunch path for Linux development robustness; packaged releases still target the standard Electron relaunch behavior.
 
 ---
 
@@ -513,7 +536,7 @@ To quickly bootstrap a new AI chat:
 
 ### 18. Conclusion
 
-Kiyeovo Desktop MVP now combines:
+Kiyeovo Desktop MVP combines:
 - mode-aware P2P messaging
 - robust offline fallback
 - group state reconciliation and encrypted group metadata distribution

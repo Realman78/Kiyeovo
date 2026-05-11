@@ -1,4 +1,4 @@
-import type { IpcMain, BrowserWindow } from 'electron';
+import type { BrowserWindow } from 'electron';
 import { app, dialog, Notification, shell } from 'electron';
 import {
   IPC_CHANNELS,
@@ -36,8 +36,11 @@ import { copyFile, stat } from 'fs/promises';
 import { log } from '../shared/logger.js';
 import { errStr } from '../core/utils/general-error.js';
 import { ChatDatabase } from '../core/db/database.js';
+import { scheduleAppRelaunch } from './relaunch.js';
+import { createTrustedIpcMainHandle, type IpcMainHandleRegistrar } from './trusted-ipc.js';
 
 function requestAppRestart(): void {
+  scheduleAppRelaunch();
   (app as typeof app & { __kiyeovoRestartRequested?: boolean }).__kiyeovoRestartRequested = true;
   app.quit();
 }
@@ -192,67 +195,69 @@ function getConfiguredIceServers(database: ChatDatabase): IceServerConfig[] {
  * Setup all IPC handlers for communication between renderer and main process
  */
 export function setupIPCHandlers(
-  ipcMain: IpcMain,
+  ipcMain: IpcMainHandleRegistrar,
   getP2PCore: () => P2PCore | null,
   getMainWindow: () => BrowserWindow | null
 ): void {
+  const trustedIpcMain = createTrustedIpcMainHandle(ipcMain, getMainWindow);
+
   // Registration handlers
-  setupRegistrationHandlers(ipcMain, getP2PCore);
+  setupRegistrationHandlers(trustedIpcMain, getP2PCore);
 
   // Messaging handlers
-  setupMessagingHandlers(ipcMain, getP2PCore);
+  setupMessagingHandlers(trustedIpcMain, getP2PCore);
 
   // Call signaling handlers
-  setupCallHandlers(ipcMain, getP2PCore);
+  setupCallHandlers(trustedIpcMain, getP2PCore);
 
   // Contact request handlers
-  setupContactRequestHandlers(ipcMain, getP2PCore);
+  setupContactRequestHandlers(trustedIpcMain, getP2PCore);
 
   // Bootstrap node handlers
-  setupBootstrapHandlers(ipcMain, getP2PCore);
+  setupBootstrapHandlers(trustedIpcMain, getP2PCore);
 
   // Contact attempt handlers
-  setupContactAttemptHandlers(ipcMain, getP2PCore);
+  setupContactAttemptHandlers(trustedIpcMain, getP2PCore);
 
   // Trusted user import/export handlers
-  setupTrustedUserHandlers(ipcMain, getP2PCore);
+  setupTrustedUserHandlers(trustedIpcMain, getP2PCore);
 
   // File dialog handlers
-  setupFileDialogHandlers(ipcMain);
+  setupFileDialogHandlers(trustedIpcMain);
 
   // Chat handlers
-  setupChatHandlers(ipcMain, getP2PCore);
+  setupChatHandlers(trustedIpcMain, getP2PCore);
 
   // Message handlers
-  setupMessageHandlers(ipcMain, getP2PCore);
+  setupMessageHandlers(trustedIpcMain, getP2PCore);
 
   // Pending key exchange handlers
-  setupPendingKeyExchangeHandlers(ipcMain, getP2PCore);
+  setupPendingKeyExchangeHandlers(trustedIpcMain, getP2PCore);
 
   // Offline message handlers
-  setupOfflineMessageHandlers(ipcMain, getP2PCore);
+  setupOfflineMessageHandlers(trustedIpcMain, getP2PCore);
 
   // Notification handlers
-  setupNotificationHandlers(ipcMain, getMainWindow);
+  setupNotificationHandlers(trustedIpcMain, getMainWindow);
 
   // Chat settings handlers
-  setupChatSettingsHandlers(ipcMain, getP2PCore, getMainWindow);
+  setupChatSettingsHandlers(trustedIpcMain, getP2PCore, getMainWindow);
 
   // File transfer handlers
-  setupFileTransferHandlers(ipcMain, getP2PCore);
+  setupFileTransferHandlers(trustedIpcMain, getP2PCore);
 
   // Group chat handlers
-  setupGroupHandlers(ipcMain, getP2PCore);
+  setupGroupHandlers(trustedIpcMain, getP2PCore);
 
   // App handlers
-  setupAppHandlers(ipcMain, getP2PCore);
+  setupAppHandlers(trustedIpcMain, getP2PCore);
 }
 
 /**
  * Username registration handlers
  */
 function setupRegistrationHandlers(
-  ipcMain: IpcMain,
+  ipcMain: IpcMainHandleRegistrar,
   getP2PCore: () => P2PCore | null
 ): void {
   ipcMain.handle(IPC_CHANNELS.REGISTER_REQUEST, async (_event, username: string, rememberMe: boolean) => {
@@ -386,7 +391,7 @@ function setupRegistrationHandlers(
  * Message sending handlers
  */
 function setupMessagingHandlers(
-  ipcMain: IpcMain,
+  ipcMain: IpcMainHandleRegistrar,
   getP2PCore: () => P2PCore | null
 ): void {
   ipcMain.handle(IPC_CHANNELS.SEND_MESSAGE_REQUEST, async (_event, identifier: string, message: string) => {
@@ -480,7 +485,7 @@ function setupMessagingHandlers(
 }
 
 function setupCallHandlers(
-  ipcMain: IpcMain,
+  ipcMain: IpcMainHandleRegistrar,
   getP2PCore: () => P2PCore | null
 ): void {
   ipcMain.handle(IPC_CHANNELS.CALL_START, async (_event, peerId: string, callId: string, offerSdp: string, mediaType: 'audio' | 'video' = 'audio') => {
@@ -544,7 +549,7 @@ function setupCallHandlers(
  * Contact request handlers
  */
 function setupContactRequestHandlers(
-  ipcMain: IpcMain,
+  ipcMain: IpcMainHandleRegistrar,
   getP2PCore: () => P2PCore | null
 ): void {
   ipcMain.handle(IPC_CHANNELS.ACCEPT_CONTACT_REQUEST, async (_event, peerId: string) => {
@@ -609,7 +614,7 @@ function setupContactRequestHandlers(
  * Bootstrap node management handlers
  */
 function setupBootstrapHandlers(
-  ipcMain: IpcMain,
+  ipcMain: IpcMainHandleRegistrar,
   getP2PCore: () => P2PCore | null
 ): void {
   const failConnectionNodesResponse = (error: string): ConnectionNodesResponse => ({
@@ -907,7 +912,7 @@ function setupBootstrapHandlers(
 
 // Contact attempt handlers
 function setupContactAttemptHandlers(
-  ipcMain: IpcMain,
+  ipcMain: IpcMainHandleRegistrar,
   getP2PCore: () => P2PCore | null
 ): void {
   ipcMain.handle(IPC_CHANNELS.GET_CONTACT_ATTEMPTS, async () => {
@@ -943,7 +948,7 @@ function setupContactAttemptHandlers(
  * Trusted user import handlers
  */
 function setupTrustedUserHandlers(
-  ipcMain: IpcMain,
+  ipcMain: IpcMainHandleRegistrar,
   getP2PCore: () => P2PCore | null
 ): void {
   ipcMain.handle(IPC_CHANNELS.IMPORT_TRUSTED_USER, async (_event, filePath: string, password: string, customName?: string) => {
@@ -1053,7 +1058,7 @@ function setupTrustedUserHandlers(
 /**
  * File dialog handlers
  */
-function setupFileDialogHandlers(ipcMain: IpcMain): void {
+function setupFileDialogHandlers(ipcMain: IpcMainHandleRegistrar): void {
   ipcMain.handle(IPC_CHANNELS.SHOW_OPEN_DIALOG, async (_event, options: {
     title?: string;
     filters?: Array<{ name: string; extensions: string[] }>;
@@ -1128,7 +1133,7 @@ function setupFileDialogHandlers(ipcMain: IpcMain): void {
  * Chat handlers
  */
 function setupChatHandlers(
-  ipcMain: IpcMain,
+  ipcMain: IpcMainHandleRegistrar,
   getP2PCore: () => P2PCore | null
 ): void {
   ipcMain.handle(IPC_CHANNELS.GET_CHATS, async () => {
@@ -1194,7 +1199,7 @@ function setupChatHandlers(
  * Message handlers
  */
 function setupMessageHandlers(
-  ipcMain: IpcMain,
+  ipcMain: IpcMainHandleRegistrar,
   getP2PCore: () => P2PCore | null
 ): void {
   ipcMain.handle(IPC_CHANNELS.GET_MESSAGES, async (_event, chatId: number, limit?: number, offset?: number) => {
@@ -1219,7 +1224,7 @@ function setupMessageHandlers(
  * Pending key exchange handlers
  */
 function setupPendingKeyExchangeHandlers(
-  ipcMain: IpcMain,
+  ipcMain: IpcMainHandleRegistrar,
   getP2PCore: () => P2PCore | null
 ): void {
   ipcMain.handle(IPC_CHANNELS.CANCEL_PENDING_KEY_EXCHANGE, async (_event, peerId: string) => {
@@ -1258,7 +1263,7 @@ function getOfflineCheckCacheKey(chatIds?: number[]): string {
  * Offline message handlers
  */
 function setupOfflineMessageHandlers(
-  ipcMain: IpcMain,
+  ipcMain: IpcMainHandleRegistrar,
   getP2PCore: () => P2PCore | null
 ): void {
   // Check offline messages for specific chats (or top 10 if no IDs provided)
@@ -1364,7 +1369,7 @@ function setupOfflineMessageHandlers(
  * Notification handlers
  */
 function setupNotificationHandlers(
-  ipcMain: IpcMain,
+  ipcMain: IpcMainHandleRegistrar,
   getMainWindow: () => BrowserWindow | null
 ): void {
   // Show desktop notification
@@ -1390,7 +1395,7 @@ function setupNotificationHandlers(
 
           // Send chat ID to renderer so it can navigate
           if (options.chatId) {
-            mainWindow.webContents.send('notification:clicked', options.chatId);
+            mainWindow.webContents.send(IPC_CHANNELS.NOTIFICATION_CLICKED, options.chatId);
           }
         }
       });
@@ -1431,7 +1436,7 @@ function setupNotificationHandlers(
  * Chat settings handlers
  */
 function setupChatSettingsHandlers(
-  ipcMain: IpcMain,
+  ipcMain: IpcMainHandleRegistrar,
   getP2PCore: () => P2PCore | null,
   getMainWindow: () => BrowserWindow | null
 ): void {
@@ -1901,7 +1906,7 @@ function setupChatSettingsHandlers(
  * Group chat handlers
  */
 function setupGroupHandlers(
-  ipcMain: IpcMain,
+  ipcMain: IpcMainHandleRegistrar,
   getP2PCore: () => P2PCore | null
 ): void {
   const buildGroupCreator = (p2pCore: P2PCore, username: string) => new GroupCreator({
@@ -2357,7 +2362,7 @@ function setupGroupHandlers(
   });
 }
 
-function setupAppHandlers(ipcMain: IpcMain, getP2PCore: () => P2PCore | null): void {
+function setupAppHandlers(ipcMain: IpcMainHandleRegistrar, getP2PCore: () => P2PCore | null): void {
   ipcMain.handle(IPC_CHANNELS.RESTART_APP, async () => {
     try {
       requestAppRestart();
@@ -2495,7 +2500,7 @@ function setupAppHandlers(ipcMain: IpcMain, getP2PCore: () => P2PCore | null): v
  * File transfer handlers
  */
 function setupFileTransferHandlers(
-  ipcMain: IpcMain,
+  ipcMain: IpcMainHandleRegistrar,
   getP2PCore: () => P2PCore | null
 ): void {
   // Send file

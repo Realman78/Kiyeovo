@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, session } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -37,6 +37,12 @@ import { ChatDatabase } from '../core/db/database.js';
 import type { NetworkMode } from '../core/types.js';
 import { log } from '../shared/logger.js';
 import { errStr } from '../core/utils/general-error.js';
+import { scheduleAppRelaunch } from './relaunch.js';
+import { createTrustedIpcMainHandle } from './trusted-ipc.js';
+import { applyWindowSecurityPolicies } from './window-security.js';
+import { applySessionSecurityPolicies } from './session-security.js';
+import { DEV_SERVER_URL } from './constants.js';
+import { getPackagedAppEntryUrl, registerAppProtocolHandler, registerAppProtocolScheme } from './app-protocol.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -50,6 +56,10 @@ let isCoreInitialized = false;
 let hasStartedInitialization = false;
 let requiresNetworkModeSelection = false;
 let pendingPasswordRequest: PasswordRequest | null = null;
+
+if (!isDev()) {
+  registerAppProtocolScheme();
+}
 
 // Enforce single instance
 const gotTheLock = app.requestSingleInstanceLock();
@@ -156,6 +166,8 @@ function createMainWindow() {
   const savedBounds = loadWindowBounds();
   const startupNetworkMode = readPersistedNetworkMode();
   const branding = getWindowBrandingForMode(startupNetworkMode);
+  const isDevelopment = isDev();
+  const appEntryUrl = isDevelopment ? DEV_SERVER_URL : getPackagedAppEntryUrl();
 
   const win = new BrowserWindow({
     // Use saved bounds if available, otherwise Electron will use defaults (centered)
@@ -174,7 +186,9 @@ function createMainWindow() {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false, // Disabled for beta version
+      sandbox: true,
+      webviewTag: false,
+      autoplayPolicy: 'no-user-gesture-required',
     }
   });
 
@@ -199,6 +213,7 @@ function createMainWindow() {
     enforceWindowTitle();
   });
   win.webContents.on('did-finish-load', enforceWindowTitle);
+  applyWindowSecurityPolicies(win, { appEntryUrl, isDevelopment });
 
   // Restore maximized state or maximize on first run
   if (savedBounds?.isMaximized || !savedBounds) {
@@ -211,11 +226,12 @@ function createMainWindow() {
   win.on('close', () => saveWindowBounds(win));
 
   // Load UI
-  if (isDev()) {
-    win.loadURL('http://localhost:3000');
+  if (isDevelopment) {
+    win.loadURL(DEV_SERVER_URL);
     win.webContents.openDevTools(); // Auto-open DevTools in development
   } else {
-    win.loadFile(path.join(__dirname, '..', '..', 'dist-ui', 'index.html'));
+    win.loadURL(appEntryUrl);
+    win.webContents.openDevTools(); // Auto-open DevTools in development
   }
 
   win.on('closed', () => {
@@ -603,14 +619,27 @@ async function initializeP2PAfterWindow() {
 async function initializeApp() {
   try {
     log('[Electron] Starting Kiyeovo...');
+    const trustedIpcMain = createTrustedIpcMainHandle(ipcMain, () => mainWindow);
+    const isDevelopment = isDev();
+    const appEntryUrl = isDevelopment ? DEV_SERVER_URL : getPackagedAppEntryUrl();
 
     // Setup minimal menu (keeps keyboard shortcuts working)
     setupMinimalMenu();
 
+    if (!isDevelopment) {
+      registerAppProtocolHandler();
+    }
+
+    applySessionSecurityPolicies(session.defaultSession, {
+      appEntryUrl,
+      isDevelopment,
+      getMainWindow: () => mainWindow,
+    });
+
     // Setup IPC handlers
     setupIPCHandlers(ipcMain, () => p2pCore, () => mainWindow);
     log('[Electron] IPC handlers registered');
-    ipcMain.handle(IPC_CHANNELS.INIT_STATE, () => {
+    trustedIpcMain.handle(IPC_CHANNELS.INIT_STATE, () => {
       return {
         initialized: isCoreInitialized,
         initStarted: hasStartedInitialization,
@@ -620,7 +649,7 @@ async function initializeApp() {
         pendingPasswordRequest,
       };
     });
-    ipcMain.handle(IPC_CHANNELS.INIT_START, async () => {
+    trustedIpcMain.handle(IPC_CHANNELS.INIT_START, async () => {
       try {
         if (isCoreInitialized) {
           return { success: true, error: null };
@@ -673,7 +702,7 @@ app.on('window-all-closed', () => {
 // Handle app activation (macOS)
 app.on('activate', () => {
   if (mainWindow === null && p2pCore !== null) {
-    void createMainWindow();
+    mainWindow = createMainWindow();
   }
 });
 
@@ -711,7 +740,7 @@ app.on('before-quit', async (event) => {
     const restartRequested = Boolean((app as typeof app & { __kiyeovoRestartRequested?: boolean }).__kiyeovoRestartRequested);
     if (restartRequested) {
       (app as typeof app & { __kiyeovoRestartRequested?: boolean }).__kiyeovoRestartRequested = false;
-      app.relaunch();
+      scheduleAppRelaunch();
     }
 
     app.exit(0);
@@ -721,11 +750,17 @@ app.on('before-quit', async (event) => {
   const restartRequested = Boolean((app as typeof app & { __kiyeovoRestartRequested?: boolean }).__kiyeovoRestartRequested);
   if (restartRequested) {
     (app as typeof app & { __kiyeovoRestartRequested?: boolean }).__kiyeovoRestartRequested = false;
-    app.relaunch();
+    scheduleAppRelaunch();
+    app.exit(0);
+    return;
   }
 });
 
 // Handle unhandled promise rejections
 process.on('unhandledRejection', (reason: unknown, promise: Promise<unknown>) => {
   console.error('[Electron] Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (error: Error) => {
+  console.error('[Electron] Uncaught Exception:', error);
 });

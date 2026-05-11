@@ -375,7 +375,10 @@ export class KeyExchange {
     const peerIdStr = targetPeerId.toString();
     const myUsername = this.getInitiatorUsername();
     const linkIntent = options?.linkIntent ?? this.resolveLinkIntent(peerIdStr);
-    this.assertCanInitiateKeyExchange(peerIdStr, targetUsername);
+    const hadExistingDirectChatAtStart = this.hasExistingDirectChat(peerIdStr);
+    this.assertCanInitiateKeyExchange(peerIdStr, targetUsername, {
+      skipRecentFailureRateLimit: hadExistingDirectChatAtStart,
+    });
     const startedAt = Date.now();
 
     const recipientOfflinePublicKeyBase64 = await this.resolveRecipientOfflinePublicKeyBase64(
@@ -446,7 +449,7 @@ export class KeyExchange {
       generalErrorHandler(error);
       this.sessionManager.removePendingKeyExchange(peerIdStr);
 
-      if (error instanceof Error && !error.message.includes('Rate limit')) {
+      if (error instanceof Error && !error.message.includes('Rate limit') && !this.hasExistingDirectChat(peerIdStr)) {
         this.database.logFailedKeyExchange(peerIdStr, targetUsername, message, error.message);
       }
 
@@ -467,13 +470,25 @@ export class KeyExchange {
     return myUser?.username || `user_${myPeerId.slice(-8)}`;
   }
 
-  private assertCanInitiateKeyExchange(peerIdStr: string, targetUsername: string): void {
+  private hasExistingDirectChat(peerIdStr: string): boolean {
+    return this.database.getChatByPeerId(peerIdStr) !== null;
+  }
+
+  private assertCanInitiateKeyExchange(
+    peerIdStr: string,
+    targetUsername: string,
+    options: { skipRecentFailureRateLimit?: boolean } = {},
+  ): void {
     if (this.keyExchangeAbortControllers.has(peerIdStr)) {
       throw new Error(`Already waiting for ${targetUsername} to accept your message request`);
     }
 
     if (this.sessionManager.getPendingKeyExchange(peerIdStr)) {
       throw new Error(`Already waiting for ${targetUsername} to accept your message request`);
+    }
+
+    if (options.skipRecentFailureRateLimit === true) {
+      return;
     }
 
     const recentFailure = this.database.getRecentFailedKeyExchange(peerIdStr, 5);
@@ -1650,6 +1665,10 @@ export class KeyExchange {
 
       if (message.type !== 'key_exchange') {
         console.warn(`[KEY-EXCHANGE][INIT_STREAM][UNEXPECTED] peer=${peerId} type=${message.type}`);
+        this.rejectPendingKeyExchangeResult(
+          peerId,
+          new Error(`Key exchange init stream returned unexpected type: ${message.type}`),
+        );
         return;
       }
 
@@ -1658,6 +1677,10 @@ export class KeyExchange {
       }
 
       console.warn(`[KEY-EXCHANGE][INIT_STREAM][UNEXPECTED] peer=${peerId} content=${message.content}`);
+      this.rejectPendingKeyExchangeResult(
+        peerId,
+        new Error(`Key exchange init stream returned unexpected content: ${message.content}`),
+      );
     } catch (streamError: unknown) {
       const activeConnections = this.node
         .getConnections()
@@ -1669,6 +1692,10 @@ export class KeyExchange {
         `sinceInitMs=${keyExchangeStartedAt === undefined ? 'unknown' : String(Date.now() - keyExchangeStartedAt)} ` +
         `activeConns=${activeConnections.length > 0 ? activeConnections.join(',') : 'none'} ` +
         `error=${errStr(streamError)}`,
+      );
+      this.rejectPendingKeyExchangeResult(
+        peerId,
+        new Error(`Key exchange init stream failed: ${errStr(streamError)}`),
       );
     } finally {
       try {
