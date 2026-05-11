@@ -666,9 +666,12 @@ export type CallSignalType =
   | 'CALL_ICE'
   | 'CALL_REJECT'
   | 'CALL_END'
-  | 'CALL_BUSY';
+  | 'CALL_BUSY'
+  | 'CALL_SCREEN_SHARE_STARTED'
+  | 'CALL_SCREEN_SHARE_STOPPED';
 
 export type CallMediaType = 'audio' | 'video';
+export type ScreenShareStopReason = 'manual' | 'track-ended' | 'call-ended' | 'failed';
 
 type BaseCallSignal = {
   type: CallSignalType;
@@ -713,13 +716,24 @@ export type CallBusySignal = BaseCallSignal & {
   reason: 'busy';
 };
 
+export type CallScreenShareStartedSignal = BaseCallSignal & {
+  type: 'CALL_SCREEN_SHARE_STARTED';
+};
+
+export type CallScreenShareStoppedSignal = BaseCallSignal & {
+  type: 'CALL_SCREEN_SHARE_STOPPED';
+  reason?: ScreenShareStopReason;
+};
+
 export type CallSignalMessage =
   | CallOfferSignal
   | CallAnswerSignal
   | CallIceSignal
   | CallRejectSignal
   | CallEndSignal
-  | CallBusySignal;
+  | CallBusySignal
+  | CallScreenShareStartedSignal
+  | CallScreenShareStoppedSignal;
 
 export type UnsignedCallSignalMessage =
   | Omit<CallOfferSignal, 'signature'>
@@ -727,7 +741,9 @@ export type UnsignedCallSignalMessage =
   | Omit<CallIceSignal, 'signature'>
   | Omit<CallRejectSignal, 'signature'>
   | Omit<CallEndSignal, 'signature'>
-  | Omit<CallBusySignal, 'signature'>;
+  | Omit<CallBusySignal, 'signature'>
+  | Omit<CallScreenShareStartedSignal, 'signature'>
+  | Omit<CallScreenShareStoppedSignal, 'signature'>;
 
 export type CallSignalOutgoingInput =
   | {
@@ -774,6 +790,19 @@ export type CallSignalOutgoingInput =
     callId: string;
     toPeerId: string;
     reason: 'busy';
+    timestamp?: number;
+  }
+  | {
+    type: 'CALL_SCREEN_SHARE_STARTED';
+    callId: string;
+    toPeerId: string;
+    timestamp?: number;
+  }
+  | {
+    type: 'CALL_SCREEN_SHARE_STOPPED';
+    callId: string;
+    toPeerId: string;
+    reason?: ScreenShareStopReason;
     timestamp?: number;
   };
 

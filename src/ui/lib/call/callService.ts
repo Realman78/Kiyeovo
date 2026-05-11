@@ -1,4 +1,11 @@
-import type { CallDirection, CallMediaType, CallSignal, CallStateChangedEvent, ScreenShareLifecycleState } from '../../types';
+import type {
+  CallDirection,
+  CallMediaType,
+  CallSignal,
+  CallStateChangedEvent,
+  ScreenShareLifecycleState,
+  ScreenShareStopReason,
+} from '../../types';
 import type { IceServerConfig } from '../../../core/types';
 import { DEFAULT_WEBRTC_ICE_SERVERS } from '../../../core/network/default-infrastructure';
 import { errStr } from '../../../core/utils/general-error';
@@ -9,8 +16,6 @@ type CurrentCall = {
   direction: CallDirection;
   mediaType: CallMediaType;
 };
-
-type ScreenShareStopReason = 'manual' | 'track-ended' | 'call-ended' | 'failed';
 
 const SCREEN_SHARE_UNSUPPORTED_MESSAGE = 'Screen sharing is not supported yet';
 
@@ -52,6 +57,8 @@ class CallService {
   private remoteAudio: HTMLAudioElement | null = null;
   private localScreenShareState: ScreenShareLifecycleState = 'idle';
   private isRemoteScreenSharing = false;
+  private localScreenShareAnnounced = false;
+  private remoteScreenShareLastSignalTs: number | null = null;
   private muted = false;
   private deafened = false;
   private pendingRemoteIce: RTCIceCandidateInit[] = [];
@@ -100,6 +107,54 @@ class CallService {
     if (this.localScreenShareState === state) return;
     this.localScreenShareState = state;
     this.emitScreenShareUpdate(context);
+  }
+
+  private setRemoteScreenSharing(
+    sharing: boolean,
+    context: CurrentCall | null = this.currentCall,
+  ): void {
+    if (this.isRemoteScreenSharing === sharing) return;
+    this.isRemoteScreenSharing = sharing;
+    this.emitScreenShareUpdate(context);
+  }
+
+  private async sendScreenShareStartedSignal(context: CurrentCall): Promise<void> {
+    const response = await window.kiyeovoAPI.sendCallSignal({
+      type: 'CALL_SCREEN_SHARE_STARTED',
+      callId: context.callId,
+      toPeerId: context.peerId,
+    });
+
+    if (!response.success) {
+      throw new Error(response.error || 'Failed to notify remote screen sharing started');
+    }
+  }
+
+  private async sendScreenShareStoppedSignal(
+    context: CurrentCall,
+    reason: ScreenShareStopReason,
+  ): Promise<void> {
+    const response = await window.kiyeovoAPI.sendCallSignal({
+      type: 'CALL_SCREEN_SHARE_STOPPED',
+      callId: context.callId,
+      toPeerId: context.peerId,
+      reason,
+    });
+
+    if (!response.success) {
+      throw new Error(response.error || 'Failed to notify remote screen sharing stopped');
+    }
+  }
+
+  private announceScreenShareStoppedBestEffort(
+    context: CurrentCall,
+    reason: ScreenShareStopReason,
+  ): void {
+    if (!this.localScreenShareAnnounced) return;
+    this.localScreenShareAnnounced = false;
+    void this.sendScreenShareStoppedSignal(context, reason).catch((error: unknown) => {
+      console.warn('[CallService] Failed to notify remote screen sharing stopped:', error);
+    });
   }
 
   private toRtcIceServers(servers: IceServerConfig[]): RTCIceServer[] {
@@ -318,6 +373,8 @@ class CallService {
     this.stopScreenCaptureTracks();
     this.localScreenShareState = 'idle';
     this.isRemoteScreenSharing = false;
+    this.localScreenShareAnnounced = false;
+    this.remoteScreenShareLastSignalTs = null;
     if (hadScreenShareState) {
       this.emitScreenShareUpdate(context);
     }
@@ -369,6 +426,7 @@ class CallService {
       this.sentDisconnectHangupCallId = context.callId;
     }
 
+    this.announceScreenShareStoppedBestEffort(context, reason === 'failed' ? 'failed' : 'call-ended');
     this.clearDisconnectTimer();
     this.clearRingTimeout();
     this.closePeerConnection();
@@ -547,6 +605,7 @@ class CallService {
   ): Promise<{ success: boolean; error?: string }> {
     const matchesCurrentCall = this.currentCall?.callId === callId && this.currentCall.peerId === peerId;
     if (matchesCurrentCall && this.currentCall) {
+      this.announceScreenShareStoppedBestEffort(this.currentCall, 'call-ended');
       this.clearDisconnectTimer();
       this.clearRingTimeout();
       this.closePeerConnection();
@@ -690,6 +749,35 @@ class CallService {
       };
 
       this.screenStream = stream;
+      try {
+        await this.sendScreenShareStartedSignal(context);
+        this.localScreenShareAnnounced = true;
+      } catch (signalError: unknown) {
+        this.stopScreenCaptureTracks();
+        this.setLocalScreenShareState('idle', context);
+        return {
+          success: false,
+          error: errStr(signalError, 'Failed to notify remote screen sharing started'),
+        };
+      }
+
+      const stillCurrentAfterSignal = this.currentCall?.callId === context.callId
+        && this.currentCall.peerId === context.peerId
+        && this.peerConnection?.connectionState === 'connected'
+        && this.screenStream === stream
+        && this.getScreenShareState().localState === 'starting';
+      if (!stillCurrentAfterSignal) {
+        try {
+          await this.sendScreenShareStoppedSignal(context, 'call-ended');
+        } catch {
+          // The call is already changing state; cleanup below is the important part.
+        }
+        this.localScreenShareAnnounced = false;
+        this.stopScreenCaptureTracks();
+        this.setLocalScreenShareState('idle', context);
+        return { success: false, canceled: true, error: 'Call ended before screen sharing started' };
+      }
+
       this.setLocalScreenShareState('sharing', context);
       return { success: true };
     } catch (error: unknown) {
@@ -707,26 +795,39 @@ class CallService {
   }
 
   async stopScreenShare(reason: ScreenShareStopReason = 'manual'): Promise<{ success: boolean; error?: string }> {
-    // Phase 2 will send this reason over signed screen-share signaling.
-    void reason;
-
     const context = this.currentCall;
     if (!context) {
       this.stopScreenCaptureTracks();
       this.localScreenShareState = 'idle';
+      this.localScreenShareAnnounced = false;
       return { success: true };
     }
 
     if (this.localScreenShareState === 'idle') {
       this.stopScreenCaptureTracks();
+      this.localScreenShareAnnounced = false;
       return { success: true };
     }
 
+    const shouldAnnounceStopped = this.localScreenShareAnnounced;
+    this.localScreenShareAnnounced = false;
     this.setLocalScreenShareState('stopping', context);
     this.stopScreenCaptureTracks();
 
-    // Phase 1 is local lifecycle only. Phase 3 will update the WebRTC sender here.
+    let signalError: string | null = null;
+    if (shouldAnnounceStopped) {
+      try {
+        await this.sendScreenShareStoppedSignal(context, reason);
+      } catch (error: unknown) {
+        signalError = errStr(error, 'Failed to notify remote screen sharing stopped');
+      }
+    }
+
+    // Phase 3 will update the WebRTC sender here.
     this.setLocalScreenShareState('idle', context);
+    if (signalError) {
+      console.warn('[CallService] Failed to notify remote screen sharing stopped:', signalError);
+    }
     return { success: true };
   }
 
@@ -748,6 +849,25 @@ class CallService {
     return this.deafened;
   }
 
+  private applyRemoteScreenShareSignal(signal: CallSignal): void {
+    if (!this.currentCall) return;
+    if (
+      signal.type === 'CALL_SCREEN_SHARE_STARTED'
+      && (this.localScreenShareState === 'starting' || this.localScreenShareState === 'sharing')
+    ) {
+      console.warn('[CallService] Ignoring remote screen share STARTED while local screen sharing is active');
+      return;
+    }
+
+    // Equal timestamps are allowed to apply in arrival order so same-ms STARTED/STOPPED pairs can settle correctly.
+    if (this.remoteScreenShareLastSignalTs !== null && signal.timestamp < this.remoteScreenShareLastSignalTs) {
+      return;
+    }
+
+    this.remoteScreenShareLastSignalTs = signal.timestamp;
+    this.setRemoteScreenSharing(signal.type === 'CALL_SCREEN_SHARE_STARTED', this.currentCall);
+  }
+
   async handleSignal(signal: CallSignal): Promise<void> {
     if (!this.currentCall) return;
     if (signal.callId !== this.currentCall.callId || signal.fromPeerId !== this.currentCall.peerId) return;
@@ -767,6 +887,10 @@ class CallService {
           return;
         case 'CALL_ICE':
           await this.addRemoteIce(signal);
+          return;
+        case 'CALL_SCREEN_SHARE_STARTED':
+        case 'CALL_SCREEN_SHARE_STOPPED':
+          this.applyRemoteScreenShareSignal(signal);
           return;
         case 'CALL_REJECT':
         case 'CALL_BUSY':

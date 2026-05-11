@@ -775,7 +775,9 @@ export class MessageHandler {
       || value === 'CALL_ICE'
       || value === 'CALL_REJECT'
       || value === 'CALL_END'
-      || value === 'CALL_BUSY';
+      || value === 'CALL_BUSY'
+      || value === 'CALL_SCREEN_SHARE_STARTED'
+      || value === 'CALL_SCREEN_SHARE_STOPPED';
   }
 
   private isCallSignalMessage(value: unknown): value is CallSignalMessage {
@@ -811,6 +813,14 @@ export class MessageHandler {
           || signal.reason === 'failed';
       case 'CALL_BUSY':
         return signal.reason === 'busy';
+      case 'CALL_SCREEN_SHARE_STARTED':
+        return true;
+      case 'CALL_SCREEN_SHARE_STOPPED':
+        return signal.reason === undefined
+          || signal.reason === 'manual'
+          || signal.reason === 'track-ended'
+          || signal.reason === 'call-ended'
+          || signal.reason === 'failed';
       default:
         return false;
     }
@@ -844,6 +854,10 @@ export class MessageHandler {
       case 'CALL_END':
       case 'CALL_BUSY':
         return { ...common, reason: signal.reason };
+      case 'CALL_SCREEN_SHARE_STARTED':
+        return common;
+      case 'CALL_SCREEN_SHARE_STOPPED':
+        return signal.reason ? { ...common, reason: signal.reason } : common;
       default:
         return common;
     }
@@ -924,6 +938,31 @@ export class MessageHandler {
           toPeerId: input.toPeerId,
           timestamp,
           reason: input.reason,
+        };
+        break;
+      case 'CALL_SCREEN_SHARE_STARTED':
+        unsignedSignal = {
+          type: 'CALL_SCREEN_SHARE_STARTED',
+          callId: input.callId,
+          fromPeerId,
+          toPeerId: input.toPeerId,
+          timestamp,
+        };
+        break;
+      case 'CALL_SCREEN_SHARE_STOPPED':
+        unsignedSignal = input.reason ? {
+          type: 'CALL_SCREEN_SHARE_STOPPED',
+          callId: input.callId,
+          fromPeerId,
+          toPeerId: input.toPeerId,
+          timestamp,
+          reason: input.reason,
+        } : {
+          type: 'CALL_SCREEN_SHARE_STOPPED',
+          callId: input.callId,
+          fromPeerId,
+          toPeerId: input.toPeerId,
+          timestamp,
         };
         break;
       default:
