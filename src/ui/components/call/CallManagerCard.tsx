@@ -46,6 +46,8 @@ function formatCallDuration(totalSeconds: number): string {
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 }
 
+const FULLSCREEN_IDLE_HIDE_DELAY_MS = 4000;
+
 export const CallManagerCard = () => {
   const { toast } = useToast();
   const activeCall = useAppSelector((state) => state.call.activeCall);
@@ -55,7 +57,9 @@ export const CallManagerCard = () => {
   const [isDeafened, setIsDeafened] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [isDraggingAnchor, setIsDraggingAnchor] = useState(false);
+  const [isCallCardHovered, setIsCallCardHovered] = useState(false);
   const [isVideoExpanded, setIsVideoExpanded] = useState(false);
+  const [isFullscreenControlsVisible, setIsFullscreenControlsVisible] = useState(true);
   const [isVideoStreamsSwapped, setIsVideoStreamsSwapped] = useState(false);
   const [localVideoStream, setLocalVideoStream] = useState<MediaStream | null>(null);
   const [remoteVideoStream, setRemoteVideoStream] = useState<MediaStream | null>(null);
@@ -64,7 +68,14 @@ export const CallManagerCard = () => {
   const smallVideoRef = useRef<HTMLVideoElement | null>(null);
   const compactRemotePreviewRef = useRef<HTMLVideoElement | null>(null);
   const previousAnchorRef = useRef<CallCardAnchor | null>(null);
+  const fullscreenIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { anchor, setAnchor, positionClassName, snapToClosestCorner } = useCallCardAnchor();
+
+  const clearFullscreenIdleTimer = () => {
+    if (!fullscreenIdleTimerRef.current) return;
+    clearTimeout(fullscreenIdleTimerRef.current);
+    fullscreenIdleTimerRef.current = null;
+  };
 
   const restoreAnchorAfterFullscreen = () => {
     if (!previousAnchorRef.current) return;
@@ -173,6 +184,48 @@ export const CallManagerCard = () => {
   const isSmallLocal = isRemoteScreenSharing || (!isLocalScreenSharing && !isRemoteScreenSharing && !isVideoStreamsSwapped);
   const compactPreviewStream = isLocalScreenSharing ? localVideoStream : remoteVideoStream;
   const compactPreviewLabel = isLocalScreenSharing ? 'Your screen' : activeCall?.peerName;
+  const shouldPinFullscreenControls = isDraggingAnchor
+    || isCallCardHovered
+    || isLocalScreenShareStarting
+    || isLocalScreenShareStopping;
+  const shouldFadeCallCard = isVideoExpanded
+    && !isFullscreenControlsVisible
+    && !shouldPinFullscreenControls;
+
+  useEffect(() => {
+    if (!isVideoExpanded) {
+      clearFullscreenIdleTimer();
+      setIsFullscreenControlsVisible(true);
+      return undefined;
+    }
+
+    const scheduleHide = () => {
+      clearFullscreenIdleTimer();
+      if (shouldPinFullscreenControls) return;
+      fullscreenIdleTimerRef.current = setTimeout(() => {
+        setIsFullscreenControlsVisible(false);
+      }, FULLSCREEN_IDLE_HIDE_DELAY_MS);
+    };
+
+    const revealControls = () => {
+      setIsFullscreenControlsVisible(true);
+      scheduleHide();
+    };
+
+    revealControls();
+    window.addEventListener('pointermove', revealControls);
+    window.addEventListener('pointerdown', revealControls);
+    window.addEventListener('keydown', revealControls);
+    window.addEventListener('wheel', revealControls);
+
+    return () => {
+      window.removeEventListener('pointermove', revealControls);
+      window.removeEventListener('pointerdown', revealControls);
+      window.removeEventListener('keydown', revealControls);
+      window.removeEventListener('wheel', revealControls);
+      clearFullscreenIdleTimer();
+    };
+  }, [isVideoExpanded, shouldPinFullscreenControls]);
 
   useEffect(() => {
     if (!activeCall) return;
@@ -294,12 +347,14 @@ export const CallManagerCard = () => {
   };
 
   const handleAnchorPointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    if (isVideoExpanded) return;
     if (event.button !== 0) return;
     event.preventDefault();
     const handle = event.currentTarget;
     const pointerId = event.pointerId;
+    const startClientX = event.clientX;
+    const startClientY = event.clientY;
     setIsDraggingAnchor(true);
+    setIsFullscreenControlsVisible(true);
 
     try {
       handle.setPointerCapture(pointerId);
@@ -320,6 +375,13 @@ export const CallManagerCard = () => {
 
     const onPointerUp = (upEvent: PointerEvent) => {
       cleanup();
+      const draggedEnoughToCount = Math.hypot(
+        upEvent.clientX - startClientX,
+        upEvent.clientY - startClientY,
+      ) > 4;
+      if (isVideoExpanded && draggedEnoughToCount) {
+        previousAnchorRef.current = null;
+      }
       snapToClosestCorner(upEvent.clientX, upEvent.clientY);
     };
 
@@ -334,7 +396,7 @@ export const CallManagerCard = () => {
   return (
     <>
       {isVisualCall && isVideoExpanded && (
-        <div className="fixed inset-0 z-108 bg-black/95">
+        <div className="fixed inset-0 z-90 bg-black/95">
           {largeHasVideo ? (
             <video
               ref={largeVideoRef}
@@ -421,12 +483,16 @@ export const CallManagerCard = () => {
         </div>
       )}
 
-      <div className={`fixed ${positionClassName} z-109 w-fit rounded-lg border border-border bg-card/95 backdrop-blur px-4 py-3 shadow-xl`}>
+      <div
+        className={`fixed ${positionClassName} z-100 w-fit rounded-lg border border-border bg-card/95 backdrop-blur px-4 py-3 shadow-xl transition-opacity duration-500 ${shouldFadeCallCard ? 'pointer-events-none opacity-0' : 'opacity-100'}`}
+        onPointerEnter={() => setIsCallCardHovered(true)}
+        onPointerLeave={() => setIsCallCardHovered(false)}
+      >
         <button
           type="button"
-          className={`absolute top-1 left-1 z-10 h-5 w-5 rounded text-muted-foreground transition hover:bg-accent/70 hover:text-foreground ${isVideoExpanded ? 'cursor-not-allowed opacity-50' : 'cursor-move'} ${isDraggingAnchor ? 'bg-accent/80 text-foreground' : ''}`}
-          title={isVideoExpanded ? 'Card position locked while fullscreen' : 'Drag to snap card position'}
-          aria-label={isVideoExpanded ? 'Card position locked while fullscreen' : 'Drag to snap card position'}
+          className={`absolute top-1 left-1 z-10 h-5 w-5 cursor-move rounded text-muted-foreground transition hover:bg-accent/70 hover:text-foreground ${isDraggingAnchor ? 'bg-accent/80 text-foreground' : ''}`}
+          title="Drag to snap card position"
+          aria-label="Drag to snap card position"
           onPointerDown={handleAnchorPointerDown}
         >
           <GripVertical className="mx-auto h-3.5 w-3.5" />
@@ -488,7 +554,7 @@ export const CallManagerCard = () => {
             </div>
           )}
           <Button
-            variant={isLocalScreenSharing ? 'secondary' : 'outline'}
+            variant={isLocalScreenSharing ? 'destructive' : 'outline'}
             size="sm"
             onClick={handleToggleScreenShare}
             disabled={!canToggleScreenShare}
