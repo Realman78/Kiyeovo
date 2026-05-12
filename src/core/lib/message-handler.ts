@@ -119,6 +119,7 @@ export class MessageHandler {
   private static readonly CALL_CONTROL_STALE_TOLERANCE_MS = 2000;
   private static readonly CALL_SHUTDOWN_HANGUP_MAX_WAIT_MS = 1500;
   private static readonly CALL_RING_STALE_TIMEOUT_MS = 35_000;
+  private static readonly CALL_PEER_DISCONNECT_GRACE_MS = 30_000;
   private node: ChatNode;
   private usernameRegistry: UsernameRegistry;
   private sessionManager: SessionManager;
@@ -165,6 +166,7 @@ export class MessageHandler {
   private activeCallLastControlSignalTs: number | null = null;
   private seenCallSignals = new Map<string, number>();
   private activeCallRingWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
+  private activeCallPeerDisconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   private formatNudgeTarget(payload: BucketNudgePayload): string {
     if (payload.kind === 'GROUP_REKEY_REFETCH') {
@@ -302,7 +304,10 @@ export class MessageHandler {
     }
     this.setupProtocolHandler();
     this.groupMessaging.start();
-    this.cleanupPeerEvents = PeerConnectionHandler.setupPeerEvents(node, this.sessionManager);
+    this.cleanupPeerEvents = PeerConnectionHandler.setupPeerEvents(node, this.sessionManager, {
+      onPeerConnect: (peerId) => this.handlePeerConnectForActiveCall(peerId),
+      onPeerDisconnect: (peerId) => this.handlePeerDisconnectForActiveCall(peerId),
+    });
     this.startSessionCleanup();
     this.startGroupAckRepublisher();
     this.startGroupInfoRepublisher();
@@ -658,6 +663,7 @@ export class MessageHandler {
     this.activeCall = null;
     this.activeCallLastControlSignalTs = null;
     this.clearCallRingWatchdog();
+    this.clearActiveCallPeerDisconnectTimer();
     this.onCallStateChanged({
       callId: previous.callId,
       peerId: previous.peerId,
@@ -673,6 +679,34 @@ export class MessageHandler {
     if (!this.activeCallRingWatchdogTimer) return;
     clearTimeout(this.activeCallRingWatchdogTimer);
     this.activeCallRingWatchdogTimer = null;
+  }
+
+  private clearActiveCallPeerDisconnectTimer(): void {
+    if (!this.activeCallPeerDisconnectTimer) return;
+    clearTimeout(this.activeCallPeerDisconnectTimer);
+    this.activeCallPeerDisconnectTimer = null;
+  }
+
+  private handlePeerConnectForActiveCall(peerId: string): void {
+    if (!this.activeCall || this.activeCall.peerId !== peerId) return;
+    this.clearActiveCallPeerDisconnectTimer();
+  }
+
+  private handlePeerDisconnectForActiveCall(peerId: string): void {
+    if (!this.activeCall || this.activeCall.peerId !== peerId) return;
+
+    this.clearActiveCallPeerDisconnectTimer();
+    const expectedCallId = this.activeCall.callId;
+    this.activeCallPeerDisconnectTimer = setTimeout(() => {
+      this.activeCallPeerDisconnectTimer = null;
+      if (!this.activeCall) return;
+      if (this.activeCall.peerId !== peerId || this.activeCall.callId !== expectedCallId) return;
+      if (this.hasActiveConnectionToPeer(peerId)) return;
+      console.warn(
+        `[CALL] Clearing stale active call after peer disconnect grace peer=${peerId.slice(-8)} callId=${expectedCallId.slice(0, 8)}`,
+      );
+      this.clearActiveCall('disconnect');
+    }, MessageHandler.CALL_PEER_DISCONNECT_GRACE_MS);
   }
 
   private scheduleCallRingWatchdog(activeCall: ActiveCall): void {
@@ -775,7 +809,9 @@ export class MessageHandler {
       || value === 'CALL_ICE'
       || value === 'CALL_REJECT'
       || value === 'CALL_END'
-      || value === 'CALL_BUSY';
+      || value === 'CALL_BUSY'
+      || value === 'CALL_SCREEN_SHARE_STARTED'
+      || value === 'CALL_SCREEN_SHARE_STOPPED';
   }
 
   private isCallSignalMessage(value: unknown): value is CallSignalMessage {
@@ -811,6 +847,14 @@ export class MessageHandler {
           || signal.reason === 'failed';
       case 'CALL_BUSY':
         return signal.reason === 'busy';
+      case 'CALL_SCREEN_SHARE_STARTED':
+        return true;
+      case 'CALL_SCREEN_SHARE_STOPPED':
+        return signal.reason === undefined
+          || signal.reason === 'manual'
+          || signal.reason === 'track-ended'
+          || signal.reason === 'call-ended'
+          || signal.reason === 'failed';
       default:
         return false;
     }
@@ -844,6 +888,10 @@ export class MessageHandler {
       case 'CALL_END':
       case 'CALL_BUSY':
         return { ...common, reason: signal.reason };
+      case 'CALL_SCREEN_SHARE_STARTED':
+        return common;
+      case 'CALL_SCREEN_SHARE_STOPPED':
+        return signal.reason ? { ...common, reason: signal.reason } : common;
       default:
         return common;
     }
@@ -924,6 +972,31 @@ export class MessageHandler {
           toPeerId: input.toPeerId,
           timestamp,
           reason: input.reason,
+        };
+        break;
+      case 'CALL_SCREEN_SHARE_STARTED':
+        unsignedSignal = {
+          type: 'CALL_SCREEN_SHARE_STARTED',
+          callId: input.callId,
+          fromPeerId,
+          toPeerId: input.toPeerId,
+          timestamp,
+        };
+        break;
+      case 'CALL_SCREEN_SHARE_STOPPED':
+        unsignedSignal = input.reason ? {
+          type: 'CALL_SCREEN_SHARE_STOPPED',
+          callId: input.callId,
+          fromPeerId,
+          toPeerId: input.toPeerId,
+          timestamp,
+          reason: input.reason,
+        } : {
+          type: 'CALL_SCREEN_SHARE_STOPPED',
+          callId: input.callId,
+          fromPeerId,
+          toPeerId: input.toPeerId,
+          timestamp,
         };
         break;
       default:
@@ -1071,6 +1144,16 @@ export class MessageHandler {
       if (this.isActiveCallMatch(remoteId, signal.callId)) {
         // Offer retry/duplicate for the same ringing call.
         return;
+      }
+
+      // Same peer dialing with a fresh callId means their previous call state
+      // is gone (e.g., they force-quit and reopened). Clear the stale entry
+      // and accept the new offer instead of replying busy to ourselves.
+      if (this.activeCall && this.activeCall.peerId === remoteId) {
+        console.warn(
+          `[CALL] Replacing stale active call after fresh offer from same peer peer=${remoteId.slice(-8)} oldCallId=${this.activeCall.callId.slice(0, 8)} newCallId=${signal.callId.slice(0, 8)}`,
+        );
+        this.clearActiveCall('disconnect');
       }
 
       const hasDifferentActiveCall = this.activeCall
@@ -2927,6 +3010,7 @@ export class MessageHandler {
     this.groupInfoSyncInFlight.clear();
     this.groupInfoSyncPending.clear();
     this.clearCallRingWatchdog();
+    this.clearActiveCallPeerDisconnectTimer();
     this.activeCall = null;
     this.activeCallLastControlSignalTs = null;
     this.seenCallSignals.clear();

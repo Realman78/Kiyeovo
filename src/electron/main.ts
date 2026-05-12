@@ -41,6 +41,7 @@ import { scheduleAppRelaunch } from './relaunch.js';
 import { createTrustedIpcMainHandle } from './trusted-ipc.js';
 import { applyWindowSecurityPolicies } from './window-security.js';
 import { applySessionSecurityPolicies } from './session-security.js';
+import { setupDisplayMediaPicker } from './display-media-picker.js';
 import { DEV_SERVER_URL } from './constants.js';
 import { getPackagedAppEntryUrl, registerAppProtocolHandler, registerAppProtocolScheme } from './app-protocol.js';
 
@@ -231,7 +232,6 @@ function createMainWindow() {
     win.webContents.openDevTools(); // Auto-open DevTools in development
   } else {
     win.loadURL(appEntryUrl);
-    win.webContents.openDevTools(); // Auto-open DevTools in development
   }
 
   win.on('closed', () => {
@@ -630,10 +630,13 @@ async function initializeApp() {
       registerAppProtocolHandler();
     }
 
+    const displayMediaPicker = setupDisplayMediaPicker(trustedIpcMain, () => mainWindow);
+
     applySessionSecurityPolicies(session.defaultSession, {
       appEntryUrl,
       isDevelopment,
       getMainWindow: () => mainWindow,
+      selectDisplayMediaSource: displayMediaPicker.selectDisplayMediaSource,
     });
 
     // Setup IPC handlers

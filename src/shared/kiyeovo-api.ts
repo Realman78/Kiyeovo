@@ -53,6 +53,26 @@ export type KiyeovoMessage = Message & {
   sender_username?: string;
 };
 
+export type ScreenShareSupportResponse = {
+  success: boolean;
+  supported: boolean;
+  message: string;
+  error: string | null;
+};
+
+export type ScreenShareSource = {
+  id: string;
+  name: string;
+  sourceType: 'screen' | 'window';
+  thumbnailDataUrl: string | null;
+  displayId: string | null;
+};
+
+export type ScreenShareSourceRequest = {
+  requestId: string;
+  sources: ScreenShareSource[];
+};
+
 export interface KiyeovoAPI {
   getAppConfig: () => Promise<{ success: boolean; config: AppConfig; error: string | null }>;
   setAppConfig: (config: AppConfig) => Promise<{ success: boolean; error: string | null }>;
@@ -113,6 +133,9 @@ export interface KiyeovoAPI {
     reason?: 'hangup' | 'disconnect' | 'failed',
   ) => Promise<{ success: boolean; error: string | null }>;
   sendCallSignal: (signal: CallSignalOutgoingInput) => Promise<{ success: boolean; error: string | null }>;
+  getScreenShareSupport: () => Promise<ScreenShareSupportResponse>;
+  onScreenShareSourceRequest: (callback: (request: ScreenShareSourceRequest) => void) => Unsubscribe;
+  selectScreenShareSource: (requestId: string, sourceId: string | null) => Promise<{ success: boolean; error: string | null }>;
   onCallIncoming: (callback: (data: CallIncomingEvent) => void) => Unsubscribe;
   onCallSignalReceived: (callback: (data: CallSignalReceivedEvent) => void) => Unsubscribe;
   onCallStateChanged: (callback: (data: CallStateChangedEvent) => void) => Unsubscribe;

@@ -26,7 +26,7 @@ The full version will come with:
 
 - big UX improvements
 - group audio/video calls (fast mode)
-- screen sharing in calls (fast mode)
+- screen sharing in calls *(Electron hardening added 12th of May)*
 - performance improvements
 - security hardening *(Electron hardening added 11th of May)*
 - easier self-hosted infrastructure setup

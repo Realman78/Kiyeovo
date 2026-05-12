@@ -9,6 +9,7 @@ export const ALLOWED_EXTERNAL_URLS = new Set([
 
 export const ALLOWED_RENDERER_PERMISSIONS = new Set([
   'media',
+  'display-capture',
   'speaker-selection',
   'clipboard-sanitized-write',
 ]);

@@ -31,6 +31,7 @@ Its goal is to provide complete context quickly in new AI conversations without 
   - encrypted group-info metadata in DHT versioned records
 - Calls are implemented for fast mode direct chats:
   - 1:1 audio/video
+  - screen sharing for active calls
   - signaling over `call-signal` protocol
   - WebRTC media path in renderer
 - File transfer uses a dedicated protocol with offer/accept/reject, chunked encrypted transfer, cancellation, and per-peer active-transfer limits.
@@ -274,24 +275,40 @@ Call support is implemented for direct chats in fast mode.
 
 Scope:
 - 1:1 audio and video
+- screen sharing inside active 1:1 calls
 - no group calls yet
 - no offline call queue (offline/unreachable peers fail immediately)
+- no system-audio sharing with screen share yet; microphone call audio continues through the normal call audio track
 
 Architecture:
-- signaling over `call-signal` protocol (`CALL_OFFER`, `CALL_ANSWER`, `CALL_ICE`, `CALL_REJECT`, `CALL_END`, `CALL_BUSY`)
+- signaling over `call-signal` protocol (`CALL_OFFER`, `CALL_ANSWER`, `CALL_ICE`, `CALL_REJECT`, `CALL_END`, `CALL_BUSY`, `CALL_SCREEN_SHARE_STARTED`, `CALL_SCREEN_SHARE_STOPPED`)
 - signaling signed and validated in core
 - renderer `CallService` owns `RTCPeerConnection` and media tracks
+- Electron main owns the Linux fallback source-picker request and only returns a display source selected by the trusted renderer
 
 Behavior highlights:
 - pre-check for direct contact and active connectivity before offer
 - outgoing ring timeout (30s)
 - busy/reject/end handling with local cleanup on both sides
 - media controls: mute/deafen
-- video UI includes compact/fullscreen variants and stream swap controls
+- video UI includes compact/fullscreen variants, stream swap controls, and fullscreen idle control fade
+- screen sharing replaces the main video surface while active; the camera is not kept as a second primary tile in the current phase
+- only one side may screen-share at a time; local sharing wins if a remote started signal arrives during local sharing
 - ICE servers default from `DEFAULT_WEBRTC_ICE_SERVERS` in `src/core/network/default-infrastructure.ts`
 - fast mode has a runtime ICE editor in `Connection status -> Calls`
 - runtime overrides are stored in the settings table and loaded by renderer `CallService` when a call starts or is accepted
 - validation is format-based only; there is no built-in health check for STUN/TURN reachability
+
+Screen sharing implementation notes:
+- calls pre-negotiate a shared video transceiver so screen sharing can start without mid-call SDP renegotiation
+- audio calls also pre-negotiate the optional video m-line; starting screen share replaces the shared video sender's track with the captured display track
+- video calls use the same shared sender for camera and screen; starting screen share replaces the camera track, and stopping restores the camera track
+- stopping screen share on an audio call replaces the shared video sender track with `null`
+- display capture is requested at up to 1920x1080 and 30fps, with `contentHint = "detail"` for screen/text readability
+- screen-share sender parameters currently cap bitrate at 4 Mbps and prefer maintaining resolution
+- remote screen-share UI is driven by signed STARTED/STOPPED call signals, not only by WebRTC track `ended`/`mute` state
+- macOS and supported portal-backed Linux environments can use the system picker; Linux fallback uses Electron `desktopCapturer` plus Kiyeovo's in-app source picker
+- if the source picker is cancelled or the call ends while it is open, captured tracks are stopped and no sharing state is committed
 
 ---
 
@@ -429,8 +446,15 @@ Main event sinks from Electron:
 - message/chat/group events
 - file transfer lifecycle events
 - call incoming/signal/state/error events
+- screen-share source selection requests from Electron main
 
 UI is event-driven while core remains authoritative.
+
+Call UI state:
+- Redux tracks active call state plus screen-share local lifecycle (`idle` / `starting` / `sharing` / `stopping`) and remote sharing state
+- `CallService` remains the owner of `RTCPeerConnection`, local/remote `MediaStream`s, display capture tracks, and sender replacement
+- fullscreen call controls sit above the fullscreen video surface, fade after idle, and reappear on user activity
+- dialogs are layered above call fullscreen controls so source pickers and safety prompts remain reachable
 
 ---
 
@@ -465,8 +489,8 @@ UI is event-driven while core remains authoritative.
    - packaged UI is served via a custom `kiyeovo://app/...` protocol instead of `file://`
    - packaged builds flip a minimal Electron fuse set via `electron-builder`:
      - disable `runAsNode`
-     - disable `NODE_OPTIONS` / `NODE_EXTRA_CA_CERTS`
-     - disable Node inspector CLI flags
+     - disable `enableNodeOptionsEnvironmentVariable`
+     - disable `enableNodeCliInspectArguments`
      - disable extra `file://` privileges
      - enable embedded ASAR integrity validation
      - leave `OnlyLoadAppFromAsar` for a later follow-up
@@ -484,7 +508,8 @@ UI is event-driven while core remains authoritative.
    - embedded `webview` usage is explicitly blocked because Kiyeovo does not rely on in-app website embedding
    - explicit session permission handling:
      - deny renderer permission requests by default
-     - allow only trusted main-frame requests for `media` and sanitized clipboard writes, preserving calls and copy actions without broad renderer permission grants
+     - allow only trusted main-frame requests for `media`, `display-capture`, `speaker-selection`, and sanitized clipboard writes, preserving calls, screen sharing, output-device switching, and copy actions without broad renderer permission grants
+     - display-media requests are additionally routed through Electron's display-media handling; the Linux fallback source selection uses trusted IPC and source IDs produced by main process enumeration
 
 ---
 
@@ -507,6 +532,7 @@ Current resilience layers:
 - Offline behavior is eventual consistency over DHT propagation.
 - Group control delivery is ACK/republish based (not strict real-time consensus).
 - Calls are currently fast-mode direct-chat only (1:1, no group call).
+- Screen sharing currently sends display video only; system/window audio sharing is intentionally out of scope for the current phase.
 - STUN/TURN validation is format-only; there is no live health-check/testing UI yet.
 - On some Linux environments, sandboxed unpackaged Electron runs may still require host-specific sandbox-helper setup during development.
 - Unpackaged restart uses an explicit relaunch path for Linux development robustness; packaged releases still target the standard Electron relaunch behavior.

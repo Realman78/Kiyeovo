@@ -15,6 +15,8 @@ export type MessageSentStatus = 'online' | 'offline' | null;
 export type CallDirection = 'incoming' | 'outgoing';
 export type CallLifecycleState = 'idle' | 'ringing_out' | 'ringing_in' | 'connecting' | 'active' | 'ended';
 export type CallMediaType = 'audio' | 'video';
+export type ScreenShareLifecycleState = 'idle' | 'starting' | 'sharing' | 'stopping';
+export type ScreenShareStopReason = 'manual' | 'track-ended' | 'call-ended' | 'failed';
 
 export type IncomingCallSignal = {
   type: 'CALL_OFFER';
@@ -28,7 +30,14 @@ export type IncomingCallSignal = {
 };
 
 export type CallSignal = {
-  type: 'CALL_ANSWER' | 'CALL_ICE' | 'CALL_REJECT' | 'CALL_END' | 'CALL_BUSY';
+  type:
+    | 'CALL_ANSWER'
+    | 'CALL_ICE'
+    | 'CALL_REJECT'
+    | 'CALL_END'
+    | 'CALL_BUSY'
+    | 'CALL_SCREEN_SHARE_STARTED'
+    | 'CALL_SCREEN_SHARE_STOPPED';
   callId: string;
   fromPeerId: string;
   toPeerId: string;
@@ -39,7 +48,16 @@ export type CallSignal = {
   sdpMid?: string | null;
   sdpMLineIndex?: number | null;
   usernameFragment?: string | null;
-  reason?: 'rejected' | 'timeout' | 'offline' | 'policy' | 'hangup' | 'disconnect' | 'failed' | 'busy';
+  reason?:
+    | 'rejected'
+    | 'timeout'
+    | 'offline'
+    | 'policy'
+    | 'hangup'
+    | 'disconnect'
+    | 'failed'
+    | 'busy'
+    | ScreenShareStopReason;
 };
 
 export interface CallIncomingEvent {

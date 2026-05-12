@@ -71,6 +71,11 @@ function normalizeAddressList(addresses: string[]): string[] {
 }
 
 const ICE_SERVER_TYPES: IceServerType[] = ['stun', 'turn', 'turns'];
+const SCREEN_SHARE_UNSUPPORTED_MESSAGE = 'Screen sharing is not supported yet';
+
+function isScreenShareSupported(): boolean {
+  return process.platform === 'darwin' || process.platform === 'linux';
+}
 
 function isIceServerType(value: string): value is IceServerType {
   return ICE_SERVER_TYPES.includes(value as IceServerType);
@@ -488,6 +493,16 @@ function setupCallHandlers(
   ipcMain: IpcMainHandleRegistrar,
   getP2PCore: () => P2PCore | null
 ): void {
+  ipcMain.handle(IPC_CHANNELS.GET_SCREEN_SHARE_SUPPORT, async () => {
+    const supported = isScreenShareSupported();
+    return {
+      success: true,
+      supported,
+      message: supported ? 'Screen sharing is available' : SCREEN_SHARE_UNSUPPORTED_MESSAGE,
+      error: null,
+    };
+  });
+
   ipcMain.handle(IPC_CHANNELS.CALL_START, async (_event, peerId: string, callId: string, offerSdp: string, mediaType: 'audio' | 'video' = 'audio') => {
     try {
       const p2pCore = getP2PCore();

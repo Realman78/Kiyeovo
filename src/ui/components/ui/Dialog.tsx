@@ -12,7 +12,7 @@ const DialogOverlay = React.forwardRef<
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>
 >(({ className = "", ...props }, ref) => {
   const classes = [
-    "fixed inset-0 z-50 bg-background/80 backdrop-blur-sm",
+    "fixed inset-0 z-[120] bg-background/80 backdrop-blur-sm",
     "dialog-overlay-animate",
     className,
   ].filter(Boolean).join(" ");
@@ -32,7 +32,7 @@ const DialogContent = React.forwardRef<
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>
 >(({ className = "", children, ...props }, ref) => {
   const classes = [
-    "fixed left-[50%] top-[50%] z-50 w-full max-w-xl translate-x-[-50%] translate-y-[-50%]",
+    "fixed left-[50%] top-[50%] z-[121] w-full max-w-xl translate-x-[-50%] translate-y-[-50%]",
     "bg-card border border-border rounded-lg shadow-lg",
     "glow-border",
     "dialog-content-animate",

@@ -34,6 +34,7 @@ export const MAX_GROUP_MEMBERS = 10;
 
 // String constants
 export const UNEXPECTED_ERROR = 'Unexpected error occurred';
+export const SCREEN_SHARE_UNSUPPORTED_MESSAGE = 'Screen sharing is not supported yet';
 
 export const EMOJI_CATEGORIES: CategoryConfig[] = [
   { category: Categories.SMILEYS_PEOPLE, name: 'Smileys & People' },
