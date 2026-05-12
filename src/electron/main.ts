@@ -41,6 +41,7 @@ import { scheduleAppRelaunch } from './relaunch.js';
 import { createTrustedIpcMainHandle } from './trusted-ipc.js';
 import { applyWindowSecurityPolicies } from './window-security.js';
 import { applySessionSecurityPolicies } from './session-security.js';
+import { setupDisplayMediaPicker } from './display-media-picker.js';
 import { DEV_SERVER_URL } from './constants.js';
 import { getPackagedAppEntryUrl, registerAppProtocolHandler, registerAppProtocolScheme } from './app-protocol.js';
 
@@ -629,10 +630,13 @@ async function initializeApp() {
       registerAppProtocolHandler();
     }
 
+    const displayMediaPicker = setupDisplayMediaPicker(trustedIpcMain, () => mainWindow);
+
     applySessionSecurityPolicies(session.defaultSession, {
       appEntryUrl,
       isDevelopment,
       getMainWindow: () => mainWindow,
+      selectDisplayMediaSource: displayMediaPicker.selectDisplayMediaSource,
     });
 
     // Setup IPC handlers

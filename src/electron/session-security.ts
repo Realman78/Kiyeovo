@@ -4,6 +4,7 @@ import { isTrustedAppOrigin, type AppUrlPolicyOptions } from './app-url-policy.j
 
 type SessionSecurityOptions = AppUrlPolicyOptions & {
   getMainWindow: () => BrowserWindow | null;
+  selectDisplayMediaSource?: () => Promise<Electron.Video | null>;
 };
 
 function isTrustedMainWindowWebContents(
@@ -136,9 +137,18 @@ export function applySessionSecurityPolicies(
       return;
     }
 
-    console.warn(
-      '[Electron][SECURITY] Display capture request reached the fallback handler; no desktopCapturer source picker is implemented yet.',
-    );
-    callback({});
+    if (!options.selectDisplayMediaSource) {
+      callback({});
+      return;
+    }
+
+    void options.selectDisplayMediaSource()
+      .then((source) => {
+        callback(source ? { video: source } : {});
+      })
+      .catch((error: unknown) => {
+        console.warn('[Electron][SECURITY] Failed to resolve display capture source:', error);
+        callback({});
+      });
   }, { useSystemPicker: true });
 }

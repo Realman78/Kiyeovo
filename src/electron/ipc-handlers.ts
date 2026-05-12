@@ -30,7 +30,7 @@ import {
 } from '../core/network/node-relays.js';
 import { DEFAULT_WEBRTC_ICE_SERVERS } from '../core/network/default-infrastructure.js';
 import { ensureAppDataDir } from '../core/utils/miscellaneous.js';
-import { homedir, release as osRelease } from 'os';
+import { homedir } from 'os';
 import { basename, isAbsolute, join, resolve as resolvePath } from 'path';
 import { copyFile, stat } from 'fs/promises';
 import { log } from '../shared/logger.js';
@@ -73,13 +73,8 @@ function normalizeAddressList(addresses: string[]): string[] {
 const ICE_SERVER_TYPES: IceServerType[] = ['stun', 'turn', 'turns'];
 const SCREEN_SHARE_UNSUPPORTED_MESSAGE = 'Screen sharing is not supported yet';
 
-function isSystemScreenSharePickerSupported(): boolean {
-  if (process.platform !== 'darwin') {
-    return false;
-  }
-
-  const darwinMajor = Number.parseInt(osRelease().split('.')[0] ?? '', 10);
-  return Number.isFinite(darwinMajor) && darwinMajor >= 24;
+function isScreenShareSupported(): boolean {
+  return process.platform === 'darwin' || process.platform === 'linux';
 }
 
 function isIceServerType(value: string): value is IceServerType {
@@ -499,7 +494,7 @@ function setupCallHandlers(
   getP2PCore: () => P2PCore | null
 ): void {
   ipcMain.handle(IPC_CHANNELS.GET_SCREEN_SHARE_SUPPORT, async () => {
-    const supported = isSystemScreenSharePickerSupported();
+    const supported = isScreenShareSupported();
     return {
       success: true,
       supported,

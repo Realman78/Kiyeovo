@@ -9,6 +9,7 @@ import type {
 import type { IceServerConfig } from '../../../core/types';
 import { DEFAULT_WEBRTC_ICE_SERVERS } from '../../../core/network/default-infrastructure';
 import { errStr } from '../../../core/utils/general-error';
+import { SCREEN_SHARE_UNSUPPORTED_MESSAGE } from '../../constants';
 
 type CurrentCall = {
   callId: string;
@@ -17,7 +18,6 @@ type CurrentCall = {
   mediaType: CallMediaType;
 };
 
-const SCREEN_SHARE_UNSUPPORTED_MESSAGE = 'Screen sharing is not supported yet';
 const SCREEN_SHARE_MAX_BITRATE_BPS = 4_000_000;
 
 export type CallServiceEvent =
@@ -508,12 +508,10 @@ class CallService {
     reason: 'hangup' | 'disconnect' | 'failed' | 'rejected' | 'busy' | 'timeout',
     sendHangup: boolean,
   ): Promise<void> {
-    const shouldSendHangup = sendHangup
-      && this.sentDisconnectHangupCallId !== context.callId
-      && reason !== 'disconnect'
-      && reason !== 'failed';
+    const shouldNotifyCore = sendHangup
+      && this.sentDisconnectHangupCallId !== context.callId;
 
-    if (shouldSendHangup) {
+    if (shouldNotifyCore) {
       this.sentDisconnectHangupCallId = context.callId;
     }
 
@@ -532,19 +530,27 @@ class CallService {
       reason,
     });
 
-    if (!shouldSendHangup) {
+    if (!shouldNotifyCore) {
       return;
     }
 
-    const hangupReason: 'hangup' = 'hangup';
+    // Peer-loss paths still need to notify the core so it clears its own
+    // activeCall; the outbound signal will likely fail and that is expected.
+    const hangupReason: 'hangup' | 'disconnect' | 'failed' =
+      reason === 'disconnect' ? 'disconnect'
+      : reason === 'failed' ? 'failed'
+      : 'hangup';
+    const isPeerLossPath = hangupReason === 'disconnect' || hangupReason === 'failed';
     try {
       const response = await window.kiyeovoAPI.hangupCall(context.peerId, context.callId, hangupReason);
-      if (!response.success) {
+      if (!response.success && !isPeerLossPath) {
         this.emit({ type: 'error', message: response.error || 'Failed to notify remote call end' });
       }
     } catch (error: unknown) {
-      const message = errStr(error, 'Failed to notify remote call end');
-      this.emit({ type: 'error', message });
+      if (!isPeerLossPath) {
+        const message = errStr(error, 'Failed to notify remote call end');
+        this.emit({ type: 'error', message });
+      }
     }
   }
 

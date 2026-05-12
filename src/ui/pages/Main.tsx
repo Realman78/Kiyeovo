@@ -13,6 +13,7 @@ import { store } from '../state/store';
 import { callService } from '../lib/call/callService';
 import { IncomingCallCard } from '../components/call/IncomingCallCard';
 import { CallManagerCard } from '../components/call/CallManagerCard';
+import { ScreenShareSourcePicker } from '../components/call/ScreenShareSourcePicker';
 
 export const Main = () => {
   const dispatch = useDispatch();
@@ -697,6 +698,7 @@ export const Main = () => {
       </div>
       <IncomingCallCard />
       <CallManagerCard />
+      <ScreenShareSourcePicker />
     </div>
   )
 }
