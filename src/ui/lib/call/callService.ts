@@ -986,7 +986,6 @@ class CallService {
       }
     }
 
-    // Phase 3 will update the WebRTC sender here.
     this.setLocalScreenShareState('idle', context);
     if (signalError) {
       console.warn('[CallService] Failed to notify remote screen sharing stopped:', signalError);

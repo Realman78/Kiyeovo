@@ -19,6 +19,7 @@ import { useToast } from '../ui/use-toast';
 import { useAppSelector } from '../../state/hooks';
 import { callService } from '../../lib/call/callService';
 import { useCallCardAnchor, type CallCardAnchor } from './useCallCardAnchor';
+import { SCREEN_SHARE_UNSUPPORTED_MESSAGE } from '../../constants';
 
 function stateLabel(state: string): string {
   switch (state) {
@@ -337,7 +338,7 @@ export const CallManagerCard = () => {
 
     const result = await callService.startScreenShare();
     if (!result.success && result.unsupported) {
-      toast.info(result.error || 'Screen sharing is not supported yet');
+      toast.info(result.error || SCREEN_SHARE_UNSUPPORTED_MESSAGE);
       return;
     }
 

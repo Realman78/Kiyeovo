@@ -10,9 +10,12 @@ import {
   DialogTitle,
 } from '../ui/Dialog';
 import { Button } from '../ui/Button';
+import { useToast } from '../ui/use-toast';
+import { errStr } from '../../../core/utils/general-error';
 import type { ScreenShareSource, ScreenShareSourceRequest } from '../../../shared/kiyeovo-api';
 
 export function ScreenShareSourcePicker() {
+  const { toast } = useToast();
   const [request, setRequest] = useState<ScreenShareSourceRequest | null>(null);
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -31,7 +34,14 @@ export function ScreenShareSourcePicker() {
     if (!request || isSubmitting) return;
     setIsSubmitting(true);
     try {
-      await window.kiyeovoAPI.selectScreenShareSource(request.requestId, sourceId);
+      const result = await window.kiyeovoAPI.selectScreenShareSource(request.requestId, sourceId);
+      if (!result.success && sourceId !== null) {
+        toast.error(result.error || 'Could not start screen sharing');
+      }
+    } catch (error: unknown) {
+      if (sourceId !== null) {
+        toast.error(errStr(error, 'Could not start screen sharing'));
+      }
     } finally {
       setRequest(null);
       setSelectedSourceId(null);
