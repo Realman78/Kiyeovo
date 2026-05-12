@@ -168,10 +168,22 @@ class CallService {
     return this.localStream?.getVideoTracks()[0] ?? null;
   }
 
+  private findSharedVideoTransceiver(pc: RTCPeerConnection): RTCRtpTransceiver | null {
+    return pc.getTransceivers().find((transceiver) => (
+      transceiver.receiver.track.kind === 'video' || transceiver.sender.track?.kind === 'video'
+    )) ?? null;
+  }
+
   private ensureSharedVideoTransceiver(pc: RTCPeerConnection): RTCRtpSender {
-    if (!this.sharedVideoTransceiver) {
-      this.sharedVideoTransceiver = pc.addTransceiver('video', { direction: 'sendrecv' });
-      this.sharedVideoSender = this.sharedVideoTransceiver.sender;
+    const existingTransceiver = this.sharedVideoTransceiver ?? this.findSharedVideoTransceiver(pc);
+    if (existingTransceiver) {
+      existingTransceiver.direction = 'sendrecv';
+      this.sharedVideoTransceiver = existingTransceiver;
+      this.sharedVideoSender = existingTransceiver.sender;
+    } else {
+      const transceiver = pc.addTransceiver('video', { direction: 'sendrecv' });
+      this.sharedVideoTransceiver = transceiver;
+      this.sharedVideoSender = transceiver.sender;
     }
 
     if (!this.sharedVideoSender) {
@@ -215,6 +227,10 @@ class CallService {
     track: MediaStreamTrack | null,
     content: 'camera' | 'screen' | 'none',
   ): Promise<void> {
+    if (!this.sharedVideoSender && this.peerConnection) {
+      this.ensureSharedVideoTransceiver(this.peerConnection);
+    }
+
     if (!this.sharedVideoSender) {
       throw new Error('Screen sharing video sender is not available');
     }
@@ -281,22 +297,12 @@ class CallService {
     };
 
     pc.ontrack = (event) => {
-      if (!this.remoteStream) {
-        this.remoteStream = new MediaStream();
-      }
-
-      const addRemoteTrack = (track: MediaStreamTrack) => {
-        if (!this.remoteStream?.getTracks().some((existing) => existing.id === track.id)) {
-          this.remoteStream?.addTrack(track);
-        }
-      };
-
       if (event.streams.length === 0) {
-        addRemoteTrack(event.track);
+        this.addRemoteTrack(event.track);
       } else {
         event.streams.forEach((stream) => {
           stream.getTracks().forEach((track) => {
-            addRemoteTrack(track);
+            this.addRemoteTrack(track);
           });
         });
       }
@@ -328,6 +334,34 @@ class CallService {
     };
 
     return pc;
+  }
+
+  private addRemoteTrack(track: MediaStreamTrack): boolean {
+    if (!this.remoteStream) {
+      this.remoteStream = new MediaStream();
+    }
+
+    if (this.remoteStream.getTracks().some((existing) => existing.id === track.id)) {
+      return false;
+    }
+
+    this.remoteStream.addTrack(track);
+    return true;
+  }
+
+  private syncRemoteVideoReceivers(context: CurrentCall | null = this.currentCall): void {
+    if (!this.peerConnection) return;
+    let addedTrack = false;
+
+    this.peerConnection.getReceivers().forEach((receiver) => {
+      const { track } = receiver;
+      if (track.kind !== 'video' || track.readyState === 'ended') return;
+      addedTrack = this.addRemoteTrack(track) || addedTrack;
+    });
+
+    if (!addedTrack) return;
+    this.attachRemoteAudio();
+    this.emitMediaUpdate(context);
   }
 
   private scheduleDisconnect(context: CurrentCall): void {
@@ -427,6 +461,7 @@ class CallService {
       sdp: answerSdp,
     });
     await this.flushPendingRemoteIce();
+    this.syncRemoteVideoReceivers();
   }
 
   private async addRemoteIce(signal: CallSignal): Promise<void> {
@@ -630,13 +665,14 @@ class CallService {
       this.currentCall = context;
       this.sentDisconnectHangupCallId = null;
       this.peerConnection = this.createPeerConnection(context);
-      await this.addLocalTracks(this.peerConnection, context.mediaType);
 
       await this.peerConnection.setRemoteDescription({
         type: 'offer',
         sdp: params.offerSdp,
       });
       await this.flushPendingRemoteIce();
+      await this.addLocalTracks(this.peerConnection, context.mediaType);
+      this.syncRemoteVideoReceivers(context);
 
       const answer = await this.peerConnection.createAnswer();
       await this.peerConnection.setLocalDescription(answer);
@@ -992,6 +1028,9 @@ class CallService {
     }
 
     this.remoteScreenShareLastSignalTs = signal.timestamp;
+    if (signal.type === 'CALL_SCREEN_SHARE_STARTED') {
+      this.syncRemoteVideoReceivers(this.currentCall);
+    }
     this.setRemoteScreenSharing(signal.type === 'CALL_SCREEN_SHARE_STARTED', this.currentCall);
   }
 
