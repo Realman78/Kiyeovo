@@ -60,6 +60,7 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
   const [groupInfoDetails, setGroupInfoDetails] = useState<GroupInfoDetails | null>(null);
   const [editUsernameModalOpen, setEditUsernameModalOpen] = useState(false);
   const [isStartingGroupCall, setIsStartingGroupCall] = useState(false);
+  const [isJoiningGroupCall, setIsJoiningGroupCall] = useState(false);
   const [newUsername, setNewUsername] = useState('');
   const [networkMode, setNetworkMode] = useState<NetworkMode | null>(null);
   const [validationError, setValidationError] = useState("");
@@ -478,6 +479,33 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
     }
   };
 
+  const handleJoinGroupCall = async () => {
+    if (!chatId) return;
+
+    setIsJoiningGroupCall(true);
+    try {
+      const result = await window.kiyeovoAPI.joinGroupCall(chatId);
+      await syncGroupCallEvidence(chatId);
+
+      if (!result.success) {
+        toast.error(result.error || 'Failed to join group call');
+        return;
+      }
+
+      if (result.outcome === 'existing') {
+        toast.info('You are already in this group call.');
+        return;
+      }
+
+      toast.success('Joined group call. Media connection comes next.');
+    } catch (error) {
+      console.error('Failed to join group call:', error);
+      toast.error('Failed to join group call');
+    } finally {
+      setIsJoiningGroupCall(false);
+    }
+  };
+
   const handleCheckMissedDirectMessages = async () => {
     if (!chatId) return;
     setDropdownOpen(false);
@@ -732,18 +760,21 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
     && activeChat?.status === 'active'
     && (resolvedGroupStatus === 'active' || resolvedGroupStatus === 'rekeying')
     && !activeCall;
+  const hasKnownGroupCall = Boolean(activeChat?.lastKnownActiveCallId);
   const hasAnotherPeerActiveCall = Boolean(activeCall) && !hasActiveCallWithThisPeer;
   const startCallDisabled = !canStartDirectCall || hasAnotherPeerActiveCall;
-  const startGroupCallDisabled = !canStartGroupCall || isStartingGroupCall;
+  const groupCallActionDisabled = !canStartGroupCall || isStartingGroupCall || isJoiningGroupCall;
   const audioCallButtonTitle = startCallDisabled
     ? 'User is offline or another call is active'
     : 'Start audio call';
   const videoCallButtonTitle = startCallDisabled
     ? 'User is offline or another call is active'
     : 'Start video call';
-  const groupCallButtonTitle = startGroupCallDisabled
+  const groupCallButtonTitle = groupCallActionDisabled
     ? 'Group call is unavailable right now'
-    : 'Start group call';
+    : hasKnownGroupCall
+      ? 'Join group call'
+      : 'Start group call';
   const groupCreatorLinkState = activeChat
     ? getGroupCreatorLinkState(activeChat, chats, myPeerId)
     : { broken: false };
@@ -872,9 +903,9 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
           variant="ghost"
           size="icon"
           className="text-muted-foreground hover:text-foreground"
-          onClick={handleStartGroupCall}
+          onClick={hasKnownGroupCall ? handleJoinGroupCall : handleStartGroupCall}
           title={groupCallButtonTitle}
-          disabled={startGroupCallDisabled}
+          disabled={groupCallActionDisabled}
         >
           <Phone className="w-4 h-4" />
         </Button>

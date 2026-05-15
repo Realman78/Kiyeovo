@@ -2,16 +2,22 @@ import { randomUUID } from 'crypto';
 import { peerIdFromString } from '@libp2p/peer-id';
 import { NETWORK_MODES, getNetworkModeRuntime } from '../constants.js';
 import type {
+  AdmissionToken,
+  CallGroupJoinRequestSignal,
+  CallGroupJoinResponseSignal,
+  CallGroupRosterSignal,
   ChatNode,
   GroupCallControlSignalForRenderer,
   GroupCallControlSignalMessage,
   GroupCallControlSignalReceivedEvent,
   GroupCallControlSignalWithoutSignature,
   GroupCallErrorEvent,
+  GroupCallJoinFailureReason,
   GroupCallPairSignalForRenderer,
   GroupCallPairSignalMessage,
   GroupCallPairSignalOutgoingInput,
   GroupCallPairSignalReceivedEvent,
+  GroupCallPairSignalWithoutSignature,
   GroupCallParticipant,
   GroupCallRole,
   GroupCallState,
@@ -25,10 +31,13 @@ import { CallActivityRegistry } from './call-activity-registry.js';
 import {
   GROUP_CALL_SIGNAL_DEDUPE_MAX_ENTRIES,
   GROUP_CALL_SIGNAL_DEDUPE_TTL_MS,
+  GROUP_CALL_SIGNAL_MAX_FUTURE_SKEW_MS,
   assertGroupCallSignalAllowed,
+  buildSignedAdmissionToken,
   buildSignedGroupCallSignal,
   isGroupCallControlSignalMessage,
   isGroupCallPairSignalMessage,
+  verifyAdmissionToken,
   verifyIncomingGroupCallSignal,
 } from './group-call-signaling.js';
 import { EncryptedUserIdentity } from '../identity/encrypted-user-identity.js';
@@ -39,7 +48,12 @@ const CONTROL_SIGNAL_TIMEOUT_MS = 5_000;
 const DISCOVERY_QUERY_TIMEOUT_MS = 10_000;
 const DISCOVERY_SETTLE_AFTER_FIRST_MS = 1_000;
 const DISCOVERY_CONFLICT_RETRY_DELAY_MS = 2_000;
-const DISCOVERY_CACHE_TTL_MS = 1_500;
+const DISCOVERY_CACHE_TTL_MS = 3_000;
+const JOIN_REQUEST_TIMEOUT_MS = 10_000;
+const ROSTER_BROADCAST_DEBOUNCE_MS = 2_000;
+const MAX_GROUP_CALL_PARTICIPANTS = 10;
+const ADMISSION_TOKEN_MAX_AGE_MS = 30_000;
+const RECENT_WRITER_SET_MAX_ENTRIES = 3;
 
 type GroupCallActionResult = {
   success: boolean;
@@ -57,6 +71,7 @@ type GroupCallSession = {
   connectionParticipants: string[];
   role: GroupCallRole;
   state: GroupCallState;
+  recentWriterPeerIds: string[];
 };
 
 type QueryWinner = {
@@ -79,6 +94,18 @@ type PendingQuery = {
   resolve: (responses: GroupCallQueryResponseSignal[]) => void;
   settleTimer: ReturnType<typeof setTimeout> | null;
   hardTimer: ReturnType<typeof setTimeout>;
+};
+
+type PendingJoinResponse = {
+  groupId: string;
+  callId: string;
+  writerPeerId: string;
+  resolve: (resolution:
+    | { kind: 'response'; response: CallGroupJoinResponseSignal }
+    | { kind: 'timeout' }
+    | { kind: 'aborted' }
+  ) => void;
+  timer: ReturnType<typeof setTimeout>;
 };
 
 type GroupCallOrchestratorConfig = {
@@ -130,6 +157,8 @@ export class GroupCallOrchestrator {
   private readonly recentQueryResults = new Map<string, { resolvedAt: number; result: QueryResolution }>();
   private session: GroupCallSession | null = null;
   private storeDurableHint: ((groupId: string) => Promise<void>) | null = null;
+  private pendingJoinResponse: PendingJoinResponse | null = null;
+  private pendingRosterBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(config: GroupCallOrchestratorConfig) {
     this.node = config.node;
@@ -160,7 +189,7 @@ export class GroupCallOrchestrator {
       }
 
       if (this.session && this.session.groupId === chat.group_id) {
-        return { success: true, error: null, outcome: 'created', callId: this.session.callId };
+        return { success: true, error: null, outcome: 'existing', callId: this.session.callId };
       }
 
       const queryResolution = await this.discoverActiveCall(chat);
@@ -189,6 +218,7 @@ export class GroupCallOrchestrator {
         connectionParticipants: [this.localPeerId()],
         role: 'writer',
         state: 'waiting',
+        recentWriterPeerIds: [this.localPeerId()],
       };
       this.callActivityRegistry.setGroupCall({ callId, groupId: chat.group_id! });
       this.writePersistentCallEvidence(chat.id, callId, joinedAt);
@@ -201,8 +231,54 @@ export class GroupCallOrchestrator {
     }
   }
 
-  async joinGroupCall(_chatId: number): Promise<GroupCallActionResult> {
-    return { success: false, error: 'Group call join is not implemented yet' };
+  async joinGroupCall(chatId: number): Promise<GroupCallActionResult> {
+    try {
+      const chat = this.requireEligibleGroupChat(chatId);
+      const gate = this.callActivityRegistry.canUseGroupCall({ groupId: chat.group_id! });
+      if (!gate.allowed) {
+        return { success: false, error: gate.error };
+      }
+
+      if (this.session && this.session.groupId === chat.group_id) {
+        return { success: true, error: null, outcome: 'existing', callId: this.session.callId };
+      }
+
+      const queryResolution = await this.discoverActiveCall(chat, { bypassCache: true });
+      if (queryResolution.kind === 'zero') {
+        this.clearPersistentCallEvidence(chat.id);
+        return { success: false, error: 'This call may have ended' };
+      }
+      if (queryResolution.kind === 'conflict') {
+        return { success: false, error: 'Call state conflict - please try again' };
+      }
+
+      this.beginJoiningSession(chat, queryResolution.winner);
+      const joinResult = await this.requestJoinWithRetry(chat, queryResolution.winner);
+      if (!joinResult.success) {
+        if (joinResult.clearEvidence) {
+          this.clearPersistentCallEvidence(chat.id);
+        }
+        this.endLocalSession(joinResult.reason);
+        return { success: false, error: joinResult.error ?? 'Failed to join group call' };
+      }
+
+      if (!this.session) {
+        return { success: false, error: 'Failed to finalize group call join' };
+      }
+
+      this.writePersistentCallEvidence(chat.id, this.session.callId, Date.now());
+      this.session.state = 'waiting';
+      this.emitStateChanged('waiting', { reason: 'joined' });
+      void this.broadcastStartedSignal(
+        chat,
+        this.session.callId,
+        this.session.authoritativeParticipants,
+        this.session.rosterVersion,
+      );
+      return { success: true, error: null, callId: this.session.callId };
+    } catch (error: unknown) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to join group call' };
+    }
   }
 
   async leaveGroupCall(chatId: number): Promise<GroupCallActionResult> {
@@ -217,8 +293,36 @@ export class GroupCallOrchestrator {
     }
   }
 
-  async sendPairSignal(_signal: GroupCallPairSignalOutgoingInput): Promise<{ success: boolean; error: string | null }> {
-    return { success: false, error: 'Group call pair signaling is not implemented yet' };
+  async sendPairSignal(signal: GroupCallPairSignalOutgoingInput): Promise<{ success: boolean; error: string | null }> {
+    if (!this.session) {
+      return { success: false, error: 'No active group call' };
+    }
+    if (signal.groupId !== this.session.groupId || signal.callId !== this.session.callId) {
+      return { success: false, error: 'Group call pair signal does not match the active call' };
+    }
+
+    const timestamp = signal.timestamp ?? Date.now();
+    const sent = signal.type === 'CALL_OFFER'
+      ? await this.trySendPairSignal({
+        ...signal,
+        fromPeerId: this.localPeerId(),
+        mediaType: signal.mediaType ?? 'audio',
+        timestamp,
+      })
+      : signal.type === 'CALL_ANSWER'
+        ? await this.trySendPairSignal({
+          ...signal,
+          fromPeerId: this.localPeerId(),
+          timestamp,
+        })
+        : await this.trySendPairSignal({
+          ...signal,
+          fromPeerId: this.localPeerId(),
+          timestamp,
+        });
+    return sent
+      ? { success: true, error: null }
+      : { success: false, error: 'Failed to send group call pair signal' };
   }
 
   async handleDurableHint(groupId: string): Promise<void> {
@@ -268,6 +372,9 @@ export class GroupCallOrchestrator {
     if (!this.verifyAndRecordIncomingSignal(remotePeerId, signal)) {
       return true;
     }
+    if (!this.validateIncomingPairSignal(signal)) {
+      return true;
+    }
 
     this.onPairSignalReceived({
       signal: this.stripPairSignalSecrets(signal),
@@ -286,6 +393,15 @@ export class GroupCallOrchestrator {
         return;
       case 'GROUP_CALL_QUERY_RESPONSE':
         this.handleQueryResponse(signal);
+        return;
+      case 'CALL_GROUP_JOIN_REQUEST':
+        await this.handleJoinRequest(signal);
+        return;
+      case 'CALL_GROUP_JOIN_RESPONSE':
+        this.handleJoinResponse(signal);
+        return;
+      case 'CALL_GROUP_ROSTER':
+        this.handleRosterSignal(signal);
         return;
       case 'CALL_GROUP_ENDED':
         this.handleEndedSignal(signal);
@@ -324,7 +440,12 @@ export class GroupCallOrchestrator {
   }
 
   private async respondToQuery(signal: GroupCallControlSignalMessage & { type: 'GROUP_CALL_QUERY' }): Promise<void> {
-    if (!this.session || this.session.groupId !== signal.groupId) {
+    if (
+      !this.session
+      || this.session.groupId !== signal.groupId
+      || this.session.state === 'joining'
+      || !this.session.authoritativeParticipants.some((participant) => participant.peerId === this.localPeerId())
+    ) {
       return;
     }
 
@@ -357,6 +478,103 @@ export class GroupCallOrchestrator {
         this.resolvePendingQuery(signal.requestId);
       }, DISCOVERY_SETTLE_AFTER_FIRST_MS);
     }
+  }
+
+  private async handleJoinRequest(signal: CallGroupJoinRequestSignal): Promise<void> {
+    const chat = this.database.getChatByGroupId(signal.groupId);
+    if (!chat) {
+      return;
+    }
+    if (!this.session || this.session.groupId !== signal.groupId || this.session.callId !== signal.callId || this.session.role !== 'writer') {
+      await this.sendRejectedJoinResponse(chat, signal, 'call_not_active');
+      return;
+    }
+
+    const memberPeerIds = new Set(
+      this.database.getChatParticipants(chat.id).map((participant) => participant.peer_id),
+    );
+    if (!memberPeerIds.has(signal.fromPeerId)) {
+      await this.sendRejectedJoinResponse(chat, signal, 'not_a_member');
+      return;
+    }
+
+    const existingParticipant = this.session.authoritativeParticipants.find(
+      (participant) => participant.peerId === signal.fromPeerId,
+    );
+    if (existingParticipant) {
+      const token = this.issueAdmissionToken(signal.callId, signal.fromPeerId);
+      await this.sendAcceptedJoinResponse(chat, signal, this.session.authoritativeParticipants, this.session.rosterVersion, token);
+      log(
+        `[GROUP-CALL][JOIN][REFRESH] group=${signal.groupId.slice(0, 8)} call=${signal.callId.slice(0, 8)} peer=${signal.fromPeerId.slice(-8)}`,
+      );
+      return;
+    }
+
+    if (this.session.authoritativeParticipants.length >= MAX_GROUP_CALL_PARTICIPANTS) {
+      await this.sendRejectedJoinResponse(chat, signal, 'full');
+      return;
+    }
+
+    const nextParticipants = sortParticipants([
+      ...this.session.authoritativeParticipants,
+      { peerId: signal.fromPeerId, joinedAt: Date.now() },
+    ]);
+    this.session.authoritativeParticipants = nextParticipants;
+    this.session.rosterVersion += 1;
+    const token = this.issueAdmissionToken(signal.callId, signal.fromPeerId);
+    await this.sendAcceptedJoinResponse(chat, signal, nextParticipants, this.session.rosterVersion, token);
+    this.scheduleRosterBroadcast(chat);
+    log(
+      `[GROUP-CALL][JOIN][ACCEPT] group=${signal.groupId.slice(0, 8)} call=${signal.callId.slice(0, 8)} peer=${signal.fromPeerId.slice(-8)} participants=${nextParticipants.length}`,
+    );
+  }
+
+  private handleJoinResponse(signal: CallGroupJoinResponseSignal): void {
+    if (
+      !this.pendingJoinResponse
+      || this.pendingJoinResponse.groupId !== signal.groupId
+      || this.pendingJoinResponse.callId !== signal.callId
+      || this.pendingJoinResponse.writerPeerId !== signal.fromPeerId
+    ) {
+      return;
+    }
+
+    const pending = this.pendingJoinResponse;
+    this.pendingJoinResponse = null;
+    clearTimeout(pending.timer);
+    pending.resolve({ kind: 'response', response: signal });
+  }
+
+  private handleRosterSignal(signal: CallGroupRosterSignal): void {
+    if (!this.session || this.session.groupId !== signal.groupId || this.session.callId !== signal.callId) {
+      return;
+    }
+
+    const chat = this.database.getChatByGroupId(signal.groupId);
+    if (!chat) {
+      return;
+    }
+
+    const expectedWriterPeerId = this.deriveWriterPeerId(chat, signal.participants);
+    if (expectedWriterPeerId !== signal.fromPeerId) {
+      return;
+    }
+    if (signal.rosterVersion < this.session.rosterVersion) {
+      return;
+    }
+    if (
+      signal.rosterVersion === this.session.rosterVersion
+      && sameParticipantRoster(signal.participants, this.session.authoritativeParticipants)
+    ) {
+      return;
+    }
+
+    this.session.authoritativeParticipants = sortParticipants(signal.participants);
+    this.session.rosterVersion = signal.rosterVersion;
+    this.recordRecentWriter(expectedWriterPeerId);
+    log(
+      `[GROUP-CALL][ROSTER] group=${signal.groupId.slice(0, 8)} call=${signal.callId.slice(0, 8)} version=${signal.rosterVersion} participants=${signal.participants.length}`,
+    );
   }
 
   private handleEndedSignal(signal: GroupCallControlSignalMessage & { type: 'CALL_GROUP_ENDED' }): void {
@@ -580,6 +798,368 @@ export class GroupCallOrchestrator {
     }
   }
 
+  private beginJoiningSession(chat: Chat, winner: QueryWinner): void {
+    const previousRecentWriters = this.session?.callId === winner.callId
+      ? this.session.recentWriterPeerIds
+      : [];
+
+    this.session = {
+      chatId: chat.id,
+      groupId: chat.group_id!,
+      callId: winner.callId,
+      rosterVersion: winner.rosterVersion,
+      authoritativeParticipants: sortParticipants(winner.participants),
+      connectionParticipants: [this.localPeerId()],
+      role: 'participant',
+      state: 'joining',
+      recentWriterPeerIds: [...previousRecentWriters],
+    };
+    this.callActivityRegistry.setGroupCall({ callId: winner.callId, groupId: chat.group_id! });
+    this.emitStateChanged('joining', { reason: 'joining' });
+    log(
+      `[GROUP-CALL][JOIN][BEGIN] group=${chat.group_id?.slice(0, 8)} call=${winner.callId.slice(0, 8)} writer=${winner.writerPeerId.slice(-8)}`,
+    );
+  }
+
+  private async requestJoinWithRetry(
+    chat: Chat,
+    winner: QueryWinner,
+  ): Promise<{ success: boolean; error?: string; clearEvidence?: boolean; reason: string }> {
+    const firstAttempt = await this.requestJoinFromWinner(chat, winner);
+    if (firstAttempt.kind === 'accepted') {
+      return { success: true, reason: 'joined' };
+    }
+    if (firstAttempt.kind === 'aborted') {
+      return { success: false, error: 'Group call join was cancelled', reason: 'join_aborted' };
+    }
+    if (firstAttempt.kind === 'rejected') {
+      return {
+        success: false,
+        error: this.mapJoinFailureToMessage(firstAttempt.reason),
+        clearEvidence: firstAttempt.reason === 'call_not_active',
+        reason: firstAttempt.reason,
+      };
+    }
+
+    const retryResolution = await this.discoverActiveCall(chat, { bypassCache: true });
+    if (retryResolution.kind === 'zero') {
+      return { success: false, error: 'This call may have ended', clearEvidence: true, reason: 'join_timeout' };
+    }
+    if (retryResolution.kind === 'conflict') {
+      return { success: false, error: 'Call state conflict - please try again', reason: 'join_conflict' };
+    }
+
+    this.beginJoiningSession(chat, retryResolution.winner);
+    const secondAttempt = await this.requestJoinFromWinner(chat, retryResolution.winner);
+    if (secondAttempt.kind === 'accepted') {
+      return { success: true, reason: 'joined' };
+    }
+    if (secondAttempt.kind === 'aborted') {
+      return { success: false, error: 'Group call join was cancelled', reason: 'join_aborted' };
+    }
+    if (secondAttempt.kind === 'rejected') {
+      return {
+        success: false,
+        error: this.mapJoinFailureToMessage(secondAttempt.reason),
+        clearEvidence: secondAttempt.reason === 'call_not_active',
+        reason: secondAttempt.reason,
+      };
+    }
+
+    return { success: false, error: 'This call may have ended', clearEvidence: true, reason: 'join_timeout' };
+  }
+
+  private async requestJoinFromWinner(
+    chat: Chat,
+    winner: QueryWinner,
+  ): Promise<
+    | { kind: 'accepted' }
+    | { kind: 'rejected'; reason: GroupCallJoinFailureReason }
+    | { kind: 'timeout' }
+    | { kind: 'aborted' }
+  > {
+    if (!this.session || this.session.groupId !== chat.group_id || this.session.callId !== winner.callId) {
+      return { kind: 'rejected', reason: 'call_not_active' };
+    }
+
+    const responsePromise = new Promise<
+      | { kind: 'response'; response: CallGroupJoinResponseSignal }
+      | { kind: 'timeout' }
+      | { kind: 'aborted' }
+    >((resolve) => {
+      this.clearPendingJoinResponse();
+      this.pendingJoinResponse = {
+        groupId: chat.group_id!,
+        callId: winner.callId,
+        writerPeerId: winner.writerPeerId,
+        resolve,
+        timer: setTimeout(() => {
+          if (this.pendingJoinResponse?.callId === winner.callId && this.pendingJoinResponse.writerPeerId === winner.writerPeerId) {
+            this.pendingJoinResponse = null;
+            resolve({ kind: 'timeout' });
+          }
+        }, JOIN_REQUEST_TIMEOUT_MS),
+      };
+    });
+
+    const sent = await this.trySendControlSignal({
+      type: 'CALL_GROUP_JOIN_REQUEST',
+      groupId: chat.group_id!,
+      callId: winner.callId,
+      fromPeerId: this.localPeerId(),
+      toPeerId: winner.writerPeerId,
+      timestamp: Date.now(),
+    });
+    if (!sent) {
+      this.clearPendingJoinResponse();
+      return { kind: 'timeout' };
+    }
+
+    log(
+      `[GROUP-CALL][JOIN][REQUEST] group=${chat.group_id?.slice(0, 8)} call=${winner.callId.slice(0, 8)} writer=${winner.writerPeerId.slice(-8)}`,
+    );
+
+    const resolution = await responsePromise;
+    if (resolution.kind === 'aborted') {
+      return { kind: 'aborted' };
+    }
+    if (resolution.kind === 'timeout') {
+      log(
+        `[GROUP-CALL][JOIN][TIMEOUT] group=${chat.group_id?.slice(0, 8)} call=${winner.callId.slice(0, 8)} writer=${winner.writerPeerId.slice(-8)}`,
+      );
+      return { kind: 'timeout' };
+    }
+    const { response } = resolution;
+    if (!response.accepted) {
+      log(
+        `[GROUP-CALL][JOIN][REJECT] group=${chat.group_id?.slice(0, 8)} call=${winner.callId.slice(0, 8)} writer=${winner.writerPeerId.slice(-8)} reason=${response.reason}`,
+      );
+      return { kind: 'rejected', reason: response.reason };
+    }
+
+    if (!this.session || this.session.groupId !== response.groupId || this.session.callId !== response.callId) {
+      return { kind: 'rejected', reason: 'call_not_active' };
+    }
+
+    const expectedWriterPeerId = this.deriveWriterPeerId(chat, response.participants);
+    if (expectedWriterPeerId !== response.fromPeerId) {
+      return { kind: 'rejected', reason: 'call_not_active' };
+    }
+    this.recordRecentWriter(expectedWriterPeerId);
+    if (!response.participants.some((participant) => participant.peerId === this.localPeerId())) {
+      return { kind: 'rejected', reason: 'call_not_active' };
+    }
+    this.session.authoritativeParticipants = sortParticipants(response.participants);
+    this.session.rosterVersion = response.rosterVersion;
+    return { kind: 'accepted' };
+  }
+
+  private issueAdmissionToken(callId: string, admittedPeerId: string): AdmissionToken {
+    return buildSignedAdmissionToken({
+      callId,
+      admittedPeerId,
+      issuedAt: Date.now(),
+      issuerPeerId: this.localPeerId(),
+    }, this.userIdentity);
+  }
+
+  private async sendAcceptedJoinResponse(
+    chat: Chat,
+    request: CallGroupJoinRequestSignal,
+    participants: GroupCallParticipant[],
+    rosterVersion: number,
+    admissionToken: AdmissionToken,
+  ): Promise<void> {
+    await this.trySendControlSignal({
+      type: 'CALL_GROUP_JOIN_RESPONSE',
+      groupId: chat.group_id!,
+      callId: request.callId,
+      accepted: true,
+      rosterVersion,
+      participants,
+      admissionToken,
+      fromPeerId: this.localPeerId(),
+      toPeerId: request.fromPeerId,
+      timestamp: Date.now(),
+    });
+  }
+
+  private async sendRejectedJoinResponse(
+    chat: Chat,
+    request: CallGroupJoinRequestSignal,
+    reason: GroupCallJoinFailureReason,
+  ): Promise<void> {
+    await this.trySendControlSignal({
+      type: 'CALL_GROUP_JOIN_RESPONSE',
+      groupId: chat.group_id!,
+      callId: request.callId,
+      accepted: false,
+      reason,
+      fromPeerId: this.localPeerId(),
+      toPeerId: request.fromPeerId,
+      timestamp: Date.now(),
+    });
+  }
+
+  private scheduleRosterBroadcast(chat: Chat): void {
+    if (this.pendingRosterBroadcastTimer) {
+      return;
+    }
+
+    this.pendingRosterBroadcastTimer = setTimeout(() => {
+      this.pendingRosterBroadcastTimer = null;
+      void this.broadcastRoster(chat);
+    }, ROSTER_BROADCAST_DEBOUNCE_MS);
+  }
+
+  private async broadcastRoster(chat: Chat): Promise<void> {
+    if (!this.session || this.session.chatId !== chat.id || this.session.role !== 'writer') {
+      return;
+    }
+
+    const participants = sortParticipants(this.session.authoritativeParticipants);
+    const peers = participants
+      .map((participant) => participant.peerId)
+      .filter((peerId) => peerId !== this.localPeerId());
+
+    const sendResults = await Promise.allSettled(
+      peers.map(async (peerId) => this.trySendControlSignal({
+        type: 'CALL_GROUP_ROSTER',
+        groupId: chat.group_id!,
+        callId: this.session!.callId,
+        rosterVersion: this.session!.rosterVersion,
+        participants,
+        fromPeerId: this.localPeerId(),
+        toPeerId: peerId,
+        timestamp: Date.now(),
+      })),
+    );
+
+    log(
+      `[GROUP-CALL][ROSTER][BROADCAST] group=${chat.group_id?.slice(0, 8)} call=${this.session.callId.slice(0, 8)} version=${this.session.rosterVersion} sent=${sendResults.filter((result) => result.status === 'fulfilled' && result.value).length}/${peers.length}`,
+    );
+  }
+
+  private validateIncomingPairSignal(signal: GroupCallPairSignalMessage): boolean {
+    if (!this.session || this.session.groupId !== signal.groupId || this.session.callId !== signal.callId) {
+      this.emitError('Unexpected group call pair signal', {
+        groupId: signal.groupId,
+        callId: signal.callId,
+        peerId: signal.fromPeerId,
+        code: 'GROUP_CALL_PAIR_UNEXPECTED',
+      });
+      return false;
+    }
+
+    if (signal.type !== 'CALL_OFFER') {
+      return true;
+    }
+
+    const senderAlreadyAdmitted = this.session.authoritativeParticipants.some(
+      (participant) => participant.peerId === signal.fromPeerId,
+    );
+    if (senderAlreadyAdmitted) {
+      return true;
+    }
+    if (!signal.admissionToken) {
+      this.emitError('Missing admission token for non-rostered group call offer', {
+        chatId: this.session.chatId,
+        groupId: signal.groupId,
+        callId: signal.callId,
+        peerId: signal.fromPeerId,
+        code: 'GROUP_CALL_ADMISSION_TOKEN_MISSING',
+      });
+      return false;
+    }
+
+    const tokenVerification = verifyAdmissionToken(
+      signal.admissionToken,
+      (peerId) => this.database.getUserByPeerId(peerId)?.signing_public_key,
+    );
+    if (!tokenVerification.valid) {
+      this.emitError(tokenVerification.error ?? 'Invalid admission token', {
+        chatId: this.session.chatId,
+        groupId: signal.groupId,
+        callId: signal.callId,
+        peerId: signal.fromPeerId,
+        code: 'GROUP_CALL_ADMISSION_TOKEN_INVALID',
+      });
+      return false;
+    }
+
+    const now = Date.now();
+    if (!this.session.recentWriterPeerIds.includes(signal.admissionToken.issuerPeerId)) {
+      this.emitError('Admission token issuer is not a recent writer', {
+        chatId: this.session.chatId,
+        groupId: signal.groupId,
+        callId: signal.callId,
+        peerId: signal.fromPeerId,
+        code: 'GROUP_CALL_ADMISSION_TOKEN_STALE',
+      });
+      return false;
+    }
+    if (signal.admissionToken.admittedPeerId !== signal.fromPeerId) {
+      this.emitError('Admission token does not match the offered peer', {
+        chatId: this.session.chatId,
+        groupId: signal.groupId,
+        callId: signal.callId,
+        peerId: signal.fromPeerId,
+        code: 'GROUP_CALL_ADMISSION_TOKEN_MISMATCH',
+      });
+      return false;
+    }
+    if (signal.admissionToken.callId !== signal.callId || signal.admissionToken.callId !== this.session.callId) {
+      this.emitError('Admission token call does not match the active call', {
+        chatId: this.session.chatId,
+        groupId: signal.groupId,
+        callId: signal.callId,
+        peerId: signal.fromPeerId,
+        code: 'GROUP_CALL_ADMISSION_TOKEN_CALL_MISMATCH',
+      });
+      return false;
+    }
+    if (
+      signal.admissionToken.issuedAt > now + GROUP_CALL_SIGNAL_MAX_FUTURE_SKEW_MS
+      || now - signal.admissionToken.issuedAt > ADMISSION_TOKEN_MAX_AGE_MS
+    ) {
+      this.emitError('Admission token is too old', {
+        chatId: this.session.chatId,
+        groupId: signal.groupId,
+        callId: signal.callId,
+        peerId: signal.fromPeerId,
+        code: 'GROUP_CALL_ADMISSION_TOKEN_EXPIRED',
+      });
+      return false;
+    }
+
+    return true;
+  }
+
+  private recordRecentWriter(peerId: string): void {
+    if (!this.session) {
+      return;
+    }
+
+    this.session.recentWriterPeerIds = [
+      peerId,
+      ...this.session.recentWriterPeerIds.filter((existingPeerId) => existingPeerId !== peerId),
+    ].slice(0, RECENT_WRITER_SET_MAX_ENTRIES);
+  }
+
+  private mapJoinFailureToMessage(reason: GroupCallJoinFailureReason): string {
+    switch (reason) {
+      case 'full':
+        return 'This call is full';
+      case 'not_a_member':
+        return 'You are no longer a member of this group';
+      case 'busy':
+        return 'Another call is already in progress';
+      case 'call_not_active':
+      default:
+        return 'This call may have ended';
+    }
+  }
+
   private async openControlStream(targetPeerId: string): Promise<Awaited<ReturnType<ChatNode['dialProtocol']>>> {
     const connections = this.node
       .getConnections()
@@ -621,6 +1201,22 @@ export class GroupCallOrchestrator {
     }
   }
 
+  private async trySendPairSignal(unsignedSignal: GroupCallPairSignalWithoutSignature): Promise<boolean> {
+    try {
+      const signedSignal = buildSignedGroupCallSignal(unsignedSignal, this.userIdentity);
+      const stream = await this.openControlStream(unsignedSignal.toPeerId);
+      const payloadBytes = new TextEncoder().encode(JSON.stringify(signedSignal));
+      await stream.sink([payloadBytes]);
+      await stream.close();
+      return true;
+    } catch (error: unknown) {
+      log(
+        `[GROUP-CALL][PAIR][SEND][FAIL] type=${unsignedSignal.type} to=${unsignedSignal.toPeerId.slice(-8)} reason=${errStr(error)}`,
+      );
+      return false;
+    }
+  }
+
   private getGroupMemberPeerIds(chatId: number): string[] {
     return this.database.getChatParticipants(chatId)
       .map((participant) => participant.peer_id)
@@ -646,6 +1242,8 @@ export class GroupCallOrchestrator {
 
     const endedSession = this.session;
     this.session = null;
+    this.clearPendingJoinResponse();
+    this.clearPendingRosterBroadcast();
     this.callActivityRegistry.setGroupCall(null);
     this.onStateChanged({
       chatId: endedSession.chatId,
@@ -656,6 +1254,26 @@ export class GroupCallOrchestrator {
       reason,
       timestamp: Date.now(),
     });
+  }
+
+  private clearPendingJoinResponse(): void {
+    if (!this.pendingJoinResponse) {
+      return;
+    }
+
+    const pending = this.pendingJoinResponse;
+    clearTimeout(pending.timer);
+    this.pendingJoinResponse = null;
+    pending.resolve({ kind: 'aborted' });
+  }
+
+  private clearPendingRosterBroadcast(): void {
+    if (!this.pendingRosterBroadcastTimer) {
+      return;
+    }
+
+    clearTimeout(this.pendingRosterBroadcastTimer);
+    this.pendingRosterBroadcastTimer = null;
   }
 
   private emitStateChanged(state: GroupCallState, options?: { reason?: string }): void {

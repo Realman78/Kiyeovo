@@ -28,6 +28,7 @@ type UnsignedGroupCallSignal =
   | GroupCallControlSignalWithoutSignature
   | GroupCallPairSignalWithoutSignature
   | GroupCallHintWithoutSignature;
+type UnsignedAdmissionToken = Omit<AdmissionToken, 'signature'>;
 
 type SignalAllowedAssertion = (signal: SignedGroupCallSignal) => void;
 
@@ -286,6 +287,15 @@ export function toUnsignedGroupCallSignalPayload(signal: UnsignedGroupCallSignal
   }
 }
 
+function toUnsignedAdmissionTokenPayload(token: UnsignedAdmissionToken): Record<string, unknown> {
+  return {
+    callId: token.callId,
+    admittedPeerId: token.admittedPeerId,
+    issuedAt: token.issuedAt,
+    issuerPeerId: token.issuerPeerId,
+  };
+}
+
 export function buildSignedGroupCallSignal<T extends UnsignedGroupCallSignal>(
   unsignedSignal: T,
   userIdentity: Pick<EncryptedUserIdentity, 'sign'>,
@@ -295,6 +305,37 @@ export function buildSignedGroupCallSignal<T extends UnsignedGroupCallSignal>(
     ...unsignedSignal,
     signature: Buffer.from(signatureBytes).toString('base64'),
   };
+}
+
+export function buildSignedAdmissionToken(
+  unsignedToken: UnsignedAdmissionToken,
+  userIdentity: Pick<EncryptedUserIdentity, 'sign'>,
+): AdmissionToken {
+  const signatureBytes = userIdentity.sign(JSON.stringify(toUnsignedAdmissionTokenPayload(unsignedToken)));
+  return {
+    ...unsignedToken,
+    signature: Buffer.from(signatureBytes).toString('base64'),
+  };
+}
+
+export function verifyAdmissionToken(
+  token: AdmissionToken,
+  getSigningPublicKey: (peerId: string) => string | null | undefined,
+): { valid: boolean; error?: string } {
+  const signingPublicKey = getSigningPublicKey(token.issuerPeerId);
+  if (!signingPublicKey) {
+    return { valid: false, error: 'Unknown admission-token issuer' };
+  }
+
+  const { signature, ...unsignedToken } = token;
+  const signatureValid = EncryptedUserIdentity.verifyKeyExchangeSignature(
+    signature,
+    toUnsignedAdmissionTokenPayload(unsignedToken),
+    signingPublicKey,
+  );
+  return signatureValid
+    ? { valid: true }
+    : { valid: false, error: 'Invalid admission token signature' };
 }
 
 export function verifyIncomingGroupCallSignal(
