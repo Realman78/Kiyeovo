@@ -6,6 +6,7 @@ import {
   type AppConfig,
   type NetworkMode,
   type CallSignalOutgoingInput,
+  type GroupCallPairSignalOutgoingInput,
   type BootstrapRetryResponse,
   type ConnectionNodeStatus,
   type ConnectionNodesResponse,
@@ -214,6 +215,7 @@ export function setupIPCHandlers(
 
   // Call signaling handlers
   setupCallHandlers(trustedIpcMain, getP2PCore);
+  setupGroupCallHandlers(trustedIpcMain, getP2PCore);
 
   // Contact request handlers
   setupContactRequestHandlers(trustedIpcMain, getP2PCore);
@@ -556,6 +558,51 @@ function setupCallHandlers(
       return await p2pCore.messageHandler.sendCallSignal(signal);
     } catch (error) {
       return { success: false, error: errStr(error, 'Failed to send call signal') };
+    }
+  });
+}
+
+function setupGroupCallHandlers(
+  ipcMain: IpcMainHandleRegistrar,
+  getP2PCore: () => P2PCore | null,
+): void {
+  ipcMain.handle(IPC_CHANNELS.GROUP_CALL_START, async (_event, chatId: number) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) return { success: false, error: 'P2P core not initialized' };
+      return await p2pCore.groupCallOrchestrator.startGroupCall(chatId);
+    } catch (error) {
+      return { success: false, error: errStr(error, 'Failed to start group call') };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.GROUP_CALL_JOIN, async (_event, chatId: number) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) return { success: false, error: 'P2P core not initialized' };
+      return await p2pCore.groupCallOrchestrator.joinGroupCall(chatId);
+    } catch (error) {
+      return { success: false, error: errStr(error, 'Failed to join group call') };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.GROUP_CALL_LEAVE, async (_event, chatId: number) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) return { success: false, error: 'P2P core not initialized' };
+      return await p2pCore.groupCallOrchestrator.leaveGroupCall(chatId);
+    } catch (error) {
+      return { success: false, error: errStr(error, 'Failed to leave group call') };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.GROUP_CALL_PAIR_SIGNAL_SEND, async (_event, signal: GroupCallPairSignalOutgoingInput) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) return { success: false, error: 'P2P core not initialized' };
+      return await p2pCore.groupCallOrchestrator.sendPairSignal(signal);
+    } catch (error) {
+      return { success: false, error: errStr(error, 'Failed to send group call pair signal') };
     }
   });
 }

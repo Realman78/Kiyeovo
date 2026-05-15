@@ -9,6 +9,8 @@ import {
 } from './network/node-setup.js';
 import { UsernameRegistry } from './username/username-registry.js';
 import { MessageHandler } from './lib/message-handler.js';
+import { GroupCallOrchestrator } from './lib/group-call-orchestrator.js';
+import { CallActivityRegistry } from './lib/call-activity-registry.js';
 import { EncryptedUserIdentity } from './identity/encrypted-user-identity.js';
 import { ChatDatabase } from './db/database.js';
 import { createNetworkHealthMonitor } from './network/network-health.js';
@@ -37,6 +39,10 @@ import type {
   CallStateChangedEvent,
   CallErrorEvent,
   BootstrapConnectResult,
+  GroupCallControlSignalReceivedEvent,
+  GroupCallPairSignalReceivedEvent,
+  GroupCallStateChangedEvent,
+  GroupCallErrorEvent,
 } from './types.js';
 import type { DhtStatusCheckSource } from './network/network-health.js';
 
@@ -48,6 +54,7 @@ export interface P2PCore {
   userIdentity: EncryptedUserIdentity;
   usernameRegistry: UsernameRegistry;
   messageHandler: MessageHandler;
+  groupCallOrchestrator: GroupCallOrchestrator;
   networkMode: NetworkMode;
   getCurrentDhtStatus: () => boolean | null;
   retryBootstrap: () => Promise<BootstrapConnectResult>;
@@ -88,6 +95,10 @@ export interface P2PCoreConfig {
   onCallSignalReceived: (data: CallSignalReceivedEvent) => void;
   onCallStateChanged: (data: CallStateChangedEvent) => void;
   onCallError: (data: CallErrorEvent) => void;
+  onGroupCallControlSignalReceived: (data: GroupCallControlSignalReceivedEvent) => void;
+  onGroupCallPairSignalReceived: (data: GroupCallPairSignalReceivedEvent) => void;
+  onGroupCallStateChanged: (data: GroupCallStateChangedEvent) => void;
+  onGroupCallError: (data: GroupCallErrorEvent) => void;
 }
 
 /**
@@ -117,6 +128,10 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     onCallSignalReceived,
     onCallStateChanged,
     onCallError,
+    onGroupCallControlSignalReceived,
+    onGroupCallPairSignalReceived,
+    onGroupCallStateChanged,
+    onGroupCallError,
   } = config;
 
   const sendStatus = (message: string, stage: any) => {
@@ -390,6 +405,33 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     onCallError(data);
   };
 
+  const sendGroupCallControlSignalReceived = (data: GroupCallControlSignalReceivedEvent) => {
+    onGroupCallControlSignalReceived(data);
+  };
+
+  const sendGroupCallPairSignalReceived = (data: GroupCallPairSignalReceivedEvent) => {
+    onGroupCallPairSignalReceived(data);
+  };
+
+  const sendGroupCallStateChanged = (data: GroupCallStateChangedEvent) => {
+    onGroupCallStateChanged(data);
+  };
+
+  const sendGroupCallError = (data: GroupCallErrorEvent) => {
+    onGroupCallError(data);
+  };
+
+  const callActivityRegistry = new CallActivityRegistry();
+  const groupCallOrchestrator = new GroupCallOrchestrator({
+    node,
+    database,
+    callActivityRegistry,
+    onControlSignalReceived: sendGroupCallControlSignalReceived,
+    onPairSignalReceived: sendGroupCallPairSignalReceived,
+    onStateChanged: sendGroupCallStateChanged,
+    onError: sendGroupCallError,
+  });
+
   const messageHandler = new MessageHandler(
     node,
     usernameRegistry,
@@ -412,6 +454,8 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     sendCallSignalReceived,
     sendCallStateChanged,
     sendCallError,
+    callActivityRegistry,
+    groupCallOrchestrator,
   );
 
   // Start periodic database cleanup
@@ -431,6 +475,7 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     userIdentity,
     usernameRegistry,
     messageHandler,
+    groupCallOrchestrator,
     networkMode,
     getCurrentDhtStatus: () => {
       return currentDhtConnected;

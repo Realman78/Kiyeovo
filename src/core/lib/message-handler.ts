@@ -78,6 +78,9 @@ import { dialProtocolWithRelayFallback } from '../transport/protocol-dialer.js';
 import { STALE_DIAL_ERROR_PATTERN } from '../transport/dial-errors.js';
 import { EncryptedUserIdentity } from '../identity/encrypted-user-identity.js';
 import { log } from '../../shared/logger.js';
+import { CallActivityRegistry } from './call-activity-registry.js';
+import { GroupCallOrchestrator } from './group-call-orchestrator.js';
+import { isGroupCallControlSignalMessage, isGroupCallPairSignalMessage } from './group-call-signaling.js';
 
 type OfflineReadBucketInfo = ReturnType<ChatDatabase['getOfflineReadBucketInfo']>[number];
 type OfflineReadBucketInfoForChats = ReturnType<ChatDatabase['getOfflineReadBucketInfoForChats']>[number];
@@ -167,6 +170,8 @@ export class MessageHandler {
   private seenCallSignals = new Map<string, number>();
   private activeCallRingWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
   private activeCallPeerDisconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private callActivityRegistry: CallActivityRegistry;
+  private groupCallOrchestrator: GroupCallOrchestrator | null;
 
   private formatNudgeTarget(payload: BucketNudgePayload): string {
     if (payload.kind === 'GROUP_REKEY_REFETCH') {
@@ -220,6 +225,8 @@ export class MessageHandler {
     onCallSignalReceived?: (data: CallSignalReceivedEvent) => void,
     onCallStateChanged?: (data: CallStateChangedEvent) => void,
     onCallError?: (data: CallErrorEvent) => void,
+    callActivityRegistry?: CallActivityRegistry,
+    groupCallOrchestrator?: GroupCallOrchestrator,
   ) {
     this.node = node;
     this.usernameRegistry = usernameRegistry;
@@ -233,6 +240,8 @@ export class MessageHandler {
     this.onCallSignalReceived = onCallSignalReceived ?? (() => undefined);
     this.onCallStateChanged = onCallStateChanged ?? (() => undefined);
     this.onCallError = onCallError ?? (() => undefined);
+    this.callActivityRegistry = callActivityRegistry ?? new CallActivityRegistry();
+    this.groupCallOrchestrator = groupCallOrchestrator ?? null;
     this.keyExchange = new KeyExchange(
       node,
       usernameRegistry,
@@ -646,6 +655,10 @@ export class MessageHandler {
       this.activeCallLastControlSignalTs = null;
     }
     this.activeCall = activeCall;
+    this.callActivityRegistry.setDirectCall({
+      callId: activeCall.callId,
+      peerId: activeCall.peerId,
+    });
     this.scheduleCallRingWatchdog(activeCall);
     this.onCallStateChanged({
       callId: activeCall.callId,
@@ -661,6 +674,7 @@ export class MessageHandler {
     if (!this.activeCall) return;
     const previous = this.activeCall;
     this.activeCall = null;
+    this.callActivityRegistry.setDirectCall(null);
     this.activeCallLastControlSignalTs = null;
     this.clearCallRingWatchdog();
     this.clearActiveCallPeerDisconnectTimer();
@@ -1116,6 +1130,16 @@ export class MessageHandler {
   }
 
   private async handleIncomingCallSignal(remoteId: string, unknownSignal: unknown): Promise<void> {
+    if (this.groupCallOrchestrator && isGroupCallControlSignalMessage(unknownSignal)) {
+      await this.groupCallOrchestrator.handleIncomingControlSignal(remoteId, unknownSignal);
+      return;
+    }
+
+    if (this.groupCallOrchestrator && isGroupCallPairSignalMessage(unknownSignal)) {
+      await this.groupCallOrchestrator.handleIncomingPairSignal(remoteId, unknownSignal);
+      return;
+    }
+
     if (!this.isCallSignalMessage(unknownSignal)) {
       this.emitCallError('Malformed call signal payload', { peerId: remoteId, code: 'CALL_MALFORMED' });
       return;
@@ -1143,6 +1167,20 @@ export class MessageHandler {
     if (signal.type === 'CALL_OFFER') {
       if (this.isActiveCallMatch(remoteId, signal.callId)) {
         // Offer retry/duplicate for the same ringing call.
+        return;
+      }
+
+      if (this.callActivityRegistry.hasGroupCall()) {
+        try {
+          await this.sendCallSignal({
+            type: 'CALL_BUSY',
+            callId: signal.callId,
+            toPeerId: remoteId,
+            reason: 'busy',
+          });
+        } catch (error: unknown) {
+          generalErrorHandler(error, '[CALL] Failed to send busy response while group call is active');
+        }
         return;
       }
 
@@ -1264,6 +1302,11 @@ export class MessageHandler {
       this.ensureDirectCallContact(peerId);
     } catch (error: unknown) {
       return { success: false, error: errStr(error) };
+    }
+
+    const gate = this.callActivityRegistry.canUseDirectCall({ callId, peerId });
+    if (!gate.allowed) {
+      return { success: false, error: gate.error };
     }
 
     if (this.activeCall && (this.activeCall.callId !== callId || this.activeCall.peerId !== peerId)) {

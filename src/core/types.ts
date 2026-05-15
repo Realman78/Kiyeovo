@@ -834,6 +834,259 @@ export interface CallErrorEvent {
   timestamp: number;
 }
 
+export type GroupCallParticipant = {
+  peerId: string;
+  joinedAt: number;
+};
+
+export type AdmissionToken = {
+  callId: string;
+  admittedPeerId: string;
+  issuedAt: number;
+  issuerPeerId: string;
+  signature: string;
+};
+
+export type GroupCallRole = 'writer' | 'participant';
+export type GroupCallState = 'idle' | 'starting' | 'joining' | 'waiting' | 'active' | 'ended';
+export type GroupCallJoinFailureReason = 'full' | 'not_a_member' | 'call_not_active' | 'busy';
+
+export type GroupCallControlSignalType =
+  | 'CALL_GROUP_STARTED'
+  | 'GROUP_CALL_QUERY'
+  | 'GROUP_CALL_QUERY_RESPONSE'
+  | 'CALL_GROUP_JOIN_REQUEST'
+  | 'CALL_GROUP_JOIN_RESPONSE'
+  | 'CALL_GROUP_ROSTER'
+  | 'CALL_GROUP_LEAVE'
+  | 'CALL_GROUP_ENDED'
+  | 'CALL_GROUP_MUTE_STATE';
+
+type BaseGroupCallLiveSignal = {
+  groupId: string;
+  callId: string;
+  fromPeerId: string;
+  toPeerId: string;
+  timestamp: number;
+  signature: string;
+};
+
+export type CallGroupStartedSignal = BaseGroupCallLiveSignal & {
+  type: 'CALL_GROUP_STARTED';
+};
+
+export type GroupCallQuerySignal = {
+  type: 'GROUP_CALL_QUERY';
+  groupId: string;
+  requestId: string;
+  fromPeerId: string;
+  toPeerId: string;
+  timestamp: number;
+  signature: string;
+};
+
+export type GroupCallQueryResponseSignal = BaseGroupCallLiveSignal & {
+  type: 'GROUP_CALL_QUERY_RESPONSE';
+  requestId: string;
+  rosterVersion: number;
+  participants: GroupCallParticipant[];
+};
+
+export type CallGroupJoinRequestSignal = BaseGroupCallLiveSignal & {
+  type: 'CALL_GROUP_JOIN_REQUEST';
+};
+
+export type CallGroupJoinResponseAcceptedSignal = BaseGroupCallLiveSignal & {
+  type: 'CALL_GROUP_JOIN_RESPONSE';
+  accepted: true;
+  rosterVersion: number;
+  participants: GroupCallParticipant[];
+  admissionToken: AdmissionToken;
+};
+
+export type CallGroupJoinResponseRejectedSignal = BaseGroupCallLiveSignal & {
+  type: 'CALL_GROUP_JOIN_RESPONSE';
+  accepted: false;
+  reason: GroupCallJoinFailureReason;
+};
+
+export type CallGroupJoinResponseSignal =
+  | CallGroupJoinResponseAcceptedSignal
+  | CallGroupJoinResponseRejectedSignal;
+
+export type CallGroupRosterSignal = BaseGroupCallLiveSignal & {
+  type: 'CALL_GROUP_ROSTER';
+  rosterVersion: number;
+  participants: GroupCallParticipant[];
+};
+
+export type CallGroupLeaveSignal = BaseGroupCallLiveSignal & {
+  type: 'CALL_GROUP_LEAVE';
+};
+
+export type CallGroupEndedSignal = BaseGroupCallLiveSignal & {
+  type: 'CALL_GROUP_ENDED';
+};
+
+export type CallGroupMuteStateSignal = BaseGroupCallLiveSignal & {
+  type: 'CALL_GROUP_MUTE_STATE';
+  muted: boolean;
+};
+
+export type GroupCallControlSignalMessage =
+  | CallGroupStartedSignal
+  | GroupCallQuerySignal
+  | GroupCallQueryResponseSignal
+  | CallGroupJoinRequestSignal
+  | CallGroupJoinResponseSignal
+  | CallGroupRosterSignal
+  | CallGroupLeaveSignal
+  | CallGroupEndedSignal
+  | CallGroupMuteStateSignal;
+
+export type CallGroupJoinResponseAcceptedWithoutSignature = Omit<CallGroupJoinResponseAcceptedSignal, 'signature'>;
+export type CallGroupJoinResponseRejectedWithoutSignature = Omit<CallGroupJoinResponseRejectedSignal, 'signature'>;
+
+export type GroupCallControlSignalWithoutSignature =
+  | Omit<CallGroupStartedSignal, 'signature'>
+  | Omit<GroupCallQuerySignal, 'signature'>
+  | Omit<GroupCallQueryResponseSignal, 'signature'>
+  | Omit<CallGroupJoinRequestSignal, 'signature'>
+  | CallGroupJoinResponseAcceptedWithoutSignature
+  | CallGroupJoinResponseRejectedWithoutSignature
+  | Omit<CallGroupRosterSignal, 'signature'>
+  | Omit<CallGroupLeaveSignal, 'signature'>
+  | Omit<CallGroupEndedSignal, 'signature'>
+  | Omit<CallGroupMuteStateSignal, 'signature'>;
+
+export type GroupCallControlSignalForRenderer =
+  | Omit<CallGroupStartedSignal, 'signature'>
+  | Omit<GroupCallQuerySignal, 'signature'>
+  | Omit<GroupCallQueryResponseSignal, 'signature'>
+  | Omit<CallGroupJoinRequestSignal, 'signature'>
+  | Omit<CallGroupJoinResponseAcceptedSignal, 'signature' | 'admissionToken'>
+  | Omit<CallGroupJoinResponseRejectedSignal, 'signature'>
+  | Omit<CallGroupRosterSignal, 'signature'>
+  | Omit<CallGroupLeaveSignal, 'signature'>
+  | Omit<CallGroupEndedSignal, 'signature'>
+  | Omit<CallGroupMuteStateSignal, 'signature'>;
+
+export type GroupCallHint = {
+  type: 'GROUP_CALL_HINT';
+  groupId: string;
+  fromPeerId: string;
+  toPeerId: string;
+  timestamp: number;
+  signature: string;
+};
+
+export type GroupCallHintWithoutSignature = Omit<GroupCallHint, 'signature'>;
+
+type BaseGroupCallPairSignal = {
+  groupId: string;
+  callId: string;
+  fromPeerId: string;
+  toPeerId: string;
+  timestamp: number;
+  signature: string;
+};
+
+export type GroupCallOfferSignal = BaseGroupCallPairSignal & {
+  type: 'CALL_OFFER';
+  offerSdp: string;
+  mediaType: 'audio';
+  admissionToken?: AdmissionToken;
+};
+
+export type GroupCallAnswerSignal = BaseGroupCallPairSignal & {
+  type: 'CALL_ANSWER';
+  answerSdp: string;
+};
+
+export type GroupCallIceSignal = BaseGroupCallPairSignal & {
+  type: 'CALL_ICE';
+  candidate: string;
+  sdpMid: string | null;
+  sdpMLineIndex: number | null;
+  usernameFragment: string | null;
+};
+
+export type GroupCallPairSignalMessage =
+  | GroupCallOfferSignal
+  | GroupCallAnswerSignal
+  | GroupCallIceSignal;
+
+export type GroupCallPairSignalWithoutSignature =
+  | Omit<GroupCallOfferSignal, 'signature'>
+  | Omit<GroupCallAnswerSignal, 'signature'>
+  | Omit<GroupCallIceSignal, 'signature'>;
+
+export type GroupCallPairSignalForRenderer =
+  | Omit<GroupCallOfferSignal, 'signature' | 'admissionToken'>
+  | Omit<GroupCallAnswerSignal, 'signature'>
+  | Omit<GroupCallIceSignal, 'signature'>;
+
+export type GroupCallPairSignalOutgoingInput =
+  | {
+    type: 'CALL_OFFER';
+    groupId: string;
+    callId: string;
+    toPeerId: string;
+    offerSdp: string;
+    mediaType?: 'audio';
+    admissionToken?: AdmissionToken;
+    timestamp?: number;
+  }
+  | {
+    type: 'CALL_ANSWER';
+    groupId: string;
+    callId: string;
+    toPeerId: string;
+    answerSdp: string;
+    timestamp?: number;
+  }
+  | {
+    type: 'CALL_ICE';
+    groupId: string;
+    callId: string;
+    toPeerId: string;
+    candidate: string;
+    sdpMid: string | null;
+    sdpMLineIndex: number | null;
+    usernameFragment: string | null;
+    timestamp?: number;
+  };
+
+export interface GroupCallControlSignalReceivedEvent {
+  signal: GroupCallControlSignalForRenderer;
+  receivedAt: number;
+}
+
+export interface GroupCallPairSignalReceivedEvent {
+  signal: GroupCallPairSignalForRenderer;
+  receivedAt: number;
+}
+
+export interface GroupCallStateChangedEvent {
+  chatId: number | null;
+  groupId: string;
+  callId: string | null;
+  state: GroupCallState;
+  role: GroupCallRole | null;
+  reason?: string;
+  timestamp: number;
+}
+
+export interface GroupCallErrorEvent {
+  error: string;
+  chatId?: number | null;
+  groupId?: string;
+  callId?: string;
+  peerId?: string;
+  code?: string;
+  timestamp: number;
+}
+
 
 export type DhtAdmissionApi = {
   routingTable: { size: number };

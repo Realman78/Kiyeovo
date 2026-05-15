@@ -27,6 +27,10 @@ import {
   type CallSignalReceivedEvent,
   type CallStateChangedEvent,
   type CallErrorEvent,
+  type GroupCallControlSignalReceivedEvent,
+  type GroupCallPairSignalReceivedEvent,
+  type GroupCallStateChangedEvent,
+  type GroupCallErrorEvent,
 } from '../core/index.js';
 import { DEFAULT_NETWORK_MODE, NETWORK_MODE_ONBOARDED_SETTING_KEY } from '../core/constants.js';
 import { ensureAppDataDir } from '../core/utils/miscellaneous.js';
@@ -391,6 +395,30 @@ function sendCallError(data: CallErrorEvent) {
   }
 }
 
+function sendGroupCallControlSignalReceived(data: GroupCallControlSignalReceivedEvent) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC_CHANNELS.GROUP_CALL_CONTROL_SIGNAL_RECEIVED, data);
+  }
+}
+
+function sendGroupCallPairSignalReceived(data: GroupCallPairSignalReceivedEvent) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC_CHANNELS.GROUP_CALL_PAIR_SIGNAL_RECEIVED, data);
+  }
+}
+
+function sendGroupCallStateChanged(data: GroupCallStateChangedEvent) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC_CHANNELS.GROUP_CALL_STATE_CHANGED, data);
+  }
+}
+
+function sendGroupCallError(data: GroupCallErrorEvent) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC_CHANNELS.GROUP_CALL_ERROR, data);
+  }
+}
+
 function detectRequiresNetworkModeSelection(): boolean {
   try {
     const dbPath = path.join(ensureAppDataDir(), 'chat.db');
@@ -592,6 +620,18 @@ async function initializeP2PAfterWindow() {
       },
       onCallError: (data: CallErrorEvent) => {
         sendCallError(data);
+      },
+      onGroupCallControlSignalReceived: (data: GroupCallControlSignalReceivedEvent) => {
+        sendGroupCallControlSignalReceived(data);
+      },
+      onGroupCallPairSignalReceived: (data: GroupCallPairSignalReceivedEvent) => {
+        sendGroupCallPairSignalReceived(data);
+      },
+      onGroupCallStateChanged: (data: GroupCallStateChangedEvent) => {
+        sendGroupCallStateChanged(data);
+      },
+      onGroupCallError: (data: GroupCallErrorEvent) => {
+        sendGroupCallError(data);
       },
     };
     p2pCore = await initializeP2PCore(p2pCoreConfig);

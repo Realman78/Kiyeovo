@@ -13,6 +13,11 @@ import type {
   FileTransferCompleteEvent,
   FileTransferFailedEvent,
   FileTransferProgressEvent,
+  GroupCallControlSignalReceivedEvent,
+  GroupCallErrorEvent,
+  GroupCallPairSignalOutgoingInput,
+  GroupCallPairSignalReceivedEvent,
+  GroupCallStateChangedEvent,
   GroupChatActivatedEvent,
   GroupMembersUpdatedEvent,
   GroupOfflineGapWarning,
@@ -133,6 +138,10 @@ export interface KiyeovoAPI {
     reason?: 'hangup' | 'disconnect' | 'failed',
   ) => Promise<{ success: boolean; error: string | null }>;
   sendCallSignal: (signal: CallSignalOutgoingInput) => Promise<{ success: boolean; error: string | null }>;
+  startGroupCall: (chatId: number) => Promise<{ success: boolean; error: string | null }>;
+  joinGroupCall: (chatId: number) => Promise<{ success: boolean; error: string | null }>;
+  leaveGroupCall: (chatId: number) => Promise<{ success: boolean; error: string | null }>;
+  sendGroupCallPairSignal: (signal: GroupCallPairSignalOutgoingInput) => Promise<{ success: boolean; error: string | null }>;
   getScreenShareSupport: () => Promise<ScreenShareSupportResponse>;
   onScreenShareSourceRequest: (callback: (request: ScreenShareSourceRequest) => void) => Unsubscribe;
   selectScreenShareSource: (requestId: string, sourceId: string | null) => Promise<{ success: boolean; error: string | null }>;
@@ -140,6 +149,10 @@ export interface KiyeovoAPI {
   onCallSignalReceived: (callback: (data: CallSignalReceivedEvent) => void) => Unsubscribe;
   onCallStateChanged: (callback: (data: CallStateChangedEvent) => void) => Unsubscribe;
   onCallError: (callback: (data: CallErrorEvent) => void) => Unsubscribe;
+  onGroupCallControlSignalReceived: (callback: (data: GroupCallControlSignalReceivedEvent) => void) => Unsubscribe;
+  onGroupCallPairSignalReceived: (callback: (data: GroupCallPairSignalReceivedEvent) => void) => Unsubscribe;
+  onGroupCallStateChanged: (callback: (data: GroupCallStateChangedEvent) => void) => Unsubscribe;
+  onGroupCallError: (callback: (data: GroupCallErrorEvent) => void) => Unsubscribe;
 
   onKeyExchangeSent: (callback: (data: KeyExchangeEvent) => void) => Unsubscribe;
   onKeyExchangeFailed: (callback: (data: KeyExchangeFailedEvent) => void) => Unsubscribe;

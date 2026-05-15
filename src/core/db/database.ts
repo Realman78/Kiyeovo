@@ -68,6 +68,8 @@ export interface Chat {
     group_status?: string // GroupStatus from group/types.ts
     needs_removed_catchup?: boolean
     removed_at?: number | null
+    last_known_active_call_id?: string | null
+    last_known_active_call_seen_at?: number | null
     created_at: Date
     updated_at: Date
 }
@@ -277,6 +279,8 @@ export class ChatDatabase {
             key_version: row.key_version ?? 0,
             needs_removed_catchup: Boolean(row.needs_removed_catchup),
             removed_at: row.removed_at ?? null,
+            last_known_active_call_id: row.last_known_active_call_id ?? null,
+            last_known_active_call_seen_at: row.last_known_active_call_seen_at ?? null,
         };
     }
 
@@ -324,11 +328,14 @@ export class ChatDatabase {
                 group_status TEXT,
                 needs_removed_catchup INTEGER NOT NULL DEFAULT 0,
                 removed_at INTEGER,
+                last_known_active_call_id TEXT,
+                last_known_active_call_seen_at INTEGER,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         `);
         this.ensureChatsRemovedCatchupColumns();
+        this.ensureChatsLastKnownActiveCallColumns();
 
 
         // Messages table
@@ -697,6 +704,24 @@ export class ChatDatabase {
 
         try {
             this.db.exec('ALTER TABLE chats ADD COLUMN removed_at INTEGER');
+        } catch (error) {
+            if (!errStr(error).toLowerCase().includes('duplicate column name')) {
+                throw error;
+            }
+        }
+    }
+
+    private ensureChatsLastKnownActiveCallColumns(): void {
+        try {
+            this.db.exec('ALTER TABLE chats ADD COLUMN last_known_active_call_id TEXT');
+        } catch (error) {
+            if (!errStr(error).toLowerCase().includes('duplicate column name')) {
+                throw error;
+            }
+        }
+
+        try {
+            this.db.exec('ALTER TABLE chats ADD COLUMN last_known_active_call_seen_at INTEGER');
         } catch (error) {
             if (!errStr(error).toLowerCase().includes('duplicate column name')) {
                 throw error;
