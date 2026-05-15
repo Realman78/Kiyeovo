@@ -540,7 +540,7 @@ export class GroupOfflineManager {
           }
 
           const expectedSeq = highestSeenSeq + 1;
-          if (msg.seq > expectedSeq) {
+          if (msg.messageType !== 'system' && msg.seq > expectedSeq) {
             gapWarnings.push({
               chatId: chat.id,
               groupId: chat.group_id,

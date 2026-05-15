@@ -141,6 +141,22 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function summarizeParticipants(participants: GroupCallParticipant[]): string {
+  return sortParticipants(participants)
+    .map((participant) => participant.peerId.slice(-8))
+    .join(',');
+}
+
+function describeQueryResolution(result: QueryResolution): string {
+  if (result.kind === 'zero') {
+    return 'zero';
+  }
+  if (result.kind === 'conflict') {
+    return 'conflict';
+  }
+  return `winner call=${result.winner.callId.slice(0, 8)} version=${result.winner.rosterVersion} participants=${summarizeParticipants(result.winner.participants)}`;
+}
+
 export class GroupCallOrchestrator {
   private readonly node: ChatNode;
   private readonly database: ChatDatabase;
@@ -155,6 +171,8 @@ export class GroupCallOrchestrator {
   private readonly pendingQueriesByGroupId = new Map<string, Promise<QueryResolution>>();
   private readonly pendingQueriesByRequestId = new Map<string, PendingQuery>();
   private readonly recentQueryResults = new Map<string, { resolvedAt: number; result: QueryResolution }>();
+  private readonly pendingDurableHintGroups = new Set<string>();
+  private readonly recentDurableHintResults = new Map<string, number>();
   private session: GroupCallSession | null = null;
   private storeDurableHint: ((groupId: string) => Promise<void>) | null = null;
   private pendingJoinResponse: PendingJoinResponse | null = null;
@@ -185,6 +203,10 @@ export class GroupCallOrchestrator {
       const chat = this.requireEligibleGroupChat(chatId);
       const gate = this.callActivityRegistry.canUseGroupCall({ groupId: chat.group_id! });
       if (!gate.allowed) {
+        // TEMP_LOG
+        log(
+          `[GROUP-CALL][GATE][DENY] action=start group=${chat.group_id?.slice(0, 8)} direct=${this.callActivityRegistry.getDirectCall()?.callId ?? 'none'} localGroup=${this.callActivityRegistry.getGroupCall()?.callId ?? 'none'} sessionGroup=${this.session?.groupId ?? 'none'} sessionCall=${this.session?.callId ?? 'none'}`,
+        );
         return { success: false, error: gate.error };
       }
 
@@ -194,7 +216,7 @@ export class GroupCallOrchestrator {
 
       const queryResolution = await this.discoverActiveCall(chat);
       if (queryResolution.kind === 'winner') {
-        this.writePersistentCallEvidence(chat.id, queryResolution.winner.callId, queryResolution.winner.timestamp);
+        this.writePersistentCallEvidence(chat.id, queryResolution.winner.callId, queryResolution.winner.timestamp, 'start-discovered-existing');
         return {
           success: true,
           error: null,
@@ -221,7 +243,7 @@ export class GroupCallOrchestrator {
         recentWriterPeerIds: [this.localPeerId()],
       };
       this.callActivityRegistry.setGroupCall({ callId, groupId: chat.group_id! });
-      this.writePersistentCallEvidence(chat.id, callId, joinedAt);
+      this.writePersistentCallEvidence(chat.id, callId, joinedAt, 'local-start');
       this.emitStateChanged('waiting', { reason: 'started' });
 
       void this.broadcastStartedSignal(chat, callId, participants, 1);
@@ -236,6 +258,10 @@ export class GroupCallOrchestrator {
       const chat = this.requireEligibleGroupChat(chatId);
       const gate = this.callActivityRegistry.canUseGroupCall({ groupId: chat.group_id! });
       if (!gate.allowed) {
+        // TEMP_LOG
+        log(
+          `[GROUP-CALL][GATE][DENY] action=join group=${chat.group_id?.slice(0, 8)} direct=${this.callActivityRegistry.getDirectCall()?.callId ?? 'none'} localGroup=${this.callActivityRegistry.getGroupCall()?.callId ?? 'none'} sessionGroup=${this.session?.groupId ?? 'none'} sessionCall=${this.session?.callId ?? 'none'}`,
+        );
         return { success: false, error: gate.error };
       }
 
@@ -245,7 +271,7 @@ export class GroupCallOrchestrator {
 
       const queryResolution = await this.discoverActiveCall(chat, { bypassCache: true });
       if (queryResolution.kind === 'zero') {
-        this.clearPersistentCallEvidence(chat.id);
+        this.clearPersistentCallEvidence(chat.id, 'join-query-zero');
         return { success: false, error: 'This call may have ended' };
       }
       if (queryResolution.kind === 'conflict') {
@@ -256,7 +282,7 @@ export class GroupCallOrchestrator {
       const joinResult = await this.requestJoinWithRetry(chat, queryResolution.winner);
       if (!joinResult.success) {
         if (joinResult.clearEvidence) {
-          this.clearPersistentCallEvidence(chat.id);
+          this.clearPersistentCallEvidence(chat.id, 'join-failure-clear');
         }
         this.endLocalSession(joinResult.reason);
         return { success: false, error: joinResult.error ?? 'Failed to join group call' };
@@ -266,7 +292,7 @@ export class GroupCallOrchestrator {
         return { success: false, error: 'Failed to finalize group call join' };
       }
 
-      this.writePersistentCallEvidence(chat.id, this.session.callId, Date.now());
+      this.writePersistentCallEvidence(chat.id, this.session.callId, Date.now(), 'join-success');
       this.session.state = 'waiting';
       this.emitStateChanged('waiting', { reason: 'joined' });
       void this.broadcastStartedSignal(
@@ -329,6 +355,17 @@ export class GroupCallOrchestrator {
     if (this.session?.groupId === groupId) {
       return;
     }
+    if (this.pendingDurableHintGroups.has(groupId)) {
+      // TEMP_LOG
+      log(`[GROUP-CALL][HINT][SKIP] group=${groupId.slice(0, 8)} reason=in_flight`);
+      return;
+    }
+    const recentResolvedAt = this.recentDurableHintResults.get(groupId);
+    if (recentResolvedAt && recentResolvedAt >= Date.now() - DISCOVERY_CACHE_TTL_MS) {
+      // TEMP_LOG
+      log(`[GROUP-CALL][HINT][SKIP] group=${groupId.slice(0, 8)} reason=recent_result`);
+      return;
+    }
 
     const chat = this.database.getChatByGroupId(groupId);
     if (!chat || chat.type !== 'group') {
@@ -338,14 +375,25 @@ export class GroupCallOrchestrator {
       return;
     }
 
-    log(`[GROUP-CALL][HINT] Received durable hint for group=${groupId.slice(0, 8)}`);
-    const queryResolution = await this.discoverActiveCall(chat);
-    if (queryResolution.kind === 'winner') {
-      this.writePersistentCallEvidence(chat.id, queryResolution.winner.callId, queryResolution.winner.timestamp);
-      return;
-    }
-    if (queryResolution.kind === 'zero') {
-      this.clearPersistentCallEvidence(chat.id);
+    this.pendingDurableHintGroups.add(groupId);
+    try {
+      // TEMP_LOG
+      log(`[GROUP-CALL][HINT] Received durable hint for group=${groupId.slice(0, 8)}`);
+      const queryResolution = await this.discoverActiveCall(chat);
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][HINT][QUERY_RESULT] group=${groupId.slice(0, 8)} result=${describeQueryResolution(queryResolution)}`,
+      );
+      if (queryResolution.kind === 'winner') {
+        this.writePersistentCallEvidence(chat.id, queryResolution.winner.callId, queryResolution.winner.timestamp, 'durable-hint-winner');
+        return;
+      }
+      if (queryResolution.kind === 'zero') {
+        this.clearPersistentCallEvidence(chat.id, 'durable-hint-zero');
+      }
+    } finally {
+      this.pendingDurableHintGroups.delete(groupId);
+      this.recentDurableHintResults.set(groupId, Date.now());
     }
   }
 
@@ -419,6 +467,7 @@ export class GroupCallOrchestrator {
 
     if (this.session?.groupId === signal.groupId && this.session.callId !== signal.callId) {
       if (compareStrings(signal.callId, this.session.callId) < 0) {
+        // TEMP_LOG
         log(
           `[GROUP-CALL][DISCOVERY] Superseded local call group=${signal.groupId.slice(0, 8)} old=${this.session.callId.slice(0, 8)} new=${signal.callId.slice(0, 8)}`,
         );
@@ -436,7 +485,7 @@ export class GroupCallOrchestrator {
       return;
     }
 
-    this.writePersistentCallEvidence(chat.id, signal.callId, signal.timestamp);
+    this.writePersistentCallEvidence(chat.id, signal.callId, signal.timestamp, 'started-signal');
   }
 
   private async respondToQuery(signal: GroupCallControlSignalMessage & { type: 'GROUP_CALL_QUERY' }): Promise<void> {
@@ -504,6 +553,7 @@ export class GroupCallOrchestrator {
     if (existingParticipant) {
       const token = this.issueAdmissionToken(signal.callId, signal.fromPeerId);
       await this.sendAcceptedJoinResponse(chat, signal, this.session.authoritativeParticipants, this.session.rosterVersion, token);
+      // TEMP_LOG
       log(
         `[GROUP-CALL][JOIN][REFRESH] group=${signal.groupId.slice(0, 8)} call=${signal.callId.slice(0, 8)} peer=${signal.fromPeerId.slice(-8)}`,
       );
@@ -524,6 +574,7 @@ export class GroupCallOrchestrator {
     const token = this.issueAdmissionToken(signal.callId, signal.fromPeerId);
     await this.sendAcceptedJoinResponse(chat, signal, nextParticipants, this.session.rosterVersion, token);
     this.scheduleRosterBroadcast(chat);
+    // TEMP_LOG
     log(
       `[GROUP-CALL][JOIN][ACCEPT] group=${signal.groupId.slice(0, 8)} call=${signal.callId.slice(0, 8)} peer=${signal.fromPeerId.slice(-8)} participants=${nextParticipants.length}`,
     );
@@ -572,6 +623,7 @@ export class GroupCallOrchestrator {
     this.session.authoritativeParticipants = sortParticipants(signal.participants);
     this.session.rosterVersion = signal.rosterVersion;
     this.recordRecentWriter(expectedWriterPeerId);
+    // TEMP_LOG
     log(
       `[GROUP-CALL][ROSTER] group=${signal.groupId.slice(0, 8)} call=${signal.callId.slice(0, 8)} version=${signal.rosterVersion} participants=${signal.participants.length}`,
     );
@@ -582,7 +634,7 @@ export class GroupCallOrchestrator {
     if (!chat || chat.last_known_active_call_id !== signal.callId) {
       return;
     }
-    this.clearPersistentCallEvidence(chat.id);
+    this.clearPersistentCallEvidence(chat.id, 'ended-signal');
   }
 
   private async discoverActiveCall(
@@ -595,11 +647,19 @@ export class GroupCallOrchestrator {
       && cached
       && cached.resolvedAt >= Date.now() - DISCOVERY_CACHE_TTL_MS
     ) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][QUERY][CACHE_HIT] group=${chat.group_id?.slice(0, 8)} result=${describeQueryResolution(cached.result)}`,
+      );
       return cached.result;
     }
 
     const existing = this.pendingQueriesByGroupId.get(chat.group_id!);
     if (!options?.bypassCache && existing) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][QUERY][REUSE_IN_FLIGHT] group=${chat.group_id?.slice(0, 8)}`,
+      );
       return existing;
     }
 
@@ -666,6 +726,7 @@ export class GroupCallOrchestrator {
 
     const responses = await responsePromise;
 
+    // TEMP_LOG
     log(
       `[GROUP-CALL][QUERY] group=${chat.group_id?.slice(0, 8)} request=${requestId.slice(0, 8)} targets=${targets.length} sent=${sentCount} responses=${responses.length}`,
     );
@@ -688,8 +749,14 @@ export class GroupCallOrchestrator {
 
   private resolveQueryResponses(chat: Chat, responses: GroupCallQueryResponseSignal[]): QueryResolution {
     if (responses.length === 0) {
+      // TEMP_LOG
+      log(`[GROUP-CALL][QUERY][RESOLVE] group=${chat.group_id?.slice(0, 8)} responses=0 outcome=zero`);
       return { kind: 'zero' };
     }
+
+    const responseSummary = responses
+      .map((response) => `${response.callId.slice(0, 8)}:v${response.rosterVersion}:${summarizeParticipants(response.participants)}`)
+      .join(' | ');
 
     const byCallId = new Map<string, GroupCallQueryResponseSignal[]>();
     for (const response of responses) {
@@ -711,6 +778,8 @@ export class GroupCallOrchestrator {
     const highestVersionResponses = winningCallResponses.filter((response) => response.rosterVersion === highestRosterVersion);
     const canonical = highestVersionResponses[0];
     if (!canonical) {
+      // TEMP_LOG
+      log(`[GROUP-CALL][QUERY][RESOLVE] group=${chat.group_id?.slice(0, 8)} responses=${responses.length} raw="${responseSummary}" outcome=zero_canonical_missing`);
       return { kind: 'zero' };
     }
 
@@ -718,18 +787,25 @@ export class GroupCallOrchestrator {
       (response) => !sameParticipantRoster(response.participants, canonical.participants),
     );
     if (conflicting) {
+      // TEMP_LOG
+      log(`[GROUP-CALL][QUERY][RESOLVE] group=${chat.group_id?.slice(0, 8)} responses=${responses.length} raw="${responseSummary}" outcome=conflict`);
       return { kind: 'conflict' };
     }
 
+    const winner: QueryWinner = {
+      callId: canonical.callId,
+      rosterVersion: canonical.rosterVersion,
+      participants: sortParticipants(canonical.participants),
+      writerPeerId: this.deriveWriterPeerId(chat, canonical.participants),
+      timestamp: canonical.timestamp,
+    };
+    // TEMP_LOG
+    log(
+      `[GROUP-CALL][QUERY][RESOLVE] group=${chat.group_id?.slice(0, 8)} responses=${responses.length} raw="${responseSummary}" outcome=winner call=${winner.callId.slice(0, 8)} version=${winner.rosterVersion} writer=${winner.writerPeerId.slice(-8)} participants=${summarizeParticipants(winner.participants)}`,
+    );
     return {
       kind: 'winner',
-      winner: {
-        callId: canonical.callId,
-        rosterVersion: canonical.rosterVersion,
-        participants: sortParticipants(canonical.participants),
-        writerPeerId: this.deriveWriterPeerId(chat, canonical.participants),
-        timestamp: canonical.timestamp,
-      },
+      winner,
     };
   }
 
@@ -780,6 +856,7 @@ export class GroupCallOrchestrator {
     );
     const sentStarted = sendResults.filter((result) => result.status === 'fulfilled' && result.value).length;
 
+    // TEMP_LOG
     log(
       `[GROUP-CALL][START] group=${chat.group_id?.slice(0, 8)} call=${callId.slice(0, 8)} startedFanout=${sentStarted}/${peers.length} rosterVersion=${rosterVersion} participants=${participants.length}`,
     );
@@ -816,6 +893,7 @@ export class GroupCallOrchestrator {
     };
     this.callActivityRegistry.setGroupCall({ callId: winner.callId, groupId: chat.group_id! });
     this.emitStateChanged('joining', { reason: 'joining' });
+    // TEMP_LOG
     log(
       `[GROUP-CALL][JOIN][BEGIN] group=${chat.group_id?.slice(0, 8)} call=${winner.callId.slice(0, 8)} writer=${winner.writerPeerId.slice(-8)}`,
     );
@@ -915,6 +993,7 @@ export class GroupCallOrchestrator {
       return { kind: 'timeout' };
     }
 
+    // TEMP_LOG
     log(
       `[GROUP-CALL][JOIN][REQUEST] group=${chat.group_id?.slice(0, 8)} call=${winner.callId.slice(0, 8)} writer=${winner.writerPeerId.slice(-8)}`,
     );
@@ -924,6 +1003,7 @@ export class GroupCallOrchestrator {
       return { kind: 'aborted' };
     }
     if (resolution.kind === 'timeout') {
+      // TEMP_LOG
       log(
         `[GROUP-CALL][JOIN][TIMEOUT] group=${chat.group_id?.slice(0, 8)} call=${winner.callId.slice(0, 8)} writer=${winner.writerPeerId.slice(-8)}`,
       );
@@ -931,6 +1011,7 @@ export class GroupCallOrchestrator {
     }
     const { response } = resolution;
     if (!response.accepted) {
+      // TEMP_LOG
       log(
         `[GROUP-CALL][JOIN][REJECT] group=${chat.group_id?.slice(0, 8)} call=${winner.callId.slice(0, 8)} writer=${winner.writerPeerId.slice(-8)} reason=${response.reason}`,
       );
@@ -1035,6 +1116,7 @@ export class GroupCallOrchestrator {
       })),
     );
 
+    // TEMP_LOG
     log(
       `[GROUP-CALL][ROSTER][BROADCAST] group=${chat.group_id?.slice(0, 8)} call=${this.session.callId.slice(0, 8)} version=${this.session.rosterVersion} sent=${sendResults.filter((result) => result.status === 'fulfilled' && result.value).length}/${peers.length}`,
     );
@@ -1194,6 +1276,7 @@ export class GroupCallOrchestrator {
       await stream.close();
       return true;
     } catch (error: unknown) {
+      // TEMP_LOG
       log(
         `[GROUP-CALL][SEND][FAIL] type=${unsignedSignal.type} to=${unsignedSignal.toPeerId.slice(-8)} reason=${errStr(error)}`,
       );
@@ -1210,6 +1293,7 @@ export class GroupCallOrchestrator {
       await stream.close();
       return true;
     } catch (error: unknown) {
+      // TEMP_LOG
       log(
         `[GROUP-CALL][PAIR][SEND][FAIL] type=${unsignedSignal.type} to=${unsignedSignal.toPeerId.slice(-8)} reason=${errStr(error)}`,
       );
@@ -1227,12 +1311,37 @@ export class GroupCallOrchestrator {
     return this.node.peerId.toString();
   }
 
-  private writePersistentCallEvidence(chatId: number, callId: string, seenAt: number): void {
+  private writePersistentCallEvidence(chatId: number, callId: string, seenAt: number, reason: string): void {
+    // TEMP_LOG
+    log(
+      `[GROUP-CALL][EVIDENCE][SET] chat=${chatId} call=${callId.slice(0, 8)} seenAt=${seenAt} reason=${reason}`,
+    );
     this.database.setLastKnownActiveCall(chatId, callId, seenAt);
+    this.emitEvidenceChanged(chatId, callId, `set:${reason}`);
   }
 
-  private clearPersistentCallEvidence(chatId: number): void {
+  private clearPersistentCallEvidence(chatId: number, reason: string): void {
+    // TEMP_LOG
+    log(`[GROUP-CALL][EVIDENCE][CLEAR] chat=${chatId} reason=${reason}`);
     this.database.clearLastKnownActiveCall(chatId);
+    this.emitEvidenceChanged(chatId, null, `clear:${reason}`);
+  }
+
+  private emitEvidenceChanged(chatId: number, callId: string | null, reason: string): void {
+    const chat = this.database.getChats([chatId])[0];
+    if (!chat?.group_id) {
+      return;
+    }
+
+    this.onStateChanged({
+      chatId,
+      groupId: chat.group_id,
+      callId,
+      state: 'idle',
+      role: this.session?.chatId === chatId ? this.session.role : null,
+      reason,
+      timestamp: Date.now(),
+    });
   }
 
   private endLocalSession(reason: string): void {
@@ -1323,6 +1432,7 @@ export class GroupCallOrchestrator {
     this.pruneSeenSignalSignatures(now);
     const previousSeenAt = this.seenSignalSignatures.get(signal.signature);
     if (previousSeenAt && previousSeenAt >= now - GROUP_CALL_SIGNAL_DEDUPE_TTL_MS) {
+      // TEMP_LOG
       log(
         `[GROUP-CALL] Dropping duplicate signal type=${signal.type} peer=${remotePeerId.slice(-8)} signature=${signal.signature.slice(0, 8)}`,
       );

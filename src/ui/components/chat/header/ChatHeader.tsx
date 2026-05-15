@@ -440,7 +440,7 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
   const syncGroupCallEvidence = async (targetChatId: number) => {
     const chatResult = await window.kiyeovoAPI.getChatById(targetChatId);
     if (!chatResult.success || !chatResult.chat) {
-      return;
+      return null;
     }
 
     dispatch(updateChat({
@@ -450,6 +450,7 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
         lastKnownActiveCallSeenAt: chatResult.chat.last_known_active_call_seen_at ?? null,
       },
     }));
+    return chatResult.chat;
   };
 
   const handleStartGroupCall = async () => {
@@ -457,6 +458,10 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
 
     setIsStartingGroupCall(true);
     try {
+      // TEMP_LOG
+      console.info(
+        `[GROUP-CALL][ACTION] action=start chat=${chatId} lastKnownCall=${activeChat?.lastKnownActiveCallId ?? 'none'} groupId=${activeChat?.groupId ?? 'none'}`,
+      );
       const result = await window.kiyeovoAPI.startGroupCall(chatId);
       await syncGroupCallEvidence(chatId);
 
@@ -484,6 +489,10 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
 
     setIsJoiningGroupCall(true);
     try {
+      // TEMP_LOG
+      console.info(
+        `[GROUP-CALL][ACTION] action=join chat=${chatId} lastKnownCall=${activeChat?.lastKnownActiveCallId ?? 'none'} groupId=${activeChat?.groupId ?? 'none'}`,
+      );
       const result = await window.kiyeovoAPI.joinGroupCall(chatId);
       await syncGroupCallEvidence(chatId);
 
@@ -504,6 +513,24 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
     } finally {
       setIsJoiningGroupCall(false);
     }
+  };
+
+  const handleGroupCallButtonClick = async () => {
+    if (!chatId) return;
+
+    const freshChat = await syncGroupCallEvidence(chatId);
+    const latestKnownCallId = freshChat?.last_known_active_call_id ?? null;
+    // TEMP_LOG
+    console.info(
+      `[GROUP-CALL][ACTION][DECIDE] chat=${chatId} reduxCall=${activeChat?.lastKnownActiveCallId ?? 'none'} freshCall=${latestKnownCallId ?? 'none'} groupId=${freshChat?.group_id ?? activeChat?.groupId ?? 'none'}`,
+    );
+
+    if (latestKnownCallId) {
+      await handleJoinGroupCall();
+      return;
+    }
+
+    await handleStartGroupCall();
   };
 
   const handleCheckMissedDirectMessages = async () => {
@@ -760,10 +787,15 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
     && activeChat?.status === 'active'
     && (resolvedGroupStatus === 'active' || resolvedGroupStatus === 'rekeying')
     && !activeCall;
+  const isGroupCallSyncBlocked = isGroup && (
+    activeChat?.fetchedOffline !== true
+    || activeChat?.isFetchingOffline === true
+    || activeChat?.offlineFetchNeedsSync === true
+  );
   const hasKnownGroupCall = Boolean(activeChat?.lastKnownActiveCallId);
   const hasAnotherPeerActiveCall = Boolean(activeCall) && !hasActiveCallWithThisPeer;
   const startCallDisabled = !canStartDirectCall || hasAnotherPeerActiveCall;
-  const groupCallActionDisabled = !canStartGroupCall || isStartingGroupCall || isJoiningGroupCall;
+  const groupCallActionDisabled = !canStartGroupCall || isGroupCallSyncBlocked || isStartingGroupCall || isJoiningGroupCall;
   const audioCallButtonTitle = startCallDisabled
     ? 'User is offline or another call is active'
     : 'Start audio call';
@@ -771,7 +803,11 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
     ? 'User is offline or another call is active'
     : 'Start video call';
   const groupCallButtonTitle = groupCallActionDisabled
-    ? 'Group call is unavailable right now'
+    ? isGroupCallSyncBlocked
+      ? activeChat?.offlineFetchNeedsSync
+        ? 'Sync group updates before using group calls'
+        : 'Wait for group updates to finish syncing before using group calls'
+      : 'Group call is unavailable right now'
     : hasKnownGroupCall
       ? 'Join group call'
       : 'Start group call';
@@ -903,7 +939,7 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
           variant="ghost"
           size="icon"
           className="text-muted-foreground hover:text-foreground"
-          onClick={hasKnownGroupCall ? handleJoinGroupCall : handleStartGroupCall}
+          onClick={() => { void handleGroupCallButtonClick(); }}
           title={groupCallButtonTitle}
           disabled={groupCallActionDisabled}
         >
