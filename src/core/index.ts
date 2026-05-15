@@ -425,6 +425,7 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
   const groupCallOrchestrator = new GroupCallOrchestrator({
     node,
     database,
+    userIdentity,
     callActivityRegistry,
     onControlSignalReceived: sendGroupCallControlSignalReceived,
     onPairSignalReceived: sendGroupCallPairSignalReceived,
@@ -457,6 +458,11 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     callActivityRegistry,
     groupCallOrchestrator,
   );
+
+  groupCallOrchestrator.setDurableHintStorage((groupId: string) => messageHandler.storeGroupCallHint(groupId));
+  messageHandler.setGroupCallHintHandler((groupId: string) => {
+    void groupCallOrchestrator.handleDurableHint(groupId);
+  });
 
   // Start periodic database cleanup
   const cleanupInterval = setInterval(() => {

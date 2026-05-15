@@ -358,6 +358,37 @@ export class GroupMessaging {
     return response;
   }
 
+  async storeHiddenSystemMessage(groupId: string, content: string): Promise<void> {
+    const ctx = this.resolveActiveGroupContext(groupId);
+    const seq = this.deps.database.getNextSeqAndIncrement(groupId, ctx.keyVersion);
+    const timestamp = Date.now();
+    const nonce = randomBytes(24);
+    const encryptedContent = this.encryptContent(content, ctx.groupKey, nonce);
+
+    const unsignedMessage: Omit<GroupContentMessage, 'signature'> = {
+      type: GroupMessageType.GROUP_MESSAGE,
+      groupId,
+      keyVersion: ctx.keyVersion,
+      senderPeerId: this.deps.myPeerId,
+      messageId: randomUUID(),
+      seq,
+      encryptedContent,
+      nonce: Buffer.from(nonce).toString('base64'),
+      timestamp,
+      messageType: 'system',
+    };
+
+    const signedMessage: GroupChatMessage = {
+      ...unsignedMessage,
+      signature: this.sign(unsignedMessage),
+    };
+
+    await this.deps.groupOfflineManager.storeGroupMessage(signedMessage);
+    log(
+      `[GROUP-MSG][SYSTEM][OFFLINE_ONLY] group=${groupId.slice(0, 8)} msgId=${signedMessage.messageId} seq=${seq}`,
+    );
+  }
+
   async retryOfflineBackup(chatId: number, messageId: string): Promise<void> {
     const pending = this.pendingOfflineBackups.get(messageId);
     if (!pending) {

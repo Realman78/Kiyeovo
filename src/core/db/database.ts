@@ -2820,6 +2820,26 @@ export class ChatDatabase {
         `).run(groupStatus, chatId);
     }
 
+    setLastKnownActiveCall(chatId: number, callId: string, seenAt: number): void {
+        this.db.prepare(`
+            UPDATE chats
+            SET last_known_active_call_id = ?,
+                last_known_active_call_seen_at = ?,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            WHERE id = ?
+        `).run(callId, seenAt, chatId);
+    }
+
+    clearLastKnownActiveCall(chatId: number): void {
+        this.db.prepare(`
+            UPDATE chats
+            SET last_known_active_call_id = NULL,
+                last_known_active_call_seen_at = NULL,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            WHERE id = ?
+        `).run(chatId);
+    }
+
     transitionChatGroupStatus(chatId: number, nextStatus: GroupStatus, reason: string): void {
         const row = this.db.prepare('SELECT group_status FROM chats WHERE id = ?')
             .get(chatId) as { group_status: string | null } | undefined;

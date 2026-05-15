@@ -172,6 +172,7 @@ export class MessageHandler {
   private activeCallPeerDisconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private callActivityRegistry: CallActivityRegistry;
   private groupCallOrchestrator: GroupCallOrchestrator | null;
+  private groupCallHintHandler: ((groupId: string) => void | Promise<void>) | null = null;
 
   private formatNudgeTarget(payload: BucketNudgePayload): string {
     if (payload.kind === 'GROUP_REKEY_REFETCH') {
@@ -280,6 +281,9 @@ export class MessageHandler {
       userIdentity,
       myPeerId: this.node.peerId.toString(),
       onMessageReceived: this.onMessageReceived,
+      onGroupCallHint: async ({ groupId }) => {
+        await this.groupCallHintHandler?.(groupId);
+      },
     });
     this.groupMessaging = new GroupMessaging({
       node: this.node,
@@ -334,6 +338,17 @@ export class MessageHandler {
 
   public nudgePeerDirectSessionReset(peerId: string): void {
     this.sendBucketNudge(peerId, { kind: 'DIRECT_SESSION_RESET' }, `direct-reset:${peerId}`);
+  }
+
+  setGroupCallHintHandler(handler: ((groupId: string) => void | Promise<void>) | null): void {
+    this.groupCallHintHandler = handler;
+  }
+
+  async storeGroupCallHint(groupId: string): Promise<void> {
+    await this.groupMessaging.storeHiddenSystemMessage(groupId, JSON.stringify({
+      type: 'GROUP_CALL_HINT',
+      groupId,
+    }));
   }
 
   private sendBucketNudge(

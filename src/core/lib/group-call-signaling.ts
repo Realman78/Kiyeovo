@@ -18,6 +18,11 @@ export const GROUP_CALL_SIGNAL_DEDUPE_TTL_MS = 10 * 60 * 1000;
 export const GROUP_CALL_SIGNAL_DEDUPE_MAX_ENTRIES = 1500;
 export const GROUP_CALL_CONTROL_STALE_TOLERANCE_MS = 2000;
 
+export type GroupCallHintSystemPayload = {
+  type: 'GROUP_CALL_HINT';
+  groupId: string;
+};
+
 type SignedGroupCallSignal = GroupCallControlSignalMessage | GroupCallPairSignalMessage | GroupCallHint;
 type UnsignedGroupCallSignal =
   | GroupCallControlSignalWithoutSignature
@@ -98,6 +103,13 @@ export function isGroupCallHint(value: unknown): value is GroupCallHint {
     && value.toPeerId.length > 0
     && isPositiveTimestamp(value.timestamp)
     && isBase64String(value.signature);
+}
+
+export function isGroupCallHintSystemPayload(value: unknown): value is GroupCallHintSystemPayload {
+  return isObject(value)
+    && value.type === 'GROUP_CALL_HINT'
+    && typeof value.groupId === 'string'
+    && value.groupId.length > 0;
 }
 
 export function isGroupCallControlSignalMessage(value: unknown): value is GroupCallControlSignalMessage {

@@ -26,6 +26,7 @@ import {
   type GroupOfflineStore,
   GroupMessageType,
 } from '../types.js';
+import { isGroupCallHintSystemPayload } from '../../lib/group-call-signaling.js';
 import { toBase64Url } from '../../utils/miscellaneous.js';
 import { errStr, generalErrorHandler } from '../../utils/general-error.js';
 import { log } from '../../../shared/logger.js';
@@ -39,6 +40,7 @@ interface GroupOfflineManagerDeps {
   userIdentity: EncryptedUserIdentity;
   myPeerId: string;
   onMessageReceived: (data: MessageReceivedEvent) => void;
+  onGroupCallHint?: (data: { groupId: string; senderPeerId: string; timestamp: number }) => void | Promise<void>;
 }
 
 interface GroupOfflineVersionMeta {
@@ -493,6 +495,17 @@ export class GroupOfflineManager {
             // Persist the missing message, but do NOT change highestSeenSeq.
             try {
               const content = this.decryptContent(msg.encryptedContent, keyBytes, msg.nonce);
+              const wasHiddenSystemMessage = await this.handleHiddenSystemMessage({
+                chatId: chat.id,
+                senderPeerId,
+                timestamp: msg.timestamp,
+                content,
+              });
+              if (wasHiddenSystemMessage) {
+                ({ lastReadTs, lastReadMessageId } = this.advanceCursor(lastReadTs, lastReadMessageId, msg));
+                repairedLate++;
+                continue;
+              }
               await this.deps.database.createMessage({
                 id: messageId,
                 chat_id: chat.id,
@@ -541,6 +554,17 @@ export class GroupOfflineManager {
           try {
             if (!alreadyPersisted) {
               const content = this.decryptContent(msg.encryptedContent, keyBytes, msg.nonce);
+              const wasHiddenSystemMessage = await this.handleHiddenSystemMessage({
+                chatId: chat.id,
+                senderPeerId,
+                timestamp: msg.timestamp,
+                content,
+              });
+              if (wasHiddenSystemMessage) {
+                highestSeenSeq = msg.seq;
+                ({ lastReadTs, lastReadMessageId } = this.advanceCursor(lastReadTs, lastReadMessageId, msg));
+                continue;
+              }
               await this.deps.database.createMessage({
                 id: messageId,
                 chat_id: chat.id,
@@ -616,6 +640,40 @@ export class GroupOfflineManager {
       unreadAdded,
       gapWarnings,
     };
+  }
+
+  private async handleHiddenSystemMessage(input: {
+    chatId: number;
+    senderPeerId: string;
+    timestamp: number;
+    content: string;
+  }): Promise<boolean> {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(input.content);
+    } catch {
+      return false;
+    }
+
+    if (!isGroupCallHintSystemPayload(parsed)) {
+      return false;
+    }
+
+    try {
+      await this.deps.onGroupCallHint?.({
+        groupId: parsed.groupId,
+        senderPeerId: input.senderPeerId,
+        timestamp: input.timestamp,
+      });
+    } catch (error: unknown) {
+      console.warn(
+        `[GROUP-OFFLINE][SYSTEM][GROUP_CALL_HINT][WARN] group=${parsed.groupId.slice(0, 8)} sender=${input.senderPeerId.slice(-8)} reason=${errStr(error)}`,
+      );
+    }
+    log(
+      `[GROUP-OFFLINE][SYSTEM][GROUP_CALL_HINT] chat=${input.chatId} group=${parsed.groupId.slice(0, 8)} sender=${input.senderPeerId.slice(-8)}`,
+    );
+    return true;
   }
 
   private selectHistoryForMode(

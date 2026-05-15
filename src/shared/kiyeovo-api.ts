@@ -78,6 +78,13 @@ export type ScreenShareSourceRequest = {
   sources: ScreenShareSource[];
 };
 
+export type GroupCallActionResult = {
+  success: boolean;
+  error: string | null;
+  outcome?: 'created' | 'existing';
+  callId?: string;
+};
+
 export interface KiyeovoAPI {
   getAppConfig: () => Promise<{ success: boolean; config: AppConfig; error: string | null }>;
   setAppConfig: (config: AppConfig) => Promise<{ success: boolean; error: string | null }>;
@@ -138,9 +145,9 @@ export interface KiyeovoAPI {
     reason?: 'hangup' | 'disconnect' | 'failed',
   ) => Promise<{ success: boolean; error: string | null }>;
   sendCallSignal: (signal: CallSignalOutgoingInput) => Promise<{ success: boolean; error: string | null }>;
-  startGroupCall: (chatId: number) => Promise<{ success: boolean; error: string | null }>;
-  joinGroupCall: (chatId: number) => Promise<{ success: boolean; error: string | null }>;
-  leaveGroupCall: (chatId: number) => Promise<{ success: boolean; error: string | null }>;
+  startGroupCall: (chatId: number) => Promise<GroupCallActionResult>;
+  joinGroupCall: (chatId: number) => Promise<GroupCallActionResult>;
+  leaveGroupCall: (chatId: number) => Promise<GroupCallActionResult>;
   sendGroupCallPairSignal: (signal: GroupCallPairSignalOutgoingInput) => Promise<{ success: boolean; error: string | null }>;
   getScreenShareSupport: () => Promise<ScreenShareSupportResponse>;
   onScreenShareSourceRequest: (callback: (request: ScreenShareSourceRequest) => void) => Unsubscribe;

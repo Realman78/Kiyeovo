@@ -34,6 +34,52 @@ export const Main = () => {
     return user?.username ?? `user_${peerId.slice(-8)}`;
   };
 
+  const mapDbChatToUiChat = (dbChat: any, overrides?: Partial<Chat>): Chat => ({
+    id: dbChat.id,
+    type: dbChat.type,
+    name: dbChat.type === 'group' ? dbChat.name : (dbChat.username || dbChat.name),
+    groupId: dbChat.group_id,
+    groupCreatorPeerId: dbChat.group_creator_peer_id,
+    groupCreatorUsername: dbChat.group_creator_username,
+    peerId: dbChat.other_peer_id,
+    lastMessage: dbChat.last_message_content || 'SYSTEM: No messages yet',
+    lastMessageTimestamp: dbChat.last_message_timestamp
+      ? new Date(dbChat.last_message_timestamp).getTime()
+      : new Date(dbChat.updated_at).getTime(),
+    lastInboundActivityTimestamp: dbChat.last_inbound_activity_timestamp
+      ? new Date(dbChat.last_inbound_activity_timestamp).getTime()
+      : undefined,
+    unreadCount: 0,
+    status: dbChat.status,
+    fetchedOffline: dbChat.type === 'group'
+      ? dbChat.group_status !== 'active'
+      : false,
+    isFetchingOffline: false,
+    offlineFetchNeedsSync: false,
+    blocked: dbChat.blocked,
+    muted: dbChat.muted,
+    groupStatus: dbChat.group_status,
+    needsRemovedCatchup: Boolean(dbChat.needs_removed_catchup),
+    lastKnownActiveCallId: dbChat.last_known_active_call_id ?? null,
+    lastKnownActiveCallSeenAt: dbChat.last_known_active_call_seen_at ?? null,
+    ...overrides,
+  });
+
+  const syncChatCallEvidenceFromDb = async (chatId: number) => {
+    const result = await window.kiyeovoAPI.getChatById(chatId);
+    if (!result.success || !result.chat) {
+      return;
+    }
+
+    dispatch(updateChat({
+      id: chatId,
+      updates: {
+        lastKnownActiveCallId: result.chat.last_known_active_call_id ?? null,
+        lastKnownActiveCallSeenAt: result.chat.last_known_active_call_seen_at ?? null,
+      },
+    }));
+  };
+
   useEffect(() => {
     if (activeCall) {
       dispatch(setCallPeerName({
@@ -139,29 +185,13 @@ export const Main = () => {
             const result = await window.kiyeovoAPI.getChatById(data.chatId);
             if (result.success && result.chat) {
               const dbChat = result.chat;
-              const newChat: Chat = {
-                id: dbChat.id,
-                type: dbChat.type,
-                name: dbChat.type === 'group' ? dbChat.name : (dbChat.username || dbChat.name),
-                groupId: dbChat.group_id,
-                groupCreatorPeerId: dbChat.group_creator_peer_id,
-                groupCreatorUsername: dbChat.group_creator_username,
-                peerId: dbChat.other_peer_id,
-                lastMessage: dbChat.last_message_content || 'SYSTEM: No messages yet',
-                lastMessageTimestamp: dbChat.last_message_timestamp
-                  ? new Date(dbChat.last_message_timestamp).getTime()
-                  : new Date(dbChat.updated_at).getTime(),
-                lastInboundActivityTimestamp: dbChat.last_inbound_activity_timestamp
-                  ? new Date(dbChat.last_inbound_activity_timestamp).getTime()
-                  : undefined,
-                unreadCount: 0,
+              const newChat: Chat = mapDbChatToUiChat(dbChat, {
                 status: 'active',
                 fetchedOffline: false,
                 isFetchingOffline: false,
                 offlineFetchNeedsSync: false,
                 groupStatus: 'active',
-                needsRemovedCatchup: Boolean(dbChat.needs_removed_catchup),
-              };
+              });
               dispatch(addChat(newChat));
             }
           } catch (error) {
@@ -218,31 +248,11 @@ export const Main = () => {
           const existing = store.getState().chat.chats.find(c => c.id === data.chatId);
 
           if (!existing) {
-            const newChat: Chat = {
-              id: dbChat.id,
-              type: dbChat.type,
-              name: dbChat.type === 'group' ? dbChat.name : (dbChat.username || dbChat.name),
-              groupId: dbChat.group_id,
-              groupCreatorPeerId: dbChat.group_creator_peer_id,
-              groupCreatorUsername: dbChat.group_creator_username,
-              peerId: dbChat.other_peer_id,
-              lastMessage: dbChat.last_message_content || 'SYSTEM: No messages yet',
-              lastMessageTimestamp: dbChat.last_message_timestamp
-                ? new Date(dbChat.last_message_timestamp).getTime()
-                : new Date(dbChat.updated_at).getTime(),
-              lastInboundActivityTimestamp: dbChat.last_inbound_activity_timestamp
-                ? new Date(dbChat.last_inbound_activity_timestamp).getTime()
-                : undefined,
-              unreadCount: 0,
-              status: dbChat.status,
+            const newChat: Chat = mapDbChatToUiChat(dbChat, {
               fetchedOffline: dbChat.type === 'group'
                 ? !(dbChat.status === 'active' && dbChat.group_status === 'active')
                 : false,
-              isFetchingOffline: false,
-              offlineFetchNeedsSync: false,
-              groupStatus: dbChat.group_status,
-              needsRemovedCatchup: Boolean(dbChat.needs_removed_catchup),
-            };
+            });
             dispatch(addChat(newChat));
             return;
           }
@@ -450,6 +460,52 @@ export const Main = () => {
       toast.error(data.error);
     });
 
+    const unsubGroupCallControlSignalReceived = window.kiyeovoAPI.onGroupCallControlSignalReceived((data) => {
+      const currentChats = store.getState().chat.chats;
+      const chat = currentChats.find((candidate) => candidate.groupId === data.signal.groupId);
+      if (!chat) {
+        return;
+      }
+
+      if (data.signal.type === 'CALL_GROUP_STARTED') {
+        if (
+          chat.lastKnownActiveCallId
+          && chat.lastKnownActiveCallId !== data.signal.callId
+          && chat.lastKnownActiveCallId < data.signal.callId
+        ) {
+          return;
+        }
+        dispatch(updateChat({
+          id: chat.id,
+          updates: {
+            lastKnownActiveCallId: data.signal.callId,
+            lastKnownActiveCallSeenAt: data.signal.timestamp,
+          },
+        }));
+        return;
+      }
+
+      if (data.signal.type === 'CALL_GROUP_ENDED' && chat.lastKnownActiveCallId === data.signal.callId) {
+        dispatch(updateChat({
+          id: chat.id,
+          updates: {
+            lastKnownActiveCallId: null,
+            lastKnownActiveCallSeenAt: null,
+          },
+        }));
+      }
+    });
+
+    const unsubGroupCallStateChanged = window.kiyeovoAPI.onGroupCallStateChanged((data) => {
+      if (typeof data.chatId === 'number') {
+        void syncChatCallEvidenceFromDb(data.chatId);
+      }
+    });
+
+    const unsubGroupCallError = window.kiyeovoAPI.onGroupCallError((data) => {
+      toast.error(data.error);
+    });
+
     const unsubCallService = callService.subscribe((event) => {
       if (event.type === 'error') {
         dispatch(setCallError(event.message));
@@ -493,6 +549,9 @@ export const Main = () => {
       unsubCallSignalReceived();
       unsubCallStateChanged();
       unsubCallError();
+      unsubGroupCallControlSignalReceived();
+      unsubGroupCallStateChanged();
+      unsubGroupCallError();
       unsubCallService();
       callService.dispose();
     };
@@ -507,33 +566,7 @@ export const Main = () => {
           return
         }
 
-        const mappedChats = result.chats.map((dbChat: any) => ({
-          id: dbChat.id,
-          type: dbChat.type,
-          name: dbChat.type === 'group' ? dbChat.name : (dbChat.username || dbChat.name),
-          groupId: dbChat.group_id,
-          groupCreatorPeerId: dbChat.group_creator_peer_id,
-          groupCreatorUsername: dbChat.group_creator_username,
-          peerId: dbChat.other_peer_id,
-          lastMessage: dbChat.last_message_content || 'SYSTEM: No messages yet',
-          lastMessageTimestamp: dbChat.last_message_timestamp
-            ? new Date(dbChat.last_message_timestamp).getTime()
-            : new Date(dbChat.updated_at).getTime(),
-          lastInboundActivityTimestamp: dbChat.last_inbound_activity_timestamp
-            ? new Date(dbChat.last_inbound_activity_timestamp).getTime()
-            : undefined,
-          unreadCount: 0,
-          status: dbChat.status,
-          fetchedOffline: dbChat.type === 'group'
-            ? dbChat.group_status !== 'active'
-            : false,
-          isFetchingOffline: false,
-          offlineFetchNeedsSync: false,
-          blocked: dbChat.blocked,
-          muted: dbChat.muted,
-          groupStatus: dbChat.group_status,
-          needsRemovedCatchup: Boolean(dbChat.needs_removed_catchup),
-        }));
+        const mappedChats = result.chats.map((dbChat: any) => mapDbChatToUiChat(dbChat));
 
         dispatch(setChats(mappedChats));
 
@@ -598,6 +631,20 @@ export const Main = () => {
               toast.warning(`Offline sync needs retry for ${failedChatIds.length} group chat${failedChatIds.length === 1 ? '' : 's'}`);
             }
 
+            const refreshResult = await window.kiyeovoAPI.getChats();
+            if (refreshResult.success) {
+              const currentChats = store.getState().chat.chats;
+              const currentUnreadByChatId = new Map(currentChats.map((chat) => [chat.id, chat.unreadCount]));
+              const refreshedChats = refreshResult.chats.map((dbChat: any) => mapDbChatToUiChat(dbChat, {
+                unreadCount: currentUnreadByChatId.get(dbChat.id) ?? 0,
+                fetchedOffline: currentChats.find((chat) => chat.id === dbChat.id)?.fetchedOffline
+                  ?? (dbChat.type === 'group' ? dbChat.group_status !== 'active' : false),
+                isFetchingOffline: currentChats.find((chat) => chat.id === dbChat.id)?.isFetchingOffline ?? false,
+                offlineFetchNeedsSync: currentChats.find((chat) => chat.id === dbChat.id)?.offlineFetchNeedsSync ?? false,
+              }));
+              dispatch(setChats(refreshedChats));
+            }
+
             const unreadMap = groupResult.unreadFromChats instanceof Map
               ? groupResult.unreadFromChats
               : new Map<number, number>();
@@ -638,34 +685,14 @@ export const Main = () => {
               if (refreshResult.success) {
                 const currentChats = store.getState().chat.chats;
                 const currentUnreadByChatId = new Map(currentChats.map((c) => [c.id, c.unreadCount]));
-                const refreshedChats = refreshResult.chats.map((dbChat: any) => ({
-                  id: dbChat.id,
-                  type: dbChat.type,
-                  name: dbChat.type === 'group' ? dbChat.name : (dbChat.username || dbChat.name),
-                  groupId: dbChat.group_id,
-                  groupCreatorPeerId: dbChat.group_creator_peer_id,
-                  groupCreatorUsername: dbChat.group_creator_username,
-                  username: dbChat.username,
-                  peerId: dbChat.other_peer_id,
-                  lastMessage: dbChat.last_message_content || 'SYSTEM: No messages yet',
-                  lastMessageTimestamp: dbChat.last_message_timestamp
-                    ? new Date(dbChat.last_message_timestamp).getTime()
-                    : new Date(dbChat.updated_at).getTime(),
-                  lastInboundActivityTimestamp: dbChat.last_inbound_activity_timestamp
-                    ? new Date(dbChat.last_inbound_activity_timestamp).getTime()
-                    : undefined,
+                const refreshedChats = refreshResult.chats.map((dbChat: any) => mapDbChatToUiChat(dbChat, {
                   unreadCount: currentUnreadByChatId.get(dbChat.id) ?? 0,
-                  status: dbChat.status,
                   fetchedOffline: currentChats.find(c => c.id === dbChat.id)?.fetchedOffline
                     ?? (dbChat.type === 'group'
                       ? dbChat.group_status !== 'active'
                       : fetchedChatIds.includes(dbChat.id)),
                   isFetchingOffline: currentChats.find(c => c.id === dbChat.id)?.isFetchingOffline ?? false,
                   offlineFetchNeedsSync: currentChats.find(c => c.id === dbChat.id)?.offlineFetchNeedsSync ?? false,
-                  blocked: dbChat.blocked,
-                  muted: dbChat.muted,
-                  groupStatus: dbChat.group_status,
-                  needsRemovedCatchup: Boolean(dbChat.needs_removed_catchup),
                 }));
                 dispatch(setChats(refreshedChats));
               }

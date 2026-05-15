@@ -1,7 +1,7 @@
 import type { FC } from "react";
 import type { Chat } from "../../../state/slices/chatSlice";
 import { formatTimestampToHourMinute } from "../../../utils/dateUtils";
-import { AlertCircle, Ban, BellOff, Paperclip, Users } from "lucide-react";
+import { AlertCircle, Ban, BellOff, Paperclip, Phone, Users } from "lucide-react";
 import { useSelector } from "react-redux";
 import type { RootState } from "../../../state/store";
 import { getGroupCreatorLinkState } from "../../../utils/groupCreatorLinkHealth";
@@ -72,6 +72,11 @@ export const ChatPreview: FC<ChatPreviewProps> = ({ chat, onSelectChat, selected
                         )}
                         {chat.hasPendingFile && (
                             <Paperclip className="w-4 h-4 text-primary"/>
+                        )}
+                        {chat.lastKnownActiveCallId && (
+                            <span title="Group call may be active">
+                                <Phone className="w-4 h-4 text-emerald-600" />
+                            </span>
                         )}
                         {chat.isFetchingOffline && !chat.blocked && (
                             <div className="w-4 h-4 border-2 border-muted-foreground border-t-transparent rounded-full animate-spin" title="Checking for offline messages..." />
