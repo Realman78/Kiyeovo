@@ -2298,6 +2298,15 @@ export class MessageHandler {
     const myUser = this.database.getUserByPeerId(myPeerId);
     const myUsername = myUser?.username || `user_${myPeerId.slice(-8)}`;
 
+    if (this.groupCallOrchestrator?.hasActiveCall()) {
+      const leaveCallResult = await this.groupCallOrchestrator.leaveGroupCall(chatId);
+      if (!leaveCallResult.success && leaveCallResult.error !== 'No active group call') {
+        console.warn(
+          `[GROUP-CALL][LEAVE_GROUP][WARN] chat=${chatId} reason=${leaveCallResult.error ?? 'unknown'}`,
+        );
+      }
+    }
+
     const responder = new GroupResponder({
       node: this.node,
       database: this.database,
@@ -2311,11 +2320,6 @@ export class MessageHandler {
     });
 
     await responder.leaveGroup(chat.group_id);
-    this.groupCallOrchestrator?.handleGroupMembersUpdated({
-      chatId,
-      groupId: chat.group_id,
-      memberPeerId: myPeerId,
-    });
     this.groupMessaging.deactivateGroup(chat.group_id);
   }
 

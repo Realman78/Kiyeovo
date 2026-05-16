@@ -271,6 +271,16 @@ export class GroupCallOrchestrator {
     }
 
     if (affectedPeerStillMember) {
+      const memberAlreadyInCall = activeSession.authoritativeParticipants.some(
+        (participant) => participant.peerId === event.memberPeerId,
+      );
+      if (
+        !memberAlreadyInCall
+        && event.memberPeerId !== this.localPeerId()
+        && activeSession.role === 'writer'
+      ) {
+        void this.seedDiscoveryForRejoinedMember(activeSession, event.memberPeerId);
+      }
       return;
     }
 
@@ -313,6 +323,40 @@ export class GroupCallOrchestrator {
     this.adoptAuthoritativeState(nextParticipants, activeSession.rosterVersion + 1, activeSession.currentWriterPeerId);
     this.scheduleRosterBroadcast(chat);
     this.emitStateChanged(activeSession.state, { reason: 'membership_removed' });
+  }
+
+  private async seedDiscoveryForRejoinedMember(session: GroupCallSession, peerId: string): Promise<void> {
+    const chat = this.database.getChats([session.chatId])[0];
+    if (!chat?.group_id || this.session?.callId !== session.callId || this.session?.groupId !== session.groupId) {
+      return;
+    }
+
+    const sent = await this.trySendControlSignal({
+      type: 'CALL_GROUP_STARTED',
+      groupId: session.groupId,
+      callId: session.callId,
+      fromPeerId: this.localPeerId(),
+      toPeerId: peerId,
+      timestamp: Date.now(),
+    });
+    // TEMP_LOG
+    log(
+      `[GROUP-CALL][DISCOVERY][RESEED] group=${session.groupId.slice(0, 8)} call=${session.callId.slice(0, 8)} peer=${peerId.slice(-8)} via=${sent ? 'started' : 'hint'}`,
+    );
+    if (sent || !this.storeDurableHint) {
+      return;
+    }
+
+    try {
+      await this.storeDurableHint(session.groupId);
+    } catch (error: unknown) {
+      this.emitError(errStr(error, 'Failed to store durable group call hint'), {
+        chatId: chat.id,
+        groupId: session.groupId,
+        callId: session.callId,
+        code: 'GROUP_CALL_HINT_STORE_FAILED',
+      });
+    }
   }
 
   hasActiveCall(): boolean {
