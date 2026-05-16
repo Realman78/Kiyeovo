@@ -533,6 +533,8 @@ export class GroupCallOrchestrator {
       return true;
     }
 
+    this.maybeClearDisconnectGraceFromSignal(signal);
+
     await this.applyIncomingControlSignal(signal);
     this.onControlSignalReceived({
       signal: this.stripControlSignalSignature(signal),
@@ -551,6 +553,8 @@ export class GroupCallOrchestrator {
     if (!this.validateIncomingPairSignal(signal)) {
       return true;
     }
+
+    this.maybeClearDisconnectGraceFromSignal(signal);
 
     this.onPairSignalReceived({
       signal: this.stripPairSignalSecrets(signal),
@@ -1911,6 +1915,29 @@ export class GroupCallOrchestrator {
     this.pendingPeerDisconnectTimers.clear();
   }
 
+  private maybeClearDisconnectGraceFromSignal(
+    signal: GroupCallControlSignalMessage | GroupCallPairSignalMessage,
+  ): void {
+    if (
+      !this.session
+      || signal.groupId !== this.session.groupId
+      || !('callId' in signal)
+      || signal.callId !== this.session.callId
+    ) {
+      return;
+    }
+
+    if (!this.pendingPeerDisconnectTimers.has(signal.fromPeerId)) {
+      return;
+    }
+
+    this.clearPeerDisconnectTimer(signal.fromPeerId);
+    this.emitStateChanged(this.session.state, {
+      reason: 'disconnect_grace_cleared',
+      peerId: signal.fromPeerId,
+    });
+  }
+
   private currentPendingDisconnects(): { peerId: string; expiresAt: number }[] {
     return [...this.pendingPeerDisconnectTimers.entries()]
       .map(([peerId, entry]) => ({ peerId, expiresAt: entry.expiresAt }))
@@ -1925,7 +1952,6 @@ export class GroupCallOrchestrator {
 
   private handlePeerConnect(peerId: string): void {
     const hadDisconnectTimer = this.pendingPeerDisconnectTimers.has(peerId);
-    this.clearPeerDisconnectTimer(peerId);
     if (!hadDisconnectTimer || !this.session) {
       return;
     }
@@ -1935,9 +1961,7 @@ export class GroupCallOrchestrator {
       log(
         `[GROUP-CALL][RECOVER][WRITER_PROBE] group=${this.session.groupId.slice(0, 8)} call=${this.session.callId.slice(0, 8)} peer=${peerId.slice(-8)}`,
       );
-      return;
     }
-    this.emitStateChanged(this.session.state, { reason: 'disconnect_grace_cleared', peerId });
   }
 
   private handlePeerDisconnect(peerId: string): void {
@@ -1971,7 +1995,7 @@ export class GroupCallOrchestrator {
     if (!this.session) {
       return;
     }
-    if (this.isPeerCurrentlyConnected(peerId) || !hasParticipant(this.session.authoritativeParticipants, peerId)) {
+    if (!hasParticipant(this.session.authoritativeParticipants, peerId)) {
       this.emitStateChanged(this.session.state, { reason: 'disconnect_grace_cleared', peerId });
       return;
     }

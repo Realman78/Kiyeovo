@@ -556,6 +556,17 @@ class GroupCallService {
     void this.startOffersForParticipants(pendingAdmission.participants, pendingAdmission.admissionToken);
   }
 
+  private reconcilePeersWithAuthoritativeRoster(participantPeerIds: string[]): void {
+    const allowedPeerIds = new Set(
+      participantPeerIds.filter((peerId) => peerId !== this.localPeerId),
+    );
+    this.peers.forEach((_, peerId) => {
+      if (!allowedPeerIds.has(peerId)) {
+        this.closePeer(peerId);
+      }
+    });
+  }
+
   private async startWriterReconnectProbe(peerId: string): Promise<void> {
     if (!this.session || this.session.role !== 'writer' || this.writerReconnectProbeInProgress || !this.localPeerId) {
       return;
@@ -788,7 +799,9 @@ class GroupCallService {
       }
     }
     if (event.participants) {
-      currentSession.participantPeerIds = event.participants.map((participant) => participant.peerId);
+      const nextParticipantPeerIds = event.participants.map((participant) => participant.peerId);
+      this.reconcilePeersWithAuthoritativeRoster(nextParticipantPeerIds);
+      currentSession.participantPeerIds = nextParticipantPeerIds;
     }
     if (event.pendingDisconnects) {
       currentSession.pendingDisconnects = event.pendingDisconnects;
@@ -815,8 +828,7 @@ class GroupCallService {
     }
 
     if (signal.type === 'CALL_GROUP_JOIN_RESPONSE' && signal.accepted) {
-      this.session.participantPeerIds = signal.participants.map((participant) => participant.peerId);
-      this.session.writerPeerId = signal.writerPeerId;
+      // Core still decides whether this response is accepted; the renderer only keeps the token payload ready.
       this.pendingJoinAdmission = {
         groupId: signal.groupId,
         callId: signal.callId,
@@ -824,22 +836,7 @@ class GroupCallService {
         admissionToken: signal.admissionToken,
       };
       this.maybeStartPendingJoinAdmission();
-      this.emitState();
       return;
-    }
-
-    if (signal.type === 'CALL_GROUP_ROSTER') {
-      this.session.participantPeerIds = signal.participants.map((participant) => participant.peerId);
-      this.session.writerPeerId = signal.writerPeerId;
-      this.emitState();
-      return;
-    }
-
-    if (signal.type === 'CALL_GROUP_LEAVE') {
-      this.closePeer(signal.fromPeerId);
-      this.session.participantPeerIds = this.session.participantPeerIds
-        .filter((peerId) => peerId !== signal.fromPeerId);
-      this.emitState();
     }
   }
 
