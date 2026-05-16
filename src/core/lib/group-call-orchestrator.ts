@@ -54,6 +54,7 @@ const ROSTER_BROADCAST_DEBOUNCE_MS = 2_000;
 const MAX_GROUP_CALL_PARTICIPANTS = 10;
 const ADMISSION_TOKEN_MAX_AGE_MS = 30_000;
 const RECENT_WRITER_SET_MAX_ENTRIES = 3;
+const PEER_DISCONNECT_GRACE_MS = 30_000;
 
 type GroupCallActionResult = {
   success: boolean;
@@ -197,6 +198,19 @@ export class GroupCallOrchestrator {
   private readonly recentQueryResults = new Map<string, { resolvedAt: number; result: QueryResolution }>();
   private readonly pendingDurableHintGroups = new Set<string>();
   private readonly recentDurableHintResults = new Map<string, number>();
+  private readonly pendingPeerDisconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly peerConnectHandler: EventListener = (event) => {
+    const peerId = (event as CustomEvent<unknown>).detail?.toString?.();
+    if (peerId) {
+      this.handlePeerConnect(peerId);
+    }
+  };
+  private readonly peerDisconnectHandler: EventListener = (event) => {
+    const peerId = (event as CustomEvent<unknown>).detail?.toString?.();
+    if (peerId) {
+      this.handlePeerDisconnect(peerId);
+    }
+  };
   private session: GroupCallSession | null = null;
   private storeDurableHint: ((groupId: string) => Promise<void>) | null = null;
   private pendingJoinResponse: PendingJoinResponse | null = null;
@@ -213,10 +227,18 @@ export class GroupCallOrchestrator {
     this.onPairSignalReceived = config.onPairSignalReceived ?? (() => undefined);
     this.onStateChanged = config.onStateChanged ?? (() => undefined);
     this.onError = config.onError ?? (() => undefined);
+    this.node.addEventListener('peer:connect', this.peerConnectHandler);
+    this.node.addEventListener('peer:disconnect', this.peerDisconnectHandler);
   }
 
   setDurableHintStorage(storeDurableHint: ((groupId: string) => Promise<void>) | null): void {
     this.storeDurableHint = storeDurableHint;
+  }
+
+  cleanup(): void {
+    this.node.removeEventListener('peer:connect', this.peerConnectHandler);
+    this.node.removeEventListener('peer:disconnect', this.peerDisconnectHandler);
+    this.clearAllPeerDisconnectTimers();
   }
 
   hasActiveCall(): boolean {
@@ -1773,6 +1795,7 @@ export class GroupCallOrchestrator {
 
     const endedSession = this.session;
     this.session = null;
+    this.clearAllPeerDisconnectTimers();
     this.clearPendingJoinResponse();
     this.clearPendingRosterBroadcast();
     this.callActivityRegistry.setGroupCall(null);
@@ -1807,6 +1830,107 @@ export class GroupCallOrchestrator {
 
     clearTimeout(this.pendingRosterBroadcastTimer);
     this.pendingRosterBroadcastTimer = null;
+  }
+
+  private clearPeerDisconnectTimer(peerId: string): void {
+    const timer = this.pendingPeerDisconnectTimers.get(peerId);
+    if (!timer) {
+      return;
+    }
+
+    clearTimeout(timer);
+    this.pendingPeerDisconnectTimers.delete(peerId);
+  }
+
+  private clearAllPeerDisconnectTimers(): void {
+    this.pendingPeerDisconnectTimers.forEach((timer) => clearTimeout(timer));
+    this.pendingPeerDisconnectTimers.clear();
+  }
+
+  private isPeerCurrentlyConnected(peerId: string): boolean {
+    return this.node.getConnections().some((connection) => (
+      connection.remotePeer.toString() === peerId && connection.status === 'open'
+    ));
+  }
+
+  private handlePeerConnect(peerId: string): void {
+    this.clearPeerDisconnectTimer(peerId);
+  }
+
+  private handlePeerDisconnect(peerId: string): void {
+    if (
+      !this.session
+      || this.pendingPeerDisconnectTimers.has(peerId)
+      || !hasParticipant(this.session.authoritativeParticipants, peerId)
+    ) {
+      return;
+    }
+    if (this.isPeerCurrentlyConnected(peerId)) {
+      return;
+    }
+
+    // TEMP_LOG
+    log(
+      `[GROUP-CALL][DISCONNECT][SCHEDULE] group=${this.session.groupId.slice(0, 8)} call=${this.session.callId.slice(0, 8)} peer=${peerId.slice(-8)} role=${this.session.role}`,
+    );
+    const timer = setTimeout(() => {
+      this.pendingPeerDisconnectTimers.delete(peerId);
+      this.handlePeerDisconnectGraceExpired(peerId);
+    }, PEER_DISCONNECT_GRACE_MS);
+    this.pendingPeerDisconnectTimers.set(peerId, timer);
+  }
+
+  private handlePeerDisconnectGraceExpired(peerId: string): void {
+    if (!this.session || this.isPeerCurrentlyConnected(peerId)) {
+      return;
+    }
+    if (!hasParticipant(this.session.authoritativeParticipants, peerId)) {
+      return;
+    }
+
+    const chat = this.database.getChatByGroupId(this.session.groupId);
+    if (!chat) {
+      return;
+    }
+
+    if (this.session.role === 'writer') {
+      const nextParticipants = this.session.authoritativeParticipants
+        .filter((participant) => participant.peerId !== peerId);
+      if (nextParticipants.length === this.session.authoritativeParticipants.length) {
+        return;
+      }
+
+      this.adoptAuthoritativeState(nextParticipants, this.session.rosterVersion + 1, this.session.currentWriterPeerId);
+      this.scheduleRosterBroadcast(chat);
+      this.emitStateChanged(this.session.state, { reason: 'disconnect_evicted' });
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][DISCONNECT][EVICT] group=${this.session.groupId.slice(0, 8)} call=${this.session.callId.slice(0, 8)} peer=${peerId.slice(-8)} participants=${nextParticipants.length}`,
+      );
+      return;
+    }
+
+    if (peerId !== this.session.currentWriterPeerId) {
+      return;
+    }
+
+    const remainingParticipants = this.session.authoritativeParticipants
+      .filter((participant) => participant.peerId !== peerId);
+    const nextWriterPeerId = this.failoverWriterPeerId(chat, remainingParticipants);
+    if (!nextWriterPeerId) {
+      return;
+    }
+
+    this.clearPendingRosterBroadcast();
+    this.adoptAuthoritativeState(remainingParticipants, this.session.rosterVersion + 1, nextWriterPeerId);
+    this.emitStateChanged(this.session.state, { reason: 'writer_failover' });
+    // TEMP_LOG
+    log(
+      `[GROUP-CALL][FAILOVER][WRITER] group=${this.session.groupId.slice(0, 8)} call=${this.session.callId.slice(0, 8)} old=${peerId.slice(-8)} new=${nextWriterPeerId.slice(-8)} participants=${remainingParticipants.length}`,
+    );
+    if (nextWriterPeerId === this.localPeerId()) {
+      void this.broadcastRoster(chat);
+    }
   }
 
   private emitStateChanged(state: GroupCallState, options?: { reason?: string }): void {

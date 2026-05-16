@@ -537,6 +537,7 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
       console.log('[Core] Shutting down...');
       try {
         await relayKeepAlive.stop();
+        groupCallOrchestrator.cleanup();
         await messageHandler.cleanup();
         reconnectController.clearPostRetryVerifyTimeout();
         clearInterval(cleanupInterval);
