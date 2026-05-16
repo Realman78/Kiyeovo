@@ -348,25 +348,34 @@ export class GroupCallOrchestrator {
       }
 
       const session = this.session;
-      const peers = session.authoritativeParticipants
-        .map((participant) => participant.peerId)
-        .filter((peerId) => peerId !== this.localPeerId());
+      const remainingParticipants = session.authoritativeParticipants
+        .filter((participant) => participant.peerId !== this.localPeerId());
 
-      if (peers.length === 0) {
+      if (remainingParticipants.length === 0) {
+        void this.broadcastEndedSignal(chat.group_id!, session.callId, this.getGroupMemberPeerIds(chat.id));
         this.clearPersistentCallEvidence(chat.id, 'left-last');
-      } else {
-        await Promise.allSettled(
-          peers.map(async (peerId) => this.trySendControlSignal({
-            type: 'CALL_GROUP_LEAVE',
-            groupId: session.groupId,
-            callId: session.callId,
-            fromPeerId: this.localPeerId(),
-            toPeerId: peerId,
-            timestamp: Date.now(),
-          })),
-        );
+        this.endLocalSession('left');
+        return { success: true, error: null, callId: session.callId };
       }
 
+      const peers = remainingParticipants.map((participant) => participant.peerId);
+      if (session.role === 'writer') {
+        const nextWriterPeerId = this.failoverWriterPeerId(chat, remainingParticipants);
+        const nextRosterVersion = session.rosterVersion + 1;
+        // Hand over authority before we disappear so the rest of the call can converge ASAP.
+        void this.broadcastWriterHandoverAndLeaveSignal(
+          session.groupId,
+          session.callId,
+          remainingParticipants,
+          nextRosterVersion,
+          nextWriterPeerId,
+        );
+        log(
+          `[GROUP-CALL][HANDOVER][FINAL] group=${session.groupId.slice(0, 8)} call=${session.callId.slice(0, 8)} writer=${nextWriterPeerId.slice(-8)} participants=${remainingParticipants.length}`,
+        );
+      } else {
+        void this.broadcastLeaveSignal(session.groupId, session.callId, peers);
+      }
       this.endLocalSession('left');
       return { success: true, error: null, callId: session.callId };
     } catch (error: unknown) {
@@ -505,6 +514,9 @@ export class GroupCallOrchestrator {
         return;
       case 'CALL_GROUP_ROSTER':
         this.handleRosterSignal(signal);
+        return;
+      case 'CALL_GROUP_LEAVE':
+        this.handleLeaveSignal(signal);
         return;
       case 'CALL_GROUP_ENDED':
         this.handleEndedSignal(signal);
@@ -735,9 +747,46 @@ export class GroupCallOrchestrator {
     }
 
     this.adoptAuthoritativeState(signal.participants, signal.rosterVersion, signal.writerPeerId);
+    this.emitStateChanged(this.session.state, { reason: 'roster_updated' });
+    if (acceptanceCase === 'handover_final' && this.session.role === 'writer') {
+      // Successor re-broadcast closes the gap for peers that missed the departing writer's final roster.
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][HANDOVER][REBROADCAST] group=${signal.groupId.slice(0, 8)} call=${signal.callId.slice(0, 8)} version=${signal.rosterVersion}`,
+      );
+      void this.broadcastRoster(chat);
+    }
     // TEMP_LOG
     log(
       `[GROUP-CALL][ROSTER][ACCEPT] case=${acceptanceCase} group=${signal.groupId.slice(0, 8)} call=${signal.callId.slice(0, 8)} version=${signal.rosterVersion} writer=${signal.writerPeerId.slice(-8)} signer=${signal.fromPeerId.slice(-8)} participants=${signal.participants.length}`,
+    );
+  }
+
+  private handleLeaveSignal(signal: GroupCallControlSignalMessage & { type: 'CALL_GROUP_LEAVE' }): void {
+    if (!this.session || this.session.groupId !== signal.groupId || this.session.callId !== signal.callId) {
+      return;
+    }
+    if (signal.fromPeerId === this.localPeerId() || this.session.role !== 'writer') {
+      return;
+    }
+
+    const nextParticipants = this.session.authoritativeParticipants
+      .filter((participant) => participant.peerId !== signal.fromPeerId);
+    if (nextParticipants.length === this.session.authoritativeParticipants.length) {
+      return;
+    }
+
+    const chat = this.database.getChatByGroupId(signal.groupId);
+    if (!chat) {
+      return;
+    }
+
+    this.adoptAuthoritativeState(nextParticipants, this.session.rosterVersion + 1, this.session.currentWriterPeerId);
+    this.scheduleRosterBroadcast(chat);
+    this.emitStateChanged(this.session.state, { reason: 'roster_updated' });
+    // TEMP_LOG
+    log(
+      `[GROUP-CALL][LEAVE][REMOTE] group=${signal.groupId.slice(0, 8)} call=${signal.callId.slice(0, 8)} peer=${signal.fromPeerId.slice(-8)} participants=${nextParticipants.length}`,
     );
   }
 
@@ -1231,6 +1280,7 @@ export class GroupCallOrchestrator {
   }
 
   private async broadcastRoster(chat: Chat): Promise<void> {
+    // The debounce may fire after a handover or local end, so re-check authority here.
     if (!this.session || this.session.chatId !== chat.id || this.session.role !== 'writer') {
       return;
     }
@@ -1257,6 +1307,65 @@ export class GroupCallOrchestrator {
     // TEMP_LOG
     log(
       `[GROUP-CALL][ROSTER][BROADCAST] group=${chat.group_id?.slice(0, 8)} call=${this.session.callId.slice(0, 8)} version=${this.session.rosterVersion} sent=${sendResults.filter((result) => result.status === 'fulfilled' && result.value).length}/${peers.length}`,
+    );
+  }
+
+  private async broadcastLeaveSignal(groupId: string, callId: string, peers: string[]): Promise<void> {
+    await Promise.allSettled(
+      peers.map(async (peerId) => this.trySendControlSignal({
+        type: 'CALL_GROUP_LEAVE',
+        groupId,
+        callId,
+        fromPeerId: this.localPeerId(),
+        toPeerId: peerId,
+        timestamp: Date.now(),
+      })),
+    );
+  }
+
+  private async broadcastWriterHandoverAndLeaveSignal(
+    groupId: string,
+    callId: string,
+    participants: GroupCallParticipant[],
+    rosterVersion: number,
+    writerPeerId: string,
+  ): Promise<void> {
+    const peers = participants.map((participant) => participant.peerId);
+    await Promise.allSettled(
+      peers.map(async (peerId) => {
+        await this.trySendControlSignal({
+          type: 'CALL_GROUP_ROSTER',
+          groupId,
+          callId,
+          rosterVersion,
+          writerPeerId,
+          participants,
+          fromPeerId: this.localPeerId(),
+          toPeerId: peerId,
+          timestamp: Date.now(),
+        });
+        await this.trySendControlSignal({
+          type: 'CALL_GROUP_LEAVE',
+          groupId,
+          callId,
+          fromPeerId: this.localPeerId(),
+          toPeerId: peerId,
+          timestamp: Date.now(),
+        });
+      }),
+    );
+  }
+
+  private async broadcastEndedSignal(groupId: string, callId: string, peers: string[]): Promise<void> {
+    await Promise.allSettled(
+      peers.map(async (peerId) => this.trySendControlSignal({
+        type: 'CALL_GROUP_ENDED',
+        groupId,
+        callId,
+        fromPeerId: this.localPeerId(),
+        toPeerId: peerId,
+        timestamp: Date.now(),
+      })),
     );
   }
 
