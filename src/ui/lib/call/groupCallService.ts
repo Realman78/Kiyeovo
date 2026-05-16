@@ -77,6 +77,7 @@ class GroupCallService {
   private readonly offeredPeerIds = new Set<string>();
   private pendingJoinAdmission: PendingJoinAdmission | null = null;
   private joinConnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private writerReconnectProbeInProgress = false;
   private lastEmittedState: GroupCallServiceState = 'idle';
   private lastSnapshotSignature = '';
   private iceServers: RTCIceServer[] = DEFAULT_WEBRTC_ICE_SERVERS.map((server) => ({ ...server }));
@@ -223,11 +224,14 @@ class GroupCallService {
     }
     clearTimeout(this.joinConnectTimer);
     this.joinConnectTimer = null;
+    this.writerReconnectProbeInProgress = false;
   }
 
   private scheduleJoinConnectTimeout(callId: string): void {
     this.clearJoinConnectTimer();
     this.joinConnectTimer = setTimeout(() => {
+      this.joinConnectTimer = null;
+      this.writerReconnectProbeInProgress = false;
       if (!this.session || this.session.callId !== callId) {
         return;
       }
@@ -486,7 +490,7 @@ class GroupCallService {
 
   private async startOffersForParticipants(
     participants: GroupCallParticipant[],
-    admissionToken: AdmissionToken,
+    admissionToken?: AdmissionToken,
   ): Promise<void> {
     if (!this.session || !this.localPeerId) {
       return;
@@ -529,13 +533,31 @@ class GroupCallService {
     void this.startOffersForParticipants(pendingAdmission.participants, pendingAdmission.admissionToken);
   }
 
-  private async createOfferForPeer(peerId: string, admissionToken: AdmissionToken): Promise<void> {
+  private async startWriterReconnectProbe(peerId: string): Promise<void> {
+    if (!this.session || this.session.role !== 'writer' || this.writerReconnectProbeInProgress || !this.localPeerId) {
+      return;
+    }
+    if (peerId === this.localPeerId || !this.session.participantPeerIds.includes(peerId)) {
+      return;
+    }
+
+    this.writerReconnectProbeInProgress = true;
+    this.offeredPeerIds.delete(peerId);
+    this.scheduleJoinConnectTimeout(this.session.callId);
+    await this.createOfferForPeer(peerId, undefined, true);
+  }
+
+  private async createOfferForPeer(
+    peerId: string,
+    admissionToken?: AdmissionToken,
+    replace = false,
+  ): Promise<void> {
     if (!this.session) {
       return;
     }
 
     try {
-      const peer = await this.ensurePeer(peerId);
+      const peer = await this.ensurePeer(peerId, replace);
       await this.addLocalTracks(peer);
       const offer = await peer.pc.createOffer();
       await peer.pc.setLocalDescription(offer);
@@ -718,6 +740,9 @@ class GroupCallService {
     }
     if (event.participants) {
       currentSession.participantPeerIds = event.participants.map((participant) => participant.peerId);
+    }
+    if (event.reason === 'writer_reconnect_probe' && currentSession.role === 'writer' && event.peerId) {
+      void this.startWriterReconnectProbe(event.peerId);
     }
     this.maybeStartPendingJoinAdmission();
     this.emitState();

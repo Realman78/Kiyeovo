@@ -199,6 +199,7 @@ export class GroupCallOrchestrator {
   private readonly pendingDurableHintGroups = new Set<string>();
   private readonly recentDurableHintResults = new Map<string, number>();
   private readonly pendingPeerDisconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private participantReconnectInProgress = false;
   private readonly peerConnectHandler: EventListener = (event) => {
     const peerId = (event as CustomEvent<unknown>).detail?.toString?.();
     if (peerId) {
@@ -1854,7 +1855,22 @@ export class GroupCallOrchestrator {
   }
 
   private handlePeerConnect(peerId: string): void {
+    const hadDisconnectTimer = this.pendingPeerDisconnectTimers.has(peerId);
     this.clearPeerDisconnectTimer(peerId);
+    if (!hadDisconnectTimer || !this.session) {
+      return;
+    }
+    if (this.session.role === 'participant' && peerId === this.session.currentWriterPeerId) {
+      void this.recoverParticipantAfterReconnect();
+      return;
+    }
+    if (this.session.role === 'writer') {
+      this.emitStateChanged(this.session.state, { reason: 'writer_reconnect_probe', peerId });
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][RECOVER][WRITER_PROBE] group=${this.session.groupId.slice(0, 8)} call=${this.session.callId.slice(0, 8)} peer=${peerId.slice(-8)}`,
+      );
+    }
   }
 
   private handlePeerDisconnect(peerId: string): void {
@@ -1933,7 +1949,75 @@ export class GroupCallOrchestrator {
     }
   }
 
-  private emitStateChanged(state: GroupCallState, options?: { reason?: string }): void {
+  private async recoverParticipantAfterReconnect(): Promise<void> {
+    if (!this.session || this.session.role !== 'participant' || this.participantReconnectInProgress) {
+      return;
+    }
+
+    const chat = this.database.getChatByGroupId(this.session.groupId);
+    if (!chat) {
+      return;
+    }
+
+    this.participantReconnectInProgress = true;
+    try {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][RECOVER][PARTICIPANT] group=${this.session.groupId.slice(0, 8)} call=${this.session.callId.slice(0, 8)} writer=${this.session.currentWriterPeerId.slice(-8)}`,
+      );
+      const queryResolution = await this.discoverActiveCall(chat, { bypassCache: true });
+      if (queryResolution.kind === 'zero') {
+        this.clearPersistentCallEvidence(chat.id, 'reconnect-query-zero');
+        this.endLocalSession('connection_lost');
+        this.emitError('Connection lost', {
+          chatId: chat.id,
+          groupId: chat.group_id!,
+          callId: this.session?.callId,
+          code: 'GROUP_CALL_CONNECTION_LOST',
+        });
+        return;
+      }
+      if (queryResolution.kind === 'conflict') {
+        const callId = this.session.callId;
+        this.endLocalSession('reconnect_conflict');
+        this.emitError('Call state conflict - please try again', {
+          chatId: chat.id,
+          groupId: chat.group_id!,
+          callId,
+          code: 'GROUP_CALL_RECONNECT_CONFLICT',
+        });
+        return;
+      }
+
+      this.beginJoiningSession(chat, queryResolution.winner);
+      const joinResult = await this.requestJoinWithRetry(chat, queryResolution.winner);
+      if (!joinResult.success) {
+        if (joinResult.clearEvidence) {
+          this.clearPersistentCallEvidence(chat.id, 'reconnect-failure-clear');
+        }
+        this.endLocalSession(joinResult.reason);
+        this.emitError(joinResult.error ?? 'Connection lost', {
+          chatId: chat.id,
+          groupId: chat.group_id!,
+          callId: queryResolution.winner.callId,
+          code: 'GROUP_CALL_RECONNECT_FAILED',
+        });
+        return;
+      }
+
+      if (!this.session) {
+        return;
+      }
+
+      this.writePersistentCallEvidence(chat.id, this.session.callId, Date.now(), 'reconnect-success');
+      this.session.state = 'waiting';
+      this.emitStateChanged('waiting', { reason: 'reconnected' });
+    } finally {
+      this.participantReconnectInProgress = false;
+    }
+  }
+
+  private emitStateChanged(state: GroupCallState, options?: { reason?: string; peerId?: string }): void {
     if (!this.session) {
       return;
     }
@@ -1950,6 +2034,9 @@ export class GroupCallOrchestrator {
     };
     if (options?.reason) {
       event.reason = options.reason;
+    }
+    if (options?.peerId) {
+      event.peerId = options.peerId;
     }
     this.onStateChanged(event);
   }

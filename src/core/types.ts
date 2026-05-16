@@ -1100,6 +1100,7 @@ export interface GroupCallStateChangedEvent {
   callId: string | null;
   state: GroupCallState;
   role: GroupCallRole | null;
+  peerId?: string;
   participants?: GroupCallParticipant[];
   writerPeerId?: string | null;
   reason?: string;
