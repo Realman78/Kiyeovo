@@ -64,6 +64,7 @@ const kiyeovoAPI: KiyeovoAPI = {
   startGroupCall: (chatId) => invoke(IPC_CHANNELS.GROUP_CALL_START, chatId),
   joinGroupCall: (chatId) => invoke(IPC_CHANNELS.GROUP_CALL_JOIN, chatId),
   leaveGroupCall: (chatId) => invoke(IPC_CHANNELS.GROUP_CALL_LEAVE, chatId),
+  fallbackGroupCallWriterRecovery: (chatId) => invoke(IPC_CHANNELS.GROUP_CALL_WRITER_RECOVERY_FALLBACK, chatId),
   sendGroupCallPairSignal: (signal) => invoke(IPC_CHANNELS.GROUP_CALL_PAIR_SIGNAL_SEND, signal),
   getScreenShareSupport: () => invoke(IPC_CHANNELS.GET_SCREEN_SHARE_SUPPORT),
   onScreenShareSourceRequest: (callback) => subscribe(IPC_CHANNELS.SCREEN_SHARE_SOURCE_REQUEST, callback),

@@ -148,6 +148,7 @@ export interface KiyeovoAPI {
   startGroupCall: (chatId: number) => Promise<GroupCallActionResult>;
   joinGroupCall: (chatId: number) => Promise<GroupCallActionResult>;
   leaveGroupCall: (chatId: number) => Promise<GroupCallActionResult>;
+  fallbackGroupCallWriterRecovery: (chatId: number) => Promise<GroupCallActionResult>;
   sendGroupCallPairSignal: (signal: GroupCallPairSignalOutgoingInput) => Promise<{ success: boolean; error: string | null }>;
   getScreenShareSupport: () => Promise<ScreenShareSupportResponse>;
   onScreenShareSourceRequest: (callback: (request: ScreenShareSourceRequest) => void) => Unsubscribe;

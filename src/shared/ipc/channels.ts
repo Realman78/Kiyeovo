@@ -61,6 +61,7 @@ export const IPC_CHANNELS = {
   GROUP_CALL_START: 'groupCall:start',
   GROUP_CALL_JOIN: 'groupCall:join',
   GROUP_CALL_LEAVE: 'groupCall:leave',
+  GROUP_CALL_WRITER_RECOVERY_FALLBACK: 'groupCall:writerRecoveryFallback',
   GROUP_CALL_PAIR_SIGNAL_SEND: 'groupCall:pairSignalSend',
   GROUP_CALL_CONTROL_SIGNAL_RECEIVED: 'groupCall:controlSignalReceived',
   GROUP_CALL_PAIR_SIGNAL_RECEIVED: 'groupCall:pairSignalReceived',

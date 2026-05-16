@@ -323,7 +323,7 @@ export class GroupCallOrchestrator {
 
   async joinGroupCall(
     chatId: number,
-    options?: { keepEvidenceOnZero?: boolean },
+    options?: { keepEvidenceOnZero?: boolean; allowWriterRecovery?: boolean },
   ): Promise<GroupCallActionResult> {
     try {
       const chat = this.requireEligibleGroupChat(chatId);
@@ -351,6 +351,9 @@ export class GroupCallOrchestrator {
         return { success: false, error: 'Call state conflict - please try again' };
       }
       if (queryResolution.winner.writerPeerId === this.localPeerId()) {
+        if (options?.allowWriterRecovery === false) {
+          return { success: false, error: 'This call may have ended' };
+        }
         return this.recoverWriterAfterReconnect(chat, queryResolution.winner);
       }
 
@@ -424,6 +427,24 @@ export class GroupCallOrchestrator {
     } catch (error: unknown) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to leave group call' };
     }
+  }
+
+  async fallbackWriterRecovery(chatId: number): Promise<GroupCallActionResult> {
+    const chat = this.requireEligibleGroupChat(chatId);
+    if (!this.session || this.session.chatId !== chatId || this.session.role !== 'writer') {
+      return { success: false, error: 'No recovering writer session' };
+    }
+
+    const callId = this.session.callId;
+    this.endLocalSession('writer_reconnect_fallback');
+    // TEMP_LOG
+    log(
+      `[GROUP-CALL][RECOVER][WRITER_FALLBACK] group=${chat.group_id?.slice(0, 8)} call=${callId.slice(0, 8)}`,
+    );
+    return this.joinGroupCall(chatId, {
+      keepEvidenceOnZero: true,
+      allowWriterRecovery: false,
+    });
   }
 
   async sendPairSignal(signal: GroupCallPairSignalOutgoingInput): Promise<{ success: boolean; error: string | null }> {

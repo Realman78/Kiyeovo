@@ -37,6 +37,8 @@ type GroupCallServiceEvent =
 
 type GroupCallServiceState = GroupCallSnapshot['state'];
 
+type JoinConnectContext = 'join' | 'writer_probe' | 'writer_recover';
+
 type GroupCallSession = {
   chatId: number | null;
   groupId: string;
@@ -77,6 +79,7 @@ class GroupCallService {
   private readonly offeredPeerIds = new Set<string>();
   private pendingJoinAdmission: PendingJoinAdmission | null = null;
   private joinConnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private joinConnectContext: JoinConnectContext | null = null;
   private writerReconnectProbeInProgress = false;
   private lastEmittedState: GroupCallServiceState = 'idle';
   private lastSnapshotSignature = '';
@@ -224,13 +227,17 @@ class GroupCallService {
     }
     clearTimeout(this.joinConnectTimer);
     this.joinConnectTimer = null;
+    this.joinConnectContext = null;
     this.writerReconnectProbeInProgress = false;
   }
 
-  private scheduleJoinConnectTimeout(callId: string): void {
+  private scheduleJoinConnectTimeout(callId: string, context: JoinConnectContext): void {
     this.clearJoinConnectTimer();
+    this.joinConnectContext = context;
     this.joinConnectTimer = setTimeout(() => {
+      const timeoutContext = this.joinConnectContext;
       this.joinConnectTimer = null;
+      this.joinConnectContext = null;
       this.writerReconnectProbeInProgress = false;
       if (!this.session || this.session.callId !== callId) {
         return;
@@ -238,8 +245,20 @@ class GroupCallService {
       if (this.connectedPeerCount() > 0) {
         return;
       }
+      if (timeoutContext === 'writer_recover' && this.session.role === 'writer' && this.session.chatId !== null) {
+        void this.fallbackWriterRecovery(this.session.chatId);
+        return;
+      }
       this.emitError('Could not connect to any group call participants');
-    }, JOIN_AUDIO_CONNECT_TIMEOUT_MS);
+    }, context === 'writer_recover' ? 10_000 : JOIN_AUDIO_CONNECT_TIMEOUT_MS);
+  }
+
+  private async fallbackWriterRecovery(chatId: number): Promise<void> {
+    const result = await window.kiyeovoAPI.fallbackGroupCallWriterRecovery(chatId);
+    if (result.success) {
+      return;
+    }
+    this.emitError(result.error || 'Could not reconnect to any group call participants');
   }
 
   private stopLocalAudio(): void {
@@ -503,7 +522,7 @@ class GroupCallService {
       return;
     }
 
-    this.scheduleJoinConnectTimeout(this.session.callId);
+    this.scheduleJoinConnectTimeout(this.session.callId, 'join');
     await Promise.allSettled(targets.map(async (peerId) => {
       if (this.offeredPeerIds.has(peerId)) {
         return;
@@ -543,7 +562,7 @@ class GroupCallService {
 
     this.writerReconnectProbeInProgress = true;
     this.offeredPeerIds.delete(peerId);
-    this.scheduleJoinConnectTimeout(this.session.callId);
+    this.scheduleJoinConnectTimeout(this.session.callId, 'writer_probe');
     await this.createOfferForPeer(peerId, undefined, true);
   }
 
@@ -562,7 +581,7 @@ class GroupCallService {
     targets.forEach((peerId) => {
       this.offeredPeerIds.delete(peerId);
     });
-    this.scheduleJoinConnectTimeout(this.session.callId);
+    this.scheduleJoinConnectTimeout(this.session.callId, 'writer_recover');
     await Promise.allSettled(targets.map(async (peerId) => {
       await this.createOfferForPeer(peerId, undefined, true);
     }));

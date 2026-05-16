@@ -596,6 +596,16 @@ function setupGroupCallHandlers(
     }
   });
 
+  ipcMain.handle(IPC_CHANNELS.GROUP_CALL_WRITER_RECOVERY_FALLBACK, async (_event, chatId: number) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) return { success: false, error: 'P2P core not initialized' };
+      return await p2pCore.groupCallOrchestrator.fallbackWriterRecovery(chatId);
+    } catch (error) {
+      return { success: false, error: errStr(error, 'Failed to recover group call writer session') };
+    }
+  });
+
   ipcMain.handle(IPC_CHANNELS.GROUP_CALL_PAIR_SIGNAL_SEND, async (_event, signal: GroupCallPairSignalOutgoingInput) => {
     try {
       const p2pCore = getP2PCore();
