@@ -129,15 +129,24 @@ export function isGroupCallControlSignalMessage(value: unknown): value is GroupC
         && typeof value.requestId === 'string'
         && value.requestId.length > 0;
     case 'GROUP_CALL_QUERY_RESPONSE':
-      return hasCallEnvelope(value)
-        && typeof value.requestId === 'string'
-        && value.requestId.length > 0
-        && Number.isInteger(value.rosterVersion)
-        && Number(value.rosterVersion) >= 0
-        && typeof value.writerPeerId === 'string'
-        && value.writerPeerId.length > 0
-        && Array.isArray(value.participants)
-        && value.participants.every(isGroupCallParticipant);
+      if (
+        !hasLiveSignalEnvelope(value)
+        || typeof value.requestId !== 'string'
+        || value.requestId.length === 0
+        || typeof value.active !== 'boolean'
+      ) {
+        return false;
+      }
+      return value.active
+        ? typeof value.callId === 'string'
+          && value.callId.length > 0
+          && Number.isInteger(value.rosterVersion)
+          && Number(value.rosterVersion) >= 0
+          && typeof value.writerPeerId === 'string'
+          && value.writerPeerId.length > 0
+          && Array.isArray(value.participants)
+          && value.participants.every(isGroupCallParticipant)
+        : true;
     case 'CALL_GROUP_JOIN_RESPONSE':
       if (!hasCallEnvelope(value) || typeof value.accepted !== 'boolean') {
         return false;
@@ -215,84 +224,136 @@ export function toUnsignedGroupCallSignalPayload(signal: UnsignedGroupCallSignal
     };
   }
 
-  const common = {
-    type: signal.type,
-    groupId: signal.groupId,
-    callId: signal.callId,
-    fromPeerId: signal.fromPeerId,
-    toPeerId: signal.toPeerId,
-    timestamp: signal.timestamp,
-  };
-
   switch (signal.type) {
     case 'CALL_GROUP_STARTED':
     case 'CALL_GROUP_JOIN_REQUEST':
     case 'CALL_GROUP_LEAVE':
     case 'CALL_GROUP_ENDED':
-      return common;
-    case 'GROUP_CALL_QUERY_RESPONSE':
       return {
-        ...common,
-        requestId: signal.requestId,
-        rosterVersion: signal.rosterVersion,
-        writerPeerId: signal.writerPeerId,
-        participants: signal.participants,
+        type: signal.type,
+        groupId: signal.groupId,
+        callId: signal.callId,
+        fromPeerId: signal.fromPeerId,
+        toPeerId: signal.toPeerId,
+        timestamp: signal.timestamp,
       };
+    case 'GROUP_CALL_QUERY_RESPONSE':
+      return signal.active
+        ? {
+          type: signal.type,
+          groupId: signal.groupId,
+          callId: signal.callId,
+          requestId: signal.requestId,
+          active: true,
+          rosterVersion: signal.rosterVersion,
+          writerPeerId: signal.writerPeerId,
+          participants: signal.participants,
+          fromPeerId: signal.fromPeerId,
+          toPeerId: signal.toPeerId,
+          timestamp: signal.timestamp,
+        }
+        : {
+          type: signal.type,
+          groupId: signal.groupId,
+          requestId: signal.requestId,
+          active: false,
+          fromPeerId: signal.fromPeerId,
+          toPeerId: signal.toPeerId,
+          timestamp: signal.timestamp,
+        };
     case 'CALL_GROUP_JOIN_RESPONSE':
       return signal.accepted
         ? {
-          ...common,
+          type: signal.type,
+          groupId: signal.groupId,
+          callId: signal.callId,
           accepted: true,
           rosterVersion: signal.rosterVersion,
           writerPeerId: signal.writerPeerId,
           participants: signal.participants,
           admissionToken: signal.admissionToken,
+          fromPeerId: signal.fromPeerId,
+          toPeerId: signal.toPeerId,
+          timestamp: signal.timestamp,
         }
         : {
-          ...common,
+          type: signal.type,
+          groupId: signal.groupId,
+          callId: signal.callId,
           accepted: false,
           reason: signal.reason,
+          fromPeerId: signal.fromPeerId,
+          toPeerId: signal.toPeerId,
+          timestamp: signal.timestamp,
         };
     case 'CALL_GROUP_ROSTER':
       return {
-        ...common,
+        type: signal.type,
+        groupId: signal.groupId,
+        callId: signal.callId,
         rosterVersion: signal.rosterVersion,
         writerPeerId: signal.writerPeerId,
         participants: signal.participants,
+        fromPeerId: signal.fromPeerId,
+        toPeerId: signal.toPeerId,
+        timestamp: signal.timestamp,
       };
     case 'CALL_GROUP_MUTE_STATE':
       return {
-        ...common,
+        type: signal.type,
+        groupId: signal.groupId,
+        callId: signal.callId,
         muted: signal.muted,
+        fromPeerId: signal.fromPeerId,
+        toPeerId: signal.toPeerId,
+        timestamp: signal.timestamp,
       };
     case 'CALL_OFFER':
       return signal.admissionToken
         ? {
-          ...common,
+          type: signal.type,
+          groupId: signal.groupId,
+          callId: signal.callId,
           offerSdp: signal.offerSdp,
           mediaType: signal.mediaType,
           admissionToken: signal.admissionToken,
+          fromPeerId: signal.fromPeerId,
+          toPeerId: signal.toPeerId,
+          timestamp: signal.timestamp,
         }
         : {
-          ...common,
+          type: signal.type,
+          groupId: signal.groupId,
+          callId: signal.callId,
           offerSdp: signal.offerSdp,
           mediaType: signal.mediaType,
+          fromPeerId: signal.fromPeerId,
+          toPeerId: signal.toPeerId,
+          timestamp: signal.timestamp,
         };
     case 'CALL_ANSWER':
       return {
-        ...common,
+        type: signal.type,
+        groupId: signal.groupId,
+        callId: signal.callId,
         answerSdp: signal.answerSdp,
+        fromPeerId: signal.fromPeerId,
+        toPeerId: signal.toPeerId,
+        timestamp: signal.timestamp,
       };
     case 'CALL_ICE':
       return {
-        ...common,
+        type: signal.type,
+        groupId: signal.groupId,
+        callId: signal.callId,
         candidate: signal.candidate,
         sdpMid: signal.sdpMid,
         sdpMLineIndex: signal.sdpMLineIndex,
         usernameFragment: signal.usernameFragment,
+        fromPeerId: signal.fromPeerId,
+        toPeerId: signal.toPeerId,
+        timestamp: signal.timestamp,
       };
-    default:
-      return common;
   }
 }
 

@@ -88,11 +88,22 @@ type QueryResolution =
   | { kind: 'conflict' }
   | { kind: 'winner'; winner: QueryWinner };
 
+type CollectedQueryResponses = {
+  responses: GroupCallQueryResponseSignal[];
+  sentCount: number;
+  settledCount: number;
+  responseCount: number;
+};
+
 type PendingQuery = {
   groupId: string;
   requestId: string;
   responses: GroupCallQueryResponseSignal[];
-  resolve: (responses: GroupCallQueryResponseSignal[]) => void;
+  targetCount: number;
+  sentCount: number;
+  settledCount: number;
+  respondedPeerIds: Set<string>;
+  resolve: (result: CollectedQueryResponses) => void;
   settleTimer: ReturnType<typeof setTimeout> | null;
   hardTimer: ReturnType<typeof setTimeout>;
 };
@@ -152,6 +163,12 @@ function summarizeParticipants(participants: GroupCallParticipant[]): string {
 
 function hasParticipant(participants: GroupCallParticipant[], peerId: string): boolean {
   return participants.some((participant) => participant.peerId === peerId);
+}
+
+function isActiveQueryResponse(
+  response: GroupCallQueryResponseSignal,
+): response is GroupCallQueryResponseSignal & { active: true } {
+  return response.active;
 }
 
 function describeQueryResolution(result: QueryResolution): string {
@@ -571,31 +588,55 @@ export class GroupCallOrchestrator {
   }
 
   private async respondToQuery(signal: GroupCallControlSignalMessage & { type: 'GROUP_CALL_QUERY' }): Promise<void> {
-    if (
-      !this.session
-      || this.session.groupId !== signal.groupId
-      || this.session.state === 'joining'
-      || !this.session.authoritativeParticipants.some((participant) => participant.peerId === this.localPeerId())
-    ) {
+    const chat = this.database.getChatByGroupId(signal.groupId);
+    if (!chat) {
       return;
     }
 
-    const response: GroupCallControlSignalWithoutSignature = {
-      type: 'GROUP_CALL_QUERY_RESPONSE',
-      groupId: signal.groupId,
-      callId: this.session.callId,
-      requestId: signal.requestId,
-      rosterVersion: this.session.rosterVersion,
-      writerPeerId: this.session.currentWriterPeerId,
-      participants: this.session.authoritativeParticipants,
-      fromPeerId: this.localPeerId(),
-      toPeerId: signal.fromPeerId,
-      timestamp: Date.now(),
-    };
-    const chat = this.database.getChatByGroupId(signal.groupId);
+    const memberPeerIds = new Set(
+      this.database.getChatParticipants(chat.id).map((participant) => participant.peer_id),
+    );
+    if (!memberPeerIds.has(this.localPeerId())) {
+      return;
+    }
+    if (this.session && this.session.groupId === signal.groupId && this.session.state === 'joining') {
+      return;
+    }
+
+    const activeSession = this.session
+      && this.session.groupId === signal.groupId
+      && this.session.state !== 'joining'
+      && this.session.authoritativeParticipants.some((participant) => participant.peerId === this.localPeerId())
+      ? this.session
+      : null;
+    const response: GroupCallControlSignalWithoutSignature = activeSession
+      ? {
+        type: 'GROUP_CALL_QUERY_RESPONSE',
+        active: true,
+        groupId: signal.groupId,
+        callId: activeSession.callId,
+        requestId: signal.requestId,
+        rosterVersion: activeSession.rosterVersion,
+        writerPeerId: activeSession.currentWriterPeerId,
+        participants: activeSession.authoritativeParticipants,
+        fromPeerId: this.localPeerId(),
+        toPeerId: signal.fromPeerId,
+        timestamp: Date.now(),
+      }
+      : {
+        type: 'GROUP_CALL_QUERY_RESPONSE',
+        active: false,
+        groupId: signal.groupId,
+        requestId: signal.requestId,
+        fromPeerId: this.localPeerId(),
+        toPeerId: signal.fromPeerId,
+        timestamp: Date.now(),
+      };
     // TEMP_LOG
     log(
-      `[GROUP-CALL][QUERY][RESPOND] group=${signal.groupId.slice(0, 8)} call=${this.session.callId.slice(0, 8)} local=${this.localPeerId().slice(-8)} to=${signal.fromPeerId.slice(-8)} version=${this.session.rosterVersion} participants=${summarizeParticipants(this.session.authoritativeParticipants)} creator=${chat?.group_creator_peer_id?.slice(-8) ?? 'none'}`,
+      activeSession
+        ? `[GROUP-CALL][QUERY][RESPOND] group=${signal.groupId.slice(0, 8)} active=true call=${activeSession.callId.slice(0, 8)} local=${this.localPeerId().slice(-8)} to=${signal.fromPeerId.slice(-8)} version=${activeSession.rosterVersion} participants=${summarizeParticipants(activeSession.authoritativeParticipants)} creator=${chat.group_creator_peer_id?.slice(-8) ?? 'none'}`
+        : `[GROUP-CALL][QUERY][RESPOND] group=${signal.groupId.slice(0, 8)} active=false local=${this.localPeerId().slice(-8)} to=${signal.fromPeerId.slice(-8)} creator=${chat.group_creator_peer_id?.slice(-8) ?? 'none'}`,
     );
     await this.trySendControlSignal(response);
   }
@@ -608,18 +649,25 @@ export class GroupCallOrchestrator {
     if (!this.isValidQueryResponse(signal)) {
       return;
     }
+    if (pending.respondedPeerIds.has(signal.fromPeerId)) {
+      return;
+    }
 
     const chat = this.database.getChatByGroupId(signal.groupId);
     // TEMP_LOG
     log(
-      `[GROUP-CALL][QUERY][RESPONSE] group=${signal.groupId.slice(0, 8)} request=${signal.requestId.slice(0, 8)} from=${signal.fromPeerId.slice(-8)} local=${this.localPeerId().slice(-8)} call=${signal.callId.slice(0, 8)} version=${signal.rosterVersion} writer=${signal.writerPeerId.slice(-8)} selfWriter=${String(signal.writerPeerId === this.localPeerId())} participants=${summarizeParticipants(signal.participants)} creator=${chat?.group_creator_peer_id?.slice(-8) ?? 'none'}`,
+      signal.active
+        ? `[GROUP-CALL][QUERY][RESPONSE] group=${signal.groupId.slice(0, 8)} request=${signal.requestId.slice(0, 8)} from=${signal.fromPeerId.slice(-8)} local=${this.localPeerId().slice(-8)} active=true call=${signal.callId.slice(0, 8)} version=${signal.rosterVersion} writer=${signal.writerPeerId.slice(-8)} selfWriter=${String(signal.writerPeerId === this.localPeerId())} participants=${summarizeParticipants(signal.participants)} creator=${chat?.group_creator_peer_id?.slice(-8) ?? 'none'}`
+        : `[GROUP-CALL][QUERY][RESPONSE] group=${signal.groupId.slice(0, 8)} request=${signal.requestId.slice(0, 8)} from=${signal.fromPeerId.slice(-8)} local=${this.localPeerId().slice(-8)} active=false creator=${chat?.group_creator_peer_id?.slice(-8) ?? 'none'}`,
     );
+    pending.respondedPeerIds.add(signal.fromPeerId);
     pending.responses.push(signal);
-    if (!pending.settleTimer) {
+    if (signal.active && !pending.settleTimer) {
       pending.settleTimer = setTimeout(() => {
         this.resolvePendingQuery(signal.requestId);
       }, DISCOVERY_SETTLE_AFTER_FIRST_MS);
     }
+    this.checkEarlyResolve(signal.requestId);
   }
 
   private async handleJoinRequest(signal: CallGroupJoinRequestSignal): Promise<void> {
@@ -836,27 +884,25 @@ export class GroupCallOrchestrator {
   }
 
   private async runDiscoveryQuery(chat: Chat): Promise<QueryResolution> {
-    const firstResponses = await this.collectQueryResponses(chat);
-    const firstResolution = this.resolveQueryResponses(chat, firstResponses);
+    const firstCollected = await this.collectQueryResponses(chat);
+    const firstResolution = this.resolveQueryResponses(chat, firstCollected.responses);
     if (firstResolution.kind !== 'conflict') {
       return firstResolution;
     }
 
     await delay(DISCOVERY_CONFLICT_RETRY_DELAY_MS);
-    const secondResponses = await this.collectQueryResponses(chat);
-    return this.resolveQueryResponses(chat, secondResponses);
+    const secondCollected = await this.collectQueryResponses(chat);
+    return this.resolveQueryResponses(chat, secondCollected.responses);
   }
 
-  private async collectQueryResponses(chat: Chat): Promise<GroupCallQueryResponseSignal[]> {
+  private async collectQueryResponses(chat: Chat): Promise<CollectedQueryResponses> {
     const targets = this.getGroupMemberPeerIds(chat.id);
     if (targets.length === 0) {
-      return [];
+      return { responses: [], sentCount: 0, settledCount: 0, responseCount: 0 };
     }
 
     const requestId = randomUUID();
-    let sentCount = 0;
-    let settledCount = 0;
-    const responsePromise = new Promise<GroupCallQueryResponseSignal[]>((resolve) => {
+    const responsePromise = new Promise<CollectedQueryResponses>((resolve) => {
       const hardTimer = setTimeout(() => {
         this.resolvePendingQuery(requestId);
       }, DISCOVERY_QUERY_TIMEOUT_MS);
@@ -865,6 +911,10 @@ export class GroupCallOrchestrator {
         groupId: chat.group_id!,
         requestId,
         responses: [],
+        targetCount: targets.length,
+        sentCount: 0,
+        settledCount: 0,
+        respondedPeerIds: new Set<string>(),
         resolve,
         settleTimer: null,
         hardTimer,
@@ -881,23 +931,36 @@ export class GroupCallOrchestrator {
           toPeerId: peerId,
           timestamp: Date.now(),
         });
+        const pending = this.pendingQueriesByRequestId.get(requestId);
+        if (!pending) {
+          return;
+        }
         if (sent) {
-          sentCount += 1;
+          pending.sentCount += 1;
         }
-        settledCount += 1;
-        if (settledCount === targets.length && sentCount === 0) {
-          this.resolvePendingQuery(requestId);
-        }
+        pending.settledCount += 1;
+        this.checkEarlyResolve(requestId);
       }),
     );
 
-    const responses = await responsePromise;
+    const result = await responsePromise;
 
     // TEMP_LOG
     log(
-      `[GROUP-CALL][QUERY] group=${chat.group_id?.slice(0, 8)} request=${requestId.slice(0, 8)} targets=${targets.length} sent=${sentCount} settled=${settledCount} responses=${responses.length}`,
+      `[GROUP-CALL][QUERY] group=${chat.group_id?.slice(0, 8)} request=${requestId.slice(0, 8)} targets=${targets.length} sent=${result.sentCount} settled=${result.settledCount} responses=${result.responseCount}`,
     );
-    return responses;
+    return result;
+  }
+
+  private checkEarlyResolve(requestId: string): void {
+    const pending = this.pendingQueriesByRequestId.get(requestId);
+    if (!pending || pending.settledCount !== pending.targetCount) {
+      return;
+    }
+    if (pending.respondedPeerIds.size < pending.sentCount) {
+      return;
+    }
+    this.resolvePendingQuery(requestId);
   }
 
   private resolvePendingQuery(requestId: string): void {
@@ -911,22 +974,30 @@ export class GroupCallOrchestrator {
     }
     clearTimeout(pending.hardTimer);
     this.pendingQueriesByRequestId.delete(requestId);
-    pending.resolve(pending.responses);
+    pending.resolve({
+      responses: pending.responses,
+      sentCount: pending.sentCount,
+      settledCount: pending.settledCount,
+      responseCount: pending.respondedPeerIds.size,
+    });
   }
 
   private resolveQueryResponses(chat: Chat, responses: GroupCallQueryResponseSignal[]): QueryResolution {
-    if (responses.length === 0) {
+    const positiveResponses = responses.filter(isActiveQueryResponse);
+    if (positiveResponses.length === 0) {
       // TEMP_LOG
-      log(`[GROUP-CALL][QUERY][RESOLVE] group=${chat.group_id?.slice(0, 8)} responses=0 outcome=zero`);
+      log(
+        `[GROUP-CALL][QUERY][RESOLVE] group=${chat.group_id?.slice(0, 8)} responses=${responses.length} positives=0 outcome=zero`,
+      );
       return { kind: 'zero' };
     }
 
-    const responseSummary = responses
+    const responseSummary = positiveResponses
       .map((response) => `${response.callId.slice(0, 8)}:v${response.rosterVersion}:w${response.writerPeerId.slice(-8)}:${summarizeParticipants(response.participants)}`)
       .join(' | ');
 
-    const byCallId = new Map<string, GroupCallQueryResponseSignal[]>();
-    for (const response of responses) {
+    const byCallId = new Map<string, Array<GroupCallQueryResponseSignal & { active: true }>>();
+    for (const response of positiveResponses) {
       const existing = byCallId.get(response.callId) ?? [];
       existing.push(response);
       byCallId.set(response.callId, existing);
@@ -986,6 +1057,14 @@ export class GroupCallOrchestrator {
     const currentMembers = new Set(
       this.database.getChatParticipants(chat.id).map((participant) => participant.peer_id),
     );
+    // Query responses are only valid from current group members, even if the signature is otherwise valid.
+    if (!currentMembers.has(signal.fromPeerId)) {
+      return false;
+    }
+    if (!signal.active) {
+      return true;
+    }
+
     const seenPeerIds = new Set<string>();
     return signal.participants.every((participant) => {
       if (!currentMembers.has(participant.peerId) || seenPeerIds.has(participant.peerId)) {

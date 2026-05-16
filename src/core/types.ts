@@ -885,13 +885,37 @@ export type GroupCallQuerySignal = {
   signature: string;
 };
 
-export type GroupCallQueryResponseSignal = BaseGroupCallLiveSignal & {
+type BaseGroupCallQueryResponseSignal = {
   type: 'GROUP_CALL_QUERY_RESPONSE';
+  groupId: string;
   requestId: string;
+  fromPeerId: string;
+  toPeerId: string;
+  timestamp: number;
+  signature: string;
+};
+
+export type GroupCallQueryResponseActiveSignal = BaseGroupCallQueryResponseSignal & {
+  active: true;
+  callId: string;
   rosterVersion: number;
   writerPeerId: string;
   participants: GroupCallParticipant[];
 };
+
+export type GroupCallQueryResponseInactiveSignal = BaseGroupCallQueryResponseSignal & {
+  active: false;
+};
+
+export type GroupCallQueryResponseSignal =
+  | GroupCallQueryResponseActiveSignal
+  | GroupCallQueryResponseInactiveSignal;
+
+export type GroupCallQueryResponseActiveWithoutSignature = Omit<GroupCallQueryResponseActiveSignal, 'signature'>;
+export type GroupCallQueryResponseInactiveWithoutSignature = Omit<GroupCallQueryResponseInactiveSignal, 'signature'>;
+export type GroupCallQueryResponseWithoutSignature =
+  | GroupCallQueryResponseActiveWithoutSignature
+  | GroupCallQueryResponseInactiveWithoutSignature;
 
 export type CallGroupJoinRequestSignal = BaseGroupCallLiveSignal & {
   type: 'CALL_GROUP_JOIN_REQUEST';
@@ -953,7 +977,7 @@ export type CallGroupJoinResponseRejectedWithoutSignature = Omit<CallGroupJoinRe
 export type GroupCallControlSignalWithoutSignature =
   | Omit<CallGroupStartedSignal, 'signature'>
   | Omit<GroupCallQuerySignal, 'signature'>
-  | Omit<GroupCallQueryResponseSignal, 'signature'>
+  | GroupCallQueryResponseWithoutSignature
   | Omit<CallGroupJoinRequestSignal, 'signature'>
   | CallGroupJoinResponseAcceptedWithoutSignature
   | CallGroupJoinResponseRejectedWithoutSignature
@@ -965,7 +989,7 @@ export type GroupCallControlSignalWithoutSignature =
 export type GroupCallControlSignalForRenderer =
   | Omit<CallGroupStartedSignal, 'signature'>
   | Omit<GroupCallQuerySignal, 'signature'>
-  | Omit<GroupCallQueryResponseSignal, 'signature'>
+  | GroupCallQueryResponseWithoutSignature
   | Omit<CallGroupJoinRequestSignal, 'signature'>
   | Omit<CallGroupJoinResponseAcceptedSignal, 'signature'>
   | Omit<CallGroupJoinResponseRejectedSignal, 'signature'>
