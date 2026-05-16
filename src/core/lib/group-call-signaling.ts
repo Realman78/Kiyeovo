@@ -134,6 +134,8 @@ export function isGroupCallControlSignalMessage(value: unknown): value is GroupC
         && value.requestId.length > 0
         && Number.isInteger(value.rosterVersion)
         && Number(value.rosterVersion) >= 0
+        && typeof value.writerPeerId === 'string'
+        && value.writerPeerId.length > 0
         && Array.isArray(value.participants)
         && value.participants.every(isGroupCallParticipant);
     case 'CALL_GROUP_JOIN_RESPONSE':
@@ -143,6 +145,8 @@ export function isGroupCallControlSignalMessage(value: unknown): value is GroupC
       if (value.accepted) {
         return Number.isInteger(value.rosterVersion)
           && Number(value.rosterVersion) >= 0
+          && typeof value.writerPeerId === 'string'
+          && value.writerPeerId.length > 0
           && Array.isArray(value.participants)
           && value.participants.every(isGroupCallParticipant)
           && isAdmissionToken(value.admissionToken);
@@ -155,6 +159,8 @@ export function isGroupCallControlSignalMessage(value: unknown): value is GroupC
       return hasCallEnvelope(value)
         && Number.isInteger(value.rosterVersion)
         && Number(value.rosterVersion) >= 0
+        && typeof value.writerPeerId === 'string'
+        && value.writerPeerId.length > 0
         && Array.isArray(value.participants)
         && value.participants.every(isGroupCallParticipant);
     case 'CALL_GROUP_MUTE_STATE':
@@ -229,6 +235,7 @@ export function toUnsignedGroupCallSignalPayload(signal: UnsignedGroupCallSignal
         ...common,
         requestId: signal.requestId,
         rosterVersion: signal.rosterVersion,
+        writerPeerId: signal.writerPeerId,
         participants: signal.participants,
       };
     case 'CALL_GROUP_JOIN_RESPONSE':
@@ -237,6 +244,7 @@ export function toUnsignedGroupCallSignalPayload(signal: UnsignedGroupCallSignal
           ...common,
           accepted: true,
           rosterVersion: signal.rosterVersion,
+          writerPeerId: signal.writerPeerId,
           participants: signal.participants,
           admissionToken: signal.admissionToken,
         }
@@ -249,6 +257,7 @@ export function toUnsignedGroupCallSignalPayload(signal: UnsignedGroupCallSignal
       return {
         ...common,
         rosterVersion: signal.rosterVersion,
+        writerPeerId: signal.writerPeerId,
         participants: signal.participants,
       };
     case 'CALL_GROUP_MUTE_STATE':

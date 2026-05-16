@@ -11,6 +11,7 @@ import { INBOUND_INACTIVITY_WARNING_MS, MAX_GROUP_MEMBERS } from "../../../const
 import { getGroupStatusMessage, isGroupStatusWaiting } from "../../../utils/groupStatusMessages";
 import { getGroupCreatorLinkState } from "../../../utils/groupCreatorLinkHealth";
 import { callService } from "../../../lib/call/callService";
+import { groupCallService } from "../../../lib/call/groupCallService";
 import type { NetworkMode } from "../../../../core/types";
 import type { ChatHeaderGroupMember, GroupInfoDetails } from "./ChatHeaderDialogTypes";
 import { DeleteAllMessagesDialog } from "./DeleteAllMessagesDialog";
@@ -458,6 +459,11 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
 
     setIsStartingGroupCall(true);
     try {
+      const audioReady = await groupCallService.prepareLocalAudio();
+      if (!audioReady.success) {
+        toast.error(audioReady.error || 'Microphone access is required for group calls');
+        return;
+      }
       // TEMP_LOG
       console.info(
         `[GROUP-CALL][ACTION] action=start chat=${chatId} lastKnownCall=${activeChat?.lastKnownActiveCallId ?? 'none'} groupId=${activeChat?.groupId ?? 'none'}`,
@@ -466,17 +472,20 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
       await syncGroupCallEvidence(chatId);
 
       if (!result.success) {
+        groupCallService.releasePreparedLocalAudio();
         toast.error(result.error || 'Failed to start group call');
         return;
       }
 
       if (result.outcome === 'existing') {
+        groupCallService.releasePreparedLocalAudio();
         toast.info('A group call is already active in this chat.');
         return;
       }
 
       toast.success('Group call started. Waiting for participants.');
     } catch (error) {
+      groupCallService.releasePreparedLocalAudio();
       console.error('Failed to start group call:', error);
       toast.error('Failed to start group call');
     } finally {
@@ -484,32 +493,52 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
     }
   };
 
-  const handleJoinGroupCall = async () => {
-    if (!chatId) return;
+  const handleJoinGroupCall = async (
+    options?: { suppressStaleClearedToast?: boolean },
+  ): Promise<'joined' | 'existing' | 'stale_cleared' | 'failed'> => {
+    if (!chatId) return 'failed';
 
     setIsJoiningGroupCall(true);
     try {
+      const audioReady = await groupCallService.prepareLocalAudio();
+      if (!audioReady.success) {
+        toast.error(audioReady.error || 'Microphone access is required for group calls');
+        return 'failed';
+      }
       // TEMP_LOG
       console.info(
         `[GROUP-CALL][ACTION] action=join chat=${chatId} lastKnownCall=${activeChat?.lastKnownActiveCallId ?? 'none'} groupId=${activeChat?.groupId ?? 'none'}`,
       );
       const result = await window.kiyeovoAPI.joinGroupCall(chatId);
-      await syncGroupCallEvidence(chatId);
+      const refreshedChat = await syncGroupCallEvidence(chatId);
 
       if (!result.success) {
+        groupCallService.releasePreparedLocalAudio();
+        if (
+          result.error === 'This call may have ended'
+          && !refreshedChat?.last_known_active_call_id
+        ) {
+          if (!options?.suppressStaleClearedToast) {
+            toast.info('Stale call info cleared. Click again to start a new call.');
+          }
+          return 'stale_cleared';
+        }
         toast.error(result.error || 'Failed to join group call');
-        return;
+        return 'failed';
       }
 
       if (result.outcome === 'existing') {
         toast.info('You are already in this group call.');
-        return;
+        return 'existing';
       }
 
-      toast.success('Joined group call. Media connection comes next.');
+      toast.success('Joined group call. Connecting audio...');
+      return 'joined';
     } catch (error) {
+      groupCallService.releasePreparedLocalAudio();
       console.error('Failed to join group call:', error);
       toast.error('Failed to join group call');
+      return 'failed';
     } finally {
       setIsJoiningGroupCall(false);
     }
@@ -526,7 +555,15 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
     );
 
     if (latestKnownCallId) {
-      await handleJoinGroupCall();
+      const joinOutcome = await handleJoinGroupCall({ suppressStaleClearedToast: true });
+      if (joinOutcome === 'stale_cleared') {
+        const refreshedChat = await syncGroupCallEvidence(chatId);
+        if (refreshedChat?.last_known_active_call_id) {
+          toast.info('A group call is already active in this chat.');
+          return;
+        }
+        await handleStartGroupCall();
+      }
       return;
     }
 

@@ -540,7 +540,16 @@ export class GroupOfflineManager {
           }
 
           const expectedSeq = highestSeenSeq + 1;
-          if (msg.messageType !== 'system' && msg.seq > expectedSeq) {
+          let shouldWarnForGap = msg.seq > expectedSeq && msg.messageType !== 'system';
+          if (shouldWarnForGap) {
+            try {
+              const gapContent = this.decryptContent(msg.encryptedContent, keyBytes, msg.nonce);
+              shouldWarnForGap = !isGroupCallHintSystemPayload(this.parseHiddenSystemPayload(gapContent));
+            } catch {
+              shouldWarnForGap = true;
+            }
+          }
+          if (shouldWarnForGap) {
             gapWarnings.push({
               chatId: chat.id,
               groupId: chat.group_id,
@@ -648,13 +657,7 @@ export class GroupOfflineManager {
     timestamp: number;
     content: string;
   }): Promise<boolean> {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(input.content);
-    } catch {
-      return false;
-    }
-
+    const parsed = this.parseHiddenSystemPayload(input.content);
     if (!isGroupCallHintSystemPayload(parsed)) {
       return false;
     }
@@ -674,6 +677,14 @@ export class GroupOfflineManager {
       `[GROUP-OFFLINE][SYSTEM][GROUP_CALL_HINT] chat=${input.chatId} group=${parsed.groupId.slice(0, 8)} sender=${input.senderPeerId.slice(-8)}`,
     );
     return true;
+  }
+
+  private parseHiddenSystemPayload(content: string): unknown {
+    try {
+      return JSON.parse(content);
+    } catch {
+      return null;
+    }
   }
 
   private selectHistoryForMode(

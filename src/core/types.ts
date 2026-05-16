@@ -889,6 +889,7 @@ export type GroupCallQueryResponseSignal = BaseGroupCallLiveSignal & {
   type: 'GROUP_CALL_QUERY_RESPONSE';
   requestId: string;
   rosterVersion: number;
+  writerPeerId: string;
   participants: GroupCallParticipant[];
 };
 
@@ -900,6 +901,7 @@ export type CallGroupJoinResponseAcceptedSignal = BaseGroupCallLiveSignal & {
   type: 'CALL_GROUP_JOIN_RESPONSE';
   accepted: true;
   rosterVersion: number;
+  writerPeerId: string;
   participants: GroupCallParticipant[];
   admissionToken: AdmissionToken;
 };
@@ -917,6 +919,7 @@ export type CallGroupJoinResponseSignal =
 export type CallGroupRosterSignal = BaseGroupCallLiveSignal & {
   type: 'CALL_GROUP_ROSTER';
   rosterVersion: number;
+  writerPeerId: string;
   participants: GroupCallParticipant[];
 };
 
@@ -964,7 +967,7 @@ export type GroupCallControlSignalForRenderer =
   | Omit<GroupCallQuerySignal, 'signature'>
   | Omit<GroupCallQueryResponseSignal, 'signature'>
   | Omit<CallGroupJoinRequestSignal, 'signature'>
-  | Omit<CallGroupJoinResponseAcceptedSignal, 'signature' | 'admissionToken'>
+  | Omit<CallGroupJoinResponseAcceptedSignal, 'signature'>
   | Omit<CallGroupJoinResponseRejectedSignal, 'signature'>
   | Omit<CallGroupRosterSignal, 'signature'>
   | Omit<CallGroupLeaveSignal, 'signature'>

@@ -67,6 +67,7 @@ type GroupCallSession = {
   groupId: string;
   callId: string;
   rosterVersion: number;
+  currentWriterPeerId: string;
   authoritativeParticipants: GroupCallParticipant[];
   connectionParticipants: string[];
   role: GroupCallRole;
@@ -119,6 +120,8 @@ type GroupCallOrchestratorConfig = {
   onError?: (data: GroupCallErrorEvent) => void;
 };
 
+type RosterAcceptanceCase = 'normal' | 'handover_final' | 'successor_rebroadcast';
+
 function compareStrings(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
@@ -147,6 +150,10 @@ function summarizeParticipants(participants: GroupCallParticipant[]): string {
     .join(',');
 }
 
+function hasParticipant(participants: GroupCallParticipant[], peerId: string): boolean {
+  return participants.some((participant) => participant.peerId === peerId);
+}
+
 function describeQueryResolution(result: QueryResolution): string {
   if (result.kind === 'zero') {
     return 'zero';
@@ -154,7 +161,7 @@ function describeQueryResolution(result: QueryResolution): string {
   if (result.kind === 'conflict') {
     return 'conflict';
   }
-  return `winner call=${result.winner.callId.slice(0, 8)} version=${result.winner.rosterVersion} participants=${summarizeParticipants(result.winner.participants)}`;
+  return `winner call=${result.winner.callId.slice(0, 8)} version=${result.winner.rosterVersion} writer=${result.winner.writerPeerId.slice(-8)} participants=${summarizeParticipants(result.winner.participants)}`;
 }
 
 export class GroupCallOrchestrator {
@@ -177,6 +184,7 @@ export class GroupCallOrchestrator {
   private storeDurableHint: ((groupId: string) => Promise<void>) | null = null;
   private pendingJoinResponse: PendingJoinResponse | null = null;
   private pendingRosterBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
+  private joinRequestQueue: Promise<void> = Promise.resolve();
 
   constructor(config: GroupCallOrchestratorConfig) {
     this.node = config.node;
@@ -236,6 +244,7 @@ export class GroupCallOrchestrator {
         groupId: chat.group_id!,
         callId,
         rosterVersion: 1,
+        currentWriterPeerId: this.localPeerId(),
         authoritativeParticipants: participants,
         connectionParticipants: [this.localPeerId()],
         role: 'writer',
@@ -504,11 +513,17 @@ export class GroupCallOrchestrator {
       callId: this.session.callId,
       requestId: signal.requestId,
       rosterVersion: this.session.rosterVersion,
+      writerPeerId: this.session.currentWriterPeerId,
       participants: this.session.authoritativeParticipants,
       fromPeerId: this.localPeerId(),
       toPeerId: signal.fromPeerId,
       timestamp: Date.now(),
     };
+    const chat = this.database.getChatByGroupId(signal.groupId);
+    // TEMP_LOG
+    log(
+      `[GROUP-CALL][QUERY][RESPOND] group=${signal.groupId.slice(0, 8)} call=${this.session.callId.slice(0, 8)} local=${this.localPeerId().slice(-8)} to=${signal.fromPeerId.slice(-8)} version=${this.session.rosterVersion} participants=${summarizeParticipants(this.session.authoritativeParticipants)} creator=${chat?.group_creator_peer_id?.slice(-8) ?? 'none'}`,
+    );
     await this.trySendControlSignal(response);
   }
 
@@ -521,6 +536,11 @@ export class GroupCallOrchestrator {
       return;
     }
 
+    const chat = this.database.getChatByGroupId(signal.groupId);
+    // TEMP_LOG
+    log(
+      `[GROUP-CALL][QUERY][RESPONSE] group=${signal.groupId.slice(0, 8)} request=${signal.requestId.slice(0, 8)} from=${signal.fromPeerId.slice(-8)} local=${this.localPeerId().slice(-8)} call=${signal.callId.slice(0, 8)} version=${signal.rosterVersion} writer=${signal.writerPeerId.slice(-8)} selfWriter=${String(signal.writerPeerId === this.localPeerId())} participants=${summarizeParticipants(signal.participants)} creator=${chat?.group_creator_peer_id?.slice(-8) ?? 'none'}`,
+    );
     pending.responses.push(signal);
     if (!pending.settleTimer) {
       pending.settleTimer = setTimeout(() => {
@@ -530,6 +550,12 @@ export class GroupCallOrchestrator {
   }
 
   private async handleJoinRequest(signal: CallGroupJoinRequestSignal): Promise<void> {
+    const queued = this.joinRequestQueue.then(() => this.handleJoinRequestImpl(signal));
+    this.joinRequestQueue = queued.catch(() => undefined);
+    await queued;
+  }
+
+  private async handleJoinRequestImpl(signal: CallGroupJoinRequestSignal): Promise<void> {
     const chat = this.database.getChatByGroupId(signal.groupId);
     if (!chat) {
       return;
@@ -552,7 +578,14 @@ export class GroupCallOrchestrator {
     );
     if (existingParticipant) {
       const token = this.issueAdmissionToken(signal.callId, signal.fromPeerId);
-      await this.sendAcceptedJoinResponse(chat, signal, this.session.authoritativeParticipants, this.session.rosterVersion, token);
+      await this.sendAcceptedJoinResponse(
+        chat,
+        signal,
+        this.session.authoritativeParticipants,
+        this.session.rosterVersion,
+        this.session.currentWriterPeerId,
+        token,
+      );
       // TEMP_LOG
       log(
         `[GROUP-CALL][JOIN][REFRESH] group=${signal.groupId.slice(0, 8)} call=${signal.callId.slice(0, 8)} peer=${signal.fromPeerId.slice(-8)}`,
@@ -565,14 +598,29 @@ export class GroupCallOrchestrator {
       return;
     }
 
-    const nextParticipants = sortParticipants([
+    const nextParticipants = [
       ...this.session.authoritativeParticipants,
       { peerId: signal.fromPeerId, joinedAt: Date.now() },
-    ]);
-    this.session.authoritativeParticipants = nextParticipants;
-    this.session.rosterVersion += 1;
+    ];
+    const nextRosterVersion = this.session.rosterVersion + 1;
     const token = this.issueAdmissionToken(signal.callId, signal.fromPeerId);
-    await this.sendAcceptedJoinResponse(chat, signal, nextParticipants, this.session.rosterVersion, token);
+    const sent = await this.sendAcceptedJoinResponse(
+      chat,
+      signal,
+      nextParticipants,
+      nextRosterVersion,
+      this.session.currentWriterPeerId,
+      token,
+    );
+    if (!sent) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][JOIN][ACCEPT_SEND_FAIL] group=${signal.groupId.slice(0, 8)} call=${signal.callId.slice(0, 8)} peer=${signal.fromPeerId.slice(-8)}`,
+      );
+      return;
+    }
+
+    this.adoptAuthoritativeState(nextParticipants, nextRosterVersion, this.session.currentWriterPeerId);
     this.scheduleRosterBroadcast(chat);
     // TEMP_LOG
     log(
@@ -587,6 +635,10 @@ export class GroupCallOrchestrator {
       || this.pendingJoinResponse.callId !== signal.callId
       || this.pendingJoinResponse.writerPeerId !== signal.fromPeerId
     ) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][JOIN][RESPONSE_IGNORED] group=${signal.groupId.slice(0, 8)} call=${signal.callId.slice(0, 8)} writer=${signal.fromPeerId.slice(-8)} accepted=${String(signal.accepted)}`,
+      );
       return;
     }
 
@@ -605,9 +657,8 @@ export class GroupCallOrchestrator {
     if (!chat) {
       return;
     }
-
-    const expectedWriterPeerId = this.deriveWriterPeerId(chat, signal.participants);
-    if (expectedWriterPeerId !== signal.fromPeerId) {
+    const acceptanceCase = this.getRosterAcceptanceCase(chat, signal);
+    if (!acceptanceCase) {
       return;
     }
     if (signal.rosterVersion < this.session.rosterVersion) {
@@ -615,17 +666,16 @@ export class GroupCallOrchestrator {
     }
     if (
       signal.rosterVersion === this.session.rosterVersion
+      && signal.writerPeerId === this.session.currentWriterPeerId
       && sameParticipantRoster(signal.participants, this.session.authoritativeParticipants)
     ) {
       return;
     }
 
-    this.session.authoritativeParticipants = sortParticipants(signal.participants);
-    this.session.rosterVersion = signal.rosterVersion;
-    this.recordRecentWriter(expectedWriterPeerId);
+    this.adoptAuthoritativeState(signal.participants, signal.rosterVersion, signal.writerPeerId);
     // TEMP_LOG
     log(
-      `[GROUP-CALL][ROSTER] group=${signal.groupId.slice(0, 8)} call=${signal.callId.slice(0, 8)} version=${signal.rosterVersion} participants=${signal.participants.length}`,
+      `[GROUP-CALL][ROSTER][ACCEPT] case=${acceptanceCase} group=${signal.groupId.slice(0, 8)} call=${signal.callId.slice(0, 8)} version=${signal.rosterVersion} writer=${signal.writerPeerId.slice(-8)} signer=${signal.fromPeerId.slice(-8)} participants=${signal.participants.length}`,
     );
   }
 
@@ -693,6 +743,8 @@ export class GroupCallOrchestrator {
     }
 
     const requestId = randomUUID();
+    let sentCount = 0;
+    let settledCount = 0;
     const responsePromise = new Promise<GroupCallQueryResponseSignal[]>((resolve) => {
       const hardTimer = setTimeout(() => {
         this.resolvePendingQuery(requestId);
@@ -708,27 +760,31 @@ export class GroupCallOrchestrator {
       });
     });
 
-    const sendResults = await Promise.allSettled(
-      targets.map(async (peerId) => this.trySendControlSignal({
-        type: 'GROUP_CALL_QUERY',
-        groupId: chat.group_id!,
-        requestId,
-        fromPeerId: this.localPeerId(),
-        toPeerId: peerId,
-        timestamp: Date.now(),
-      })),
+    void Promise.allSettled(
+      targets.map(async (peerId) => {
+        const sent = await this.trySendControlSignal({
+          type: 'GROUP_CALL_QUERY',
+          groupId: chat.group_id!,
+          requestId,
+          fromPeerId: this.localPeerId(),
+          toPeerId: peerId,
+          timestamp: Date.now(),
+        });
+        if (sent) {
+          sentCount += 1;
+        }
+        settledCount += 1;
+        if (settledCount === targets.length && sentCount === 0) {
+          this.resolvePendingQuery(requestId);
+        }
+      }),
     );
-
-    const sentCount = sendResults.filter((result) => result.status === 'fulfilled' && result.value).length;
-    if (sentCount === 0) {
-      this.resolvePendingQuery(requestId);
-    }
 
     const responses = await responsePromise;
 
     // TEMP_LOG
     log(
-      `[GROUP-CALL][QUERY] group=${chat.group_id?.slice(0, 8)} request=${requestId.slice(0, 8)} targets=${targets.length} sent=${sentCount} responses=${responses.length}`,
+      `[GROUP-CALL][QUERY] group=${chat.group_id?.slice(0, 8)} request=${requestId.slice(0, 8)} targets=${targets.length} sent=${sentCount} settled=${settledCount} responses=${responses.length}`,
     );
     return responses;
   }
@@ -755,7 +811,7 @@ export class GroupCallOrchestrator {
     }
 
     const responseSummary = responses
-      .map((response) => `${response.callId.slice(0, 8)}:v${response.rosterVersion}:${summarizeParticipants(response.participants)}`)
+      .map((response) => `${response.callId.slice(0, 8)}:v${response.rosterVersion}:w${response.writerPeerId.slice(-8)}:${summarizeParticipants(response.participants)}`)
       .join(' | ');
 
     const byCallId = new Map<string, GroupCallQueryResponseSignal[]>();
@@ -784,7 +840,8 @@ export class GroupCallOrchestrator {
     }
 
     const conflicting = highestVersionResponses.some(
-      (response) => !sameParticipantRoster(response.participants, canonical.participants),
+      (response) => response.writerPeerId !== canonical.writerPeerId
+        || !sameParticipantRoster(response.participants, canonical.participants),
     );
     if (conflicting) {
       // TEMP_LOG
@@ -796,26 +853,17 @@ export class GroupCallOrchestrator {
       callId: canonical.callId,
       rosterVersion: canonical.rosterVersion,
       participants: sortParticipants(canonical.participants),
-      writerPeerId: this.deriveWriterPeerId(chat, canonical.participants),
+      writerPeerId: canonical.writerPeerId,
       timestamp: canonical.timestamp,
     };
     // TEMP_LOG
     log(
-      `[GROUP-CALL][QUERY][RESOLVE] group=${chat.group_id?.slice(0, 8)} responses=${responses.length} raw="${responseSummary}" outcome=winner call=${winner.callId.slice(0, 8)} version=${winner.rosterVersion} writer=${winner.writerPeerId.slice(-8)} participants=${summarizeParticipants(winner.participants)}`,
+      `[GROUP-CALL][QUERY][RESOLVE] group=${chat.group_id?.slice(0, 8)} responses=${responses.length} raw="${responseSummary}" outcome=winner call=${winner.callId.slice(0, 8)} version=${winner.rosterVersion} writer=${winner.writerPeerId.slice(-8)} local=${this.localPeerId().slice(-8)} selfWriter=${String(winner.writerPeerId === this.localPeerId())} participants=${summarizeParticipants(winner.participants)} creator=${chat.group_creator_peer_id?.slice(-8) ?? 'none'}`,
     );
     return {
       kind: 'winner',
       winner,
     };
-  }
-
-  private deriveWriterPeerId(chat: Chat, participants: GroupCallParticipant[]): string {
-    const participantPeerIds = participants.map((participant) => participant.peerId);
-    if (chat.group_creator_peer_id && participantPeerIds.includes(chat.group_creator_peer_id)) {
-      return chat.group_creator_peer_id;
-    }
-
-    return [...participantPeerIds].sort(compareStrings)[0] ?? '';
   }
 
   private isValidQueryResponse(signal: GroupCallQueryResponseSignal): boolean {
@@ -834,7 +882,7 @@ export class GroupCallOrchestrator {
       }
       seenPeerIds.add(participant.peerId);
       return true;
-    });
+    }) && currentMembers.has(signal.writerPeerId) && signal.participants.some((participant) => participant.peerId === signal.writerPeerId);
   }
 
   private async broadcastStartedSignal(
@@ -885,17 +933,21 @@ export class GroupCallOrchestrator {
       groupId: chat.group_id!,
       callId: winner.callId,
       rosterVersion: winner.rosterVersion,
+      currentWriterPeerId: winner.writerPeerId,
       authoritativeParticipants: sortParticipants(winner.participants),
       connectionParticipants: [this.localPeerId()],
       role: 'participant',
       state: 'joining',
-      recentWriterPeerIds: [...previousRecentWriters],
+      recentWriterPeerIds: [
+        winner.writerPeerId,
+        ...previousRecentWriters.filter((peerId) => peerId !== winner.writerPeerId),
+      ].slice(0, RECENT_WRITER_SET_MAX_ENTRIES),
     };
     this.callActivityRegistry.setGroupCall({ callId: winner.callId, groupId: chat.group_id! });
     this.emitStateChanged('joining', { reason: 'joining' });
     // TEMP_LOG
     log(
-      `[GROUP-CALL][JOIN][BEGIN] group=${chat.group_id?.slice(0, 8)} call=${winner.callId.slice(0, 8)} writer=${winner.writerPeerId.slice(-8)}`,
+      `[GROUP-CALL][JOIN][BEGIN] group=${chat.group_id?.slice(0, 8)} call=${winner.callId.slice(0, 8)} writer=${winner.writerPeerId.slice(-8)} local=${this.localPeerId().slice(-8)} selfWriter=${String(winner.writerPeerId === this.localPeerId())} participants=${summarizeParticipants(winner.participants)}`,
     );
   }
 
@@ -989,13 +1041,17 @@ export class GroupCallOrchestrator {
       timestamp: Date.now(),
     });
     if (!sent) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][JOIN][SEND_FAIL] group=${chat.group_id?.slice(0, 8)} call=${winner.callId.slice(0, 8)} writer=${winner.writerPeerId.slice(-8)} local=${this.localPeerId().slice(-8)} selfDial=${String(winner.writerPeerId === this.localPeerId())}`,
+      );
       this.clearPendingJoinResponse();
       return { kind: 'timeout' };
     }
 
     // TEMP_LOG
     log(
-      `[GROUP-CALL][JOIN][REQUEST] group=${chat.group_id?.slice(0, 8)} call=${winner.callId.slice(0, 8)} writer=${winner.writerPeerId.slice(-8)}`,
+      `[GROUP-CALL][JOIN][REQUEST] group=${chat.group_id?.slice(0, 8)} call=${winner.callId.slice(0, 8)} writer=${winner.writerPeerId.slice(-8)} local=${this.localPeerId().slice(-8)} selfDial=${String(winner.writerPeerId === this.localPeerId())}`,
     );
 
     const resolution = await responsePromise;
@@ -1018,20 +1074,37 @@ export class GroupCallOrchestrator {
       return { kind: 'rejected', reason: response.reason };
     }
 
+    // TEMP_LOG
+    log(
+      `[GROUP-CALL][JOIN][ACCEPTED_RESPONSE] group=${chat.group_id?.slice(0, 8)} call=${winner.callId.slice(0, 8)} writer=${winner.writerPeerId.slice(-8)} responseWriter=${response.writerPeerId.slice(-8)} from=${response.fromPeerId.slice(-8)} local=${this.localPeerId().slice(-8)} version=${response.rosterVersion} participants=${summarizeParticipants(response.participants)}`,
+    );
+
     if (!this.session || this.session.groupId !== response.groupId || this.session.callId !== response.callId) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][JOIN][ACCEPT_INVALID] reason=session_mismatch group=${chat.group_id?.slice(0, 8)} call=${winner.callId.slice(0, 8)} local=${this.localPeerId().slice(-8)} sessionGroup=${this.session?.groupId ?? 'none'} sessionCall=${this.session?.callId ?? 'none'}`,
+      );
       return { kind: 'rejected', reason: 'call_not_active' };
     }
 
-    const expectedWriterPeerId = this.deriveWriterPeerId(chat, response.participants);
-    if (expectedWriterPeerId !== response.fromPeerId) {
-      return { kind: 'rejected', reason: 'call_not_active' };
-    }
-    this.recordRecentWriter(expectedWriterPeerId);
     if (!response.participants.some((participant) => participant.peerId === this.localPeerId())) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][JOIN][ACCEPT_INVALID] reason=local_missing_from_roster group=${chat.group_id?.slice(0, 8)} call=${winner.callId.slice(0, 8)} writer=${response.fromPeerId.slice(-8)} local=${this.localPeerId().slice(-8)} participants=${summarizeParticipants(response.participants)}`,
+      );
       return { kind: 'rejected', reason: 'call_not_active' };
     }
-    this.session.authoritativeParticipants = sortParticipants(response.participants);
-    this.session.rosterVersion = response.rosterVersion;
+
+    if (response.writerPeerId !== response.fromPeerId) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][JOIN][ACCEPT_INVALID] reason=writer_identity_mismatch group=${chat.group_id?.slice(0, 8)} call=${winner.callId.slice(0, 8)} responseWriter=${response.writerPeerId.slice(-8)} responseFrom=${response.fromPeerId.slice(-8)} local=${this.localPeerId().slice(-8)}`,
+      );
+      return { kind: 'rejected', reason: 'call_not_active' };
+    }
+
+    this.recordRecentWriter(response.writerPeerId);
+    this.adoptAuthoritativeState(response.participants, response.rosterVersion, response.writerPeerId);
     return { kind: 'accepted' };
   }
 
@@ -1049,14 +1122,16 @@ export class GroupCallOrchestrator {
     request: CallGroupJoinRequestSignal,
     participants: GroupCallParticipant[],
     rosterVersion: number,
+    writerPeerId: string,
     admissionToken: AdmissionToken,
-  ): Promise<void> {
-    await this.trySendControlSignal({
+  ): Promise<boolean> {
+    return this.trySendControlSignal({
       type: 'CALL_GROUP_JOIN_RESPONSE',
       groupId: chat.group_id!,
       callId: request.callId,
       accepted: true,
       rosterVersion,
+      writerPeerId,
       participants,
       admissionToken,
       fromPeerId: this.localPeerId(),
@@ -1109,6 +1184,7 @@ export class GroupCallOrchestrator {
         groupId: chat.group_id!,
         callId: this.session!.callId,
         rosterVersion: this.session!.rosterVersion,
+        writerPeerId: this.session!.currentWriterPeerId,
         participants,
         fromPeerId: this.localPeerId(),
         toPeerId: peerId,
@@ -1226,6 +1302,72 @@ export class GroupCallOrchestrator {
       peerId,
       ...this.session.recentWriterPeerIds.filter((existingPeerId) => existingPeerId !== peerId),
     ].slice(0, RECENT_WRITER_SET_MAX_ENTRIES);
+  }
+
+  private adoptAuthoritativeState(
+    participants: GroupCallParticipant[],
+    rosterVersion: number,
+    currentWriterPeerId: string,
+  ): void {
+    if (!this.session) {
+      return;
+    }
+
+    this.session.authoritativeParticipants = sortParticipants(participants);
+    this.session.rosterVersion = rosterVersion;
+    this.session.currentWriterPeerId = currentWriterPeerId;
+    this.session.role = currentWriterPeerId === this.localPeerId() ? 'writer' : 'participant';
+    this.recordRecentWriter(currentWriterPeerId);
+  }
+
+  private getRosterAcceptanceCase(
+    chat: Chat,
+    signal: CallGroupRosterSignal,
+  ): RosterAcceptanceCase | null {
+    const session = this.session;
+    if (!session || !hasParticipant(signal.participants, signal.writerPeerId)) {
+      return null;
+    }
+
+    if (
+      signal.fromPeerId === session.currentWriterPeerId
+      && signal.writerPeerId === signal.fromPeerId
+    ) {
+      return 'normal';
+    }
+
+    if (
+      signal.fromPeerId === session.currentWriterPeerId
+      && signal.writerPeerId !== signal.fromPeerId
+      && !hasParticipant(signal.participants, signal.fromPeerId)
+      && this.failoverWriterPeerId(chat, signal.participants) === signal.writerPeerId
+    ) {
+      return 'handover_final';
+    }
+
+    if (signal.fromPeerId !== signal.writerPeerId) {
+      return null;
+    }
+
+    const remainingParticipants = session.authoritativeParticipants
+      .filter((participant) => participant.peerId !== session.currentWriterPeerId);
+    if (this.failoverWriterPeerId(chat, remainingParticipants) === signal.writerPeerId) {
+      return 'successor_rebroadcast';
+    }
+
+    return null;
+  }
+
+  private failoverWriterPeerId(chat: Chat, participants: GroupCallParticipant[]): string {
+    if (participants.length === 0) {
+      return '';
+    }
+
+    if (chat.group_creator_peer_id && hasParticipant(participants, chat.group_creator_peer_id)) {
+      return chat.group_creator_peer_id;
+    }
+
+    return sortParticipants(participants)[0]?.peerId ?? '';
   }
 
   private mapJoinFailureToMessage(reason: GroupCallJoinFailureReason): string {
@@ -1490,7 +1632,7 @@ export class GroupCallOrchestrator {
     switch (signal.type) {
       case 'CALL_GROUP_JOIN_RESPONSE':
         if (signal.accepted) {
-          const { signature, admissionToken, ...rest } = signal;
+          const { signature, ...rest } = signal;
           return rest;
         }
         {

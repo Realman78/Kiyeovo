@@ -11,6 +11,7 @@ import { useNotifications } from '../hooks/useNotifications';
 import { useCallRingtone } from '../hooks/useCallRingtone';
 import { store } from '../state/store';
 import { callService } from '../lib/call/callService';
+import { groupCallService } from '../lib/call/groupCallService';
 import { IncomingCallCard } from '../components/call/IncomingCallCard';
 import { CallManagerCard } from '../components/call/CallManagerCard';
 import { ScreenShareSourcePicker } from '../components/call/ScreenShareSourcePicker';
@@ -461,6 +462,8 @@ export const Main = () => {
     });
 
     const unsubGroupCallControlSignalReceived = window.kiyeovoAPI.onGroupCallControlSignalReceived((data) => {
+      void groupCallService.handleControlSignal(data.signal);
+
       const currentChats = store.getState().chat.chats;
       const chat = currentChats.find((candidate) => candidate.groupId === data.signal.groupId);
       if (!chat) {
@@ -496,7 +499,12 @@ export const Main = () => {
       }
     });
 
+    const unsubGroupCallPairSignalReceived = window.kiyeovoAPI.onGroupCallPairSignalReceived((data) => {
+      void groupCallService.handlePairSignal(data.signal);
+    });
+
     const unsubGroupCallStateChanged = window.kiyeovoAPI.onGroupCallStateChanged((data) => {
+      groupCallService.syncWithCoreState(data);
       if (typeof data.chatId === 'number') {
         void syncChatCallEvidenceFromDb(data.chatId);
       }
@@ -534,6 +542,16 @@ export const Main = () => {
       }
     });
 
+    const unsubGroupCallService = groupCallService.subscribe((event) => {
+      if (event.type === 'error') {
+        toast.error(event.message);
+        return;
+      }
+      if (event.state === 'active') {
+        toast.success('Group call audio connected');
+      }
+    });
+
     return () => {
       unsubKeyExchangeFailed();
       unsubMessageReceived();
@@ -550,10 +568,13 @@ export const Main = () => {
       unsubCallStateChanged();
       unsubCallError();
       unsubGroupCallControlSignalReceived();
+      unsubGroupCallPairSignalReceived();
       unsubGroupCallStateChanged();
       unsubGroupCallError();
       unsubCallService();
+      unsubGroupCallService();
       callService.dispose();
+      groupCallService.dispose();
     };
   }, [])
 
