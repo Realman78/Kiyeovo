@@ -198,7 +198,7 @@ export class GroupCallOrchestrator {
   private readonly recentQueryResults = new Map<string, { resolvedAt: number; result: QueryResolution }>();
   private readonly pendingDurableHintGroups = new Set<string>();
   private readonly recentDurableHintResults = new Map<string, number>();
-  private readonly pendingPeerDisconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly pendingPeerDisconnectTimers = new Map<string, { timer: ReturnType<typeof setTimeout>; expiresAt: number }>();
   private participantReconnectInProgress = false;
   private readonly peerConnectHandler: EventListener = (event) => {
     const peerId = (event as CustomEvent<unknown>).detail?.toString?.();
@@ -1897,18 +1897,24 @@ export class GroupCallOrchestrator {
   }
 
   private clearPeerDisconnectTimer(peerId: string): void {
-    const timer = this.pendingPeerDisconnectTimers.get(peerId);
-    if (!timer) {
+    const entry = this.pendingPeerDisconnectTimers.get(peerId);
+    if (!entry) {
       return;
     }
 
-    clearTimeout(timer);
+    clearTimeout(entry.timer);
     this.pendingPeerDisconnectTimers.delete(peerId);
   }
 
   private clearAllPeerDisconnectTimers(): void {
-    this.pendingPeerDisconnectTimers.forEach((timer) => clearTimeout(timer));
+    this.pendingPeerDisconnectTimers.forEach((entry) => clearTimeout(entry.timer));
     this.pendingPeerDisconnectTimers.clear();
+  }
+
+  private currentPendingDisconnects(): { peerId: string; expiresAt: number }[] {
+    return [...this.pendingPeerDisconnectTimers.entries()]
+      .map(([peerId, entry]) => ({ peerId, expiresAt: entry.expiresAt }))
+      .sort((a, b) => a.expiresAt - b.expiresAt);
   }
 
   private isPeerCurrentlyConnected(peerId: string): boolean {
@@ -1929,7 +1935,9 @@ export class GroupCallOrchestrator {
       log(
         `[GROUP-CALL][RECOVER][WRITER_PROBE] group=${this.session.groupId.slice(0, 8)} call=${this.session.callId.slice(0, 8)} peer=${peerId.slice(-8)}`,
       );
+      return;
     }
+    this.emitStateChanged(this.session.state, { reason: 'disconnect_grace_cleared', peerId });
   }
 
   private handlePeerDisconnect(peerId: string): void {
@@ -1952,14 +1960,19 @@ export class GroupCallOrchestrator {
       this.pendingPeerDisconnectTimers.delete(peerId);
       this.handlePeerDisconnectGraceExpired(peerId);
     }, PEER_DISCONNECT_GRACE_MS);
-    this.pendingPeerDisconnectTimers.set(peerId, timer);
+    this.pendingPeerDisconnectTimers.set(peerId, {
+      timer,
+      expiresAt: Date.now() + PEER_DISCONNECT_GRACE_MS,
+    });
+    this.emitStateChanged(this.session.state, { reason: 'disconnect_grace_started', peerId });
   }
 
   private handlePeerDisconnectGraceExpired(peerId: string): void {
-    if (!this.session || this.isPeerCurrentlyConnected(peerId)) {
+    if (!this.session) {
       return;
     }
-    if (!hasParticipant(this.session.authoritativeParticipants, peerId)) {
+    if (this.isPeerCurrentlyConnected(peerId) || !hasParticipant(this.session.authoritativeParticipants, peerId)) {
+      this.emitStateChanged(this.session.state, { reason: 'disconnect_grace_cleared', peerId });
       return;
     }
 
@@ -1986,6 +1999,7 @@ export class GroupCallOrchestrator {
     }
 
     if (peerId !== this.session.currentWriterPeerId) {
+      this.emitStateChanged(this.session.state, { reason: 'disconnect_grace_expired', peerId });
       return;
     }
 
@@ -2020,6 +2034,7 @@ export class GroupCallOrchestrator {
       state,
       role: this.session.role,
       participants: this.session.authoritativeParticipants,
+      pendingDisconnects: this.currentPendingDisconnects(),
       writerPeerId: this.session.currentWriterPeerId,
       timestamp: Date.now(),
     };

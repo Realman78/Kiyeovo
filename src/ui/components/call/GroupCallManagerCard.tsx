@@ -24,6 +24,7 @@ export const GroupCallManagerCard = () => {
   const userPeerId = useAppSelector((state) => state.user.peerId);
   const [snapshot, setSnapshot] = useState<GroupCallSnapshot>(() => groupCallService.getSnapshot());
   const [actionPending, setActionPending] = useState<'mute' | 'leave' | null>(null);
+  const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
     return groupCallService.subscribe((event) => {
@@ -32,6 +33,16 @@ export const GroupCallManagerCard = () => {
       }
     });
   }, []);
+
+  useEffect(() => {
+    if (snapshot.pendingDisconnects.length === 0) {
+      return;
+    }
+    const timer = setInterval(() => {
+      setNow(Date.now());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [snapshot.pendingDisconnects.length]);
 
   const participantPeerIds = useMemo(() => {
     if (snapshot.participantPeerIds.length > 0) {
@@ -44,6 +55,10 @@ export const GroupCallManagerCard = () => {
   }, [snapshot.localPeerId, snapshot.participantPeerIds]);
 
   const connectedPeerIds = useMemo(() => new Set(snapshot.connectedPeerIds), [snapshot.connectedPeerIds]);
+  const pendingDisconnects = useMemo(
+    () => new Map(snapshot.pendingDisconnects.map((entry) => [entry.peerId, entry.expiresAt])),
+    [snapshot.pendingDisconnects],
+  );
   const groupChat = chats.find((chat) => chat.id === snapshot.chatId || chat.groupId === snapshot.groupId);
 
   const resolvePeerName = (peerId: string): string => {
@@ -116,7 +131,13 @@ export const GroupCallManagerCard = () => {
                 </div>
                 <div className="shrink-0 text-right text-[11px] uppercase tracking-wide text-muted-foreground">
                   <div>{isWriter ? 'Writer' : 'Member'}</div>
-                  <div>{isConnected ? 'Connected' : 'Pending'}</div>
+                  <div>
+                    {pendingDisconnects.has(peerId)
+                      ? `Disconnect ${Math.max(0, Math.ceil(((pendingDisconnects.get(peerId) ?? now) - now) / 1000))}s`
+                      : isConnected
+                        ? 'Connected'
+                        : 'Pending'}
+                  </div>
                 </div>
               </div>
             );

@@ -21,6 +21,7 @@ export type GroupCallSnapshot = {
   localPeerId: string | null;
   participantPeerIds: string[];
   connectedPeerIds: string[];
+  pendingDisconnects: { peerId: string; expiresAt: number }[];
   localMuted: boolean;
 };
 
@@ -47,6 +48,7 @@ type GroupCallSession = {
   coreState: Exclude<GroupCallStateChangedEvent['state'], 'idle' | 'ended'>;
   writerPeerId: string | null;
   participantPeerIds: string[];
+  pendingDisconnects: { peerId: string; expiresAt: number }[];
 };
 
 type PendingJoinAdmission = {
@@ -140,6 +142,7 @@ class GroupCallService {
         localPeerId: this.localPeerId,
         participantPeerIds: [],
         connectedPeerIds: [],
+        pendingDisconnects: [],
         localMuted: this.localMuted,
       };
     }
@@ -155,6 +158,7 @@ class GroupCallService {
       localPeerId: this.localPeerId,
       participantPeerIds: [...this.session.participantPeerIds],
       connectedPeerIds: this.connectedPeerIds(),
+      pendingDisconnects: [...this.session.pendingDisconnects],
       localMuted: this.localMuted,
     };
   }
@@ -731,6 +735,7 @@ class GroupCallService {
             localPeerId: this.localPeerId,
             participantPeerIds: event.participants?.map((participant) => participant.peerId) ?? [],
             connectedPeerIds: [],
+            pendingDisconnects: [],
             localMuted: false,
           },
         });
@@ -756,6 +761,7 @@ class GroupCallService {
         coreState: event.state,
         writerPeerId: event.writerPeerId ?? null,
         participantPeerIds: event.participants?.map((participant) => participant.peerId) ?? [],
+        pendingDisconnects: event.pendingDisconnects ?? [],
       };
       if (event.role === 'writer' && event.writerPeerId) {
         this.localPeerId = event.writerPeerId;
@@ -783,6 +789,9 @@ class GroupCallService {
     }
     if (event.participants) {
       currentSession.participantPeerIds = event.participants.map((participant) => participant.peerId);
+    }
+    if (event.pendingDisconnects) {
+      currentSession.pendingDisconnects = event.pendingDisconnects;
     }
     if (event.reason === 'writer_reconnect_recover' && currentSession.role === 'writer') {
       void this.startWriterRecoveryProbe();

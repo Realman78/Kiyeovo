@@ -1102,6 +1102,7 @@ export interface GroupCallStateChangedEvent {
   role: GroupCallRole | null;
   peerId?: string;
   participants?: GroupCallParticipant[];
+  pendingDisconnects?: { peerId: string; expiresAt: number }[];
   writerPeerId?: string | null;
   reason?: string;
   timestamp: number;
