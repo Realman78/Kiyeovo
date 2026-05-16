@@ -377,11 +377,12 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     onPendingFileReceived(data);
   };
 
+  let groupCallOrchestrator: GroupCallOrchestrator | null = null;
+
   const sendGroupChatActivated = (data: GroupChatActivatedEvent) => {
+    void groupCallOrchestrator?.handleGroupChatActivated(data.chatId);
     onGroupChatActivated(data);
   };
-
-  let groupCallOrchestrator: GroupCallOrchestrator | null = null;
 
   const sendGroupMembersUpdated = (data: GroupMembersUpdatedEvent) => {
     groupCallOrchestrator?.handleGroupMembersUpdated(data);

@@ -243,6 +243,24 @@ export class GroupCallOrchestrator {
     this.clearAllPeerDisconnectTimers();
   }
 
+  async handleGroupChatActivated(chatId: number): Promise<void> {
+    if (this.session?.chatId === chatId) {
+      return;
+    }
+
+    let chat: Chat;
+    try {
+      chat = this.requireEligibleGroupChat(chatId);
+    } catch {
+      return;
+    }
+
+    const queryResolution = await this.discoverActiveCall(chat, { bypassCache: true });
+    if (queryResolution.kind === 'winner') {
+      this.writePersistentCallEvidence(chat.id, queryResolution.winner.callId, queryResolution.winner.timestamp, 'group-activated-winner');
+    }
+  }
+
   handleGroupMembersUpdated(event: GroupMembersUpdatedEvent): void {
     const activeSession = this.session;
     const chat = this.database.getChatByGroupId(event.groupId);
@@ -2200,6 +2218,17 @@ export class GroupCallOrchestrator {
       },
     });
     if (!validation.valid) {
+      const chat = this.database.getChatByGroupId(signal.groupId);
+      if (
+        validation.error === 'Group is not eligible for call signaling'
+        && (chat?.group_status === 'invited_pending' || chat?.group_status === 'awaiting_activation')
+      ) {
+        // TEMP_LOG
+        log(
+          `[GROUP-CALL][SIGNAL][SKIP] type=${signal.type} group=${signal.groupId.slice(0, 8)} reason=activating status=${chat.group_status}`,
+        );
+        return false;
+      }
       const errorContext: Pick<GroupCallErrorEvent, 'groupId' | 'peerId' | 'code'> & { callId?: string } = {
         groupId: signal.groupId,
         peerId: remotePeerId,
