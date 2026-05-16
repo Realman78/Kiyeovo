@@ -23,6 +23,7 @@ import type {
   GroupCallState,
   GroupCallStateChangedEvent,
   GroupCallQueryResponseSignal,
+  GroupMembersUpdatedEvent,
 } from '../types.js';
 import { log } from '../../shared/logger.js';
 import type { Chat } from '../db/database.js';
@@ -240,6 +241,78 @@ export class GroupCallOrchestrator {
     this.node.removeEventListener('peer:connect', this.peerConnectHandler);
     this.node.removeEventListener('peer:disconnect', this.peerDisconnectHandler);
     this.clearAllPeerDisconnectTimers();
+  }
+
+  handleGroupMembersUpdated(event: GroupMembersUpdatedEvent): void {
+    const activeSession = this.session;
+    const chat = this.database.getChatByGroupId(event.groupId);
+    const currentMemberPeerIds = new Set(
+      chat ? this.database.getChatParticipants(chat.id).map((participant) => participant.peer_id) : [],
+    );
+    const localStillMember = currentMemberPeerIds.has(this.localPeerId());
+    const affectedPeerStillMember = currentMemberPeerIds.has(event.memberPeerId);
+    const terminalStatus = chat?.group_status === 'removed'
+      || chat?.group_status === 'left'
+      || chat?.group_status === 'disbanded';
+
+    if (!activeSession || activeSession.groupId !== event.groupId) {
+      if (chat && terminalStatus && chat.last_known_active_call_id) {
+        this.clearPersistentCallEvidence(chat.id, 'membership-terminal');
+      }
+      return;
+    }
+
+    if (terminalStatus || !localStillMember || (event.memberPeerId === this.localPeerId() && !affectedPeerStillMember)) {
+      if (chat) {
+        this.clearPersistentCallEvidence(chat.id, 'membership-self-removed');
+      }
+      this.endLocalSession(chat?.group_status === 'disbanded' ? 'group_disbanded' : 'group_membership_removed');
+      return;
+    }
+
+    if (affectedPeerStillMember) {
+      return;
+    }
+
+    const removedPeerWasInCall = activeSession.authoritativeParticipants.some(
+      (participant) => participant.peerId === event.memberPeerId,
+    );
+    if (!removedPeerWasInCall) {
+      return;
+    }
+
+    this.clearPeerDisconnectTimer(event.memberPeerId);
+
+    const nextParticipants = activeSession.authoritativeParticipants
+      .filter((participant) => participant.peerId !== event.memberPeerId);
+
+    if (event.memberPeerId === activeSession.currentWriterPeerId) {
+      if (!chat) {
+        return;
+      }
+      const nextWriterPeerId = this.failoverWriterPeerId(chat, nextParticipants);
+      if (!nextWriterPeerId) {
+        this.endLocalSession('group_membership_removed');
+        return;
+      }
+
+      this.clearPendingRosterBroadcast();
+      this.adoptAuthoritativeState(nextParticipants, activeSession.rosterVersion + 1, nextWriterPeerId);
+      this.emitStateChanged(activeSession.state, { reason: 'membership_removed' });
+      if (nextWriterPeerId === this.localPeerId()) {
+        void this.broadcastRoster(chat);
+      }
+      return;
+    }
+
+    if (activeSession.role !== 'writer' || !chat) {
+      return;
+    }
+
+    // Membership removals are authoritative immediately for the writer, even before the debounced roster fanout.
+    this.adoptAuthoritativeState(nextParticipants, activeSession.rosterVersion + 1, activeSession.currentWriterPeerId);
+    this.scheduleRosterBroadcast(chat);
+    this.emitStateChanged(activeSession.state, { reason: 'membership_removed' });
   }
 
   hasActiveCall(): boolean {

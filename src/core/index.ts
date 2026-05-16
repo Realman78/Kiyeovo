@@ -381,7 +381,10 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     onGroupChatActivated(data);
   };
 
+  let groupCallOrchestrator: GroupCallOrchestrator | null = null;
+
   const sendGroupMembersUpdated = (data: GroupMembersUpdatedEvent) => {
+    groupCallOrchestrator?.handleGroupMembersUpdated(data);
     onGroupMembersUpdated(data);
   };
 
@@ -422,7 +425,7 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
   };
 
   const callActivityRegistry = new CallActivityRegistry();
-  const groupCallOrchestrator = new GroupCallOrchestrator({
+  groupCallOrchestrator = new GroupCallOrchestrator({
     node,
     database,
     userIdentity,

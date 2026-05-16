@@ -2311,6 +2311,11 @@ export class MessageHandler {
     });
 
     await responder.leaveGroup(chat.group_id);
+    this.groupCallOrchestrator?.handleGroupMembersUpdated({
+      chatId,
+      groupId: chat.group_id,
+      memberPeerId: myPeerId,
+    });
     this.groupMessaging.deactivateGroup(chat.group_id);
   }
 
