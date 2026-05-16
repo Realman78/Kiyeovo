@@ -547,6 +547,27 @@ class GroupCallService {
     await this.createOfferForPeer(peerId, undefined, true);
   }
 
+  private async startWriterRecoveryProbe(): Promise<void> {
+    if (!this.session || this.session.role !== 'writer' || this.writerReconnectProbeInProgress || !this.localPeerId) {
+      return;
+    }
+
+    const targets = this.session.participantPeerIds
+      .filter((peerId) => peerId !== this.localPeerId);
+    if (targets.length === 0) {
+      return;
+    }
+
+    this.writerReconnectProbeInProgress = true;
+    targets.forEach((peerId) => {
+      this.offeredPeerIds.delete(peerId);
+    });
+    this.scheduleJoinConnectTimeout(this.session.callId);
+    await Promise.allSettled(targets.map(async (peerId) => {
+      await this.createOfferForPeer(peerId, undefined, true);
+    }));
+  }
+
   private async createOfferForPeer(
     peerId: string,
     admissionToken?: AdmissionToken,
@@ -721,6 +742,9 @@ class GroupCallService {
         this.localPeerId = event.writerPeerId;
       }
       this.queueIceServerRefresh();
+      if (event.reason === 'writer_reconnect_recover' && this.session.role === 'writer') {
+        void this.startWriterRecoveryProbe();
+      }
       this.emitState(true);
       return;
     }
@@ -740,6 +764,9 @@ class GroupCallService {
     }
     if (event.participants) {
       currentSession.participantPeerIds = event.participants.map((participant) => participant.peerId);
+    }
+    if (event.reason === 'writer_reconnect_recover' && currentSession.role === 'writer') {
+      void this.startWriterRecoveryProbe();
     }
     if (event.reason === 'writer_reconnect_probe' && currentSession.role === 'writer' && event.peerId) {
       void this.startWriterReconnectProbe(event.peerId);

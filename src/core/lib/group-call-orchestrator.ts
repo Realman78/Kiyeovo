@@ -350,6 +350,9 @@ export class GroupCallOrchestrator {
       if (queryResolution.kind === 'conflict') {
         return { success: false, error: 'Call state conflict - please try again' };
       }
+      if (queryResolution.winner.writerPeerId === this.localPeerId()) {
+        return this.recoverWriterAfterReconnect(chat, queryResolution.winner);
+      }
 
       this.beginJoiningSession(chat, queryResolution.winner);
       const joinResult = await this.requestJoinWithRetry(chat, queryResolution.winner);
@@ -1162,6 +1165,45 @@ export class GroupCallOrchestrator {
     log(
       `[GROUP-CALL][JOIN][BEGIN] group=${chat.group_id?.slice(0, 8)} call=${winner.callId.slice(0, 8)} writer=${winner.writerPeerId.slice(-8)} local=${this.localPeerId().slice(-8)} selfWriter=${String(winner.writerPeerId === this.localPeerId())} participants=${summarizeParticipants(winner.participants)}`,
     );
+  }
+
+  private recoverWriterAfterReconnect(chat: Chat, winner: QueryWinner): GroupCallActionResult {
+    if (!winner.participants.some((participant) => participant.peerId === this.localPeerId())) {
+      return { success: false, error: 'Call state conflict - please try again' };
+    }
+
+    this.clearPendingJoinResponse();
+    this.clearPendingRosterBroadcast();
+    this.clearAllPeerDisconnectTimers();
+
+    const previousRecentWriters = this.session?.callId === winner.callId
+      ? this.session.recentWriterPeerIds
+      : [];
+
+    this.session = {
+      chatId: chat.id,
+      groupId: chat.group_id!,
+      callId: winner.callId,
+      rosterVersion: winner.rosterVersion,
+      currentWriterPeerId: this.localPeerId(),
+      authoritativeParticipants: sortParticipants(winner.participants),
+      connectionParticipants: [this.localPeerId()],
+      role: 'writer',
+      state: 'waiting',
+      recentWriterPeerIds: [
+        this.localPeerId(),
+        ...previousRecentWriters.filter((peerId) => peerId !== this.localPeerId()),
+      ].slice(0, RECENT_WRITER_SET_MAX_ENTRIES),
+    };
+    this.callActivityRegistry.setGroupCall({ callId: winner.callId, groupId: chat.group_id! });
+    this.writePersistentCallEvidence(chat.id, winner.callId, Date.now(), 'writer-reconnect-recover');
+    // Restore the call as writer and let the renderer rebuild the peer mesh from the known roster.
+    this.emitStateChanged('waiting', { reason: 'writer_reconnect_recover' });
+    // TEMP_LOG
+    log(
+      `[GROUP-CALL][RECOVER][WRITER] group=${chat.group_id?.slice(0, 8)} call=${winner.callId.slice(0, 8)} participants=${summarizeParticipants(winner.participants)}`,
+    );
+    return { success: true, error: null, callId: winner.callId };
   }
 
   private async requestJoinWithRetry(
