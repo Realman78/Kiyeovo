@@ -14,6 +14,7 @@ import { callService } from '../lib/call/callService';
 import { groupCallService } from '../lib/call/groupCallService';
 import { IncomingCallCard } from '../components/call/IncomingCallCard';
 import { CallManagerCard } from '../components/call/CallManagerCard';
+import { GroupCallManagerCard } from '../components/call/GroupCallManagerCard';
 import { ScreenShareSourcePicker } from '../components/call/ScreenShareSourcePicker';
 
 export const Main = () => {
@@ -547,7 +548,7 @@ export const Main = () => {
         toast.error(event.message);
         return;
       }
-      if (event.state === 'active') {
+      if (event.previousState !== 'active' && event.snapshot.state === 'active') {
         toast.success('Group call audio connected');
       }
     });
@@ -746,6 +747,7 @@ export const Main = () => {
       </div>
       <IncomingCallCard />
       <CallManagerCard />
+      <GroupCallManagerCard />
       <ScreenShareSourcePicker />
     </div>
   )

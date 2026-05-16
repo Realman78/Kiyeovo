@@ -1076,6 +1076,8 @@ export interface GroupCallStateChangedEvent {
   callId: string | null;
   state: GroupCallState;
   role: GroupCallRole | null;
+  participants?: GroupCallParticipant[];
+  writerPeerId?: string | null;
   reason?: string;
   timestamp: number;
 }

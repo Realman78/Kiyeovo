@@ -318,11 +318,33 @@ export class GroupCallOrchestrator {
 
   async leaveGroupCall(chatId: number): Promise<GroupCallActionResult> {
     try {
-      this.requireEligibleGroupChat(chatId);
-      if (!this.callActivityRegistry.hasGroupCall()) {
+      const chat = this.requireEligibleGroupChat(chatId);
+      if (!this.session || this.session.chatId !== chatId || !this.callActivityRegistry.hasGroupCall()) {
         return { success: false, error: 'No active group call' };
       }
-      return { success: false, error: 'Group call leave is not implemented yet' };
+
+      const session = this.session;
+      const peers = session.authoritativeParticipants
+        .map((participant) => participant.peerId)
+        .filter((peerId) => peerId !== this.localPeerId());
+
+      if (peers.length === 0) {
+        this.clearPersistentCallEvidence(chat.id, 'left-last');
+      } else {
+        await Promise.allSettled(
+          peers.map(async (peerId) => this.trySendControlSignal({
+            type: 'CALL_GROUP_LEAVE',
+            groupId: session.groupId,
+            callId: session.callId,
+            fromPeerId: this.localPeerId(),
+            toPeerId: peerId,
+            timestamp: Date.now(),
+          })),
+        );
+      }
+
+      this.endLocalSession('left');
+      return { success: true, error: null, callId: session.callId };
     } catch (error: unknown) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to leave group call' };
     }
@@ -622,6 +644,7 @@ export class GroupCallOrchestrator {
 
     this.adoptAuthoritativeState(nextParticipants, nextRosterVersion, this.session.currentWriterPeerId);
     this.scheduleRosterBroadcast(chat);
+    this.emitStateChanged(this.session.state, { reason: 'roster_updated' });
     // TEMP_LOG
     log(
       `[GROUP-CALL][JOIN][ACCEPT] group=${signal.groupId.slice(0, 8)} call=${signal.callId.slice(0, 8)} peer=${signal.fromPeerId.slice(-8)} participants=${nextParticipants.length}`,
@@ -1502,6 +1525,8 @@ export class GroupCallOrchestrator {
       callId: endedSession.callId,
       state: 'ended',
       role: endedSession.role,
+      participants: endedSession.authoritativeParticipants,
+      writerPeerId: endedSession.currentWriterPeerId,
       reason,
       timestamp: Date.now(),
     });
@@ -1538,6 +1563,8 @@ export class GroupCallOrchestrator {
       callId: this.session.callId,
       state,
       role: this.session.role,
+      participants: this.session.authoritativeParticipants,
+      writerPeerId: this.session.currentWriterPeerId,
       timestamp: Date.now(),
     };
     if (options?.reason) {

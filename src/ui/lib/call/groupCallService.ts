@@ -10,20 +10,32 @@ import type {
 import { DEFAULT_WEBRTC_ICE_SERVERS } from '../../../core/network/default-infrastructure';
 import { errStr } from '../../../core/utils/general-error';
 
+export type GroupCallSnapshot = {
+  chatId: number | null;
+  groupId: string;
+  callId: string;
+  role: GroupCallRole | null;
+  coreState: Exclude<GroupCallStateChangedEvent['state'], 'idle' | 'ended'>;
+  state: 'idle' | 'joining' | 'waiting' | 'active' | 'ended';
+  writerPeerId: string | null;
+  localPeerId: string | null;
+  participantPeerIds: string[];
+  connectedPeerIds: string[];
+  localMuted: boolean;
+};
+
 type GroupCallServiceEvent =
   | {
     type: 'state';
-    groupId: string;
-    callId: string;
-    state: 'idle' | 'joining' | 'waiting' | 'active' | 'ended';
-    connectedPeers: number;
+    previousState: GroupCallServiceState;
+    snapshot: GroupCallSnapshot;
   }
   | {
     type: 'error';
     message: string;
   };
 
-type GroupCallServiceState = Extract<GroupCallServiceEvent, { type: 'state' }>['state'];
+type GroupCallServiceState = GroupCallSnapshot['state'];
 
 type GroupCallSession = {
   chatId: number | null;
@@ -31,6 +43,8 @@ type GroupCallSession = {
   callId: string;
   role: GroupCallRole | null;
   coreState: Exclude<GroupCallStateChangedEvent['state'], 'idle' | 'ended'>;
+  writerPeerId: string | null;
+  participantPeerIds: string[];
 };
 
 type PendingJoinAdmission = {
@@ -64,8 +78,10 @@ class GroupCallService {
   private pendingJoinAdmission: PendingJoinAdmission | null = null;
   private joinConnectTimer: ReturnType<typeof setTimeout> | null = null;
   private lastEmittedState: GroupCallServiceState = 'idle';
+  private lastSnapshotSignature = '';
   private iceServers: RTCIceServer[] = DEFAULT_WEBRTC_ICE_SERVERS.map((server) => ({ ...server }));
   private iceServersRefreshPromise: Promise<void> | null = null;
+  private localMuted = false;
 
   subscribe(listener: (event: GroupCallServiceEvent) => void): () => void {
     this.listeners.add(listener);
@@ -81,13 +97,17 @@ class GroupCallService {
   }
 
   private connectedPeerCount(): number {
-    let count = 0;
-    this.peers.forEach((peer) => {
+    return this.connectedPeerIds().length;
+  }
+
+  private connectedPeerIds(): string[] {
+    const connected: string[] = [];
+    this.peers.forEach((peer, peerId) => {
       if (peer.connected) {
-        count += 1;
+        connected.push(peerId);
       }
     });
-    return count;
+    return connected.sort();
   }
 
   private computeState(): GroupCallServiceState {
@@ -103,33 +123,60 @@ class GroupCallService {
     return 'waiting';
   }
 
-  private emitState(force = false): void {
+  private buildSnapshot(): GroupCallSnapshot {
     if (!this.session) {
-      if (force || this.lastEmittedState !== 'idle') {
-        this.lastEmittedState = 'idle';
-        this.emit({
-          type: 'state',
-          groupId: '',
-          callId: '',
-          state: 'idle',
-          connectedPeers: 0,
-        });
-      }
-      return;
+      return {
+        chatId: null,
+        groupId: '',
+        callId: '',
+        role: null,
+        coreState: 'waiting',
+        state: 'idle',
+        writerPeerId: null,
+        localPeerId: this.localPeerId,
+        participantPeerIds: [],
+        connectedPeerIds: [],
+        localMuted: this.localMuted,
+      };
     }
 
-    const state = this.computeState();
-    if (!force && state === this.lastEmittedState) {
-      return;
-    }
-
-    this.lastEmittedState = state;
-    this.emit({
-      type: 'state',
+    return {
+      chatId: this.session.chatId,
       groupId: this.session.groupId,
       callId: this.session.callId,
-      state,
-      connectedPeers: this.connectedPeerCount(),
+      role: this.session.role,
+      coreState: this.session.coreState,
+      state: this.computeState(),
+      writerPeerId: this.session.writerPeerId,
+      localPeerId: this.localPeerId,
+      participantPeerIds: [...this.session.participantPeerIds],
+      connectedPeerIds: this.connectedPeerIds(),
+      localMuted: this.localMuted,
+    };
+  }
+
+  private snapshotSignature(snapshot: GroupCallSnapshot): string {
+    return JSON.stringify(snapshot);
+  }
+
+  getSnapshot(): GroupCallSnapshot {
+    return this.buildSnapshot();
+  }
+
+  private emitState(force = false): void {
+    const previousState = this.lastEmittedState;
+    const snapshot = this.buildSnapshot();
+    const signature = this.snapshotSignature(snapshot);
+    if (!force && signature === this.lastSnapshotSignature) {
+      return;
+    }
+
+    this.lastSnapshotSignature = signature;
+    this.lastEmittedState = snapshot.state;
+    this.emit({
+      type: 'state',
+      previousState,
+      snapshot,
     });
   }
 
@@ -299,6 +346,7 @@ class GroupCallService {
     this.stopLocalAudio();
     this.session = null;
     this.localPeerId = null;
+    this.localMuted = false;
     this.emitState(true);
   }
 
@@ -407,6 +455,7 @@ class GroupCallService {
     if (!audioTrack) {
       throw new Error('Local microphone track is not available');
     }
+    audioTrack.enabled = !this.localMuted;
     const alreadyAdded = peer.pc.getSenders().some((sender) => sender.track?.id === audioTrack.id);
     if (!alreadyAdded) {
       peer.pc.addTrack(audioTrack, stream);
@@ -606,14 +655,24 @@ class GroupCallService {
         && this.session.callId === event.callId
       ) {
         this.resetSession();
-        this.lastEmittedState = 'ended';
         this.emit({
           type: 'state',
-          groupId: event.groupId,
-          callId: event.callId ?? '',
-          state: 'ended',
-          connectedPeers: 0,
+          previousState: this.lastEmittedState,
+          snapshot: {
+            chatId: event.chatId,
+            groupId: event.groupId,
+            callId: event.callId ?? '',
+            role: event.role,
+            coreState: 'waiting',
+            state: 'ended',
+            writerPeerId: event.writerPeerId ?? null,
+            localPeerId: this.localPeerId,
+            participantPeerIds: event.participants?.map((participant) => participant.peerId) ?? [],
+            connectedPeerIds: [],
+            localMuted: false,
+          },
         });
+        this.lastEmittedState = 'ended';
       }
       return;
     }
@@ -627,17 +686,22 @@ class GroupCallService {
       if (!event.callId) {
         return;
       }
-    this.session = {
-      chatId: event.chatId,
-      groupId: event.groupId,
-      callId: event.callId,
-      role: event.role,
-      coreState: event.state,
-    };
-    this.queueIceServerRefresh();
-    this.emitState(true);
-    return;
-  }
+      this.session = {
+        chatId: event.chatId,
+        groupId: event.groupId,
+        callId: event.callId,
+        role: event.role,
+        coreState: event.state,
+        writerPeerId: event.writerPeerId ?? null,
+        participantPeerIds: event.participants?.map((participant) => participant.peerId) ?? [],
+      };
+      if (event.role === 'writer' && event.writerPeerId) {
+        this.localPeerId = event.writerPeerId;
+      }
+      this.queueIceServerRefresh();
+      this.emitState(true);
+      return;
+    }
 
     const currentSession = this.session;
     if (!currentSession) {
@@ -646,6 +710,15 @@ class GroupCallService {
     currentSession.chatId = event.chatId;
     currentSession.role = event.role;
     currentSession.coreState = event.state;
+    if (event.writerPeerId) {
+      currentSession.writerPeerId = event.writerPeerId;
+      if (event.role === 'writer') {
+        this.localPeerId = event.writerPeerId;
+      }
+    }
+    if (event.participants) {
+      currentSession.participantPeerIds = event.participants.map((participant) => participant.peerId);
+    }
     this.maybeStartPendingJoinAdmission();
     this.emitState();
   }
@@ -661,16 +734,59 @@ class GroupCallService {
       this.localPeerId = signal.toPeerId;
     }
 
-    if (signal.type !== 'CALL_GROUP_JOIN_RESPONSE' || !signal.accepted) {
+    if (signal.type === 'CALL_GROUP_JOIN_RESPONSE' && signal.accepted) {
+      this.session.participantPeerIds = signal.participants.map((participant) => participant.peerId);
+      this.session.writerPeerId = signal.writerPeerId;
+      this.pendingJoinAdmission = {
+        groupId: signal.groupId,
+        callId: signal.callId,
+        participants: signal.participants,
+        admissionToken: signal.admissionToken,
+      };
+      this.maybeStartPendingJoinAdmission();
+      this.emitState();
       return;
     }
-    this.pendingJoinAdmission = {
-      groupId: signal.groupId,
-      callId: signal.callId,
-      participants: signal.participants,
-      admissionToken: signal.admissionToken,
-    };
-    this.maybeStartPendingJoinAdmission();
+
+    if (signal.type === 'CALL_GROUP_ROSTER') {
+      this.session.participantPeerIds = signal.participants.map((participant) => participant.peerId);
+      this.session.writerPeerId = signal.writerPeerId;
+      this.emitState();
+      return;
+    }
+
+    if (signal.type === 'CALL_GROUP_LEAVE') {
+      this.closePeer(signal.fromPeerId);
+      this.session.participantPeerIds = this.session.participantPeerIds
+        .filter((peerId) => peerId !== signal.fromPeerId);
+      this.emitState();
+    }
+  }
+
+  async toggleMute(): Promise<{ success: boolean; error: string | null }> {
+    try {
+      const stream = await this.ensureLocalAudioStream();
+      const audioTrack = stream.getAudioTracks()[0];
+      if (!audioTrack) {
+        return { success: false, error: 'Local microphone track is not available' };
+      }
+      this.localMuted = !this.localMuted;
+      audioTrack.enabled = !this.localMuted;
+      this.emitState();
+      return { success: true, error: null };
+    } catch (error: unknown) {
+      return {
+        success: false,
+        error: errStr(error, 'Failed to update group call microphone state'),
+      };
+    }
+  }
+
+  async leave(): Promise<{ success: boolean; error: string | null }> {
+    if (!this.session || this.session.chatId === null) {
+      return { success: false, error: 'No active group call' };
+    }
+    return window.kiyeovoAPI.leaveGroupCall(this.session.chatId);
   }
 
   async handlePairSignal(signal: GroupCallPairSignalForRenderer): Promise<void> {
