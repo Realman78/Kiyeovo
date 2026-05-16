@@ -222,6 +222,7 @@ export class GroupCallOrchestrator {
         return { success: true, error: null, outcome: 'existing', callId: this.session.callId };
       }
 
+      const queryStartedAt = Date.now();
       const queryResolution = await this.discoverActiveCall(chat);
       if (queryResolution.kind === 'winner') {
         this.writePersistentCallEvidence(chat.id, queryResolution.winner.callId, queryResolution.winner.timestamp, 'start-discovered-existing');
@@ -234,6 +235,24 @@ export class GroupCallOrchestrator {
       }
       if (queryResolution.kind === 'conflict') {
         return { success: false, error: 'Call state conflict - please try again' };
+      }
+
+      const refreshedChat = this.database.getChats([chat.id])[0];
+      if (
+        refreshedChat?.last_known_active_call_id
+        && refreshedChat.last_known_active_call_seen_at
+        && refreshedChat.last_known_active_call_seen_at >= queryStartedAt
+      ) {
+        // TEMP_LOG
+        log(
+          `[GROUP-CALL][START][EVIDENCE_WIN] chat=${chat.id} call=${refreshedChat.last_known_active_call_id.slice(0, 8)} seenAt=${refreshedChat.last_known_active_call_seen_at}`,
+        );
+        return {
+          success: true,
+          error: null,
+          outcome: 'existing',
+          callId: refreshedChat.last_known_active_call_id,
+        };
       }
 
       const callId = randomUUID();
@@ -262,7 +281,10 @@ export class GroupCallOrchestrator {
     }
   }
 
-  async joinGroupCall(chatId: number): Promise<GroupCallActionResult> {
+  async joinGroupCall(
+    chatId: number,
+    options?: { keepEvidenceOnZero?: boolean },
+  ): Promise<GroupCallActionResult> {
     try {
       const chat = this.requireEligibleGroupChat(chatId);
       const gate = this.callActivityRegistry.canUseGroupCall({ groupId: chat.group_id! });
@@ -280,7 +302,9 @@ export class GroupCallOrchestrator {
 
       const queryResolution = await this.discoverActiveCall(chat, { bypassCache: true });
       if (queryResolution.kind === 'zero') {
-        this.clearPersistentCallEvidence(chat.id, 'join-query-zero');
+        if (!options?.keepEvidenceOnZero) {
+          this.clearPersistentCallEvidence(chat.id, 'join-query-zero');
+        }
         return { success: false, error: 'This call may have ended' };
       }
       if (queryResolution.kind === 'conflict') {
@@ -496,13 +520,25 @@ export class GroupCallOrchestrator {
       return;
     }
 
+    let autoJoinWinningCall = false;
+    let supersededCallId: string | null = null;
     if (this.session?.groupId === signal.groupId && this.session.callId !== signal.callId) {
       if (compareStrings(signal.callId, this.session.callId) < 0) {
+        autoJoinWinningCall = this.isAutoSupersessionCandidate(this.session);
+        supersededCallId = this.session.callId;
         // TEMP_LOG
         log(
           `[GROUP-CALL][DISCOVERY] Superseded local call group=${signal.groupId.slice(0, 8)} old=${this.session.callId.slice(0, 8)} new=${signal.callId.slice(0, 8)}`,
         );
         this.endLocalSession('superseded');
+        if (!autoJoinWinningCall) {
+          this.emitError('Another group call took precedence. Click Join to switch.', {
+            chatId: chat.id,
+            groupId: signal.groupId,
+            callId: signal.callId,
+            code: 'GROUP_CALL_SUPERSEDED_MANUAL_RECOVERY',
+          });
+        }
       } else {
         return;
       }
@@ -516,7 +552,10 @@ export class GroupCallOrchestrator {
       return;
     }
 
-    this.writePersistentCallEvidence(chat.id, signal.callId, signal.timestamp, 'started-signal');
+    this.writePersistentCallEvidence(chat.id, signal.callId, Date.now(), 'started-signal');
+    if (autoJoinWinningCall && supersededCallId) {
+      void this.autoJoinWinningCallAfterSuperseded(chat.id, supersededCallId, signal.callId);
+    }
   }
 
   private async respondToQuery(signal: GroupCallControlSignalMessage & { type: 'GROUP_CALL_QUERY' }): Promise<void> {
@@ -1341,6 +1380,36 @@ export class GroupCallOrchestrator {
     this.session.currentWriterPeerId = currentWriterPeerId;
     this.session.role = currentWriterPeerId === this.localPeerId() ? 'writer' : 'participant';
     this.recordRecentWriter(currentWriterPeerId);
+  }
+
+  private isAutoSupersessionCandidate(session: GroupCallSession): boolean {
+    return session.role === 'writer'
+      && session.state === 'waiting'
+      && session.authoritativeParticipants.length === 1
+      && session.authoritativeParticipants[0]?.peerId === this.localPeerId();
+  }
+
+  private async autoJoinWinningCallAfterSuperseded(
+    chatId: number,
+    previousCallId: string,
+    winningCallId: string,
+  ): Promise<void> {
+    // TEMP_LOG
+    log(
+      `[GROUP-CALL][DISCOVERY][AUTO_JOIN] chat=${chatId} old=${previousCallId.slice(0, 8)} new=${winningCallId.slice(0, 8)}`,
+    );
+    const result = await this.joinGroupCall(chatId, { keepEvidenceOnZero: true });
+    if (result.success) {
+      return;
+    }
+
+    const chat = this.database.getChats([chatId])[0];
+    this.emitError(result.error || 'Failed to join the winning group call', {
+      chatId,
+      callId: winningCallId,
+      ...(chat?.group_id ? { groupId: chat.group_id } : {}),
+      code: 'GROUP_CALL_SUPERSEDED_AUTO_JOIN_FAILED',
+    });
   }
 
   private getRosterAcceptanceCase(

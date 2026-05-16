@@ -478,8 +478,22 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
       }
 
       if (result.outcome === 'existing') {
-        groupCallService.releasePreparedLocalAudio();
-        toast.info('A group call is already active in this chat.');
+        const snapshot = groupCallService.getSnapshot();
+        if (
+          result.callId
+          && snapshot.groupId === activeChat?.groupId
+          && snapshot.callId === result.callId
+          && snapshot.state !== 'idle'
+          && snapshot.state !== 'ended'
+        ) {
+          toast.info('You are already in this group call.');
+          return;
+        }
+
+        const joinOutcome = await handleJoinGroupCall({ suppressStaleClearedToast: true });
+        if (joinOutcome === 'stale_cleared') {
+          toast.info('This call may have ended. Try starting again.');
+        }
         return;
       }
 
