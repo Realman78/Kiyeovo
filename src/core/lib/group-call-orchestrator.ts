@@ -258,6 +258,10 @@ export class GroupCallOrchestrator {
     const queryResolution = await this.discoverActiveCall(chat, { bypassCache: true });
     if (queryResolution.kind === 'winner') {
       this.writePersistentCallEvidence(chat.id, queryResolution.winner.callId, queryResolution.winner.timestamp, 'group-activated-winner');
+      return;
+    }
+    if (queryResolution.kind === 'zero' && chat.last_known_active_call_id) {
+      this.clearPersistentCallEvidence(chat.id, 'group-activated-zero');
     }
   }
 
