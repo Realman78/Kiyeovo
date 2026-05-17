@@ -7,6 +7,7 @@ import {
   GROUP_GOSSIPSUB_HEARTBEAT_INTERVAL,
   GROUP_MESSAGE_MAX_AGE_MS,
   GROUP_MESSAGE_MAX_FUTURE_SKEW_MS,
+  GROUP_OFFLINE_MESSAGE_TTL_MS,
   GROUP_OLD_TOPIC_SUBSCRIPTION_GRACE_MS,
   GROUP_PUBLISH_RETRYABLE_ERROR,
   GROUP_PUBLISH_RETRY_DELAY_MS,
@@ -21,6 +22,8 @@ import {
   type GroupContentMessage,
   type GroupHeartbeatMessage,
 } from '../types.js';
+import { isGroupCallHintSystemPayload } from '../../lib/group-call-signaling.js';
+import { toBase64Url } from '../../utils/miscellaneous.js';
 import { errStr, generalErrorHandler } from '../../utils/general-error.js';
 import { GroupOfflineManager } from './group-offline-manager.js';
 import { log } from '../../../shared/logger.js';
@@ -387,6 +390,21 @@ export class GroupMessaging {
     log(
       `[GROUP-MSG][SYSTEM][OFFLINE_ONLY] group=${groupId.slice(0, 8)} msgId=${signedMessage.messageId} seq=${seq}`,
     );
+  }
+
+  async storeGroupCallHintMessage(groupId: string): Promise<void> {
+    const ctx = this.resolveActiveGroupContext(groupId);
+    if (this.hasLiveGroupCallHintInLocalMirror(ctx)) {
+      log(
+        `[GROUP-CALL][HINT][STORE_SKIP] group=${groupId.slice(0, 8)} epoch=${ctx.keyVersion}`,
+      );
+      return;
+    }
+
+    await this.storeHiddenSystemMessage(groupId, JSON.stringify({
+      type: 'GROUP_CALL_HINT',
+      groupId,
+    }));
   }
 
   async retryOfflineBackup(chatId: number, messageId: string): Promise<void> {
@@ -810,6 +828,32 @@ export class GroupMessaging {
     const cipher = xchacha20poly1305(key, nonce);
     const decrypted = cipher.decrypt(encryptedBytes);
     return new TextDecoder().decode(decrypted);
+  }
+
+  private hasLiveGroupCallHintInLocalMirror(ctx: GroupContext): boolean {
+    const ownPubKeyBase64url = toBase64Url(this.deps.userIdentity.signingPublicKey);
+    const bucketKey = `${getNetworkModeRuntime(this.deps.database.getSessionNetworkMode()).config.dhtNamespaces.groupOffline}/${ctx.groupId}/${ctx.keyVersion}/${ownPubKeyBase64url}`;
+    const local = this.deps.database.getGroupOfflineSentMessages(bucketKey);
+    const cutoff = Date.now() - GROUP_OFFLINE_MESSAGE_TTL_MS;
+    const maxAllowedTimestamp = Date.now() + GROUP_MESSAGE_MAX_FUTURE_SKEW_MS;
+
+    return local.messages.some((message) => {
+      if (
+        message.messageType !== 'system'
+        || message.timestamp < cutoff
+        || message.timestamp > maxAllowedTimestamp
+      ) {
+        return false;
+      }
+
+      try {
+        const content = this.decryptContent(message.encryptedContent, ctx.groupKey, message.nonce);
+        const parsed = JSON.parse(content);
+        return isGroupCallHintSystemPayload(parsed) && parsed.groupId === ctx.groupId;
+      } catch {
+        return false;
+      }
+    });
   }
 
   private async handleIncomingPubsubEvent(detail: unknown): Promise<void> {

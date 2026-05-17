@@ -345,10 +345,7 @@ export class MessageHandler {
   }
 
   async storeGroupCallHint(groupId: string): Promise<void> {
-    await this.groupMessaging.storeHiddenSystemMessage(groupId, JSON.stringify({
-      type: 'GROUP_CALL_HINT',
-      groupId,
-    }));
+    await this.groupMessaging.storeGroupCallHintMessage(groupId);
   }
 
   private sendBucketNudge(
