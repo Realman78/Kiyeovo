@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useSelector, useDispatch } from "react-redux";
 import type { RootState } from "../../../state/store";
-import { Shield, UserPlus, AlertCircle, Users, Clock, Phone } from "lucide-react";
+import { Shield, UserPlus, AlertCircle, Users, Clock, Phone, PhoneOff, Loader2 } from "lucide-react";
 import { updateChat, clearMessages, removeChat, setOfflineFetchStatus, markOfflineFetched, markOfflineFetchFailed } from "../../../state/slices/chatSlice";
 import { AboutUserModal } from "./AboutUserModal";
 import { useToast } from "../../ui/use-toast";
@@ -62,6 +62,8 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
   const [editUsernameModalOpen, setEditUsernameModalOpen] = useState(false);
   const [isStartingGroupCall, setIsStartingGroupCall] = useState(false);
   const [isJoiningGroupCall, setIsJoiningGroupCall] = useState(false);
+  const [isLeavingGroupCall, setIsLeavingGroupCall] = useState(false);
+  const [groupCallSnapshot, setGroupCallSnapshot] = useState(() => groupCallService.getSnapshot());
   const [newUsername, setNewUsername] = useState('');
   const [networkMode, setNetworkMode] = useState<NetworkMode | null>(null);
   const [validationError, setValidationError] = useState("");
@@ -102,6 +104,32 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    return groupCallService.subscribe((event) => {
+      if (event.type === 'state') {
+        setGroupCallSnapshot(event.snapshot);
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!isLeavingGroupCall) {
+      return;
+    }
+    if (
+      !activeChat?.groupId
+      || groupCallSnapshot.groupId !== activeChat.groupId
+      || groupCallSnapshot.state === 'idle'
+      || groupCallSnapshot.state === 'ended'
+    ) {
+      console.info(
+        `[GROUP-CALL][UI][HEADER_BUTTON][LEAVE_CLEAR] chat=${chatId ?? 'none'} activeGroup=${activeChat?.groupId ?? 'none'} ` +
+        `snapshotGroup=${groupCallSnapshot.groupId || 'none'} snapshotState=${groupCallSnapshot.state}`,
+      );
+      setIsLeavingGroupCall(false);
+    }
+  }, [activeChat?.groupId, chatId, groupCallSnapshot.groupId, groupCallSnapshot.state, isLeavingGroupCall]);
 
   useEffect(() => {
     setNewUsername('');
@@ -464,10 +492,6 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
         toast.error(audioReady.error || 'Microphone access is required for group calls');
         return;
       }
-      // TEMP_LOG
-      console.info(
-        `[GROUP-CALL][ACTION] action=start chat=${chatId} lastKnownCall=${activeChat?.lastKnownActiveCallId ?? 'none'} groupId=${activeChat?.groupId ?? 'none'}`,
-      );
       const result = await window.kiyeovoAPI.startGroupCall(chatId);
       await syncGroupCallEvidence(chatId);
 
@@ -519,10 +543,6 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
         toast.error(audioReady.error || 'Microphone access is required for group calls');
         return 'failed';
       }
-      // TEMP_LOG
-      console.info(
-        `[GROUP-CALL][ACTION] action=join chat=${chatId} lastKnownCall=${activeChat?.lastKnownActiveCallId ?? 'none'} groupId=${activeChat?.groupId ?? 'none'}`,
-      );
       const result = await window.kiyeovoAPI.joinGroupCall(chatId);
       const refreshedChat = await syncGroupCallEvidence(chatId);
 
@@ -561,12 +581,28 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
   const handleGroupCallButtonClick = async () => {
     if (!chatId) return;
 
+    if (
+      groupCallSnapshot.groupId
+      && groupCallSnapshot.groupId === activeChat?.groupId
+      && groupCallSnapshot.state !== 'idle'
+      && groupCallSnapshot.state !== 'ended'
+    ) {
+      setIsLeavingGroupCall(true);
+      try {
+        const result = await groupCallService.leave();
+        if (!result.success) {
+          setIsLeavingGroupCall(false);
+          toast.error(result.error || 'Failed to leave group call');
+        }
+      } catch (error) {
+        setIsLeavingGroupCall(false);
+        toast.error(errStr(error, 'Failed to leave group call'));
+      }
+      return;
+    }
+
     const freshChat = await syncGroupCallEvidence(chatId);
     const latestKnownCallId = freshChat?.last_known_active_call_id ?? null;
-    // TEMP_LOG
-    console.info(
-      `[GROUP-CALL][ACTION][DECIDE] chat=${chatId} reduxCall=${activeChat?.lastKnownActiveCallId ?? 'none'} freshCall=${latestKnownCallId ?? 'none'} groupId=${freshChat?.group_id ?? activeChat?.groupId ?? 'none'}`,
-    );
 
     if (latestKnownCallId) {
       const joinOutcome = await handleJoinGroupCall({ suppressStaleClearedToast: true });
@@ -844,24 +880,85 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
     || activeChat?.offlineFetchNeedsSync === true
   );
   const hasKnownGroupCall = Boolean(activeChat?.lastKnownActiveCallId);
+  const isInThisGroupCall = Boolean(
+    activeChat?.groupId
+    && groupCallSnapshot.groupId === activeChat.groupId
+    && groupCallSnapshot.state !== 'idle'
+    && groupCallSnapshot.state !== 'ended',
+  );
   const hasAnotherPeerActiveCall = Boolean(activeCall) && !hasActiveCallWithThisPeer;
   const startCallDisabled = !canStartDirectCall || hasAnotherPeerActiveCall;
-  const groupCallActionDisabled = !canStartGroupCall || isGroupCallSyncBlocked || isStartingGroupCall || isJoiningGroupCall;
+  const groupCallActionDisabled = isInThisGroupCall
+    ? isLeavingGroupCall
+    : !canStartGroupCall || isGroupCallSyncBlocked || isStartingGroupCall || isJoiningGroupCall;
   const audioCallButtonTitle = startCallDisabled
     ? 'User is offline or another call is active'
     : 'Start audio call';
   const videoCallButtonTitle = startCallDisabled
     ? 'User is offline or another call is active'
     : 'Start video call';
+
   const groupCallButtonTitle = groupCallActionDisabled
-    ? isGroupCallSyncBlocked
-      ? activeChat?.offlineFetchNeedsSync
-        ? 'Sync group updates before using group calls'
-        : 'Wait for group updates to finish syncing before using group calls'
-      : 'Group call is unavailable right now'
-    : hasKnownGroupCall
-      ? 'Join group call'
-      : 'Start group call';
+    ? isLeavingGroupCall
+      ? 'Leaving group call'
+      : isStartingGroupCall
+      ? 'Starting group call'
+      : isJoiningGroupCall
+        ? 'Joining group call'
+        : isGroupCallSyncBlocked
+          ? activeChat?.offlineFetchNeedsSync
+            ? 'Sync group updates before using group calls'
+            : 'Wait for group updates to finish syncing before using group calls'
+          : 'Group call is unavailable right now'
+    : isInThisGroupCall
+      ? 'Leave group call'
+      : hasKnownGroupCall
+        ? 'Join group call'
+        : 'Start group call';
+  // const groupCallButtonLabel = isStartingGroupCall
+  //   ? 'Starting...'
+  //   : isJoiningGroupCall
+  //     ? 'Joining...'
+  //     : isInThisGroupCall
+  //       ? 'In Call'
+  //       : hasKnownGroupCall
+  //         ? 'Join Call'
+  //         : 'Start Call';
+  const groupCallStatusTone = isStartingGroupCall || isJoiningGroupCall || isLeavingGroupCall
+    ? 'text-primary'
+    : isGroupCallSyncBlocked
+      ? 'text-warning'
+      : isInThisGroupCall || hasKnownGroupCall
+        ? 'text-emerald-600'
+        : 'text-muted-foreground';
+
+  const groupCallStatusMessage = isLeavingGroupCall
+    ? 'Leaving group call...'
+    : isStartingGroupCall
+    ? 'Starting group call... wait up to 10 seconds'
+    : isJoiningGroupCall
+      ? 'Joining group call... wait up to 10 seconds'
+      : isInThisGroupCall
+        ? null
+        : isGroupCallSyncBlocked
+        ? activeChat?.offlineFetchNeedsSync
+          ? 'Sync group updates before starting or joining a call'
+          : 'Waiting for group updates to finish syncing'
+        : hasKnownGroupCall
+          ? 'A group call may already be active in this chat.'
+          : null;
+  const showGroupCallStatusMessage = isGroup && Boolean(groupCallStatusMessage);
+  const groupCallButtonVisualState = isLeavingGroupCall
+    ? 'leaving'
+    : isStartingGroupCall
+      ? 'starting'
+      : isJoiningGroupCall
+        ? 'joining'
+        : isInThisGroupCall
+          ? 'hangup'
+          : hasKnownGroupCall
+            ? 'join'
+            : 'start';
   const groupCreatorLinkState = activeChat
     ? getGroupCreatorLinkState(activeChat, chats, myPeerId)
     : { broken: false };
@@ -871,6 +968,33 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
   const showDirectInactivityWarning = !isGroup
     && typeof activeChat?.lastInboundActivityTimestamp === 'number'
     && (Date.now() - activeChat.lastInboundActivityTimestamp) >= INBOUND_INACTIVITY_WARNING_MS;
+
+  useEffect(() => {
+    if (!isGroup) {
+      return;
+    }
+    console.info(
+      `[GROUP-CALL][UI][HEADER_BUTTON] chat=${chatId ?? 'none'} activeGroup=${activeChat?.groupId ?? 'none'} ` +
+      `snapshotGroup=${groupCallSnapshot.groupId || 'none'} snapshotState=${groupCallSnapshot.state} ` +
+      `inThis=${String(isInThisGroupCall)} starting=${String(isStartingGroupCall)} ` +
+      `joining=${String(isJoiningGroupCall)} leaving=${String(isLeavingGroupCall)} ` +
+      `syncBlocked=${String(isGroupCallSyncBlocked)} disabled=${String(groupCallActionDisabled)} ` +
+      `visual=${groupCallButtonVisualState}`,
+    );
+  }, [
+    activeChat?.groupId,
+    chatId,
+    groupCallActionDisabled,
+    groupCallButtonVisualState,
+    groupCallSnapshot.groupId,
+    groupCallSnapshot.state,
+    isGroup,
+    isGroupCallSyncBlocked,
+    isInThisGroupCall,
+    isJoiningGroupCall,
+    isLeavingGroupCall,
+    isStartingGroupCall,
+  ]);
 
   const memberSummary = groupMembers.length > 0
     ? groupMembers.map(m => m.status === 'pending' ? `${m.username} (invited)` : m.username).sort().join(', ')
@@ -985,18 +1109,35 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
         onAudioCallClick={handleAudioCallClick}
         onVideoCallClick={handleVideoCallClick}
       />
-      {canShowGroupCallButton && (
+      {canShowGroupCallButton && <>
+        {showGroupCallStatusMessage && (
+          <div className={`flex items-center gap-1.5 text-xs mr-2 ${groupCallStatusTone}`}>
+            {(isStartingGroupCall || isJoiningGroupCall || isLeavingGroupCall) ? (
+              <Loader2 className="w-3 h-3 animate-spin" />
+            ) : (
+              <Phone className="w-3 h-3" />
+            )}
+            <span>{groupCallStatusMessage}</span>
+          </div>
+        )}
         <Button
-          variant="ghost"
+          variant={isInThisGroupCall ? "destructive" : hasKnownGroupCall ? "outline" : "ghost"}
           size="icon"
-          className="text-muted-foreground hover:text-foreground"
+          className={isInThisGroupCall ? '' : 'text-muted-foreground hover:text-foreground'}
           onClick={() => { void handleGroupCallButtonClick(); }}
           title={groupCallButtonTitle}
           disabled={groupCallActionDisabled}
         >
-          <Phone className="w-4 h-4" />
+          {(isStartingGroupCall || isJoiningGroupCall || isLeavingGroupCall) ? (
+            <Loader2 className="w-4 h-4 animate-spin" />
+          ) : isInThisGroupCall ? (
+            <PhoneOff className="w-4 h-4" />
+          ) : (
+            <Phone className="w-4 h-4" />
+          )}
         </Button>
-      )}
+      </>
+      }
       <ChatHeaderMenu
         open={dropdownOpen}
         onOpenChange={setDropdownOpen}

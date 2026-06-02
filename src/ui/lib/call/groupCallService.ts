@@ -19,6 +19,7 @@ export type GroupCallSnapshot = {
   state: 'idle' | 'joining' | 'waiting' | 'active' | 'ended';
   writerPeerId: string | null;
   localPeerId: string | null;
+  participants: GroupCallParticipant[];
   participantPeerIds: string[];
   connectedPeerIds: string[];
   pendingDisconnects: { peerId: string; expiresAt: number }[];
@@ -47,6 +48,7 @@ type GroupCallSession = {
   role: GroupCallRole | null;
   coreState: Exclude<GroupCallStateChangedEvent['state'], 'idle' | 'ended'>;
   writerPeerId: string | null;
+  participants: GroupCallParticipant[];
   participantPeerIds: string[];
   pendingDisconnects: { peerId: string; expiresAt: number }[];
 };
@@ -140,6 +142,7 @@ class GroupCallService {
         state: 'idle',
         writerPeerId: null,
         localPeerId: this.localPeerId,
+        participants: [],
         participantPeerIds: [],
         connectedPeerIds: [],
         pendingDisconnects: [],
@@ -156,6 +159,7 @@ class GroupCallService {
       state: this.computeState(),
       writerPeerId: this.session.writerPeerId,
       localPeerId: this.localPeerId,
+      participants: [...this.session.participants],
       participantPeerIds: [...this.session.participantPeerIds],
       connectedPeerIds: this.connectedPeerIds(),
       pendingDisconnects: [...this.session.pendingDisconnects],
@@ -744,6 +748,7 @@ class GroupCallService {
             state: 'ended',
             writerPeerId: event.writerPeerId ?? null,
             localPeerId: this.localPeerId,
+            participants: event.participants ?? [],
             participantPeerIds: event.participants?.map((participant) => participant.peerId) ?? [],
             connectedPeerIds: [],
             pendingDisconnects: [],
@@ -771,6 +776,7 @@ class GroupCallService {
         role: event.role,
         coreState: event.state,
         writerPeerId: event.writerPeerId ?? null,
+        participants: event.participants ?? [],
         participantPeerIds: event.participants?.map((participant) => participant.peerId) ?? [],
         pendingDisconnects: event.pendingDisconnects ?? [],
       };
@@ -799,6 +805,7 @@ class GroupCallService {
       }
     }
     if (event.participants) {
+      currentSession.participants = event.participants;
       const nextParticipantPeerIds = event.participants.map((participant) => participant.peerId);
       this.reconcilePeersWithAuthoritativeRoster(nextParticipantPeerIds);
       currentSession.participantPeerIds = nextParticipantPeerIds;

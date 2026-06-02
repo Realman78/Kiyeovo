@@ -363,6 +363,19 @@
     animation: pulse-glow 2s ease-in-out infinite;
   }
 
+  @keyframes pulse-opacity-soft {
+    0%, 100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.35;
+    }
+  }
+
+  .pulse-opacity-soft {
+    animation: pulse-opacity-soft 1.8s ease-in-out infinite;
+  }
+
   /* Typing cursor animation */
   @keyframes blink {
     0%, 50% { opacity: 1; }

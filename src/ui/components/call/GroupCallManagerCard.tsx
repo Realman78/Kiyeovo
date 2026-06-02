@@ -1,22 +1,13 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Loader2, Mic, MicOff, PhoneOff, Users } from 'lucide-react';
+import { useEffect, useMemo, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import { GripVertical, Loader2, Mic, MicOff, PhoneOff, Users } from 'lucide-react';
 import { Button } from '../ui/Button';
 import { useToast } from '../ui/use-toast';
 import { useAppSelector } from '../../state/hooks';
 import { groupCallService, type GroupCallSnapshot } from '../../lib/call/groupCallService';
+import { GroupCallParticipantModal } from './GroupCallParticipantModal';
+import { useCallCardAnchor } from './useCallCardAnchor';
 
-function groupCallStateLabel(snapshot: GroupCallSnapshot): string {
-  switch (snapshot.state) {
-    case 'joining':
-      return 'Joining...';
-    case 'active':
-      return 'Audio connected';
-    case 'waiting':
-      return snapshot.role === 'writer' ? 'Waiting for participants' : 'Waiting for audio';
-    default:
-      return snapshot.state;
-  }
-}
+const MAX_DISCONNECT_COUNTDOWN_SECONDS = 30;
 
 export const GroupCallManagerCard = () => {
   const { toast } = useToast();
@@ -25,6 +16,9 @@ export const GroupCallManagerCard = () => {
   const [snapshot, setSnapshot] = useState<GroupCallSnapshot>(() => groupCallService.getSnapshot());
   const [actionPending, setActionPending] = useState<'mute' | 'leave' | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  const [isDraggingAnchor, setIsDraggingAnchor] = useState(false);
+  const [selectedPeerId, setSelectedPeerId] = useState<string | null>(null);
+  const { positionClassName, snapToClosestCorner } = useCallCardAnchor();
 
   useEffect(() => {
     return groupCallService.subscribe((event) => {
@@ -69,6 +63,21 @@ export const GroupCallManagerCard = () => {
       ?? `user_${peerId.slice(-8)}`;
   };
 
+  const disconnectSecondsRemaining = (peerId: string): number | null => {
+    const expiresAt = pendingDisconnects.get(peerId);
+    if (typeof expiresAt !== 'number' || !Number.isFinite(expiresAt)) {
+      return null;
+    }
+    const remainingSeconds = Math.ceil((expiresAt - now) / 1000);
+    return Math.min(
+      MAX_DISCONNECT_COUNTDOWN_SECONDS,
+      Math.max(0, remainingSeconds),
+    );
+  };
+  const selectedParticipant = selectedPeerId
+    ? snapshot.participants.find((participant) => participant.peerId === selectedPeerId) ?? null
+    : null;
+
   const handleToggleMute = async () => {
     setActionPending('mute');
     const result = await groupCallService.toggleMute();
@@ -91,30 +100,67 @@ export const GroupCallManagerCard = () => {
     return null;
   }
 
+  const handleAnchorPointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const handle = event.currentTarget;
+    const pointerId = event.pointerId;
+    setIsDraggingAnchor(true);
+
+    try {
+      handle.setPointerCapture(pointerId);
+    } catch {
+      // no-op
+    }
+
+    const cleanup = () => {
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerCancel);
+      try {
+        handle.releasePointerCapture(pointerId);
+      } catch {
+        // no-op
+      }
+      setIsDraggingAnchor(false);
+    };
+
+    const onPointerUp = (upEvent: PointerEvent) => {
+      cleanup();
+      snapToClosestCorner(upEvent.clientX, upEvent.clientY);
+    };
+
+    const onPointerCancel = () => {
+      cleanup();
+    };
+
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerCancel);
+  };
+
   return (
-    <div className="fixed bottom-4 right-4 z-40 w-80 rounded-xl border border-primary/30 bg-background/95 p-4 shadow-2xl backdrop-blur">
+    <div className={`fixed ${positionClassName} z-100 w-80 rounded-xl border border-primary/30 bg-background/95 p-4 shadow-2xl backdrop-blur`}>
+      <button
+        type="button"
+        className={`absolute top-1 left-1 z-10 h-5 w-5 cursor-move rounded text-muted-foreground transition hover:bg-accent/70 hover:text-foreground ${isDraggingAnchor ? 'bg-accent/80 text-foreground' : ''}`}
+        title="Drag to snap card position"
+        aria-label="Drag to snap card position"
+        onPointerDown={handleAnchorPointerDown}
+      >
+        <GripVertical className="mx-auto h-3.5 w-3.5" />
+      </button>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="flex items-center gap-2 text-sm font-medium uppercase tracking-wide text-primary">
+          <div className="flex ml-1 items-center gap-2 text-sm font-medium tracking-wide text-primary">
             <Users className="h-4 w-4" />
-            Group Call
-          </div>
-          <div className="mt-1 truncate font-mono text-sm text-foreground">
             {groupChat?.name || 'Group chat'}
-          </div>
-          <div className="mt-1 text-xs text-muted-foreground">
-            {groupCallStateLabel(snapshot)}
           </div>
         </div>
         <div className="rounded-md border border-border px-2 py-1 text-xs font-mono text-muted-foreground">
-          {snapshot.connectedPeerIds.length} connected
+          {snapshot.connectedPeerIds.length + 1} members
         </div>
       </div>
 
       <div className="mt-4 rounded-lg border border-border/70 bg-secondary/20 p-3">
-        <div className="mb-2 text-xs font-mono uppercase tracking-wide text-muted-foreground">
-          Participants
-        </div>
         <div className="space-y-2">
           {participantPeerIds.map((peerId) => {
             const isWriter = peerId === snapshot.writerPeerId;
@@ -122,21 +168,22 @@ export const GroupCallManagerCard = () => {
             return (
               <div key={peerId} className="flex items-center justify-between gap-3 text-sm">
                 <div className="min-w-0">
-                  <div className="truncate font-mono text-foreground">
+                  <button
+                    type="button"
+                    className={`truncate font-mono text-foreground transition hover:text-primary ${peerId === userPeerId ? "" : "hover:cursor-pointer"}`}
+                    onClick={() => peerId === userPeerId ? null : setSelectedPeerId(peerId)}
+                    title={peerId === userPeerId ? 'Cannot see your own info' : `Show info for ${resolvePeerName(peerId)}`}
+                  >
                     {resolvePeerName(peerId)}
-                  </div>
-                  <div className="truncate text-[11px] text-muted-foreground">
-                    {peerId}
-                  </div>
+                  </button>
                 </div>
                 <div className="shrink-0 text-right text-[11px] uppercase tracking-wide text-muted-foreground">
-                  <div>{isWriter ? 'Writer' : 'Member'}</div>
                   <div>
                     {pendingDisconnects.has(peerId)
-                      ? `Disconnect ${Math.max(0, Math.ceil(((pendingDisconnects.get(peerId) ?? now) - now) / 1000))}s`
+                      ? `Disconnect ${disconnectSecondsRemaining(peerId) ?? MAX_DISCONNECT_COUNTDOWN_SECONDS}s`
                       : isConnected
-                        ? 'Connected'
-                        : 'Pending'}
+                        ? <><span className='text-sm'>{isWriter ? '🎮 ' : ''}</span><span className='text-emerald-600 font-extrabold text-xl'>•</span></>
+                        : <span className='text-warning font-extrabold text-xl pulse-opacity-soft'>•</span>}
                   </div>
                 </div>
               </div>
@@ -151,29 +198,49 @@ export const GroupCallManagerCard = () => {
       <div className="mt-4 flex gap-2">
         <Button
           variant="secondary"
+          size="icon"
           className="flex-1"
           onClick={() => void handleToggleMute()}
           disabled={actionPending !== null}
+          title={snapshot.localMuted ? 'Unmute' : 'Mute'}
+          aria-label={snapshot.localMuted ? 'Unmute' : 'Mute'}
         >
           {actionPending === 'mute'
             ? <Loader2 className="h-4 w-4 animate-spin" />
             : snapshot.localMuted
               ? <MicOff className="h-4 w-4" />
               : <Mic className="h-4 w-4" />}
-          {snapshot.localMuted ? 'Unmute' : 'Mute'}
         </Button>
         <Button
           variant="destructive"
+          size="icon"
           className="flex-1"
           onClick={() => void handleLeave()}
           disabled={actionPending !== null}
+          title="Leave"
+          aria-label="Leave"
         >
           {actionPending === 'leave'
             ? <Loader2 className="h-4 w-4 animate-spin" />
             : <PhoneOff className="h-4 w-4" />}
-          Leave
         </Button>
       </div>
+      <GroupCallParticipantModal
+        chatId={snapshot.chatId}
+        connected={selectedPeerId ? (selectedPeerId === snapshot.localPeerId || connectedPeerIds.has(selectedPeerId)) : false}
+        disconnectSecondsRemaining={selectedPeerId ? disconnectSecondsRemaining(selectedPeerId) : null}
+        displayName={selectedPeerId ? resolvePeerName(selectedPeerId) : ''}
+        groupName={groupChat?.name || 'Group chat'}
+        localPeerId={snapshot.localPeerId}
+        open={selectedPeerId !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setSelectedPeerId(null);
+          }
+        }}
+        participant={selectedParticipant}
+        writerPeerId={snapshot.writerPeerId}
+      />
     </div>
   );
 };
