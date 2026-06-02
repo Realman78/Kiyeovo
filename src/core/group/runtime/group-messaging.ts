@@ -247,6 +247,7 @@ export class GroupMessaging {
     const hasRecipient = participants.some((participant) => participant.peer_id !== this.deps.myPeerId);
     const participantPeers = participants.map((participant) => participant.peer_id);
     const connectedPeers = this.deps.node.getPeers().map((peerId) => peerId.toString());
+    const runtimeSnapshot = await this.describeRuntimeSnapshot(ctx.topic);
 
     if (!hasRecipient) {
       throw new Error('Cannot send message: group has no other members');
@@ -256,7 +257,7 @@ export class GroupMessaging {
     log(
       `[GROUP-MSG][SEND][CTX] group=${groupId.slice(0, 8)} keyVersion=${ctx.keyVersion} ` +
       `topic=${ctx.topic.slice(0, 16)}... participants=${participantPeers.map((p) => p.slice(-8)).join(',') || 'none'} ` +
-      `connectedPeers=${connectedPeers.map((p) => p.slice(-8)).join(',') || 'none'}`
+      `connectedPeers=${connectedPeers.map((p) => p.slice(-8)).join(',') || 'none'} ${runtimeSnapshot}`
     );
 
     const nonce = randomBytes(24);
@@ -629,10 +630,14 @@ export class GroupMessaging {
 
   private async publishWithRetry(ctx: GroupContext, payload: Uint8Array): Promise<boolean> {
     try {
-      await this.publish(ctx.topic, payload);
+      await this.publish(ctx.topic, payload, `group=${ctx.groupId.slice(0, 8)} attempt=1`);
       log(`[GROUP-MSG][PUBLISH] group=${ctx.groupId.slice(0, 8)} attempt=1 ok`);
       return true;
     } catch (firstError: unknown) {
+      console.warn(
+        `[GROUP-MSG][PUBLISH][ATTEMPT_FAIL] group=${ctx.groupId.slice(0, 8)} attempt=1 ` +
+        `error=${errStr(firstError)} ${await this.describeRuntimeSnapshot(ctx.topic)}`,
+      );
       if (!this.isRetryablePublishError(firstError)) {
         log(`[GROUP-MSG][PUBLISH] group=${ctx.groupId.slice(0, 8)} attempt=1 fail_non_retryable`);
         throw firstError;
@@ -645,10 +650,14 @@ export class GroupMessaging {
       setTimeout(resolve, GROUP_PUBLISH_RETRY_DELAY_MS);
     });
     try {
-      await this.publish(ctx.topic, payload);
+      await this.publish(ctx.topic, payload, `group=${ctx.groupId.slice(0, 8)} attempt=2`);
       log(`[GROUP-MSG][PUBLISH] group=${ctx.groupId.slice(0, 8)} attempt=2 ok`);
       return true;
     } catch (secondError: unknown) {
+      console.warn(
+        `[GROUP-MSG][PUBLISH][ATTEMPT_FAIL] group=${ctx.groupId.slice(0, 8)} attempt=2 ` +
+        `error=${errStr(secondError)} ${await this.describeRuntimeSnapshot(ctx.topic)}`,
+      );
       if (this.isRetryablePublishError(secondError)) {
         console.warn(`[GROUP-MSG] Falling back to offline delivery for group=${ctx.groupId}`);
         return false;
@@ -703,14 +712,78 @@ export class GroupMessaging {
     }
   }
 
-  private async publish(topic: string, payload: Uint8Array): Promise<void> {
+  private async publish(topic: string, payload: Uint8Array, debugContext?: string): Promise<void> {
     const result = await this.deps.node.services.pubsub.publish(topic, payload);
     const recipients = result.recipients ?? [];
     const remoteRecipients = recipients.filter((peerId) => peerId.toString() !== this.deps.myPeerId);
 
+    if (debugContext) {
+      log(
+        `[GROUP-MSG][PUBLISH][RESULT] ${debugContext} topic=${topic.slice(0, 16)}... ` +
+        `recipients=${recipients.map((peerId) => peerId.toString().slice(-8)).join(',') || 'none'} ` +
+        `remoteRecipients=${remoteRecipients.map((peerId) => peerId.toString().slice(-8)).join(',') || 'none'}`
+      );
+    }
+
     if (remoteRecipients.length === 0) {
       throw new Error(GROUP_PUBLISH_RETRYABLE_ERROR);
     }
+  }
+
+  private async describeRuntimeSnapshot(topic: string): Promise<string> {
+    const mode = this.deps.database.getSessionNetworkMode();
+    const runtime = getNetworkModeRuntime(mode);
+    const dhtProtocol = runtime.config.dhtProtocol;
+    const connections = this.deps.node.getConnections();
+    const pubsubTopics = this.deps.node.services.pubsub.getTopics();
+    const topicSubscribed = pubsubTopics.includes(topic);
+    const topicSubscribers = this.getTopicSubscribers(topic);
+    let dhtProtocolPeers = 0;
+
+    const peerSummaries = await Promise.all(connections.slice(0, 6).map(async (connection) => {
+      const peerId = connection.remotePeer.toString();
+      let dhtState = 'unknown';
+      try {
+        const peerData = await this.deps.node.peerStore.get(connection.remotePeer);
+        const protocols = peerData.protocols ?? [];
+        const hasDhtProtocol = protocols.includes(dhtProtocol);
+        if (hasDhtProtocol) {
+          dhtProtocolPeers++;
+        }
+        dhtState = hasDhtProtocol ? 'yes' : 'no';
+      } catch {
+        dhtState = 'peerstore_error';
+      }
+
+      return `${peerId.slice(-8)}:dht=${dhtState}`;
+    }));
+
+    return (
+      `mode=${mode} connections=${connections.length} dhtProtocolPeers=${dhtProtocolPeers} ` +
+      `topicSubscribed=${String(topicSubscribed)} pubsubTopics=${pubsubTopics.length} ` +
+      `topicSubscribers=${topicSubscribers === null ? 'n/a' : this.formatPeerIds(topicSubscribers)} ` +
+      `peerSample=${peerSummaries.join(',') || 'none'}`
+    );
+  }
+
+  private getTopicSubscribers(topic: string): string[] | null {
+    const pubsub = this.deps.node.services.pubsub as unknown as {
+      getSubscribers?: (topic: string) => Iterable<unknown>;
+    };
+
+    if (typeof pubsub.getSubscribers !== 'function') {
+      return null;
+    }
+
+    try {
+      return Array.from(pubsub.getSubscribers(topic)).map((peerId) => String(peerId));
+    } catch {
+      return null;
+    }
+  }
+
+  private formatPeerIds(peerIds: string[]): string {
+    return peerIds.map((peerId) => peerId.slice(-8)).join(',') || 'none';
   }
 
   private resolveActiveGroupContext(groupId: string): GroupContext {

@@ -92,6 +92,32 @@ export function createReconnectController() {
     return true;
   };
 
+  // On-demand reconnect for callers with direct evidence the current
+  // connections are dead (e.g. an offline DHT write that reached zero peers).
+  // Keeps the same cooldown and in-progress guards as tryBeginReconnect so we
+  // never stack reconnects, but skips the consecutive-probe-failure threshold
+  // instead of waiting for the periodic probe to agree.
+  const tryBeginImmediateReconnect = (): boolean => {
+    const now = Date.now();
+    const sinceLastReconnect = now - lastReconnectAt;
+    if (lastReconnectAt > 0 && sinceLastReconnect < DHT_RECONNECT_COOLDOWN_MS) {
+      log(
+        `[DHT-STATUS][CORE][RECONNECT][SKIP] reason=cooldown source=immediate ` +
+        `waitMs=${DHT_RECONNECT_COOLDOWN_MS - sinceLastReconnect}`,
+      );
+      return false;
+    }
+
+    if (reconnectInProgress) {
+      log('[Core] Immediate reconnect requested but one is already in progress, skipping');
+      return false;
+    }
+
+    lastReconnectAt = now;
+    reconnectInProgress = true;
+    return true;
+  };
+
   return {
     beginBootstrapRetry() {
       clearPostRetryVerifyTimeout();
@@ -112,5 +138,6 @@ export function createReconnectController() {
     schedulePostRetryVerify,
     shouldSuppressNegativeStatusDuringBootstrapRetry,
     tryBeginReconnect,
+    tryBeginImmediateReconnect,
   };
 }

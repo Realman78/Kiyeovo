@@ -173,6 +173,7 @@ export class MessageHandler {
   private callActivityRegistry: CallActivityRegistry;
   private groupCallOrchestrator: GroupCallOrchestrator | null;
   private groupCallHintHandler: ((groupId: string) => void | Promise<void>) | null = null;
+  private requestReconnect: (() => Promise<boolean>) | null = null;
 
   private formatNudgeTarget(payload: BucketNudgePayload): string {
     if (payload.kind === 'GROUP_REKEY_REFETCH') {
@@ -284,6 +285,8 @@ export class MessageHandler {
       onGroupCallHint: async ({ groupId }) => {
         await this.groupCallHintHandler?.(groupId);
       },
+      // Closes over `this` so it picks up the handler set after construction.
+      requestReconnect: async () => (await this.requestReconnect?.()) ?? false,
     });
     this.groupMessaging = new GroupMessaging({
       node: this.node,
@@ -342,6 +345,10 @@ export class MessageHandler {
 
   setGroupCallHintHandler(handler: ((groupId: string) => void | Promise<void>) | null): void {
     this.groupCallHintHandler = handler;
+  }
+
+  setRequestReconnect(handler: (() => Promise<boolean>) | null): void {
+    this.requestReconnect = handler;
   }
 
   async storeGroupCallHint(groupId: string): Promise<void> {

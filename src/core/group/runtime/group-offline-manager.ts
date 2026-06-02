@@ -41,6 +41,9 @@ interface GroupOfflineManagerDeps {
   myPeerId: string;
   onMessageReceived: (data: MessageReceivedEvent) => void;
   onGroupCallHint?: (data: { groupId: string; senderPeerId: string; timestamp: number }) => void | Promise<void>;
+  // Forces an immediate reconnect when a DHT write hits dead connections.
+  // Resolves true if a live DHT path exists afterwards.
+  requestReconnect?: () => Promise<boolean>;
 }
 
 interface GroupOfflineVersionMeta {
@@ -85,6 +88,8 @@ export interface GroupOfflineCheckResult {
 
 export class GroupOfflineManager {
   private readonly deps: GroupOfflineManagerDeps;
+  private readonly networkMode: string;
+  private readonly dhtProtocol: string;
   private readonly groupOfflineBucketPrefix: string;
   private readonly groupInfoVersionPrefix: string;
   private readonly bucketMutationQueues = new Map<string, Promise<void>>();
@@ -92,9 +97,21 @@ export class GroupOfflineManager {
   private readonly groupCheckInFlight = new Map<string, Promise<GroupChatCheckResult>>();
   private offlineCheckRunCounter = 0;
 
+  // Upper bound for a single group offline DHT op (put/get). Without it a stale
+  // or slow peer can keep a send stuck on "sending..." until the underlying
+  // query gives up on its own (~tens of seconds). A timeout here is not fatal:
+  // a connectivity-shaped failure triggers an immediate reconnect + one retry,
+  // so fast mode can run tighter than the direct path (a healthy put completes
+  // in well under a second) to keep the spinner short. Anonymous (Tor) keeps a
+  // larger budget for its higher baseline latency.
+  private static readonly DHT_OP_TIMEOUT_FAST_MS = 10_000;
+  private static readonly DHT_OP_TIMEOUT_ANONYMOUS_MS = 30_000;
+
   constructor(deps: GroupOfflineManagerDeps) {
     this.deps = deps;
     const runtime = getNetworkModeRuntime(this.deps.database.getSessionNetworkMode());
+    this.networkMode = runtime.mode;
+    this.dhtProtocol = runtime.config.dhtProtocol;
     this.groupOfflineBucketPrefix = runtime.config.dhtNamespaces.groupOffline;
     this.groupInfoVersionPrefix = runtime.config.dhtNamespaces.groupInfoVersion;
   }
@@ -123,6 +140,10 @@ export class GroupOfflineManager {
           `msgId=${message.messageId} bucket=*${bucketTag} lockWaitMs=${lockWaitMs}`,
         );
       }
+      log(
+        `[GROUP-OFFLINE][STORE][DHT_SNAPSHOT] group=${message.groupId.slice(0, 8)} ` +
+        `msgId=${message.messageId} bucket=*${bucketTag} ${await this.describeDhtSnapshot()}`,
+      );
 
       try {
         const local = this.deps.database.getGroupOfflineSentMessages(bucketKey);
@@ -170,6 +191,21 @@ export class GroupOfflineManager {
           // Oversized stores cannot be recovered via remote merge.
           if (this.isStoreTooLargeError(firstError)) {
             throw firstError;
+          }
+
+          // Connectivity failure: a recovery DHT read would run over the same
+          // dead connections and just burn another timeout. Instead, force a
+          // reconnect to get fresh peers and retry the write once. The first
+          // failure already proved zero peers stored it, so re-putting the same
+          // store is safe.
+          if (this.isConnectivityFailureError(firstError)) {
+            const reconnected = await this.triggerReconnect();
+            if (!reconnected) {
+              throw firstError;
+            }
+            await this.putStore(bucketKey, signedStore);
+            this.deps.database.saveGroupOfflineSentMessages(bucketKey, nextMessages, version);
+            return;
           }
 
           // Recovery path: local version may be stale (restart/cleanup race). Fetch once, merge, retry once.
@@ -914,7 +950,9 @@ export class GroupOfflineManager {
     log('fetching store from dht', bucketKey);
 
     try {
-      for await (const event of this.deps.node.services.dht.get(key) as AsyncIterable<QueryEvent>) {
+      for await (const event of this.deps.node.services.dht.get(key, {
+        signal: AbortSignal.timeout(this.dhtOpTimeoutMs()),
+      }) as AsyncIterable<QueryEvent>) {
         if (event.name !== 'VALUE' || event.value.length === 0) continue;
         valueEvents++;
         try {
@@ -931,10 +969,11 @@ export class GroupOfflineManager {
           continue;
         }
       }
-    } catch {
+    } catch (error: unknown) {
       log(
         `[GROUP-OFFLINE][TIMING][STORE] bucket=*${bucketKey.slice(-10)} cacheHit=false dhtError=true ` +
-        `valueEvents=${valueEvents} took=${Date.now() - startedAt}ms`
+        `valueEvents=${valueEvents} took=${Date.now() - startedAt}ms error=${errStr(error)} ` +
+        `${await this.describeDhtSnapshot()}`
       );
       return null;
     }
@@ -944,6 +983,12 @@ export class GroupOfflineManager {
       `valueEvents=${valueEvents} took=${Date.now() - startedAt}ms`
     );
     return best;
+  }
+
+  private dhtOpTimeoutMs(): number {
+    return this.networkMode === 'anonymous'
+      ? GroupOfflineManager.DHT_OP_TIMEOUT_ANONYMOUS_MS
+      : GroupOfflineManager.DHT_OP_TIMEOUT_FAST_MS;
   }
 
   private async putStore(bucketKey: string, store: GroupOfflineStore): Promise<void> {
@@ -963,16 +1008,45 @@ export class GroupOfflineManager {
     let eventCount = 0;
     let queryErrorCount = 0;
     let firstPeerResponseAt: number | null = null;
+    const eventNameCounts = new Map<string, number>();
+    const queryErrorDetails: string[] = [];
+    const peerResponseDetails: string[] = [];
 
-    for await (const event of this.deps.node.services.dht.put(key, compressed) as AsyncIterable<QueryEvent>) {
-      eventCount++;
-      if (event.name === 'PEER_RESPONSE') {
-        successCount++;
-        if (firstPeerResponseAt === null) {
-          firstPeerResponseAt = Date.now();
+    log(
+      `[GROUP-OFFLINE][TIMING][PUT][START] bucket=*${bucketTag} storeVersion=${store.version} ` +
+      `compressedBytes=${compressed.length} ${await this.describeDhtSnapshot()}`,
+    );
+
+    try {
+      for await (const event of this.deps.node.services.dht.put(key, compressed, {
+        signal: AbortSignal.timeout(this.dhtOpTimeoutMs()),
+      }) as AsyncIterable<QueryEvent>) {
+        eventCount++;
+        eventNameCounts.set(event.name, (eventNameCounts.get(event.name) ?? 0) + 1);
+        if (event.name === 'PEER_RESPONSE') {
+          successCount++;
+          if (firstPeerResponseAt === null) {
+            firstPeerResponseAt = Date.now();
+          }
+          peerResponseDetails.push(
+            `${event.from.toString().slice(-8)}:record=${event.record ? 'yes' : 'no'}`
+          );
+        } else if (event.name === 'QUERY_ERROR') {
+          queryErrorCount++;
+          queryErrorDetails.push(
+            `${event.from.toString().slice(-8)}:${errStr(event.error)}`
+          );
         }
-      } else if (event.name === 'QUERY_ERROR') {
-        queryErrorCount++;
+      }
+    } catch (error: unknown) {
+      // Timeout (or abort) reaching the rest of the peers. If at least one peer
+      // already stored the record, the message is on the DHT, so let it count
+      // as success instead of forcing the caller into recovery/offline-failure.
+      // A timeout with zero successful peers is a real failure and rethrows.
+      const isTimeout = error instanceof Error
+        && (error.name === 'AbortError' || error.name === 'TimeoutError');
+      if (!isTimeout || successCount === 0) {
+        throw error;
       }
     }
     const totalPutMs = Date.now() - startedAt;
@@ -981,7 +1055,10 @@ export class GroupOfflineManager {
     const timingMsg =
       `[GROUP-OFFLINE][TIMING][PUT] bucket=*${bucketTag} storeVersion=${store.version} ` +
       `events=${eventCount} peerResponses=${successCount} queryErrors=${queryErrorCount} ` +
-      `firstPeerMs=${firstPeerMs} tailAfterFirstSuccessMs=${tailAfterFirstSuccessMs} totalPutMs=${totalPutMs}`;
+      `firstPeerMs=${firstPeerMs} tailAfterFirstSuccessMs=${tailAfterFirstSuccessMs} totalPutMs=${totalPutMs} ` +
+      `eventBreakdown=${this.formatEventCounts(eventNameCounts)} ` +
+      `peerResponseDetails=${this.formatDetailSample(peerResponseDetails)} ` +
+      `queryErrorDetails=${this.formatDetailSample(queryErrorDetails)}`;
 
     if (totalPutMs > 5000 || (firstPeerResponseAt !== null && tailAfterFirstSuccessMs > 2000)) {
       console.warn(timingMsg);
@@ -990,12 +1067,83 @@ export class GroupOfflineManager {
     }
 
     if (successCount === 0) {
+      console.warn(
+        `[GROUP-OFFLINE][TIMING][PUT][NO_SUCCESS] bucket=*${bucketTag} storeVersion=${store.version} ` +
+        `${await this.describeDhtSnapshot()} queryErrorDetails=${this.formatDetailSample(queryErrorDetails)}`,
+      );
       throw new Error('Failed to store group offline message: no successful DHT peers');
     }
   }
 
+  private async describeDhtSnapshot(): Promise<string> {
+    const connections = this.deps.node.getConnections();
+    let dhtProtocolPeers = 0;
+
+    const peerSummaries = await Promise.all(connections.slice(0, 6).map(async (connection) => {
+      const peerId = connection.remotePeer.toString();
+      let dhtState = 'unknown';
+      try {
+        const peerData = await this.deps.node.peerStore.get(connection.remotePeer);
+        const protocols = peerData.protocols ?? [];
+        const hasDhtProtocol = protocols.includes(this.dhtProtocol);
+        if (hasDhtProtocol) {
+          dhtProtocolPeers++;
+        }
+        dhtState = hasDhtProtocol ? 'yes' : 'no';
+      } catch {
+        dhtState = 'peerstore_error';
+      }
+
+      return `${peerId.slice(-8)}:dht=${dhtState}`;
+    }));
+
+    return (
+      `mode=${this.networkMode} connections=${connections.length} ` +
+      `dhtProtocol=${this.dhtProtocol} dhtProtocolPeers=${dhtProtocolPeers} ` +
+      `peerSample=${peerSummaries.join(',') || 'none'}`
+    );
+  }
+
+  private formatEventCounts(counts: Map<string, number>): string {
+    return Array.from(counts.entries())
+      .map(([name, count]) => `${name}:${count}`)
+      .join(',') || 'none';
+  }
+
+  private formatDetailSample(details: string[]): string {
+    if (details.length === 0) return 'none';
+    const sample = details.slice(0, 4).join('|');
+    return details.length > 4 ? `${sample}|+${details.length - 4}more` : sample;
+  }
+
   private isStoreTooLargeError(error: unknown): boolean {
     return errStr(error).includes('store too large');
+  }
+
+  // A DHT write that reached zero peers, or aborted/timed out against stale
+  // connections. Distinguished from version-conflict failures (which warrant a
+  // remote read + merge) because reading the DHT can't succeed here either.
+  private isConnectivityFailureError(error: unknown): boolean {
+    const errorText = errStr(error).toLowerCase();
+    return (
+      errorText.includes('no successful dht peers')
+      || errorText.includes('all peers unreachable')
+      || errorText.includes('timed out')
+      || errorText.includes('aborted')
+      || errorText.includes('no connected peers')
+    );
+  }
+
+  private async triggerReconnect(): Promise<boolean> {
+    if (!this.deps.requestReconnect) {
+      return false;
+    }
+    try {
+      return await this.deps.requestReconnect();
+    } catch (error: unknown) {
+      log(`[GROUP-OFFLINE][STORE][RECONNECT_ERROR] ${errStr(error)}`);
+      return false;
+    }
   }
 
   private decryptContent(encryptedContent: string, key: Uint8Array, nonceBase64: string): string {

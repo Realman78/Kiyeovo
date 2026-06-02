@@ -250,6 +250,50 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
 
   const reconnectController = createReconnectController();
 
+  // Drop stale connections, re-dial bootstrap, and verify DHT liveness. Shared
+  // by the periodic health gate and on-demand (send-triggered) reconnects
+  const performReconnect = async (): Promise<boolean> => {
+    try {
+      console.log('[Core] All sampled connections appear stale; closing and reconnecting...');
+      const staleConnections = node.getConnections();
+      if (staleConnections.length > 0) {
+        await Promise.allSettled(staleConnections.map(conn => conn.close()));
+      }
+
+      const reconnectBootstrapResult = await connectToBootstrap(node, database);
+      console.log(
+        `[Core] Reconnect bootstrap status=${reconnectBootstrapResult.status} connected=${reconnectBootstrapResult.connectedCount}/${reconnectBootstrapResult.targetConnectionCount} attempts=${reconnectBootstrapResult.attempts.length}`,
+      );
+
+      // Verify immediately after reconnect attempt so UI state is up to date
+      const dhtAfterReconnect = await networkHealth.getDhtCapableConnections();
+      const aliveAfterReconnect = await networkHealth.probeAnyAliveConnection(dhtAfterReconnect, {
+        probeSource: 'dht',
+      });
+      const liveCount = aliveAfterReconnect ? dhtAfterReconnect.length : 0;
+      emitDhtStatus(liveCount > 0, 'post_reconnect_dht_probe');
+      if (liveCount > 0) {
+        reconnectController.resetProbeFailures();
+      }
+      return liveCount > 0;
+    } finally {
+      reconnectController.finishReconnect();
+    }
+  };
+
+  // On-demand reconnect: callers (e.g. a group offline write that reached zero
+  // peers) have direct evidence the connections are dead, so reconnect now
+  // instead of waiting for the periodic probe to trip the failure threshold
+  const requestImmediateReconnect = async (): Promise<boolean> => {
+    if (reconnectController.tryBeginImmediateReconnect()) {
+      return performReconnect();
+    }
+    // Cooldown active or a reconnect already running: don't stack another
+    await dhtStatusCheckInFlight?.catch(() => { });
+    const dhtConns = await networkHealth.getDhtCapableConnections();
+    return networkHealth.probeAnyAliveConnection(dhtConns, { probeSource: 'dht' });
+  };
+
   const checkDHTStatus = async (source: DhtStatusCheckSource = 'timer_30s') => {
     if (dhtStatusCheckInFlight) {
       const ageMs = dhtStatusActiveStartedAt > 0 ? Date.now() - dhtStatusActiveStartedAt : -1;
@@ -293,32 +337,8 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
           return;
         }
 
-        try {
-          console.log('[Core] All sampled connections appear stale; closing and reconnecting...');
-          const staleConnections = node.getConnections();
-          if (staleConnections.length > 0) {
-            await Promise.allSettled(staleConnections.map(conn => conn.close()));
-          }
-
-          const reconnectBootstrapResult = await connectToBootstrap(node, database);
-          console.log(
-            `[Core] Reconnect bootstrap status=${reconnectBootstrapResult.status} connected=${reconnectBootstrapResult.connectedCount}/${reconnectBootstrapResult.targetConnectionCount} attempts=${reconnectBootstrapResult.attempts.length}`,
-          );
-
-          // Verify immediately after reconnect attempt so UI state is up to date.
-          const dhtAfterReconnect = await networkHealth.getDhtCapableConnections();
-          const aliveAfterReconnect = await networkHealth.probeAnyAliveConnection(dhtAfterReconnect, {
-            probeSource: 'dht',
-          });
-          const liveCount = aliveAfterReconnect ? dhtAfterReconnect.length : 0;
-          emitDhtStatus(liveCount > 0, 'post_reconnect_dht_probe');
-          if (liveCount > 0) {
-            reconnectController.resetProbeFailures();
-          }
-          return;
-        } finally {
-          reconnectController.finishReconnect();
-        }
+        await performReconnect();
+        return;
       } catch (error) {
         console.error('[Core] Failed to check peer count:', error);
         emitDhtStatus(false, 'check_exception');
@@ -462,6 +482,8 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     callActivityRegistry,
     groupCallOrchestrator,
   );
+
+  messageHandler.setRequestReconnect(requestImmediateReconnect);
 
   groupCallOrchestrator.setDurableHintStorage((groupId: string) => messageHandler.storeGroupCallHint(groupId));
   messageHandler.setGroupCallHintHandler((groupId: string) => {
