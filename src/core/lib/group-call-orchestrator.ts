@@ -50,6 +50,8 @@ const DISCOVERY_QUERY_TIMEOUT_MS = 10_000;
 const DISCOVERY_SETTLE_AFTER_FIRST_MS = 1_000;
 const DISCOVERY_CONFLICT_RETRY_DELAY_MS = 2_000;
 const DISCOVERY_CACHE_TTL_MS = 3_000;
+const DEFERRED_QUERY_TTL_MS = 10_000;
+const MAX_DEFERRED_QUERY_PEERS_PER_GROUP = 5;
 const JOIN_REQUEST_TIMEOUT_MS = 10_000;
 const ROSTER_BROADCAST_DEBOUNCE_MS = 2_000;
 const MAX_GROUP_CALL_PARTICIPANTS = 10;
@@ -119,6 +121,12 @@ type PendingJoinResponse = {
     | { kind: 'timeout' }
     | { kind: 'aborted' }
   ) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
+
+type DeferredQuery = {
+  signal: Extract<GroupCallControlSignalMessage, { type: 'GROUP_CALL_QUERY' }>;
+  receivedAt: number;
   timer: ReturnType<typeof setTimeout>;
 };
 
@@ -199,6 +207,7 @@ export class GroupCallOrchestrator {
   private readonly recentQueryResults = new Map<string, { resolvedAt: number; result: QueryResolution }>();
   private readonly pendingDurableHintGroups = new Set<string>();
   private readonly recentDurableHintResults = new Map<string, number>();
+  private readonly deferredQueriesByKey = new Map<string, DeferredQuery>();
   private readonly pendingPeerDisconnectTimers = new Map<string, { timer: ReturnType<typeof setTimeout>; expiresAt: number }>();
   private participantReconnectInProgress = false;
   private readonly peerConnectHandler: EventListener = (event) => {
@@ -241,6 +250,7 @@ export class GroupCallOrchestrator {
     this.node.removeEventListener('peer:connect', this.peerConnectHandler);
     this.node.removeEventListener('peer:disconnect', this.peerDisconnectHandler);
     this.clearAllPeerDisconnectTimers();
+    this.clearDeferredQueries();
   }
 
   async handleGroupChatActivated(chatId: number): Promise<void> {
@@ -276,6 +286,14 @@ export class GroupCallOrchestrator {
     const terminalStatus = chat?.group_status === 'removed'
       || chat?.group_status === 'left'
       || chat?.group_status === 'disbanded';
+
+    if (
+      !terminalStatus
+      && localStillMember
+      && affectedPeerStillMember
+    ) {
+      this.flushDeferredQueriesForMember(event.groupId, event.memberPeerId);
+    }
 
     if (!activeSession || activeSession.groupId !== event.groupId) {
       if (chat && terminalStatus && chat.last_known_active_call_id) {
@@ -2233,6 +2251,13 @@ export class GroupCallOrchestrator {
         );
         return false;
       }
+      if (
+        signal.type === 'GROUP_CALL_QUERY'
+        && validation.error === 'Sender is not a current member of this group'
+        && this.tryDeferGroupQuery(remotePeerId, signal)
+      ) {
+        return false;
+      }
       const errorContext: Pick<GroupCallErrorEvent, 'groupId' | 'peerId' | 'code'> & { callId?: string } = {
         groupId: signal.groupId,
         peerId: remotePeerId,
@@ -2245,20 +2270,117 @@ export class GroupCallOrchestrator {
       return false;
     }
 
+    if (!this.recordSeenSignalSignature(signal.signature, signal.type, remotePeerId)) {
+      return false;
+    }
+    return true;
+  }
+
+  private recordSeenSignalSignature(signature: string, signalType: string, remotePeerId: string): boolean {
     const now = Date.now();
     this.pruneSeenSignalSignatures(now);
-    const previousSeenAt = this.seenSignalSignatures.get(signal.signature);
+    const previousSeenAt = this.seenSignalSignatures.get(signature);
     if (previousSeenAt && previousSeenAt >= now - GROUP_CALL_SIGNAL_DEDUPE_TTL_MS) {
-      // TEMP_LOG
-      log(
-        `[GROUP-CALL] Dropping duplicate signal type=${signal.type} peer=${remotePeerId.slice(-8)} signature=${signal.signature.slice(0, 8)}`,
-      );
       return false;
     }
 
-    this.seenSignalSignatures.set(signal.signature, now);
+    this.seenSignalSignatures.set(signature, now);
     this.trimSeenSignalSignatures();
     return true;
+  }
+
+  private tryDeferGroupQuery(
+    remotePeerId: string,
+    signal: Extract<GroupCallControlSignalMessage, { type: 'GROUP_CALL_QUERY' }>,
+  ): boolean {
+    if (!this.verifyDeferredGroupQueryCandidate(remotePeerId, signal)) {
+      return false;
+    }
+    if (!this.recordSeenSignalSignature(signal.signature, signal.type, remotePeerId)) {
+      return true;
+    }
+
+    const key = this.deferredQueryKey(signal.groupId, signal.fromPeerId);
+    const existing = this.deferredQueriesByKey.get(key);
+    if (existing) {
+      existing.signal = signal;
+      return true;
+    }
+    if (this.deferredQueryCountForGroup(signal.groupId) >= MAX_DEFERRED_QUERY_PEERS_PER_GROUP) {
+      return false;
+    }
+    const timer = setTimeout(() => {
+      this.deferredQueriesByKey.delete(key);
+    }, DEFERRED_QUERY_TTL_MS);
+    this.deferredQueriesByKey.set(key, {
+      signal,
+      receivedAt: Date.now(),
+      timer,
+    });
+    return true;
+  }
+
+  private verifyDeferredGroupQueryCandidate(
+    remotePeerId: string,
+    signal: Extract<GroupCallControlSignalMessage, { type: 'GROUP_CALL_QUERY' }>,
+  ): boolean {
+    const validation = verifyIncomingGroupCallSignal(remotePeerId, signal, {
+      localPeerId: this.localPeerId(),
+      getSigningPublicKey: (peerId) => this.database.getUserByPeerId(peerId)?.signing_public_key,
+      assertSignalAllowed: (allowedSignal) => {
+        if (this.database.getSessionNetworkMode() !== NETWORK_MODES.FAST) {
+          throw new Error('Group calls require fast mode');
+        }
+
+        const chat = this.database.getChatByGroupId(allowedSignal.groupId);
+        if (!chat || chat.type !== 'group') {
+          throw new Error('Unknown group for group call signal');
+        }
+        if (chat.group_status !== 'active' && chat.group_status !== 'rekeying') {
+          throw new Error('Group is not eligible for call signaling');
+        }
+
+        const participantIds = new Set(
+          this.database.getChatParticipants(chat.id).map((participant) => participant.peer_id),
+        );
+        if (!participantIds.has(this.localPeerId())) {
+          throw new Error('Local user is not a current member of this group');
+        }
+      },
+    });
+    return validation.valid;
+  }
+
+  private deferredQueryKey(groupId: string, fromPeerId: string): string {
+    return `${groupId}:${fromPeerId}`;
+  }
+
+  private deferredQueryCountForGroup(groupId: string): number {
+    let count = 0;
+    for (const deferred of this.deferredQueriesByKey.values()) {
+      if (deferred.signal.groupId === groupId) {
+        count += 1;
+      }
+    }
+    return count;
+  }
+
+  private flushDeferredQueriesForMember(groupId: string, peerId: string): void {
+    for (const [key, deferred] of this.deferredQueriesByKey) {
+      if (deferred.signal.groupId !== groupId || deferred.signal.fromPeerId !== peerId) {
+        continue;
+      }
+      clearTimeout(deferred.timer);
+      this.deferredQueriesByKey.delete(key);
+      void this.respondToQuery(deferred.signal);
+    }
+  }
+
+  private clearDeferredQueries(): void {
+    for (const deferred of this.deferredQueriesByKey.values()) {
+      clearTimeout(deferred.timer);
+    }
+    this.deferredQueriesByKey.clear();
   }
 
   private pruneSeenSignalSignatures(now: number): void {
