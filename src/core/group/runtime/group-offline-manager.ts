@@ -89,7 +89,6 @@ export interface GroupOfflineCheckResult {
 export class GroupOfflineManager {
   private readonly deps: GroupOfflineManagerDeps;
   private readonly networkMode: string;
-  private readonly dhtProtocol: string;
   private readonly groupOfflineBucketPrefix: string;
   private readonly groupInfoVersionPrefix: string;
   private readonly bucketMutationQueues = new Map<string, Promise<void>>();
@@ -111,7 +110,6 @@ export class GroupOfflineManager {
     this.deps = deps;
     const runtime = getNetworkModeRuntime(this.deps.database.getSessionNetworkMode());
     this.networkMode = runtime.mode;
-    this.dhtProtocol = runtime.config.dhtProtocol;
     this.groupOfflineBucketPrefix = runtime.config.dhtNamespaces.groupOffline;
     this.groupInfoVersionPrefix = runtime.config.dhtNamespaces.groupInfoVersion;
   }
@@ -140,10 +138,6 @@ export class GroupOfflineManager {
           `msgId=${message.messageId} bucket=*${bucketTag} lockWaitMs=${lockWaitMs}`,
         );
       }
-      log(
-        `[GROUP-OFFLINE][STORE][DHT_SNAPSHOT] group=${message.groupId.slice(0, 8)} ` +
-        `msgId=${message.messageId} bucket=*${bucketTag} ${await this.describeDhtSnapshot()}`,
-      );
 
       try {
         const local = this.deps.database.getGroupOfflineSentMessages(bucketKey);
@@ -969,11 +963,10 @@ export class GroupOfflineManager {
           continue;
         }
       }
-    } catch (error: unknown) {
+    } catch {
       log(
         `[GROUP-OFFLINE][TIMING][STORE] bucket=*${bucketKey.slice(-10)} cacheHit=false dhtError=true ` +
-        `valueEvents=${valueEvents} took=${Date.now() - startedAt}ms error=${errStr(error)} ` +
-        `${await this.describeDhtSnapshot()}`
+        `valueEvents=${valueEvents} took=${Date.now() - startedAt}ms`
       );
       return null;
     }
@@ -1008,34 +1001,19 @@ export class GroupOfflineManager {
     let eventCount = 0;
     let queryErrorCount = 0;
     let firstPeerResponseAt: number | null = null;
-    const eventNameCounts = new Map<string, number>();
-    const queryErrorDetails: string[] = [];
-    const peerResponseDetails: string[] = [];
-
-    log(
-      `[GROUP-OFFLINE][TIMING][PUT][START] bucket=*${bucketTag} storeVersion=${store.version} ` +
-      `compressedBytes=${compressed.length} ${await this.describeDhtSnapshot()}`,
-    );
 
     try {
       for await (const event of this.deps.node.services.dht.put(key, compressed, {
         signal: AbortSignal.timeout(this.dhtOpTimeoutMs()),
       }) as AsyncIterable<QueryEvent>) {
         eventCount++;
-        eventNameCounts.set(event.name, (eventNameCounts.get(event.name) ?? 0) + 1);
         if (event.name === 'PEER_RESPONSE') {
           successCount++;
           if (firstPeerResponseAt === null) {
             firstPeerResponseAt = Date.now();
           }
-          peerResponseDetails.push(
-            `${event.from.toString().slice(-8)}:record=${event.record ? 'yes' : 'no'}`
-          );
         } else if (event.name === 'QUERY_ERROR') {
           queryErrorCount++;
-          queryErrorDetails.push(
-            `${event.from.toString().slice(-8)}:${errStr(event.error)}`
-          );
         }
       }
     } catch (error: unknown) {
@@ -1055,10 +1033,7 @@ export class GroupOfflineManager {
     const timingMsg =
       `[GROUP-OFFLINE][TIMING][PUT] bucket=*${bucketTag} storeVersion=${store.version} ` +
       `events=${eventCount} peerResponses=${successCount} queryErrors=${queryErrorCount} ` +
-      `firstPeerMs=${firstPeerMs} tailAfterFirstSuccessMs=${tailAfterFirstSuccessMs} totalPutMs=${totalPutMs} ` +
-      `eventBreakdown=${this.formatEventCounts(eventNameCounts)} ` +
-      `peerResponseDetails=${this.formatDetailSample(peerResponseDetails)} ` +
-      `queryErrorDetails=${this.formatDetailSample(queryErrorDetails)}`;
+      `firstPeerMs=${firstPeerMs} tailAfterFirstSuccessMs=${tailAfterFirstSuccessMs} totalPutMs=${totalPutMs}`;
 
     if (totalPutMs > 5000 || (firstPeerResponseAt !== null && tailAfterFirstSuccessMs > 2000)) {
       console.warn(timingMsg);
@@ -1067,53 +1042,8 @@ export class GroupOfflineManager {
     }
 
     if (successCount === 0) {
-      console.warn(
-        `[GROUP-OFFLINE][TIMING][PUT][NO_SUCCESS] bucket=*${bucketTag} storeVersion=${store.version} ` +
-        `${await this.describeDhtSnapshot()} queryErrorDetails=${this.formatDetailSample(queryErrorDetails)}`,
-      );
       throw new Error('Failed to store group offline message: no successful DHT peers');
     }
-  }
-
-  private async describeDhtSnapshot(): Promise<string> {
-    const connections = this.deps.node.getConnections();
-    let dhtProtocolPeers = 0;
-
-    const peerSummaries = await Promise.all(connections.slice(0, 6).map(async (connection) => {
-      const peerId = connection.remotePeer.toString();
-      let dhtState = 'unknown';
-      try {
-        const peerData = await this.deps.node.peerStore.get(connection.remotePeer);
-        const protocols = peerData.protocols ?? [];
-        const hasDhtProtocol = protocols.includes(this.dhtProtocol);
-        if (hasDhtProtocol) {
-          dhtProtocolPeers++;
-        }
-        dhtState = hasDhtProtocol ? 'yes' : 'no';
-      } catch {
-        dhtState = 'peerstore_error';
-      }
-
-      return `${peerId.slice(-8)}:dht=${dhtState}`;
-    }));
-
-    return (
-      `mode=${this.networkMode} connections=${connections.length} ` +
-      `dhtProtocol=${this.dhtProtocol} dhtProtocolPeers=${dhtProtocolPeers} ` +
-      `peerSample=${peerSummaries.join(',') || 'none'}`
-    );
-  }
-
-  private formatEventCounts(counts: Map<string, number>): string {
-    return Array.from(counts.entries())
-      .map(([name, count]) => `${name}:${count}`)
-      .join(',') || 'none';
-  }
-
-  private formatDetailSample(details: string[]): string {
-    if (details.length === 0) return 'none';
-    const sample = details.slice(0, 4).join('|');
-    return details.length > 4 ? `${sample}|+${details.length - 4}more` : sample;
   }
 
   private isStoreTooLargeError(error: unknown): boolean {
@@ -1140,8 +1070,7 @@ export class GroupOfflineManager {
     }
     try {
       return await this.deps.requestReconnect();
-    } catch (error: unknown) {
-      log(`[GROUP-OFFLINE][STORE][RECONNECT_ERROR] ${errStr(error)}`);
+    } catch {
       return false;
     }
   }
