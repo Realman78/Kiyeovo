@@ -217,7 +217,9 @@ export class GroupCallOrchestrator {
   private readonly peerConnectHandler: EventListener = (event) => {
     const peerId = (event as CustomEvent<unknown>).detail?.toString?.();
     if (peerId) {
-      this.handlePeerConnect(peerId);
+      void this.handlePeerConnect(peerId).catch((err) => {
+        log(`[GROUP-CALL][PEER_CONNECT][ERROR] peer=${peerId.slice(-8)} reason=${errStr(err)}`);
+      });
     }
   };
   private readonly peerDisconnectHandler: EventListener = (event) => {
@@ -1118,8 +1120,13 @@ export class GroupCallOrchestrator {
     return this.resolveQueryResponses(chat, secondCollected.responses);
   }
 
-  private async collectQueryResponses(chat: Chat): Promise<CollectedQueryResponses> {
-    const targets = this.getGroupMemberPeerIds(chat.id);
+  private async collectQueryResponses(
+    chat: Chat,
+    explicitTargets?: string[],
+  ): Promise<CollectedQueryResponses> {
+    const targets = explicitTargets
+      ? [...new Set(explicitTargets.filter((peerId) => peerId && peerId !== this.localPeerId()))]
+      : this.getGroupMemberPeerIds(chat.id);
     if (targets.length === 0) {
       return { responses: [], sentCount: 0, settledCount: 0, responseCount: 0 };
     }
@@ -1760,7 +1767,13 @@ export class GroupCallOrchestrator {
   }
 
   private validateIncomingPairSignal(signal: GroupCallPairSignalMessage): boolean {
-    if (!this.session || this.session.groupId !== signal.groupId || this.session.callId !== signal.callId) {
+    // A restarted or not-yet-rejoined participant can receive late offer/ICE traffic before
+    // a local group-call session exists again. Drop that pair traffic quietly.
+    if (!this.session) {
+      return false;
+    }
+
+    if (this.session.groupId !== signal.groupId || this.session.callId !== signal.callId) {
       this.emitError('Unexpected group call pair signal', {
         groupId: signal.groupId,
         callId: signal.callId,
@@ -2171,18 +2184,57 @@ export class GroupCallOrchestrator {
     ));
   }
 
-  private handlePeerConnect(peerId: string): void {
+  private async queryPeerForActiveCall(
+    chat: Chat,
+    peerId: string,
+  ): Promise<(GroupCallQueryResponseSignal & { active: true }) | null> {
+    const collected = await this.collectQueryResponses(chat, [peerId]);
+    const response = collected.responses.find(
+      (candidate): candidate is GroupCallQueryResponseSignal & { active: true } => (
+        candidate.fromPeerId === peerId && candidate.active
+      ),
+    );
+    return response ?? null;
+  }
+
+  private async handlePeerConnect(peerId: string): Promise<void> {
     const hadDisconnectTimer = this.pendingPeerDisconnectTimers.has(peerId);
     if (!hadDisconnectTimer || !this.session) {
       return;
     }
-    if (this.session.role === 'writer') {
-      this.emitStateChanged(this.session.state, { reason: 'writer_reconnect_probe', peerId });
-      // TEMP_LOG
-      log(
-        `[GROUP-CALL][RECOVER][WRITER_PROBE] group=${this.session.groupId.slice(0, 8)} call=${this.session.callId.slice(0, 8)} peer=${peerId.slice(-8)}`,
-      );
+
+    if (this.session.role !== 'writer') {
+      return;
     }
+
+    const session = this.session;
+    const chat = this.database.getChatByGroupId(session.groupId);
+    if (!chat) {
+      return;
+    }
+
+    const peerResponse = await this.queryPeerForActiveCall(chat, peerId);
+    if (
+      !peerResponse
+      || peerResponse.callId !== session.callId
+      || peerResponse.writerPeerId !== this.localPeerId()
+    ) {
+      return;
+    }
+    if (
+      !this.session
+      || this.session.groupId !== session.groupId
+      || this.session.callId !== session.callId
+      || this.session.role !== 'writer'
+    ) {
+      return;
+    }
+
+    this.emitStateChanged(this.session.state, { reason: 'writer_reconnect_probe', peerId });
+    // TEMP_LOG
+    log(
+      `[GROUP-CALL][RECOVER][WRITER_PROBE] group=${this.session.groupId.slice(0, 8)} call=${this.session.callId.slice(0, 8)} peer=${peerId.slice(-8)}`,
+    );
   }
 
   private handlePeerDisconnect(peerId: string): void {

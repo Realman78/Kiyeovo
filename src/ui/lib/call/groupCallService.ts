@@ -253,6 +253,9 @@ class GroupCallService {
       if (this.connectedPeerCount() > 0) {
         return;
       }
+      if (timeoutContext === 'writer_probe') {
+        return;
+      }
       if (timeoutContext === 'writer_recover' && this.session.role === 'writer' && this.session.chatId !== null) {
         void this.fallbackWriterRecovery(this.session.chatId);
         return;
