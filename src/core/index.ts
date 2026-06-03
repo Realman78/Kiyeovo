@@ -451,6 +451,7 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     database,
     userIdentity,
     callActivityRegistry,
+    requestImmediateReconnect,
     onControlSignalReceived: sendGroupCallControlSignalReceived,
     onPairSignalReceived: sendGroupCallPairSignalReceived,
     onStateChanged: sendGroupCallStateChanged,

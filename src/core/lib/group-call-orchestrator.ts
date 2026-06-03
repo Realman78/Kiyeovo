@@ -65,8 +65,8 @@ const LOCAL_NETWORK_CHANGE_DEBOUNCE_MS = 500;
 const LOCAL_NETWORK_INTERFACE_POLL_MS = 2_000;
 const LOCAL_NETWORK_INTERFACE_CONFIRMATION_COUNT = 2;
 const LOCAL_NETWORK_INTERFACE_SKIP_PATTERNS = /^(lo|virbr|vnet|docker|br-|vboxnet|vmnet|tun|tap|zt|wg|ppp|awdl|utun|cni|podman)/;
-const LOCAL_NETWORK_RECOVERY_JOIN_ATTEMPTS = 3;
-const LOCAL_NETWORK_RECOVERY_RETRY_DELAY_MS = 5_000;
+const LOCAL_NETWORK_RECOVERY_JOIN_ATTEMPTS = 2;
+const LOCAL_NETWORK_RECOVERY_RETRY_DELAY_MS = 2_000;
 
 type GroupCallActionResult = {
   success: boolean;
@@ -147,6 +147,7 @@ type GroupCallOrchestratorConfig = {
   database: ChatDatabase;
   userIdentity: Pick<EncryptedUserIdentity, 'sign'>;
   callActivityRegistry: CallActivityRegistry;
+  requestImmediateReconnect?: () => Promise<boolean>;
   onControlSignalReceived?: (data: GroupCallControlSignalReceivedEvent) => void;
   onPairSignalReceived?: (data: GroupCallPairSignalReceivedEvent) => void;
   onStateChanged?: (data: GroupCallStateChangedEvent) => void;
@@ -211,6 +212,7 @@ export class GroupCallOrchestrator {
   private readonly database: ChatDatabase;
   private readonly userIdentity: Pick<EncryptedUserIdentity, 'sign'>;
   private readonly callActivityRegistry: CallActivityRegistry;
+  private readonly requestImmediateReconnect: (() => Promise<boolean>) | null;
   private readonly callSignalProtocol: string;
   private readonly onControlSignalReceived: (data: GroupCallControlSignalReceivedEvent) => void;
   private readonly onPairSignalReceived: (data: GroupCallPairSignalReceivedEvent) => void;
@@ -259,6 +261,7 @@ export class GroupCallOrchestrator {
     this.database = config.database;
     this.userIdentity = config.userIdentity;
     this.callActivityRegistry = config.callActivityRegistry;
+    this.requestImmediateReconnect = config.requestImmediateReconnect ?? null;
     this.callSignalProtocol = getNetworkModeRuntime(this.database.getSessionNetworkMode()).config.callSignalProtocol;
     this.onControlSignalReceived = config.onControlSignalReceived ?? (() => undefined);
     this.onPairSignalReceived = config.onPairSignalReceived ?? (() => undefined);
@@ -2333,6 +2336,20 @@ export class GroupCallOrchestrator {
     remotePeerIds.forEach((peerId) => this.localTransportResetPeerIds.add(peerId));
 
     try {
+      // Force libp2p to drop stale connections and rebuild bootstrap + relay.
+      // Without this we sit for ~30s waiting for the periodic DHT probe gate.
+      if (this.requestImmediateReconnect) {
+        // TEMP_LOG
+        log(`[GROUP-CALL][NETWORK][FORCE_RECONNECT_START] group=${session.groupId.slice(0, 8)} call=${session.callId.slice(0, 8)}`);
+        try {
+          await this.requestImmediateReconnect();
+        } catch (error: unknown) {
+          log(`[GROUP-CALL][NETWORK][FORCE_RECONNECT_ERROR] reason=${errStr(error)}`);
+        }
+        // TEMP_LOG
+        log(`[GROUP-CALL][NETWORK][FORCE_RECONNECT_DONE] group=${session.groupId.slice(0, 8)} call=${session.callId.slice(0, 8)}`);
+      }
+
       await Promise.allSettled(
         remotePeerIds.map(async (peerId) => this.node.hangUp(peerIdFromString(peerId))),
       );
