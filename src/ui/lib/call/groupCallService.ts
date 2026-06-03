@@ -9,6 +9,7 @@ import type {
 } from '../../../core/types';
 import { DEFAULT_WEBRTC_ICE_SERVERS } from '../../../core/network/default-infrastructure';
 import { errStr } from '../../../core/utils/general-error';
+import { log } from '../../../shared/logger';
 
 export type GroupCallSnapshot = {
   chatId: number | null;
@@ -92,6 +93,8 @@ class GroupCallService {
   private iceServers: RTCIceServer[] = DEFAULT_WEBRTC_ICE_SERVERS.map((server) => ({ ...server }));
   private iceServersRefreshPromise: Promise<void> | null = null;
   private localMuted = false;
+  private lastTransportResetAt = 0;
+  private readonly LOCAL_RECOVERY_OFFER_TOAST_SUPPRESSION_MS = 30_000;
 
   subscribe(listener: (event: GroupCallServiceEvent) => void): () => void {
     this.listeners.add(listener);
@@ -402,6 +405,7 @@ class GroupCallService {
     if (this.session) {
       this.session.recoveryFailed = false;
     }
+    this.lastTransportResetAt = Date.now();
   }
 
   private async createPeer(peerId: string): Promise<PeerState> {
@@ -442,10 +446,10 @@ class GroupCallService {
         usernameFragment: event.candidate.usernameFragment ?? null,
       }).then((result) => {
         if (!result.success) {
-          this.emitError(result.error || 'Failed to send group call ICE candidate');
+          log(`[GROUP-CALL][PAIR][ICE_SEND_FAIL] to=${peerId.slice(-8)} reason=${result.error || 'Failed to send group call ICE candidate'}`);
         }
       }).catch((error: unknown) => {
-        this.emitError(errStr(error, 'Failed to send group call ICE candidate'));
+        log(`[GROUP-CALL][PAIR][ICE_SEND_FAIL] to=${peerId.slice(-8)} reason=${errStr(error, 'Failed to send group call ICE candidate')}`);
       });
     };
 
@@ -665,6 +669,13 @@ class GroupCallService {
       }
     } catch (error: unknown) {
       this.closePeer(peerId);
+      const sinceTransportReset = Date.now() - this.lastTransportResetAt;
+      if (this.lastTransportResetAt > 0 && sinceTransportReset < this.LOCAL_RECOVERY_OFFER_TOAST_SUPPRESSION_MS) {
+        // We're inside a recovery window — OFFER failures are expected while
+        // libp2p rebuilds its connections. Log only, don't toast.
+        log(`[GROUP-CALL][PAIR][OFFER_SEND_FAIL] to=${peerId.slice(-8)} reason=${errStr(error, 'Failed to start group call audio negotiation')} suppressed=local_recovery sinceMs=${sinceTransportReset}`);
+        return;
+      }
       this.emitError(errStr(error, 'Failed to start group call audio negotiation'));
     }
   }

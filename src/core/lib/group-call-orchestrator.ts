@@ -65,8 +65,11 @@ const LOCAL_NETWORK_CHANGE_DEBOUNCE_MS = 500;
 const LOCAL_NETWORK_INTERFACE_POLL_MS = 2_000;
 const LOCAL_NETWORK_INTERFACE_CONFIRMATION_COUNT = 2;
 const LOCAL_NETWORK_INTERFACE_SKIP_PATTERNS = /^(lo|virbr|vnet|docker|br-|vboxnet|vmnet|tun|tap|zt|wg|ppp|awdl|utun|cni|podman)/;
-const LOCAL_NETWORK_RECOVERY_JOIN_ATTEMPTS = 2;
-const LOCAL_NETWORK_RECOVERY_RETRY_DELAY_MS = 2_000;
+const LOCAL_NETWORK_RECOVERY_JOIN_ATTEMPTS = 4;
+const LOCAL_NETWORK_RECOVERY_RETRY_DELAY_MS = 3_000;
+const LOCAL_NETWORK_RECOVERY_POST_GIVEUP_WINDOW_MS = 30_000;
+const LOCAL_NETWORK_CHANGE_SUPPRESS_FALLBACK_MS = 60_000;
+const LOCAL_NETWORK_RECOVERY_DEDUP_MS = 3_000;
 
 type GroupCallActionResult = {
   success: boolean;
@@ -255,6 +258,10 @@ export class GroupCallOrchestrator {
   private lastInterfaceSignature: string | null = null;
   private candidateInterfaceSignature: string | null = null;
   private candidateInterfaceSeenCount = 0;
+  private postGiveupRetryHandler: EventListener | null = null;
+  private postGiveupRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastLocalNetworkChangeAt = 0;
+  private lastTransportResetAt = 0;
 
   constructor(config: GroupCallOrchestratorConfig) {
     this.node = config.node;
@@ -281,6 +288,7 @@ export class GroupCallOrchestrator {
     this.node.removeEventListener('peer:disconnect', this.peerDisconnectHandler);
     this.node.removeEventListener('self:peer:update', this.selfPeerUpdateHandler);
     this.clearLocalNetworkChangeTimer();
+    this.clearPostGiveupRetry();
     this.stopInterfacePolling();
     this.clearAllPeerDisconnectTimers();
     this.localTransportResetPeerIds.clear();
@@ -645,6 +653,21 @@ export class GroupCallOrchestrator {
     const chat = this.requireEligibleGroupChat(chatId);
     if (!this.session || this.session.chatId !== chatId || this.session.role !== 'writer') {
       return { success: false, error: 'No recovering writer session' };
+    }
+
+    // If a local network change happened recently, the renderer's 10s writer-recover
+    // timeout is firing during what is really an in-flight network transition.
+    // Don't destroy the session — arm post-giveup retry; the banner only fires
+    // if that window also expires without recovery. Return success so the
+    // renderer doesn't surface this as a user-facing error.
+    const sinceLocalChange = Date.now() - this.lastLocalNetworkChangeAt;
+    if (this.lastLocalNetworkChangeAt > 0 && sinceLocalChange < LOCAL_NETWORK_CHANGE_SUPPRESS_FALLBACK_MS) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][RECOVER][WRITER_FALLBACK_SUPPRESSED] group=${chat.group_id?.slice(0, 8)} call=${this.session.callId.slice(0, 8)} sinceLocalChangeMs=${sinceLocalChange}`,
+      );
+      this.armPostGiveupRetry(this.session);
+      return { success: true, error: null, callId: this.session.callId, reason: 'writer_fallback_deferred' };
     }
 
     const callId = this.session.callId;
@@ -2154,8 +2177,11 @@ export class GroupCallOrchestrator {
     const endedSession = this.session;
     this.session = null;
     this.clearLocalNetworkChangeTimer();
+    this.clearPostGiveupRetry();
     this.stopInterfacePolling();
     this.localNetworkRecoveryInProgress = false;
+    this.lastLocalNetworkChangeAt = 0;
+    this.lastTransportResetAt = 0;
     this.localTransportResetPeerIds.clear();
     this.clearAllPeerDisconnectTimers();
     this.clearPendingJoinResponse();
@@ -2304,6 +2330,90 @@ export class GroupCallOrchestrator {
     this.resetInterfacePollingCandidate();
   }
 
+  private clearPostGiveupRetry(): void {
+    if (this.postGiveupRetryHandler) {
+      this.node.removeEventListener('peer:connect', this.postGiveupRetryHandler);
+      this.postGiveupRetryHandler = null;
+    }
+    if (this.postGiveupRetryTimer) {
+      clearTimeout(this.postGiveupRetryTimer);
+      this.postGiveupRetryTimer = null;
+    }
+  }
+
+  private armPostGiveupRetry(session: GroupCallSession): void {
+    this.clearPostGiveupRetry();
+    const targets = new Set(
+      session.authoritativeParticipants
+        .map((participant) => participant.peerId)
+        .filter((peerId) => peerId !== this.localPeerId()),
+    );
+    if (targets.size === 0) {
+      return;
+    }
+
+    const handler: EventListener = (event) => {
+      const peerId = (event as CustomEvent<unknown>).detail?.toString?.();
+      if (!peerId || !targets.has(peerId)) {
+        return;
+      }
+      if (!this.session || this.session.callId !== session.callId) {
+        this.clearPostGiveupRetry();
+        return;
+      }
+      // TEMP_LOG
+      log(`[GROUP-CALL][NETWORK][POST_GIVEUP_RETRY] group=${session.groupId.slice(0, 8)} call=${session.callId.slice(0, 8)} peer=${peerId.slice(-8)}`);
+      this.clearPostGiveupRetry();
+      void this.joinGroupCall(session.chatId, {
+        keepEvidenceOnZero: true,
+        forceRejoin: true,
+      }).catch((error: unknown) => {
+        log(`[GROUP-CALL][NETWORK][POST_GIVEUP_RETRY_ERROR] reason=${errStr(error)}`);
+      });
+    };
+
+    this.postGiveupRetryHandler = handler;
+    this.node.addEventListener('peer:connect', handler);
+    this.postGiveupRetryTimer = setTimeout(() => {
+      // TEMP_LOG
+      log(`[GROUP-CALL][NETWORK][POST_GIVEUP_RETRY_EXPIRED] group=${session.groupId.slice(0, 8)} call=${session.callId.slice(0, 8)}`);
+      this.clearPostGiveupRetry();
+      // Recovery has truly failed: retries exhausted AND no peer reconnected
+      // within the post-giveup window. Now surface the banner.
+      if (this.session && this.session.callId === session.callId) {
+        this.emitStateChanged(this.session.state, { reason: 'recovery_failed' });
+      }
+    }, LOCAL_NETWORK_RECOVERY_POST_GIVEUP_WINDOW_MS);
+    // TEMP_LOG
+    log(`[GROUP-CALL][NETWORK][POST_GIVEUP_RETRY_ARMED] group=${session.groupId.slice(0, 8)} call=${session.callId.slice(0, 8)} targets=${[...targets].map((p) => p.slice(-8)).join(',')} windowMs=${LOCAL_NETWORK_RECOVERY_POST_GIVEUP_WINDOW_MS}`);
+
+    // If any target is already connected, fire immediately. The peer:connect
+    // event may have fired before this listener was armed (between the failed
+    // recovery probe and the giveup), so we'd otherwise wait the full window
+    // for an event that already happened.
+    for (const peerId of targets) {
+      let isConnected = false;
+      try {
+        isConnected = this.node.getConnections(peerIdFromString(peerId)).length > 0;
+      } catch {
+        // Malformed peerId is implausible here, just skip.
+      }
+      if (!isConnected) {
+        continue;
+      }
+      // TEMP_LOG
+      log(`[GROUP-CALL][NETWORK][POST_GIVEUP_RETRY_IMMEDIATE] group=${session.groupId.slice(0, 8)} call=${session.callId.slice(0, 8)} peer=${peerId.slice(-8)} reason=already_connected`);
+      this.clearPostGiveupRetry();
+      void this.joinGroupCall(session.chatId, {
+        keepEvidenceOnZero: true,
+        forceRejoin: true,
+      }).catch((error: unknown) => {
+        log(`[GROUP-CALL][NETWORK][POST_GIVEUP_RETRY_ERROR] reason=${errStr(error)}`);
+      });
+      return;
+    }
+  }
+
   private scheduleLocalNetworkChangeRecovery(): void {
     if (this.localNetworkRecoveryInProgress) {
       return;
@@ -2333,6 +2443,8 @@ export class GroupCallOrchestrator {
       .filter((peerId) => peerId !== this.localPeerId());
 
     this.localNetworkRecoveryInProgress = true;
+    this.lastLocalNetworkChangeAt = Date.now();
+    this.clearPostGiveupRetry();
     remotePeerIds.forEach((peerId) => this.localTransportResetPeerIds.add(peerId));
 
     try {
@@ -2363,7 +2475,23 @@ export class GroupCallOrchestrator {
         return;
       }
 
+      // Suppress duplicate transport_reset cycles fired in quick succession.
+      // libp2p's destructive reconnect itself emits self:peer:update (new
+      // advertised addresses), which re-triggers our recovery handler. The
+      // second cycle's force_reconnect is cooldown-skipped (libp2p didn't
+      // do anything new), so re-emitting transport_reset just causes the
+      // renderer to restart its writer probe and produce duplicate signaling
+      // failures + toast spam. Within 3s of the last emission we treat the
+      // previous one as still authoritative and skip the rest of the cycle.
+      const sinceLastReset = Date.now() - this.lastTransportResetAt;
+      if (this.lastTransportResetAt > 0 && sinceLastReset < LOCAL_NETWORK_RECOVERY_DEDUP_MS) {
+        // TEMP_LOG
+        log(`[GROUP-CALL][NETWORK][TRANSPORT_RESET_SKIP] group=${session.groupId.slice(0, 8)} call=${session.callId.slice(0, 8)} reason=dedup sinceMs=${sinceLastReset}`);
+        return;
+      }
+
       this.clearAllPeerDisconnectTimers();
+      this.lastTransportResetAt = Date.now();
       this.emitStateChanged(this.session.state, { reason: 'transport_reset' });
 
       if (session.role === 'participant') {
@@ -2391,7 +2519,9 @@ export class GroupCallOrchestrator {
             log(
               `[GROUP-CALL][NETWORK][RECOVERY_GIVEUP] group=${session.groupId.slice(0, 8)} call=${session.callId.slice(0, 8)} attempts=${attempt} reason=${result.reason ?? 'unknown'}`,
             );
-            this.emitStateChanged(this.session.state, { reason: 'recovery_failed' });
+            // Stay silent for the user: we're arming a 30s post-giveup retry
+            // that often succeeds. The banner only fires from the expired path.
+            this.armPostGiveupRetry(session);
             return;
           }
 

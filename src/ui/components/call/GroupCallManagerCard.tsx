@@ -196,7 +196,7 @@ export const GroupCallManagerCard = () => {
       </div>
 
       {snapshot.recoveryFailed && snapshot.state === 'waiting' && (
-        <div className="mt-3 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning-foreground">
+        <div className="mt-3 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-foreground">
           Reconnecting failed. Leave and rejoin if the call does not recover.
         </div>
       )}
