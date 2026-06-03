@@ -24,6 +24,7 @@ export type GroupCallSnapshot = {
   connectedPeerIds: string[];
   pendingDisconnects: { peerId: string; expiresAt: number }[];
   localMuted: boolean;
+  recoveryFailed: boolean;
 };
 
 type GroupCallServiceEvent =
@@ -51,6 +52,7 @@ type GroupCallSession = {
   participants: GroupCallParticipant[];
   participantPeerIds: string[];
   pendingDisconnects: { peerId: string; expiresAt: number }[];
+  recoveryFailed: boolean;
 };
 
 type PendingJoinAdmission = {
@@ -147,6 +149,7 @@ class GroupCallService {
         connectedPeerIds: [],
         pendingDisconnects: [],
         localMuted: this.localMuted,
+        recoveryFailed: false,
       };
     }
 
@@ -164,6 +167,7 @@ class GroupCallService {
       connectedPeerIds: this.connectedPeerIds(),
       pendingDisconnects: [...this.session.pendingDisconnects],
       localMuted: this.localMuted,
+      recoveryFailed: this.session.recoveryFailed,
     };
   }
 
@@ -395,6 +399,9 @@ class GroupCallService {
     this.offeredPeerIds.clear();
     this.writerReconnectProbeInProgress = false;
     this.queueIceServerRefresh();
+    if (this.session) {
+      this.session.recoveryFailed = false;
+    }
   }
 
   private async createPeer(peerId: string): Promise<PeerState> {
@@ -463,6 +470,9 @@ class GroupCallService {
       const state = pc.connectionState;
       if (state === 'connected') {
         peer.connected = true;
+        if (this.session) {
+          this.session.recoveryFailed = false;
+        }
         this.clearPeerDisconnectTimer(peer);
         this.clearJoinConnectTimer();
         this.emitState();
@@ -769,6 +779,7 @@ class GroupCallService {
             connectedPeerIds: [],
             pendingDisconnects: [],
             localMuted: false,
+            recoveryFailed: false,
           },
         });
         this.lastEmittedState = 'ended';
@@ -795,6 +806,7 @@ class GroupCallService {
         participants: event.participants ?? [],
         participantPeerIds: event.participants?.map((participant) => participant.peerId) ?? [],
         pendingDisconnects: event.pendingDisconnects ?? [],
+        recoveryFailed: event.reason === 'recovery_failed',
       };
       if (event.role === 'writer' && event.writerPeerId) {
         this.localPeerId = event.writerPeerId;
@@ -834,6 +846,15 @@ class GroupCallService {
     }
     if (event.pendingDisconnects) {
       currentSession.pendingDisconnects = event.pendingDisconnects;
+    }
+    if (event.reason === 'recovery_failed') {
+      currentSession.recoveryFailed = true;
+    } else if (
+      event.reason === 'transport_reset'
+      || event.reason === 'writer_reconnect_recover'
+      || event.reason === 'joined'
+    ) {
+      currentSession.recoveryFailed = false;
     }
     if (event.reason === 'transport_reset') {
       this.resetTransportForRecovery();

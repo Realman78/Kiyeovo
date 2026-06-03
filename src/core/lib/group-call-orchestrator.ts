@@ -65,6 +65,8 @@ const LOCAL_NETWORK_CHANGE_DEBOUNCE_MS = 500;
 const LOCAL_NETWORK_INTERFACE_POLL_MS = 2_000;
 const LOCAL_NETWORK_INTERFACE_CONFIRMATION_COUNT = 2;
 const LOCAL_NETWORK_INTERFACE_SKIP_PATTERNS = /^(lo|virbr|vnet|docker|br-|vboxnet|vmnet|tun|tap|zt|wg|ppp|awdl|utun|cni|podman)/;
+const LOCAL_NETWORK_RECOVERY_JOIN_ATTEMPTS = 3;
+const LOCAL_NETWORK_RECOVERY_RETRY_DELAY_MS = 5_000;
 
 type GroupCallActionResult = {
   success: boolean;
@@ -97,6 +99,7 @@ type QueryWinner = {
 };
 
 type QueryResolution =
+  | { kind: 'unreachable' }
   | { kind: 'zero' }
   | { kind: 'conflict' }
   | { kind: 'winner'; winner: QueryWinner };
@@ -191,6 +194,9 @@ function isActiveQueryResponse(
 }
 
 function describeQueryResolution(result: QueryResolution): string {
+  if (result.kind === 'unreachable') {
+    return 'unreachable';
+  }
   if (result.kind === 'zero') {
     return 'zero';
   }
@@ -446,6 +452,9 @@ export class GroupCallOrchestrator {
 
       const queryStartedAt = Date.now();
       const queryResolution = await this.discoverActiveCall(chat);
+      if (queryResolution.kind === 'unreachable') {
+        return { success: false, error: 'Could not reach group members' };
+      }
       if (queryResolution.kind === 'winner') {
         this.writePersistentCallEvidence(chat.id, queryResolution.winner.callId, queryResolution.winner.timestamp, 'start-discovered-existing');
         return {
@@ -524,6 +533,9 @@ export class GroupCallOrchestrator {
       }
 
       const queryResolution = await this.discoverActiveCall(chat, { bypassCache: true });
+      if (queryResolution.kind === 'unreachable') {
+        return { success: false, error: 'Could not reach group members', reason: 'join_unreachable' };
+      }
       if (queryResolution.kind === 'zero') {
         if (!options?.keepEvidenceOnZero) {
           this.clearPersistentCallEvidence(chat.id, 'join-query-zero');
@@ -1133,14 +1145,14 @@ export class GroupCallOrchestrator {
 
   private async runDiscoveryQuery(chat: Chat): Promise<QueryResolution> {
     const firstCollected = await this.collectQueryResponses(chat);
-    const firstResolution = this.resolveQueryResponses(chat, firstCollected.responses);
+    const firstResolution = this.resolveQueryResponses(chat, firstCollected);
     if (firstResolution.kind !== 'conflict') {
       return firstResolution;
     }
 
     await delay(DISCOVERY_CONFLICT_RETRY_DELAY_MS);
     const secondCollected = await this.collectQueryResponses(chat);
-    return this.resolveQueryResponses(chat, secondCollected.responses);
+    return this.resolveQueryResponses(chat, secondCollected);
   }
 
   private async collectQueryResponses(
@@ -1235,7 +1247,16 @@ export class GroupCallOrchestrator {
     });
   }
 
-  private resolveQueryResponses(chat: Chat, responses: GroupCallQueryResponseSignal[]): QueryResolution {
+  private resolveQueryResponses(chat: Chat, collected: CollectedQueryResponses): QueryResolution {
+    const { responses } = collected;
+    if (responses.length === 0) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][QUERY][RESOLVE] group=${chat.group_id?.slice(0, 8)} responses=0 sent=${collected.sentCount} settled=${collected.settledCount} positives=0 outcome=unreachable`,
+      );
+      return { kind: 'unreachable' };
+    }
+
     const positiveResponses = responses.filter(isActiveQueryResponse);
     if (positiveResponses.length === 0) {
       // TEMP_LOG
@@ -1478,6 +1499,9 @@ export class GroupCallOrchestrator {
     const retryResolution = await this.discoverActiveCall(chat, { bypassCache: true });
     if (retryResolution.kind === 'zero') {
       return { success: false, error: 'This call may have ended', clearEvidence: true, reason: 'join_timeout' };
+    }
+    if (retryResolution.kind === 'unreachable') {
+      return { success: false, error: 'Could not reach group members', reason: 'join_unreachable' };
     }
     if (retryResolution.kind === 'conflict') {
       return { success: false, error: 'Call state conflict - please try again', reason: 'join_conflict' };
@@ -2326,10 +2350,39 @@ export class GroupCallOrchestrator {
       this.emitStateChanged(this.session.state, { reason: 'transport_reset' });
 
       if (session.role === 'participant') {
-        await this.joinGroupCall(session.chatId, {
-          keepEvidenceOnZero: true,
-          forceRejoin: true,
-        });
+        for (let attempt = 1; attempt <= LOCAL_NETWORK_RECOVERY_JOIN_ATTEMPTS; attempt += 1) {
+          if (
+            !this.session
+            || this.session.groupId !== session.groupId
+            || this.session.callId !== session.callId
+            || this.session.role !== 'participant'
+          ) {
+            return;
+          }
+
+          const result = await this.joinGroupCall(session.chatId, {
+            keepEvidenceOnZero: true,
+            forceRejoin: true,
+          });
+          if (result.success) {
+            return;
+          }
+          if (result.reason === 'join_query_zero' || result.reason === 'join_aborted') {
+            return;
+          }
+          if (attempt >= LOCAL_NETWORK_RECOVERY_JOIN_ATTEMPTS) {
+            log(
+              `[GROUP-CALL][NETWORK][RECOVERY_GIVEUP] group=${session.groupId.slice(0, 8)} call=${session.callId.slice(0, 8)} attempts=${attempt} reason=${result.reason ?? 'unknown'}`,
+            );
+            this.emitStateChanged(this.session.state, { reason: 'recovery_failed' });
+            return;
+          }
+
+          log(
+            `[GROUP-CALL][NETWORK][RECOVERY_RETRY] group=${session.groupId.slice(0, 8)} call=${session.callId.slice(0, 8)} attempt=${attempt} reason=${result.reason ?? 'unknown'}`,
+          );
+          await delay(LOCAL_NETWORK_RECOVERY_RETRY_DELAY_MS);
+        }
       }
     } finally {
       this.localNetworkRecoveryInProgress = false;
