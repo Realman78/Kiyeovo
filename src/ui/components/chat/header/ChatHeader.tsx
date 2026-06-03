@@ -548,6 +548,10 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
 
       if (!result.success) {
         groupCallService.releasePreparedLocalAudio();
+        if (result.reason === 'host_reconnecting') {
+          toast.info(result.error || 'The host is reconnecting. Please try again shortly.');
+          return 'failed';
+        }
         if (
           result.error === 'This call may have ended'
           && !refreshedChat?.last_known_active_call_id

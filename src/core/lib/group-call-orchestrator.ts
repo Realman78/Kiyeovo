@@ -58,10 +58,13 @@ const MAX_GROUP_CALL_PARTICIPANTS = 10;
 const ADMISSION_TOKEN_MAX_AGE_MS = 30_000;
 const RECENT_WRITER_SET_MAX_ENTRIES = 3;
 const PEER_DISCONNECT_GRACE_MS = 30_000;
+const HOST_RECONNECTING_RETRY_SECONDS = Math.ceil(PEER_DISCONNECT_GRACE_MS / 1_000);
+const HOST_RECONNECTING_MESSAGE = `The host is reconnecting. Please try again in ${HOST_RECONNECTING_RETRY_SECONDS} seconds`;
 
 type GroupCallActionResult = {
   success: boolean;
   error: string | null;
+  reason?: string;
   outcome?: 'created' | 'existing';
   callId?: string;
 };
@@ -84,6 +87,7 @@ type QueryWinner = {
   rosterVersion: number;
   participants: GroupCallParticipant[];
   writerPeerId: string;
+  writerResponded: boolean;
   timestamp: number;
 };
 
@@ -502,14 +506,14 @@ export class GroupCallOrchestrator {
         if (!options?.keepEvidenceOnZero) {
           this.clearPersistentCallEvidence(chat.id, 'join-query-zero');
         }
-        return { success: false, error: 'This call may have ended' };
+        return { success: false, error: 'This call may have ended', reason: 'join_query_zero' };
       }
       if (queryResolution.kind === 'conflict') {
-        return { success: false, error: 'Call state conflict - please try again' };
+        return { success: false, error: 'Call state conflict - please try again', reason: 'join_conflict' };
       }
       if (queryResolution.winner.writerPeerId === this.localPeerId()) {
         if (options?.allowWriterRecovery === false) {
-          return { success: false, error: 'This call may have ended' };
+          return { success: false, error: 'This call may have ended', reason: 'writer_recovery_disallowed' };
         }
         return this.recoverWriterAfterReconnect(chat, queryResolution.winner);
       }
@@ -520,12 +524,18 @@ export class GroupCallOrchestrator {
         if (joinResult.clearEvidence) {
           this.clearPersistentCallEvidence(chat.id, 'join-failure-clear');
         }
-        this.endLocalSession(joinResult.reason);
-        return { success: false, error: joinResult.error ?? 'Failed to join group call' };
+        if (this.session?.chatId === chat.id) {
+          this.endLocalSession(joinResult.reason);
+        }
+        return {
+          success: false,
+          error: joinResult.error ?? 'Failed to join group call',
+          reason: joinResult.reason,
+        };
       }
 
       if (!this.session) {
-        return { success: false, error: 'Failed to finalize group call join' };
+        return { success: false, error: 'Failed to finalize group call join', reason: 'join_finalize_failed' };
       }
 
       this.writePersistentCallEvidence(chat.id, this.session.callId, Date.now(), 'join-success');
@@ -537,7 +547,7 @@ export class GroupCallOrchestrator {
         this.session.authoritativeParticipants,
         this.session.rosterVersion,
       );
-      return { success: true, error: null, callId: this.session.callId };
+      return { success: true, error: null, callId: this.session.callId, reason: 'joined' };
     } catch (error: unknown) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to join group call' };
     }
@@ -551,6 +561,11 @@ export class GroupCallOrchestrator {
       }
 
       const session = this.session;
+      if (session.state === 'joining') {
+        this.endLocalSession('join_aborted');
+        return { success: true, error: null, callId: session.callId, reason: 'join_aborted' };
+      }
+
       const remainingParticipants = session.authoritativeParticipants
         .filter((participant) => participant.peerId !== this.localPeerId());
 
@@ -1244,6 +1259,7 @@ export class GroupCallOrchestrator {
       rosterVersion: canonical.rosterVersion,
       participants: sortParticipants(canonical.participants),
       writerPeerId: canonical.writerPeerId,
+      writerResponded: winningCallResponses.some((response) => response.fromPeerId === canonical.writerPeerId),
       timestamp: canonical.timestamp,
     };
     // TEMP_LOG
@@ -1351,7 +1367,7 @@ export class GroupCallOrchestrator {
 
   private recoverWriterAfterReconnect(chat: Chat, winner: QueryWinner): GroupCallActionResult {
     if (!winner.participants.some((participant) => participant.peerId === this.localPeerId())) {
-      return { success: false, error: 'Call state conflict - please try again' };
+      return { success: false, error: 'Call state conflict - please try again', reason: 'join_conflict' };
     }
 
     this.clearPendingJoinResponse();
@@ -1385,7 +1401,7 @@ export class GroupCallOrchestrator {
     log(
       `[GROUP-CALL][RECOVER][WRITER] group=${chat.group_id?.slice(0, 8)} call=${winner.callId.slice(0, 8)} participants=${summarizeParticipants(winner.participants)}`,
     );
-    return { success: true, error: null, callId: winner.callId };
+    return { success: true, error: null, callId: winner.callId, reason: 'writer_reconnect_recover' };
   }
 
   private async requestJoinWithRetry(
@@ -1395,6 +1411,13 @@ export class GroupCallOrchestrator {
     const firstAttempt = await this.requestJoinFromWinner(chat, winner);
     if (firstAttempt.kind === 'accepted') {
       return { success: true, reason: 'joined' };
+    }
+    if (firstAttempt.kind === 'send_failed' && !winner.writerResponded) {
+      return {
+        success: false,
+        error: HOST_RECONNECTING_MESSAGE,
+        reason: 'host_reconnecting',
+      };
     }
     if (firstAttempt.kind === 'aborted') {
       return { success: false, error: 'Group call join was cancelled', reason: 'join_aborted' };
@@ -1408,6 +1431,14 @@ export class GroupCallOrchestrator {
       };
     }
 
+    if (
+      !this.session
+      || this.session.groupId !== chat.group_id
+      || this.session.state !== 'joining'
+    ) {
+      return { success: false, error: 'Group call join was cancelled', reason: 'join_aborted' };
+    }
+
     const retryResolution = await this.discoverActiveCall(chat, { bypassCache: true });
     if (retryResolution.kind === 'zero') {
       return { success: false, error: 'This call may have ended', clearEvidence: true, reason: 'join_timeout' };
@@ -1416,10 +1447,31 @@ export class GroupCallOrchestrator {
       return { success: false, error: 'Call state conflict - please try again', reason: 'join_conflict' };
     }
 
-    this.beginJoiningSession(chat, retryResolution.winner);
+    if (
+      !this.session
+      || this.session.groupId !== chat.group_id
+      || this.session.state !== 'joining'
+    ) {
+      return { success: false, error: 'Group call join was cancelled', reason: 'join_aborted' };
+    }
+
+    if (
+      this.session.callId !== retryResolution.winner.callId
+      || this.session.currentWriterPeerId !== retryResolution.winner.writerPeerId
+    ) {
+      this.beginJoiningSession(chat, retryResolution.winner);
+    }
+
     const secondAttempt = await this.requestJoinFromWinner(chat, retryResolution.winner);
     if (secondAttempt.kind === 'accepted') {
       return { success: true, reason: 'joined' };
+    }
+    if (secondAttempt.kind === 'send_failed' && !retryResolution.winner.writerResponded) {
+      return {
+        success: false,
+        error: HOST_RECONNECTING_MESSAGE,
+        reason: 'host_reconnecting',
+      };
     }
     if (secondAttempt.kind === 'aborted') {
       return { success: false, error: 'Group call join was cancelled', reason: 'join_aborted' };
@@ -1442,10 +1494,17 @@ export class GroupCallOrchestrator {
   ): Promise<
     | { kind: 'accepted' }
     | { kind: 'rejected'; reason: GroupCallJoinFailureReason }
+    | { kind: 'send_failed' }
     | { kind: 'timeout' }
     | { kind: 'aborted' }
   > {
-    if (!this.session || this.session.groupId !== chat.group_id || this.session.callId !== winner.callId) {
+    if (
+      !this.session
+      || this.session.groupId !== chat.group_id
+      || this.session.callId !== winner.callId
+      || this.session.currentWriterPeerId !== winner.writerPeerId
+      || this.session.state !== 'joining'
+    ) {
       return { kind: 'rejected', reason: 'call_not_active' };
     }
 
@@ -1483,7 +1542,7 @@ export class GroupCallOrchestrator {
         `[GROUP-CALL][JOIN][SEND_FAIL] group=${chat.group_id?.slice(0, 8)} call=${winner.callId.slice(0, 8)} writer=${winner.writerPeerId.slice(-8)} local=${this.localPeerId().slice(-8)} selfDial=${String(winner.writerPeerId === this.localPeerId())}`,
       );
       this.clearPendingJoinResponse();
-      return { kind: 'timeout' };
+      return { kind: 'send_failed' };
     }
 
     // TEMP_LOG
@@ -1516,7 +1575,12 @@ export class GroupCallOrchestrator {
       `[GROUP-CALL][JOIN][ACCEPTED_RESPONSE] group=${chat.group_id?.slice(0, 8)} call=${winner.callId.slice(0, 8)} writer=${winner.writerPeerId.slice(-8)} responseWriter=${response.writerPeerId.slice(-8)} from=${response.fromPeerId.slice(-8)} local=${this.localPeerId().slice(-8)} version=${response.rosterVersion} participants=${summarizeParticipants(response.participants)}`,
     );
 
-    if (!this.session || this.session.groupId !== response.groupId || this.session.callId !== response.callId) {
+    if (
+      !this.session
+      || this.session.groupId !== response.groupId
+      || this.session.callId !== response.callId
+      || this.session.state !== 'joining'
+    ) {
       // TEMP_LOG
       log(
         `[GROUP-CALL][JOIN][ACCEPT_INVALID] reason=session_mismatch group=${chat.group_id?.slice(0, 8)} call=${winner.callId.slice(0, 8)} local=${this.localPeerId().slice(-8)} sessionGroup=${this.session?.groupId ?? 'none'} sessionCall=${this.session?.callId ?? 'none'}`,

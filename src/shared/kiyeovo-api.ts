@@ -81,6 +81,7 @@ export type ScreenShareSourceRequest = {
 export type GroupCallActionResult = {
   success: boolean;
   error: string | null;
+  reason?: string;
   outcome?: 'created' | 'existing';
   callId?: string;
 };
