@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import os from 'os';
 import { peerIdFromString } from '@libp2p/peer-id';
 import { NETWORK_MODES, getNetworkModeRuntime } from '../constants.js';
 import type {
@@ -60,7 +61,10 @@ const RECENT_WRITER_SET_MAX_ENTRIES = 3;
 const PEER_DISCONNECT_GRACE_MS = 30_000;
 const HOST_RECONNECTING_RETRY_SECONDS = Math.ceil(PEER_DISCONNECT_GRACE_MS / 1_000);
 const HOST_RECONNECTING_MESSAGE = `The host is reconnecting. Please try again in ${HOST_RECONNECTING_RETRY_SECONDS} seconds`;
-const LOCAL_NETWORK_CHANGE_DEBOUNCE_MS = 1000;
+const LOCAL_NETWORK_CHANGE_DEBOUNCE_MS = 500;
+const LOCAL_NETWORK_INTERFACE_POLL_MS = 2_000;
+const LOCAL_NETWORK_INTERFACE_CONFIRMATION_COUNT = 2;
+const LOCAL_NETWORK_INTERFACE_SKIP_PATTERNS = /^(lo|virbr|vnet|docker|br-|vboxnet|vmnet|tun|tap|zt|wg|ppp|awdl|utun|cni|podman)/;
 
 type GroupCallActionResult = {
   success: boolean;
@@ -239,6 +243,10 @@ export class GroupCallOrchestrator {
   private joinRequestQueue: Promise<void> = Promise.resolve();
   private localNetworkChangeTimer: ReturnType<typeof setTimeout> | null = null;
   private localNetworkRecoveryInProgress = false;
+  private interfacePollTimer: ReturnType<typeof setInterval> | null = null;
+  private lastInterfaceSignature: string | null = null;
+  private candidateInterfaceSignature: string | null = null;
+  private candidateInterfaceSeenCount = 0;
 
   constructor(config: GroupCallOrchestratorConfig) {
     this.node = config.node;
@@ -264,6 +272,7 @@ export class GroupCallOrchestrator {
     this.node.removeEventListener('peer:disconnect', this.peerDisconnectHandler);
     this.node.removeEventListener('self:peer:update', this.selfPeerUpdateHandler);
     this.clearLocalNetworkChangeTimer();
+    this.stopInterfacePolling();
     this.clearAllPeerDisconnectTimers();
     this.localTransportResetPeerIds.clear();
     this.clearDeferredQueries();
@@ -484,6 +493,7 @@ export class GroupCallOrchestrator {
         recentWriterPeerIds: [this.localPeerId()],
       };
       this.callActivityRegistry.setGroupCall({ callId, groupId: chat.group_id! });
+      this.startInterfacePolling();
       this.writePersistentCallEvidence(chat.id, callId, joinedAt, 'local-start');
       this.emitStateChanged('waiting', { reason: 'started' });
 
@@ -1382,6 +1392,7 @@ export class GroupCallOrchestrator {
       ].slice(0, RECENT_WRITER_SET_MAX_ENTRIES),
     };
     this.callActivityRegistry.setGroupCall({ callId: winner.callId, groupId: chat.group_id! });
+    this.startInterfacePolling();
     this.emitStateChanged('joining', { reason: 'joining' });
     // TEMP_LOG
     log(
@@ -1418,6 +1429,7 @@ export class GroupCallOrchestrator {
       ].slice(0, RECENT_WRITER_SET_MAX_ENTRIES),
     };
     this.callActivityRegistry.setGroupCall({ callId: winner.callId, groupId: chat.group_id! });
+    this.startInterfacePolling();
     this.writePersistentCallEvidence(chat.id, winner.callId, Date.now(), 'writer-reconnect-recover');
     // Restore the call as writer and let the renderer rebuild the peer mesh from the known roster.
     this.emitStateChanged('waiting', { reason: 'writer_reconnect_recover' });
@@ -2115,6 +2127,7 @@ export class GroupCallOrchestrator {
     const endedSession = this.session;
     this.session = null;
     this.clearLocalNetworkChangeTimer();
+    this.stopInterfacePolling();
     this.localNetworkRecoveryInProgress = false;
     this.localTransportResetPeerIds.clear();
     this.clearAllPeerDisconnectTimers();
@@ -2175,6 +2188,93 @@ export class GroupCallOrchestrator {
     }
     clearTimeout(this.localNetworkChangeTimer);
     this.localNetworkChangeTimer = null;
+  }
+
+  private resetInterfacePollingCandidate(): void {
+    this.candidateInterfaceSignature = null;
+    this.candidateInterfaceSeenCount = 0;
+  }
+
+  private computeInterfaceSignature(): string {
+    const entries: string[] = [];
+    const interfaces = os.networkInterfaces();
+    for (const name of Object.keys(interfaces).sort()) {
+      if (LOCAL_NETWORK_INTERFACE_SKIP_PATTERNS.test(name)) {
+        continue;
+      }
+      for (const address of interfaces[name] ?? []) {
+        if (address.internal || address.family !== 'IPv4') {
+          continue;
+        }
+        if (address.address === '0.0.0.0' || address.address.startsWith('169.254.')) {
+          continue;
+        }
+        entries.push(`${name}:${address.address}`);
+      }
+    }
+    return entries.join('|');
+  }
+
+  private handleInterfacePollTick(): void {
+    let signature: string;
+    try {
+      signature = this.computeInterfaceSignature();
+      console.log('SIGNATURE at T:', Date.now(), signature);
+    } catch (error: unknown) {
+      log(`[GROUP-CALL][NETWORK][POLL_ERROR] reason=${errStr(error)}`);
+      return;
+    }
+    if (this.lastInterfaceSignature === null) {
+      this.lastInterfaceSignature = signature;
+      this.resetInterfacePollingCandidate();
+      return;
+    }
+
+    if (signature === this.lastInterfaceSignature) {
+      this.resetInterfacePollingCandidate();
+      return;
+    }
+
+    if (signature !== this.candidateInterfaceSignature) {
+      this.candidateInterfaceSignature = signature;
+      this.candidateInterfaceSeenCount = 1;
+      return;
+    }
+
+    this.candidateInterfaceSeenCount += 1;
+    if (this.candidateInterfaceSeenCount < LOCAL_NETWORK_INTERFACE_CONFIRMATION_COUNT) {
+      return;
+    }
+
+    const previousSignature = this.lastInterfaceSignature;
+    this.lastInterfaceSignature = signature;
+    this.resetInterfacePollingCandidate();
+    log(`[GROUP-CALL][NETWORK][INTERFACE_CHANGE] from=${previousSignature || 'none'} to=${signature || 'none'}`);
+    this.scheduleLocalNetworkChangeRecovery();
+  }
+
+  private startInterfacePolling(): void {
+    if (this.interfacePollTimer) {
+      return;
+    }
+    this.lastInterfaceSignature = this.computeInterfaceSignature();
+    this.resetInterfacePollingCandidate();
+    log(`[GROUP-CALL][NETWORK][POLL_START] initial=${this.lastInterfaceSignature || 'none'}`);
+    this.interfacePollTimer = setInterval(() => {
+      this.handleInterfacePollTick();
+    }, LOCAL_NETWORK_INTERFACE_POLL_MS);
+  }
+
+  private stopInterfacePolling(): void {
+    if (this.interfacePollTimer) {
+      clearInterval(this.interfacePollTimer);
+      this.interfacePollTimer = null;
+    }
+    if (this.lastInterfaceSignature !== null) {
+      log(`[GROUP-CALL][NETWORK][POLL_STOP] last=${this.lastInterfaceSignature || 'none'}`);
+    }
+    this.lastInterfaceSignature = null;
+    this.resetInterfacePollingCandidate();
   }
 
   private scheduleLocalNetworkChangeRecovery(): void {
