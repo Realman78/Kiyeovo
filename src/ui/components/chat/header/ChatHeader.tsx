@@ -906,14 +906,14 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
     ? isLeavingGroupCall
       ? 'Leaving group call'
       : isStartingGroupCall
-      ? 'Starting group call'
-      : isJoiningGroupCall
-        ? 'Joining group call'
-        : isGroupCallSyncBlocked
-          ? activeChat?.offlineFetchNeedsSync
-            ? 'Sync group updates before using group calls'
-            : 'Wait for group updates to finish syncing before using group calls'
-          : 'Group call is unavailable right now'
+        ? 'Starting group call'
+        : isJoiningGroupCall
+          ? 'Joining group call'
+          : isGroupCallSyncBlocked
+            ? activeChat?.offlineFetchNeedsSync
+              ? 'Sync group updates before using group calls'
+              : 'Wait for group updates to finish syncing before using group calls'
+            : 'Group call is unavailable right now'
     : isInThisGroupCall
       ? 'Leave group call'
       : hasKnownGroupCall
@@ -939,18 +939,18 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
   const groupCallStatusMessage = isLeavingGroupCall
     ? 'Leaving group call...'
     : isStartingGroupCall
-    ? 'Starting group call... wait up to 10 seconds'
-    : isJoiningGroupCall
-      ? 'Joining group call... wait up to 10 seconds'
-      : isInThisGroupCall
-        ? null
-        : isGroupCallSyncBlocked
-        ? activeChat?.offlineFetchNeedsSync
-          ? 'Sync group updates before starting or joining a call'
-          : 'Waiting for group updates to finish syncing'
-        : hasKnownGroupCall
-          ? 'A group call may already be active in this chat.'
-          : null;
+      ? 'Starting group call... wait up to 10 seconds'
+      : isJoiningGroupCall
+        ? 'Joining group call... wait up to 10 seconds'
+        : isInThisGroupCall
+          ? null
+          : isGroupCallSyncBlocked
+            ? activeChat?.offlineFetchNeedsSync
+              ? 'Sync group updates before joining a call'
+              : 'Syncing group updates...'
+            : hasKnownGroupCall
+              ? 'Group call may already be active'
+              : null;
   const showGroupCallStatusMessage = isGroup && Boolean(groupCallStatusMessage);
   const groupCallButtonVisualState = isLeavingGroupCall
     ? 'leaving'
@@ -1058,13 +1058,16 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
       ) : null}
       <div className="min-w-4 flex-1">
         <h3 className="flex min-w-4 items-center gap-2 text-left font-medium text-foreground">
-          <span className="block min-w-4 flex-1 truncate" title={username}>{username}</span>
-          {isFetchingGroupUpdates && (
-            <span className="inline-flex shrink-0 items-center gap-1 text-[11px] font-normal text-muted-foreground">
-              <span className="w-3 h-3 border-2 border-muted-foreground border-t-transparent rounded-full animate-spin" />
-              fetching group updates
-            </span>
-          )}
+          <span className="block min-w-4 flex-1 truncate" title={username}>
+            {username}
+            {isFetchingGroupUpdates && (
+              <span className="inline-flex ml-2 shrink-0 items-center gap-1 text-[11px] font-normal text-muted-foreground">
+                <span className="w-3 h-3 border-2 border-muted-foreground border-t-transparent rounded-full animate-spin" />
+                fetching group updates
+              </span>
+            )}
+          </span>
+
         </h3>
         {isGroup ? (
           <div className="flex flex-col gap-0.5">
