@@ -384,6 +384,19 @@ class GroupCallService {
     this.emitState(true);
   }
 
+  private resetTransportForRecovery(): void {
+    this.clearJoinConnectTimer();
+    this.pendingJoinAdmission = null;
+    this.peers.forEach((_, peerId) => {
+      this.closePeer(peerId);
+    });
+    this.peers.clear();
+    this.pendingIceByPeerId.clear();
+    this.offeredPeerIds.clear();
+    this.writerReconnectProbeInProgress = false;
+    this.queueIceServerRefresh();
+  }
+
   private async createPeer(peerId: string): Promise<PeerState> {
     if (this.iceServersRefreshPromise) {
       await this.iceServersRefreshPromise;
@@ -787,6 +800,12 @@ class GroupCallService {
         this.localPeerId = event.writerPeerId;
       }
       this.queueIceServerRefresh();
+      if (event.reason === 'transport_reset') {
+        this.resetTransportForRecovery();
+        if (this.session.role === 'writer') {
+          void this.startWriterRecoveryProbe();
+        }
+      }
       if (event.reason === 'writer_reconnect_recover' && this.session.role === 'writer') {
         void this.startWriterRecoveryProbe();
       }
@@ -815,6 +834,12 @@ class GroupCallService {
     }
     if (event.pendingDisconnects) {
       currentSession.pendingDisconnects = event.pendingDisconnects;
+    }
+    if (event.reason === 'transport_reset') {
+      this.resetTransportForRecovery();
+      if (currentSession.role === 'writer') {
+        void this.startWriterRecoveryProbe();
+      }
     }
     if (event.reason === 'writer_reconnect_recover' && currentSession.role === 'writer') {
       void this.startWriterRecoveryProbe();

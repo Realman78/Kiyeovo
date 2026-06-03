@@ -60,6 +60,7 @@ const RECENT_WRITER_SET_MAX_ENTRIES = 3;
 const PEER_DISCONNECT_GRACE_MS = 30_000;
 const HOST_RECONNECTING_RETRY_SECONDS = Math.ceil(PEER_DISCONNECT_GRACE_MS / 1_000);
 const HOST_RECONNECTING_MESSAGE = `The host is reconnecting. Please try again in ${HOST_RECONNECTING_RETRY_SECONDS} seconds`;
+const LOCAL_NETWORK_CHANGE_DEBOUNCE_MS = 1000;
 
 type GroupCallActionResult = {
   success: boolean;
@@ -213,7 +214,7 @@ export class GroupCallOrchestrator {
   private readonly recentDurableHintResults = new Map<string, number>();
   private readonly deferredQueriesByKey = new Map<string, DeferredQuery>();
   private readonly pendingPeerDisconnectTimers = new Map<string, { timer: ReturnType<typeof setTimeout>; expiresAt: number }>();
-  private participantReconnectInProgress = false;
+  private readonly localTransportResetPeerIds = new Set<string>();
   private readonly peerConnectHandler: EventListener = (event) => {
     const peerId = (event as CustomEvent<unknown>).detail?.toString?.();
     if (peerId) {
@@ -228,11 +229,16 @@ export class GroupCallOrchestrator {
       this.handlePeerDisconnect(peerId);
     }
   };
+  private readonly selfPeerUpdateHandler: EventListener = () => {
+    this.scheduleLocalNetworkChangeRecovery();
+  };
   private session: GroupCallSession | null = null;
   private storeDurableHint: ((groupId: string) => Promise<void>) | null = null;
   private pendingJoinResponse: PendingJoinResponse | null = null;
   private pendingRosterBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
   private joinRequestQueue: Promise<void> = Promise.resolve();
+  private localNetworkChangeTimer: ReturnType<typeof setTimeout> | null = null;
+  private localNetworkRecoveryInProgress = false;
 
   constructor(config: GroupCallOrchestratorConfig) {
     this.node = config.node;
@@ -246,6 +252,7 @@ export class GroupCallOrchestrator {
     this.onError = config.onError ?? (() => undefined);
     this.node.addEventListener('peer:connect', this.peerConnectHandler);
     this.node.addEventListener('peer:disconnect', this.peerDisconnectHandler);
+    this.node.addEventListener('self:peer:update', this.selfPeerUpdateHandler);
   }
 
   setDurableHintStorage(storeDurableHint: ((groupId: string) => Promise<void>) | null): void {
@@ -255,7 +262,10 @@ export class GroupCallOrchestrator {
   cleanup(): void {
     this.node.removeEventListener('peer:connect', this.peerConnectHandler);
     this.node.removeEventListener('peer:disconnect', this.peerDisconnectHandler);
+    this.node.removeEventListener('self:peer:update', this.selfPeerUpdateHandler);
+    this.clearLocalNetworkChangeTimer();
     this.clearAllPeerDisconnectTimers();
+    this.localTransportResetPeerIds.clear();
     this.clearDeferredQueries();
   }
 
@@ -486,7 +496,7 @@ export class GroupCallOrchestrator {
 
   async joinGroupCall(
     chatId: number,
-    options?: { keepEvidenceOnZero?: boolean; allowWriterRecovery?: boolean },
+    options?: { keepEvidenceOnZero?: boolean; allowWriterRecovery?: boolean; forceRejoin?: boolean },
   ): Promise<GroupCallActionResult> {
     try {
       const chat = this.requireEligibleGroupChat(chatId);
@@ -499,7 +509,7 @@ export class GroupCallOrchestrator {
         return { success: false, error: gate.error };
       }
 
-      if (this.session && this.session.groupId === chat.group_id) {
+      if (this.session && this.session.groupId === chat.group_id && !options?.forceRejoin) {
         return { success: true, error: null, outcome: 'existing', callId: this.session.callId };
       }
 
@@ -507,6 +517,9 @@ export class GroupCallOrchestrator {
       if (queryResolution.kind === 'zero') {
         if (!options?.keepEvidenceOnZero) {
           this.clearPersistentCallEvidence(chat.id, 'join-query-zero');
+        }
+        if (options?.forceRejoin && this.session?.chatId === chat.id) {
+          this.endLocalSession('call_ended_during_partition');
         }
         return { success: false, error: 'This call may have ended', reason: 'join_query_zero' };
       }
@@ -1349,6 +1362,10 @@ export class GroupCallOrchestrator {
       ? this.session.recentWriterPeerIds
       : [];
 
+    this.clearPendingJoinResponse();
+    this.clearPendingRosterBroadcast();
+    this.clearAllPeerDisconnectTimers();
+
     this.session = {
       chatId: chat.id,
       groupId: chat.group_id!,
@@ -2097,6 +2114,9 @@ export class GroupCallOrchestrator {
 
     const endedSession = this.session;
     this.session = null;
+    this.clearLocalNetworkChangeTimer();
+    this.localNetworkRecoveryInProgress = false;
+    this.localTransportResetPeerIds.clear();
     this.clearAllPeerDisconnectTimers();
     this.clearPendingJoinResponse();
     this.clearPendingRosterBroadcast();
@@ -2149,6 +2169,74 @@ export class GroupCallOrchestrator {
     this.pendingPeerDisconnectTimers.clear();
   }
 
+  private clearLocalNetworkChangeTimer(): void {
+    if (!this.localNetworkChangeTimer) {
+      return;
+    }
+    clearTimeout(this.localNetworkChangeTimer);
+    this.localNetworkChangeTimer = null;
+  }
+
+  private scheduleLocalNetworkChangeRecovery(): void {
+    if (this.localNetworkRecoveryInProgress) {
+      return;
+    }
+    this.clearLocalNetworkChangeTimer();
+    this.localNetworkChangeTimer = setTimeout(() => {
+      this.localNetworkChangeTimer = null;
+      void this.handleLocalNetworkChangeRecovery().catch((error: unknown) => {
+        log(`[GROUP-CALL][NETWORK][RESET][ERROR] reason=${errStr(error)}`);
+      });
+    }, LOCAL_NETWORK_CHANGE_DEBOUNCE_MS);
+  }
+
+  private async handleLocalNetworkChangeRecovery(): Promise<void> {
+    if (this.localNetworkRecoveryInProgress || !this.session) {
+      return;
+    }
+
+    const session = this.session;
+    if (session.state === 'joining') {
+      this.endLocalSession('join_aborted');
+      return;
+    }
+
+    const remotePeerIds = session.authoritativeParticipants
+      .map((participant) => participant.peerId)
+      .filter((peerId) => peerId !== this.localPeerId());
+
+    this.localNetworkRecoveryInProgress = true;
+    remotePeerIds.forEach((peerId) => this.localTransportResetPeerIds.add(peerId));
+
+    try {
+      await Promise.allSettled(
+        remotePeerIds.map(async (peerId) => this.node.hangUp(peerIdFromString(peerId))),
+      );
+
+      if (
+        !this.session
+        || this.session.groupId !== session.groupId
+        || this.session.callId !== session.callId
+        || this.session.role !== session.role
+      ) {
+        return;
+      }
+
+      this.clearAllPeerDisconnectTimers();
+      this.emitStateChanged(this.session.state, { reason: 'transport_reset' });
+
+      if (session.role === 'participant') {
+        await this.joinGroupCall(session.chatId, {
+          keepEvidenceOnZero: true,
+          forceRejoin: true,
+        });
+      }
+    } finally {
+      this.localNetworkRecoveryInProgress = false;
+      this.localTransportResetPeerIds.clear();
+    }
+  }
+
   private maybeClearDisconnectGraceFromSignal(
     signal: GroupCallControlSignalMessage | GroupCallPairSignalMessage,
   ): void {
@@ -2198,6 +2286,7 @@ export class GroupCallOrchestrator {
   }
 
   private async handlePeerConnect(peerId: string): Promise<void> {
+    this.localTransportResetPeerIds.delete(peerId);
     const hadDisconnectTimer = this.pendingPeerDisconnectTimers.has(peerId);
     if (!hadDisconnectTimer || !this.session) {
       return;
@@ -2238,6 +2327,9 @@ export class GroupCallOrchestrator {
   }
 
   private handlePeerDisconnect(peerId: string): void {
+    if (this.localNetworkRecoveryInProgress && this.localTransportResetPeerIds.has(peerId)) {
+      return;
+    }
     if (
       !this.session
       || this.pendingPeerDisconnectTimers.has(peerId)
