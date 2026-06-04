@@ -257,6 +257,12 @@ class GroupCallService {
       if (!this.session || this.session.callId !== callId) {
         return;
       }
+      // TEMP_LOG
+      const peerStates: string[] = [];
+      this.peers.forEach((peer, peerId) => {
+        peerStates.push(`${peerId.slice(-8)}:conn=${peer.pc.connectionState}/ice=${peer.pc.iceConnectionState}/sig=${peer.pc.signalingState}`);
+      });
+      log(`[GROUP-CALL][JOIN_TIMEOUT][FIRE] context=${timeoutContext} connectedPeers=${this.connectedPeerCount()} peers=[${peerStates.join('|')}]`);
       if (this.connectedPeerCount() > 0) {
         return;
       }
@@ -472,6 +478,8 @@ class GroupCallService {
 
     pc.onconnectionstatechange = () => {
       const state = pc.connectionState;
+      // TEMP_LOG
+      log(`[GROUP-CALL][PC][CONN_STATE] peer=${peerId.slice(-8)} state=${state} iceState=${pc.iceConnectionState} iceGather=${pc.iceGatheringState}`);
       if (state === 'connected') {
         peer.connected = true;
         if (this.session) {
@@ -493,6 +501,12 @@ class GroupCallService {
         this.closePeer(peerId);
         this.emitState();
       }
+    };
+
+    // TEMP_LOG: ICE state transitions (signal of whether ICE is making progress
+    // vs stuck checking after writer probe sends OFFER).
+    pc.oniceconnectionstatechange = () => {
+      log(`[GROUP-CALL][PC][ICE_STATE] peer=${peerId.slice(-8)} iceState=${pc.iceConnectionState} connState=${pc.connectionState}`);
     };
 
     this.peers.set(peerId, peer);
@@ -617,12 +631,16 @@ class GroupCallService {
 
   private async startWriterRecoveryProbe(): Promise<void> {
     if (!this.session || this.session.role !== 'writer' || this.writerReconnectProbeInProgress || !this.localPeerId) {
+      // TEMP_LOG
+      log(`[GROUP-CALL][WRITER_PROBE][SKIP] reason=${!this.session ? 'no_session' : this.session.role !== 'writer' ? 'not_writer' : this.writerReconnectProbeInProgress ? 'already_in_progress' : 'no_local_peer_id'}`);
       return;
     }
 
     const targets = this.session.participantPeerIds
       .filter((peerId) => peerId !== this.localPeerId);
     if (targets.length === 0) {
+      // TEMP_LOG
+      log('[GROUP-CALL][WRITER_PROBE][SKIP] reason=no_targets');
       return;
     }
 
@@ -630,6 +648,8 @@ class GroupCallService {
     targets.forEach((peerId) => {
       this.offeredPeerIds.delete(peerId);
     });
+    // TEMP_LOG
+    log(`[GROUP-CALL][WRITER_PROBE][START] call=${this.session.callId.slice(0, 8)} targets=${targets.map((p) => p.slice(-8)).join(',')} timeoutMs=10000`);
     this.scheduleJoinConnectTimeout(this.session.callId, 'writer_recover');
     await Promise.allSettled(targets.map(async (peerId) => {
       await this.createOfferForPeer(peerId, undefined, true);
@@ -725,15 +745,21 @@ class GroupCallService {
   private async handleIncomingAnswer(signal: Extract<GroupCallPairSignalForRenderer, { type: 'CALL_ANSWER' }>): Promise<void> {
     const peer = this.peers.get(signal.fromPeerId);
     if (!peer) {
+      // TEMP_LOG
+      log(`[GROUP-CALL][ANSWER][DROP] from=${signal.fromPeerId.slice(-8)} reason=no_peer_in_map`);
       return;
     }
 
+    // TEMP_LOG
+    log(`[GROUP-CALL][ANSWER][APPLY] from=${signal.fromPeerId.slice(-8)} signalingState=${peer.pc.signalingState}`);
     try {
       await peer.pc.setRemoteDescription({
         type: 'answer',
         sdp: signal.answerSdp,
       });
       await this.flushPendingIce(peer);
+      // TEMP_LOG
+      log(`[GROUP-CALL][ANSWER][APPLIED] from=${signal.fromPeerId.slice(-8)} signalingState=${peer.pc.signalingState}`);
     } catch (error: unknown) {
       this.closePeer(signal.fromPeerId);
       this.emitError(errStr(error, 'Failed to apply group call answer'));
