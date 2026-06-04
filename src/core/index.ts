@@ -16,7 +16,7 @@ import { ChatDatabase } from './db/database.js';
 import { createNetworkHealthMonitor } from './network/network-health.js';
 import { createReconnectController } from './network/reconnect-controller.js';
 import { startFastRelayKeepAlive } from './network/relay-keepalive.js';
-import { DATABASE_CLEANUP_INTERVAL, getNetworkModeConfig, MAX_BOOTSTRAP_NODES_FAST, MAX_BOOTSTRAP_NODES_TOR, SECOND } from './constants.js';
+import { DATABASE_CLEANUP_INTERVAL, getNetworkModeConfig, MAX_BOOTSTRAP_NODES_FAST, MAX_BOOTSTRAP_NODES_TOR, POST_RECONNECT_RECENT_ACTIVITY_WINDOW_MS, POST_RECONNECT_RECENT_GROUP_CAP, SECOND } from './constants.js';
 import type {
   ChatNode,
   ContactRequestEvent,
@@ -231,6 +231,12 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     currentDhtConnected = connected;
     currentDhtReason = reason;
     sendDHTConnectionStatus({ connected });
+
+    // Fire post-reconnect hooks on the next "we're healthy" emit after a
+    // destructive reconnect was marked
+    if (connected === true && reconnectController.consumeCatchupNeeded()) {
+      reconnectController.fireReconnectSucceededHandlers();
+    }
   };
 
   const getConnectedBootstrapConnections = (
@@ -254,6 +260,7 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
   // by the periodic health gate and on-demand (send-triggered) reconnects
   const performReconnect = async (): Promise<boolean> => {
     try {
+      reconnectController.markCatchupNeeded();
       console.log('[Core] All sampled connections appear stale; closing and reconnecting...');
       const staleConnections = node.getConnections();
       if (staleConnections.length > 0) {
@@ -485,6 +492,17 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
   );
 
   messageHandler.setRequestReconnect(requestImmediateReconnect);
+
+  // After a destructive reconnect succeeds, start a group offline-message check
+  reconnectController.onReconnectSucceeded(() => {
+    const since = Date.now() - POST_RECONNECT_RECENT_ACTIVITY_WINDOW_MS;
+    const callChatId = groupCallOrchestrator.getActiveCallChatId();
+    void messageHandler.checkRecentlyActiveGroupOfflineMessages(
+      since,
+      POST_RECONNECT_RECENT_GROUP_CAP,
+      callChatId !== null ? [callChatId] : undefined,
+    );
+  });
 
   groupCallOrchestrator.setDurableHintStorage((groupId: string) => messageHandler.storeGroupCallHint(groupId));
   messageHandler.setGroupCallHintHandler((groupId: string) => {

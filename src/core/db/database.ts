@@ -1517,6 +1517,29 @@ export class ChatDatabase {
         return rows.map(row => this.mapChatRow(row));
     }
 
+    getRecentlyActiveGroupChats(sinceMs: number, limit: number): Chat[] {
+        const stmt = this.db.prepare(`
+            SELECT * FROM chats
+            WHERE type = 'group'
+              AND network_mode = ?
+              AND datetime(updated_at) > datetime(?)
+              AND group_id IS NOT NULL
+              AND key_version > 0
+              AND (
+                group_status IN ('active', 'rekeying')
+                OR (group_status = 'removed' AND needs_removed_catchup = 1)
+              )
+            ORDER BY datetime(updated_at) DESC
+            LIMIT ?
+        `);
+        const sinceIso = new Date(sinceMs).toISOString();
+        const rows = stmt.all(this.getActiveNetworkMode(), sinceIso, limit) as any[];
+
+        if (!rows) return [];
+
+        return rows.map(row => this.mapChatRow(row));
+    }
+
     getAllPendingGroupChatsCreatedByMe(myPeerId: string, limit: number = 100): Chat[] {
         const stmt = this.db.prepare(`
             SELECT * FROM chats

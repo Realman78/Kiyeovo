@@ -13,6 +13,8 @@ export function createReconnectController() {
   let bootstrapRetryInProgress = false;
   let lastReconnectAt = 0;
   let postRetryVerifyTimeout: ReturnType<typeof setTimeout> | null = null;
+  let catchupNeeded = false;
+  const reconnectSucceededHandlers: Array<() => void> = [];
 
   const getPostRetryVerifyDelayMs = (mode: NetworkMode): number => (
     mode === 'anonymous' ? POST_RETRY_VERIFY_DELAY_ANONYMOUS_MS : POST_RETRY_VERIFY_DELAY_FAST_MS
@@ -139,5 +141,29 @@ export function createReconnectController() {
     shouldSuppressNegativeStatusDuringBootstrapRetry,
     tryBeginReconnect,
     tryBeginImmediateReconnect,
+    // Register a handler to fire after a destructive reconnect succeeds
+    onReconnectSucceeded(handler: () => void): void {
+      reconnectSucceededHandlers.push(handler);
+    },
+    fireReconnectSucceededHandlers(): void {
+      for (const handler of reconnectSucceededHandlers) {
+        try {
+          handler();
+        } catch (error: unknown) {
+          console.warn('[Reconnect] post-reconnect handler threw:', error);
+        }
+      }
+    },
+    // A destructive reconnect happened
+    markCatchupNeeded(): void {
+      catchupNeeded = true;
+    },
+    consumeCatchupNeeded(): boolean {
+      if (!catchupNeeded) {
+        return false;
+      }
+      catchupNeeded = false;
+      return true;
+    },
   };
 }

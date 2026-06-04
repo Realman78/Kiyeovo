@@ -253,6 +253,10 @@ export class GroupOfflineManager {
     });
   }
 
+  resolveRecentlyActiveGroupChats(sinceMs: number, limit: number): Chat[] {
+    return this.deps.database.getRecentlyActiveGroupChats(sinceMs, limit);
+  }
+
   async checkGroupOfflineMessages(chatIds?: number[], options?: GroupOfflineCheckOptions): Promise<GroupOfflineCheckResult> {
     const mode: GroupOfflineCheckMode = options?.mode ?? 'periodic';
     const runId = ++this.offlineCheckRunCounter;

@@ -2522,6 +2522,28 @@ export class MessageHandler {
     }
   }
 
+  async checkRecentlyActiveGroupOfflineMessages(
+    sinceMs: number,
+    limit: number,
+    alwaysIncludeChatIds?: number[],
+  ): Promise<void> {
+    try {
+      const recent = this.groupOfflineManager.resolveRecentlyActiveGroupChats(sinceMs, limit);
+      const chatIds = new Set<number>(recent.map(c => c.id));
+      if (alwaysIncludeChatIds) {
+        for (const id of alwaysIncludeChatIds) {
+          chatIds.add(id);
+        }
+      }
+      if (chatIds.size === 0) {
+        return;
+      }
+      await this.groupOfflineManager.checkGroupOfflineMessages([...chatIds]);
+    } catch (error: unknown) {
+      generalErrorHandler(error, '[GROUP-OFFLINE] Failed to check recently active group offline messages');
+    }
+  }
+
   private async storeOfflineMessageDB(user: User, writeBucketKey: string, message: string): Promise<StrippedMessage> {
     try {
       const userIdentity = this.usernameRegistry.getUserIdentity();

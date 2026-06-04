@@ -363,3 +363,6 @@ export const GROUP_OFFLINE_MESSAGE_TTL_MS = MESSAGE_TTL;
 export const GROUP_MISSING_USED_UNTIL_SCAN_EPOCH_CAP = 10; // Max historical epochs scanned for missing used-until markers
 export const MAX_BOOTSTRAP_NODES_FAST = 3; // Target bootstrap connection count in fast mode
 export const MAX_BOOTSTRAP_NODES_TOR = 2; // Target bootstrap connection count in anonymous mode
+
+export const POST_RECONNECT_RECENT_ACTIVITY_WINDOW_MS = 15 * 60_000;
+export const POST_RECONNECT_RECENT_GROUP_CAP = 15;

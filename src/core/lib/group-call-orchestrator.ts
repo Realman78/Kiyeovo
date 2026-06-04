@@ -445,6 +445,11 @@ export class GroupCallOrchestrator {
     return this.callActivityRegistry.hasGroupCall();
   }
 
+  // Chat ID of the currently-active group call session
+  getActiveCallChatId(): number | null {
+    return this.session?.chatId ?? null;
+  }
+
   async startGroupCall(chatId: number): Promise<GroupCallActionResult> {
     try {
       const chat = this.requireEligibleGroupChat(chatId);
