@@ -1,12 +1,11 @@
 import { createSlice, type PayloadAction } from '@reduxjs/toolkit';
-import type { CallDirection, CallLifecycleState, CallMediaType, ScreenShareLifecycleState } from '../../types';
+import type { CameraLifecycleState, CallDirection, CallLifecycleState, ScreenShareLifecycleState } from '../../types';
 
 export interface IncomingCall {
   callId: string;
   peerId: string;
   peerName: string;
   offerSdp: string;
-  mediaType: CallMediaType;
   receivedAt: number;
 }
 
@@ -15,7 +14,6 @@ export interface ActiveCall {
   peerId: string;
   peerName: string;
   direction: CallDirection;
-  mediaType: CallMediaType;
   state: Exclude<CallLifecycleState, 'idle' | 'ended'>;
   startedAt: number;
   reason?: string;
@@ -30,6 +28,12 @@ interface CallState {
     localState: ScreenShareLifecycleState;
     remoteSharing: boolean;
   };
+  camera: {
+    callId: string | null;
+    peerId: string | null;
+    localState: CameraLifecycleState;
+    remoteEnabled: boolean;
+  };
   lastError: string | null;
 }
 
@@ -42,6 +46,12 @@ const initialState: CallState = {
     localState: 'idle',
     remoteSharing: false,
   },
+  camera: {
+    callId: null,
+    peerId: null,
+    localState: 'off',
+    remoteEnabled: false,
+  },
   lastError: null,
 };
 
@@ -51,6 +61,15 @@ function resetScreenShareState(state: CallState): void {
     peerId: null,
     localState: 'idle',
     remoteSharing: false,
+  };
+}
+
+function resetCameraState(state: CallState): void {
+  state.camera = {
+    callId: null,
+    peerId: null,
+    localState: 'off',
+    remoteEnabled: false,
   };
 }
 
@@ -66,12 +85,12 @@ const callSlice = createSlice({
         || state.activeCall.peerId !== action.payload.peerId
       ) {
         resetScreenShareState(state);
+        resetCameraState(state);
         state.activeCall = {
           callId: action.payload.callId,
           peerId: action.payload.peerId,
           peerName: action.payload.peerName,
           direction: 'incoming',
-          mediaType: action.payload.mediaType,
           state: 'ringing_in',
           startedAt: action.payload.receivedAt,
         };
@@ -88,7 +107,6 @@ const callSlice = createSlice({
         peerId: string;
         peerName: string;
         direction: CallDirection;
-        mediaType?: CallMediaType;
         state: CallLifecycleState;
         reason?: string;
         timestamp: number;
@@ -103,6 +121,7 @@ const callSlice = createSlice({
         ) {
           state.activeCall = null;
           resetScreenShareState(state);
+          resetCameraState(state);
         }
         if (
           state.incomingCall
@@ -120,12 +139,12 @@ const callSlice = createSlice({
         || state.activeCall.peerId !== payload.peerId
       ) {
         resetScreenShareState(state);
+        resetCameraState(state);
         state.activeCall = {
           callId: payload.callId,
           peerId: payload.peerId,
           peerName: payload.peerName,
           direction: payload.direction,
-          mediaType: payload.mediaType ?? 'audio',
           state: payload.state,
           startedAt: payload.timestamp,
           reason: payload.reason,
@@ -133,7 +152,6 @@ const callSlice = createSlice({
       } else {
         state.activeCall.state = payload.state;
         state.activeCall.direction = payload.direction;
-        state.activeCall.mediaType = payload.mediaType ?? state.activeCall.mediaType;
         state.activeCall.peerName = payload.peerName;
         state.activeCall.reason = payload.reason;
       }
@@ -165,6 +183,7 @@ const callSlice = createSlice({
         ) {
           state.activeCall = null;
           resetScreenShareState(state);
+          resetCameraState(state);
         }
         if (
           state.incomingCall
@@ -232,10 +251,43 @@ const callSlice = createSlice({
         resetScreenShareState(state);
       }
     },
+    applyCameraState: (
+      state,
+      action: PayloadAction<{
+        callId: string;
+        peerId: string;
+        localState: CameraLifecycleState;
+        remoteEnabled: boolean;
+      }>
+    ) => {
+      const payload = action.payload;
+      if (
+        !state.activeCall
+        || state.activeCall.callId !== payload.callId
+        || state.activeCall.peerId !== payload.peerId
+      ) {
+        if (payload.localState === 'off' && !payload.remoteEnabled) {
+          resetCameraState(state);
+        }
+        return;
+      }
+
+      state.camera = {
+        callId: payload.callId,
+        peerId: payload.peerId,
+        localState: payload.localState,
+        remoteEnabled: payload.remoteEnabled,
+      };
+
+      if (payload.localState === 'off' && !payload.remoteEnabled) {
+        resetCameraState(state);
+      }
+    },
     resetCallState: (state) => {
       state.incomingCall = null;
       state.activeCall = null;
       resetScreenShareState(state);
+      resetCameraState(state);
       state.lastError = null;
     },
   },
@@ -250,6 +302,7 @@ export const {
   clearCallError,
   setCallPeerName,
   applyScreenShareState,
+  applyCameraState,
   resetCallState,
 } = callSlice.actions;
 

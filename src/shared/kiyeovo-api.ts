@@ -132,7 +132,6 @@ export interface KiyeovoAPI {
     peerId: string,
     callId: string,
     offerSdp: string,
-    mediaType?: 'audio' | 'video',
   ) => Promise<{ success: boolean; error: string | null }>;
   acceptCall: (peerId: string, callId: string, answerSdp: string) => Promise<{ success: boolean; error: string | null }>;
   rejectCall: (

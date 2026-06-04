@@ -66,6 +66,8 @@ If the behavior is ambiguous, **stop and ask**.
 
 Use best practices. This is a P2P electron application focused on security and privacy. Keep that in mind and follow best practices in those topics.
 
+**Never** worry about legacy support. The product will launch with a new version that everyone will have to install otherwise it will not work. If you notice something that might need legacy support (unlikely), point it out.
+
 Regarding code:
 
 - prefer clear ownership of state and behavior

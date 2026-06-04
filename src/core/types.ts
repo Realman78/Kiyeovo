@@ -667,6 +667,8 @@ export type CallSignalType =
   | 'CALL_REJECT'
   | 'CALL_END'
   | 'CALL_BUSY'
+  | 'CALL_CAMERA_STARTED'
+  | 'CALL_CAMERA_STOPPED'
   | 'CALL_SCREEN_SHARE_STARTED'
   | 'CALL_SCREEN_SHARE_STOPPED';
 
@@ -716,6 +718,14 @@ export type CallBusySignal = BaseCallSignal & {
   reason: 'busy';
 };
 
+export type CallCameraStartedSignal = BaseCallSignal & {
+  type: 'CALL_CAMERA_STARTED';
+};
+
+export type CallCameraStoppedSignal = BaseCallSignal & {
+  type: 'CALL_CAMERA_STOPPED';
+};
+
 export type CallScreenShareStartedSignal = BaseCallSignal & {
   type: 'CALL_SCREEN_SHARE_STARTED';
 };
@@ -732,6 +742,8 @@ export type CallSignalMessage =
   | CallRejectSignal
   | CallEndSignal
   | CallBusySignal
+  | CallCameraStartedSignal
+  | CallCameraStoppedSignal
   | CallScreenShareStartedSignal
   | CallScreenShareStoppedSignal;
 
@@ -742,6 +754,8 @@ export type UnsignedCallSignalMessage =
   | Omit<CallRejectSignal, 'signature'>
   | Omit<CallEndSignal, 'signature'>
   | Omit<CallBusySignal, 'signature'>
+  | Omit<CallCameraStartedSignal, 'signature'>
+  | Omit<CallCameraStoppedSignal, 'signature'>
   | Omit<CallScreenShareStartedSignal, 'signature'>
   | Omit<CallScreenShareStoppedSignal, 'signature'>;
 
@@ -790,6 +804,18 @@ export type CallSignalOutgoingInput =
     callId: string;
     toPeerId: string;
     reason: 'busy';
+    timestamp?: number;
+  }
+  | {
+    type: 'CALL_CAMERA_STARTED';
+    callId: string;
+    toPeerId: string;
+    timestamp?: number;
+  }
+  | {
+    type: 'CALL_CAMERA_STOPPED';
+    callId: string;
+    toPeerId: string;
     timestamp?: number;
   }
   | {

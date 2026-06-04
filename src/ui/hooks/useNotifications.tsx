@@ -159,7 +159,7 @@ export const useNotifications = () => {
         const callerName = directChat?.name || `user_${data.signal.fromPeerId.slice(-8)}`;
 
         await window.kiyeovoAPI.showNotification({
-          title: `Incoming ${data.signal.mediaType} call`,
+          title: 'Incoming call',
           body: `${callerName} is calling you`,
           chatId: directChat?.id,
         });

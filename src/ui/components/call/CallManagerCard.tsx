@@ -11,6 +11,7 @@ import {
   ScreenShare,
   ScreenShareOff,
   Video,
+  VideoOff,
   Volume2,
   VolumeX,
 } from 'lucide-react';
@@ -53,6 +54,7 @@ export const CallManagerCard = () => {
   const { toast } = useToast();
   const activeCall = useAppSelector((state) => state.call.activeCall);
   const incomingCall = useAppSelector((state) => state.call.incomingCall);
+  const camera = useAppSelector((state) => state.call.camera);
   const screenShare = useAppSelector((state) => state.call.screenShare);
   const [isMuted, setIsMuted] = useState(false);
   const [isDeafened, setIsDeafened] = useState(false);
@@ -67,7 +69,6 @@ export const CallManagerCard = () => {
   const [mediaTick, setMediaTick] = useState(0);
   const largeVideoRef = useRef<HTMLVideoElement | null>(null);
   const smallVideoRef = useRef<HTMLVideoElement | null>(null);
-  const compactRemotePreviewRef = useRef<HTMLVideoElement | null>(null);
   const previousAnchorRef = useRef<CallCardAnchor | null>(null);
   const fullscreenIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { anchor, setAnchor, positionClassName, snapToClosestCorner } = useCallCardAnchor();
@@ -117,15 +118,7 @@ export const CallManagerCard = () => {
     const media = callService.getMediaStreams();
     setLocalVideoStream(media.localStream);
     setRemoteVideoStream(media.remoteStream);
-
-    if (activeCall.mediaType !== 'video') {
-      if (isVideoExpanded) {
-        setIsVideoExpanded(false);
-        restoreAnchorAfterFullscreen();
-      }
-      setIsVideoStreamsSwapped(false);
-    }
-  }, [activeCall?.callId, activeCall?.mediaType]);
+  }, [activeCall?.callId]);
 
   useEffect(() => {
     if (!activeCall) {
@@ -154,7 +147,15 @@ export const CallManagerCard = () => {
     return unsubscribe;
   }, [activeCall?.callId, activeCall?.peerId]);
 
-  const isVideoCall = activeCall?.mediaType === 'video';
+  const isCameraForActiveCall = !!activeCall
+    && camera.callId === activeCall.callId
+    && camera.peerId === activeCall.peerId;
+  const localCameraState = isCameraForActiveCall ? camera.localState : 'off';
+  const isLocalCameraStarting = localCameraState === 'starting';
+  const isLocalCameraOn = localCameraState === 'on';
+  const isLocalCameraStopping = localCameraState === 'stopping';
+  const hasLocalCameraVisual = localCameraState !== 'off';
+  const isRemoteCameraEnabled = isCameraForActiveCall && camera.remoteEnabled;
 
   const isScreenShareForActiveCall = !!activeCall
     && screenShare.callId === activeCall.callId
@@ -164,29 +165,58 @@ export const CallManagerCard = () => {
   const isLocalScreenSharing = localScreenShareState === 'sharing';
   const isLocalScreenShareStopping = localScreenShareState === 'stopping';
   const isRemoteScreenSharing = isScreenShareForActiveCall && screenShare.remoteSharing;
-  const isVisualCall = isVideoCall || isLocalScreenSharing || isRemoteScreenSharing;
-  const canSwapVideos = isVideoCall && !isLocalScreenSharing && !isRemoteScreenSharing;
+
+  const isVisualCall = hasLocalCameraVisual || isRemoteCameraEnabled || isLocalScreenSharing || isRemoteScreenSharing;
+  const canSwapVideos = !isLocalScreenSharing && !isRemoteScreenSharing && hasLocalCameraVisual && isRemoteCameraEnabled;
+  const hasSecondaryVisualTile = (isLocalScreenSharing && isRemoteCameraEnabled)
+    || (isRemoteScreenSharing && hasLocalCameraVisual)
+    || canSwapVideos;
 
   const largeVideoStream = isLocalScreenSharing
     ? localVideoStream
     : isRemoteScreenSharing
       ? remoteVideoStream
-      : isVideoCall
+      : canSwapVideos
         ? (isVideoStreamsSwapped ? localVideoStream : remoteVideoStream)
-        : null;
+        : isRemoteCameraEnabled
+          ? remoteVideoStream
+          : hasLocalCameraVisual
+            ? localVideoStream
+            : null;
+
   const smallVideoStream = isLocalScreenSharing
-    ? remoteVideoStream
+    ? (isRemoteCameraEnabled ? remoteVideoStream : null)
     : isRemoteScreenSharing
-      ? localVideoStream
-      : isVideoCall
+      ? (hasLocalCameraVisual ? localVideoStream : null)
+      : canSwapVideos
         ? (isVideoStreamsSwapped ? remoteVideoStream : localVideoStream)
         : null;
-  const isLargeLocal = isLocalScreenSharing || (!isRemoteScreenSharing && isVideoStreamsSwapped);
-  const isSmallLocal = isRemoteScreenSharing || (!isLocalScreenSharing && !isRemoteScreenSharing && !isVideoStreamsSwapped);
-  const compactPreviewStream = isLocalScreenSharing ? localVideoStream : remoteVideoStream;
-  const compactPreviewLabel = isLocalScreenSharing ? 'Your screen' : activeCall?.peerName;
+
+  const isLargeLocal = isLocalScreenSharing
+    || (!isRemoteScreenSharing && !isRemoteCameraEnabled && hasLocalCameraVisual)
+    || (canSwapVideos && isVideoStreamsSwapped);
+  const isSmallLocal = (isRemoteScreenSharing && hasLocalCameraVisual)
+    || (canSwapVideos && !isVideoStreamsSwapped);
+
+  const largeLabel = isLocalScreenSharing
+    ? 'Your screen'
+    : isRemoteScreenSharing
+      ? `${activeCall?.peerName}'s screen`
+      : isLargeLocal
+        ? 'You'
+        : activeCall?.peerName ?? 'Remote';
+  const smallLabel = isLocalScreenSharing
+    ? activeCall?.peerName ?? 'Remote'
+    : isRemoteScreenSharing
+      ? 'You'
+      : isSmallLocal
+        ? 'You'
+        : activeCall?.peerName ?? 'Remote';
+
   const shouldPinFullscreenControls = isDraggingAnchor
     || isCallCardHovered
+    || isLocalCameraStarting
+    || isLocalCameraStopping
     || isLocalScreenShareStarting
     || isLocalScreenShareStopping;
   const shouldFadeCallCard = isVideoExpanded
@@ -234,7 +264,10 @@ export const CallManagerCard = () => {
       setIsVideoExpanded(false);
       restoreAnchorAfterFullscreen();
     }
-  }, [activeCall?.callId, isVisualCall, isVideoExpanded]);
+    if (!canSwapVideos) {
+      setIsVideoStreamsSwapped(false);
+    }
+  }, [activeCall?.callId, canSwapVideos, isVideoExpanded, isVisualCall]);
 
   useEffect(() => {
     const largeVideo = largeVideoRef.current;
@@ -268,22 +301,6 @@ export const CallManagerCard = () => {
     }
   }, [smallVideoStream, isVideoExpanded, mediaTick]);
 
-  useEffect(() => {
-    const compactPreview = compactRemotePreviewRef.current;
-    if (!compactPreview) return;
-
-    if (compactPreview.srcObject !== compactPreviewStream) {
-      compactPreview.srcObject = compactPreviewStream;
-    }
-
-    compactPreview.muted = true;
-    if (compactPreviewStream) {
-      void compactPreview.play().catch(() => {
-        // Playback can fail before user gesture.
-      });
-    }
-  }, [compactPreviewStream, isVisualCall, mediaTick, activeCall?.state, isVideoExpanded]);
-
   if (!activeCall) return null;
   if (activeCall.state === 'ringing_in' && incomingCall) return null;
 
@@ -291,12 +308,18 @@ export const CallManagerCard = () => {
   const timerText = showTimer ? formatCallDuration(elapsedSeconds) : null;
   const largeHasVideo = Boolean(largeVideoStream && largeVideoStream.getVideoTracks().length > 0);
   const smallHasVideo = Boolean(smallVideoStream && smallVideoStream.getVideoTracks().length > 0);
-  const compactPreviewHasVideo = Boolean(compactPreviewStream && compactPreviewStream.getVideoTracks().length > 0);
-  const showCompactPreview = isVisualCall && activeCall.state === 'active' && !isVideoExpanded;
+  const canToggleCamera = activeCall.state === 'active'
+    && !isLocalCameraStarting
+    && !isLocalCameraStopping;
   const canToggleScreenShare = activeCall.state === 'active'
     && !isLocalScreenShareStarting
     && !isLocalScreenShareStopping
     && !isRemoteScreenSharing;
+  const cameraButtonTitle = activeCall.state !== 'active'
+    ? 'Camera is available once the call is connected'
+    : isLocalCameraOn || isLocalCameraStarting
+      ? 'Turn camera off'
+      : 'Turn camera on';
   const screenShareTitle = isRemoteScreenSharing
     ? `${activeCall.peerName} is already sharing`
     : activeCall.state !== 'active'
@@ -304,6 +327,18 @@ export const CallManagerCard = () => {
       : isLocalScreenSharing
         ? 'Stop sharing screen'
         : 'Share screen';
+  const visualPlaceholderText = isLocalScreenSharing
+    ? 'Screen preview unavailable'
+    : isRemoteScreenSharing
+      ? 'Waiting for screen share...'
+      : isLocalCameraStarting
+        ? 'Starting camera...'
+        : isLargeLocal
+          ? 'Camera unavailable'
+          : 'Waiting for remote video...';
+  const secondaryPlaceholderText = isSmallLocal
+    ? (isLocalCameraStarting ? 'Starting camera...' : 'Camera unavailable')
+    : 'Waiting for remote video...';
 
   const handleHangup = async () => {
     if (isVideoExpanded) {
@@ -323,6 +358,26 @@ export const CallManagerCard = () => {
 
   const handleToggleDeafen = () => {
     setIsDeafened(callService.toggleDeafen());
+  };
+
+  const handleToggleCamera = async () => {
+    if (!canToggleCamera) return;
+
+    if (isLocalCameraOn) {
+      const result = await callService.stopCamera();
+      if (!result.success) {
+        toast.error(result.error || 'Failed to stop camera');
+      }
+      return;
+    }
+
+    const result = await callService.startCamera();
+    if (!result.success && !result.canceled) {
+      const message = result.error?.toLowerCase().includes('device not found')
+        ? 'Camera not found'
+        : result.error;
+      toast.error(message || 'Could not start camera');
+    }
   };
 
   const handleToggleScreenShare = async () => {
@@ -407,27 +462,15 @@ export const CallManagerCard = () => {
             />
           ) : (
             <div className="flex h-full w-full items-center justify-center text-sm text-white/80">
-              {isLocalScreenSharing
-                ? 'Screen preview unavailable'
-                : isRemoteScreenSharing
-                  ? 'Waiting for screen share...'
-                  : isLargeLocal
-                    ? 'Camera unavailable'
-                    : 'Waiting for remote video...'}
+              {visualPlaceholderText}
             </div>
           )}
 
           <div className="absolute top-4 left-4 rounded-md bg-black/40 px-2 py-1 text-xs text-white/80">
-            {isLocalScreenSharing
-              ? 'Your screen'
-              : isRemoteScreenSharing
-                ? `${activeCall.peerName}'s screen`
-                : isLargeLocal
-                  ? 'You'
-                  : activeCall.peerName}
+            {largeLabel}
           </div>
 
-          {isVideoCall && (
+          {hasSecondaryVisualTile && (
             <div className="absolute bottom-4 right-4 h-32 w-48 overflow-hidden rounded-lg border border-white/20 bg-black/70 shadow-xl">
               {smallHasVideo ? (
                 <video
@@ -439,11 +482,11 @@ export const CallManagerCard = () => {
                 />
               ) : (
                 <div className="flex h-full w-full items-center justify-center text-xs text-white/70">
-                  {isSmallLocal ? 'Camera unavailable' : 'No remote video'}
+                  {secondaryPlaceholderText}
                 </div>
               )}
               <div className="absolute top-1 left-1 rounded bg-black/55 px-1.5 py-0.5 text-[10px] text-white/80">
-                {isSmallLocal ? 'You' : activeCall.peerName}
+                {smallLabel}
               </div>
               {canSwapVideos && (
                 <Button
@@ -485,7 +528,7 @@ export const CallManagerCard = () => {
       )}
 
       <div
-        className={`fixed ${positionClassName} z-100 w-fit rounded-lg border border-border bg-card/95 backdrop-blur px-4 py-3 shadow-xl transition-opacity duration-500 ${shouldFadeCallCard ? 'pointer-events-none opacity-0' : 'opacity-100'}`}
+        className={`fixed ${positionClassName} z-100 ${isVisualCall ? 'w-[360px]' : 'w-fit'} rounded-lg border border-border bg-card/95 backdrop-blur px-4 py-3 shadow-xl transition-opacity duration-500 ${shouldFadeCallCard ? 'pointer-events-none opacity-0' : 'opacity-100'}`}
         onPointerEnter={() => setIsCallCardHovered(true)}
         onPointerLeave={() => setIsCallCardHovered(false)}
       >
@@ -507,53 +550,93 @@ export const CallManagerCard = () => {
                 ? `${activeCall.peerName}${timerText ? ` • ${timerText}` : ''}`
                 : stateLabel(activeCall.state)}
             </div>
-            {isVideoCall && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-primary/15 px-2 py-0.5 text-[10px] uppercase tracking-wide text-primary">
-                <Video className="h-3 w-3" />
-                Video
-              </span>
-            )}
           </div>
-
-          {showCompactPreview && (
-            <div className="relative h-16 w-24 shrink-0 overflow-hidden rounded-md border border-border/70 bg-muted/30">
-              {compactPreviewHasVideo ? (
-                <video
-                  ref={compactRemotePreviewRef}
-                  autoPlay
-                  muted
-                  playsInline
-                  className="h-full w-full object-cover"
-                />
-              ) : (
-                <div className="flex h-full w-full items-center justify-center text-[10px] text-muted-foreground">
-                  {isLocalScreenSharing
-                    ? 'No screen preview'
-                    : isRemoteScreenSharing
-                      ? 'Waiting for share'
-                      : 'No remote video'}
-                </div>
-              )}
-              <div className="absolute bottom-1 left-1 rounded bg-black/55 px-1 py-0.5 text-[9px] text-white/85">
-                {compactPreviewLabel}
-              </div>
-            </div>
-          )}
         </div>
 
+        {isVisualCall && !isVideoExpanded && (
+          <div className="relative mt-3 h-52 overflow-hidden rounded-lg border border-border/70 bg-black/90 shadow-inner">
+            {largeHasVideo ? (
+              <video
+                ref={largeVideoRef}
+                autoPlay
+                playsInline
+                className="h-full w-full object-cover"
+              />
+            ) : (
+              <div className="flex h-full w-full items-center justify-center text-sm text-white/80">
+                {visualPlaceholderText}
+              </div>
+            )}
+
+            <div className="absolute top-2 left-2 rounded bg-black/55 px-2 py-1 text-[10px] uppercase tracking-wide text-white/85">
+              {largeLabel}
+            </div>
+
+            {hasSecondaryVisualTile && (
+              <div className="absolute bottom-3 right-3 h-20 w-28 overflow-hidden rounded-md border border-white/15 bg-black/70 shadow-lg">
+                {smallHasVideo ? (
+                  <video
+                    ref={smallVideoRef}
+                    autoPlay
+                    muted
+                    playsInline
+                    className="h-full w-full object-cover"
+                  />
+                ) : (
+                  <div className="flex h-full w-full items-center justify-center text-[10px] text-white/70">
+                    {secondaryPlaceholderText}
+                  </div>
+                )}
+                <div className="absolute top-1 left-1 rounded bg-black/55 px-1.5 py-0.5 text-[9px] text-white/80">
+                  {smallLabel}
+                </div>
+                {canSwapVideos && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="absolute top-1 right-1 h-5 w-5 border-white/20 bg-black/45 p-0 text-white hover:bg-black/60"
+                    onClick={() => setIsVideoStreamsSwapped((prev) => !prev)}
+                    title="Swap videos"
+                  >
+                    <ArrowLeftRight className="h-3 w-3" />
+                  </Button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
-          {(isLocalScreenShareStarting || isLocalScreenSharing || isLocalScreenShareStopping || isRemoteScreenSharing) && (
+          {(isLocalCameraStarting || isLocalCameraStopping || isLocalScreenShareStarting || isLocalScreenSharing || isLocalScreenShareStopping || isRemoteScreenSharing) && (
             <div className="mr-auto inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-1 text-[10px] font-mono uppercase tracking-wide text-primary">
-              <ScreenShare className="h-3 w-3" />
-              {isLocalScreenShareStarting
-                ? 'Starting share'
-                : isLocalScreenShareStopping
-                  ? 'Stopping share'
-                  : isLocalScreenSharing
-                    ? 'You are sharing'
-                    : `${activeCall.peerName} is sharing`}
+              {isLocalScreenShareStarting || isLocalScreenSharing || isLocalScreenShareStopping || isRemoteScreenSharing ? (
+                <>
+                  <ScreenShare className="h-3 w-3" />
+                  {isLocalScreenShareStarting
+                    ? 'Starting share'
+                    : isLocalScreenShareStopping
+                      ? 'Stopping share'
+                      : isLocalScreenSharing
+                        ? 'You are sharing'
+                        : `${activeCall.peerName} is sharing`}
+                </>
+              ) : (
+                <>
+                  <Video className="h-3 w-3" />
+                  {isLocalCameraStarting ? 'Starting camera' : 'Stopping camera'}
+                </>
+              )}
             </div>
           )}
+          <Button
+            variant={isLocalCameraOn ? 'secondary' : 'outline'}
+            size="sm"
+            onClick={handleToggleCamera}
+            disabled={!canToggleCamera}
+            title={cameraButtonTitle}
+          >
+            {isLocalCameraOn ? <VideoOff className="w-4 h-4" /> : <Video className="w-4 h-4" />}
+          </Button>
           <Button
             variant={isLocalScreenSharing ? 'destructive' : 'outline'}
             size="sm"

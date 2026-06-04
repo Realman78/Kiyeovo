@@ -843,6 +843,8 @@ export class MessageHandler {
       || value === 'CALL_REJECT'
       || value === 'CALL_END'
       || value === 'CALL_BUSY'
+      || value === 'CALL_CAMERA_STARTED'
+      || value === 'CALL_CAMERA_STOPPED'
       || value === 'CALL_SCREEN_SHARE_STARTED'
       || value === 'CALL_SCREEN_SHARE_STOPPED';
   }
@@ -880,6 +882,9 @@ export class MessageHandler {
           || signal.reason === 'failed';
       case 'CALL_BUSY':
         return signal.reason === 'busy';
+      case 'CALL_CAMERA_STARTED':
+      case 'CALL_CAMERA_STOPPED':
+        return true;
       case 'CALL_SCREEN_SHARE_STARTED':
         return true;
       case 'CALL_SCREEN_SHARE_STOPPED':
@@ -921,6 +926,8 @@ export class MessageHandler {
       case 'CALL_END':
       case 'CALL_BUSY':
         return { ...common, reason: signal.reason };
+      case 'CALL_CAMERA_STARTED':
+      case 'CALL_CAMERA_STOPPED':
       case 'CALL_SCREEN_SHARE_STARTED':
         return common;
       case 'CALL_SCREEN_SHARE_STOPPED':
@@ -1005,6 +1012,24 @@ export class MessageHandler {
           toPeerId: input.toPeerId,
           timestamp,
           reason: input.reason,
+        };
+        break;
+      case 'CALL_CAMERA_STARTED':
+        unsignedSignal = {
+          type: 'CALL_CAMERA_STARTED',
+          callId: input.callId,
+          fromPeerId,
+          toPeerId: input.toPeerId,
+          timestamp,
+        };
+        break;
+      case 'CALL_CAMERA_STOPPED':
+        unsignedSignal = {
+          type: 'CALL_CAMERA_STOPPED',
+          callId: input.callId,
+          fromPeerId,
+          toPeerId: input.toPeerId,
+          timestamp,
         };
         break;
       case 'CALL_SCREEN_SHARE_STARTED':
@@ -1229,6 +1254,19 @@ export class MessageHandler {
         return;
       }
 
+      if (signal.mediaType === 'video') {
+        log(
+          `[CALL] Rejecting unsupported legacy video offer from ${remoteId.slice(-8)} callId=${signal.callId.slice(0, 8)}`,
+        );
+        this.sendCallSignal({
+          type: 'CALL_REJECT',
+          callId: signal.callId,
+          toPeerId: remoteId,
+          reason: 'policy',
+        }).catch(error => generalErrorHandler(error, '[CALL] Failed to send legacy video offer rejection'));
+        return;
+      }
+
       this.setActiveCall({
         callId: signal.callId,
         peerId: remoteId,
@@ -1314,7 +1352,6 @@ export class MessageHandler {
     peerId: string,
     callId: string,
     offerSdp: string,
-    mediaType: CallMediaType = 'audio',
   ): Promise<{ success: boolean; error: string | null }> {
     try {
       this.ensureFastModeForCalls();
@@ -1341,7 +1378,7 @@ export class MessageHandler {
       callId,
       toPeerId: peerId,
       offerSdp,
-      mediaType,
+      mediaType: 'audio',
     });
     if (!sent.success) return sent;
 
@@ -1349,7 +1386,7 @@ export class MessageHandler {
       callId,
       peerId,
       direction: 'outgoing',
-      mediaType,
+      mediaType: 'audio',
       state: 'ringing_out',
     });
     return { success: true, error: null };
@@ -3052,8 +3089,7 @@ export class MessageHandler {
       }
     } catch (error: unknown) {
       console.warn(
-        `[CALL] Unexpected error during shutdown hangup peer=${peerId.slice(-8)} callId=${callId.slice(0, 8)}: ${
-          errStr(error)
+        `[CALL] Unexpected error during shutdown hangup peer=${peerId.slice(-8)} callId=${callId.slice(0, 8)}: ${errStr(error)
         }`,
       );
     } finally {

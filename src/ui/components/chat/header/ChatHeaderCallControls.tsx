@@ -1,25 +1,21 @@
 import type { FC } from "react";
-import { Phone, PhoneOff, Video } from "lucide-react";
+import { Phone, PhoneOff } from "lucide-react";
 import { Button } from "../../ui/Button";
 
 type ChatHeaderCallControlsProps = {
   canShowCallButtons: boolean;
   hasActiveCallWithThisPeer: boolean;
   startCallDisabled: boolean;
-  audioCallButtonTitle: string;
-  videoCallButtonTitle: string;
-  onAudioCallClick: () => void;
-  onVideoCallClick: () => void;
+  callButtonTitle: string;
+  onCallClick: () => void;
 };
 
 export const ChatHeaderCallControls: FC<ChatHeaderCallControlsProps> = ({
   canShowCallButtons,
   hasActiveCallWithThisPeer,
   startCallDisabled,
-  audioCallButtonTitle,
-  videoCallButtonTitle,
-  onAudioCallClick,
-  onVideoCallClick,
+  callButtonTitle,
+  onCallClick,
 }) => {
   if (!canShowCallButtons) {
     return null;
@@ -31,7 +27,7 @@ export const ChatHeaderCallControls: FC<ChatHeaderCallControlsProps> = ({
         variant="ghost"
         size="icon"
         className="text-muted-foreground hover:text-foreground"
-        onClick={onAudioCallClick}
+        onClick={onCallClick}
         title="Hang up"
       >
         <PhoneOff className="w-4 h-4" />
@@ -40,27 +36,15 @@ export const ChatHeaderCallControls: FC<ChatHeaderCallControlsProps> = ({
   }
 
   return (
-    <>
-      <Button
-        variant="ghost"
-        size="icon"
-        className="text-muted-foreground hover:text-foreground"
-        onClick={onAudioCallClick}
-        title={audioCallButtonTitle}
-        disabled={startCallDisabled}
-      >
-        <Phone className="w-4 h-4" />
-      </Button>
-      <Button
-        variant="ghost"
-        size="icon"
-        className="text-muted-foreground hover:text-foreground"
-        onClick={onVideoCallClick}
-        title={videoCallButtonTitle}
-        disabled={startCallDisabled}
-      >
-        <Video className="w-4 h-4" />
-      </Button>
-    </>
+    <Button
+      variant="ghost"
+      size="icon"
+      className="text-muted-foreground hover:text-foreground"
+      onClick={onCallClick}
+      title={callButtonTitle}
+      disabled={startCallDisabled}
+    >
+      <Phone className="w-4 h-4" />
+    </Button>
   );
 };

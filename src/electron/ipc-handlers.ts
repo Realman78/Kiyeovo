@@ -505,11 +505,11 @@ function setupCallHandlers(
     };
   });
 
-  ipcMain.handle(IPC_CHANNELS.CALL_START, async (_event, peerId: string, callId: string, offerSdp: string, mediaType: 'audio' | 'video' = 'audio') => {
+  ipcMain.handle(IPC_CHANNELS.CALL_START, async (_event, peerId: string, callId: string, offerSdp: string) => {
     try {
       const p2pCore = getP2PCore();
       if (!p2pCore) return { success: false, error: 'P2P core not initialized' };
-      return await p2pCore.messageHandler.startCall(peerId, callId, offerSdp, mediaType);
+      return await p2pCore.messageHandler.startCall(peerId, callId, offerSdp);
     } catch (error) {
       return { success: false, error: errStr(error, 'Failed to start call') };
     }
