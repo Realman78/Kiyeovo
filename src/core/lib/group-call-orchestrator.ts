@@ -2679,10 +2679,18 @@ export class GroupCallOrchestrator {
       return;
     }
 
+    // A libp2p reconnect means the peer is reachable again. Cancel the disconnect
+    // grace regardless of role — it was armed by a libp2p disconnect, and letting
+    // it fire would fail over / evict a peer that is actually still present (which
+    // is what split-brains a call after a transient flap). WebRTC media health is
+    // tracked separately by the renderer, which runs its own grace + recovery.
+    this.clearPeerDisconnectTimer(peerId);
+    this.emitStateChanged(this.session.state, { reason: 'disconnect_grace_cleared', peerId });
+
     if (this.session.role !== 'writer') {
-      // TEMP_LOG
+      // Recovery probes are writer-only; a participant just cancels its grace.
       log(
-        `[GROUP-CALL][RECOVER][PEER_CONNECT_SKIP] peer=${peerId.slice(-8)} reason=not_writer role=${this.session.role} call=${this.session.callId.slice(0, 8)}`,
+        `[GROUP-CALL][RECOVER][PEER_CONNECT] peer=${peerId.slice(-8)} action=grace_cleared_no_probe role=${this.session.role} call=${this.session.callId.slice(0, 8)}`,
       );
       return;
     }
