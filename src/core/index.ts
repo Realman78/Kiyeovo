@@ -441,6 +441,9 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
   };
 
   const sendGroupCallPairSignalReceived = (data: GroupCallPairSignalReceivedEvent) => {
+    console.log(
+      `[GROUP-CALL][PAIR][FORWARD] type=${data.signal.type} from=${data.signal.fromPeerId.slice(-8)} to=${data.signal.toPeerId.slice(-8)} call=${data.signal.callId.slice(0, 8)} receivedAt=${data.receivedAt}`,
+    );
     onGroupCallPairSignalReceived(data);
   };
 
