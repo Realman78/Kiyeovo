@@ -629,7 +629,7 @@ export const CallManagerCard = () => {
             </div>
           )}
           <Button
-            variant={isLocalCameraOn ? 'secondary' : 'outline'}
+            variant={isLocalCameraOn ? 'destructive' : 'outline'}
             size="sm"
             onClick={handleToggleCamera}
             disabled={!canToggleCamera}

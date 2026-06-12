@@ -555,6 +555,9 @@ export const Main = () => {
         toast.error(event.message);
         return;
       }
+      if (event.type !== 'state') {
+        return;
+      }
       if (event.previousState !== 'active' && event.snapshot.state === 'active') {
         toast.success('Group call audio connected');
       }

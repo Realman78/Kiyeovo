@@ -1064,20 +1064,29 @@ export type GroupCallIceSignal = BaseGroupCallPairSignal & {
   usernameFragment: string | null;
 };
 
+// Peer-owned camera on/off state
+export type GroupCallCameraStateSignal = BaseGroupCallPairSignal & {
+  type: 'CALL_CAMERA_STATE';
+  cameraOn: boolean;
+};
+
 export type GroupCallPairSignalMessage =
   | GroupCallOfferSignal
   | GroupCallAnswerSignal
-  | GroupCallIceSignal;
+  | GroupCallIceSignal
+  | GroupCallCameraStateSignal;
 
 export type GroupCallPairSignalWithoutSignature =
   | Omit<GroupCallOfferSignal, 'signature'>
   | Omit<GroupCallAnswerSignal, 'signature'>
-  | Omit<GroupCallIceSignal, 'signature'>;
+  | Omit<GroupCallIceSignal, 'signature'>
+  | Omit<GroupCallCameraStateSignal, 'signature'>;
 
 export type GroupCallPairSignalForRenderer =
   | Omit<GroupCallOfferSignal, 'signature' | 'admissionToken'>
   | Omit<GroupCallAnswerSignal, 'signature'>
-  | Omit<GroupCallIceSignal, 'signature'>;
+  | Omit<GroupCallIceSignal, 'signature'>
+  | Omit<GroupCallCameraStateSignal, 'signature'>;
 
 export type GroupCallPairSignalOutgoingInput =
   | {
@@ -1107,6 +1116,14 @@ export type GroupCallPairSignalOutgoingInput =
     sdpMid: string | null;
     sdpMLineIndex: number | null;
     usernameFragment: string | null;
+    timestamp?: number;
+  }
+  | {
+    type: 'CALL_CAMERA_STATE';
+    groupId: string;
+    callId: string;
+    toPeerId: string;
+    cameraOn: boolean;
     timestamp?: number;
   };
 

@@ -10,6 +10,7 @@ import type {
 import { DEFAULT_WEBRTC_ICE_SERVERS } from '../../../core/network/default-infrastructure';
 import { errStr } from '../../../core/utils/general-error';
 import { log } from '../../../shared/logger';
+import type { CameraLifecycleState } from '../../types';
 
 export type GroupCallSnapshot = {
   chatId: number | null;
@@ -26,6 +27,14 @@ export type GroupCallSnapshot = {
   pendingDisconnects: { peerId: string; expiresAt: number }[];
   localMuted: boolean;
   recoveryFailed: boolean;
+  localCameraState: CameraLifecycleState;
+  participantCameraOn: Record<string, boolean>;
+};
+
+export type GroupParticipantMedia = {
+  peerId: string;
+  stream: MediaStream;
+  hasVideo: boolean;
 };
 
 type GroupCallServiceEvent =
@@ -33,6 +42,9 @@ type GroupCallServiceEvent =
     type: 'state';
     previousState: GroupCallServiceState;
     snapshot: GroupCallSnapshot;
+  }
+  | {
+    type: 'media';
   }
   | {
     type: 'error';
@@ -67,6 +79,7 @@ type PeerState = {
   pc: RTCPeerConnection;
   remoteStream: MediaStream;
   remoteAudio: HTMLAudioElement;
+  videoSender: RTCRtpSender | null;
   pendingRemoteIce: RTCIceCandidateInit[];
   disconnectTimer: ReturnType<typeof setTimeout> | null;
   connected: boolean;
@@ -80,6 +93,11 @@ class GroupCallService {
   private localPeerId: string | null = null;
   private localAudioStream: MediaStream | null = null;
   private localAudioStreamPromise: Promise<MediaStream> | null = null;
+  private localCameraStream: MediaStream | null = null;
+  private localCameraState: CameraLifecycleState = 'off';
+  private readonly remoteCameraOn = new Map<string, boolean>();
+  // Timestamp of the last applied camera signal per peer
+  private readonly remoteCameraSignalTs = new Map<string, number>();
   private readonly listeners = new Set<(event: GroupCallServiceEvent) => void>();
   private readonly peers = new Map<string, PeerState>();
   private readonly pendingIceByPeerId = new Map<string, RTCIceCandidateInit[]>();
@@ -153,6 +171,8 @@ class GroupCallService {
         pendingDisconnects: [],
         localMuted: this.localMuted,
         recoveryFailed: false,
+        localCameraState: this.localCameraState,
+        participantCameraOn: {},
       };
     }
 
@@ -171,7 +191,19 @@ class GroupCallService {
       pendingDisconnects: [...this.session.pendingDisconnects],
       localMuted: this.localMuted,
       recoveryFailed: this.session.recoveryFailed,
+      localCameraState: this.localCameraState,
+      participantCameraOn: this.buildParticipantCameraOn(),
     };
+  }
+
+  private buildParticipantCameraOn(): Record<string, boolean> {
+    const map: Record<string, boolean> = {};
+    this.remoteCameraOn.forEach((on, peerId) => {
+      if (on) {
+        map[peerId] = true;
+      }
+    });
+    return map;
   }
 
   private snapshotSignature(snapshot: GroupCallSnapshot): string {
@@ -180,6 +212,27 @@ class GroupCallService {
 
   getSnapshot(): GroupCallSnapshot {
     return this.buildSnapshot();
+  }
+
+  // Live per-peer media for the UI to bind to video
+  getParticipantMedia(): GroupParticipantMedia[] {
+    const media: GroupParticipantMedia[] = [];
+    this.peers.forEach((peer, peerId) => {
+      media.push({
+        peerId,
+        stream: peer.remoteStream,
+        hasVideo: peer.remoteStream.getVideoTracks().length > 0,
+      });
+    });
+    return media;
+  }
+
+  getLocalCameraStream(): MediaStream | null {
+    return this.localCameraStream;
+  }
+
+  private emitMedia(): void {
+    this.emit({ type: 'media' });
   }
 
   private emitState(force = false): void {
@@ -294,6 +347,14 @@ class GroupCallService {
     this.localAudioStream = null;
   }
 
+  private stopLocalCamera(): void {
+    if (this.localCameraStream) {
+      this.localCameraStream.getTracks().forEach((track) => track.stop());
+      this.localCameraStream = null;
+    }
+    this.localCameraState = 'off';
+  }
+
   private async ensureLocalAudioStream(): Promise<MediaStream> {
     if (this.localAudioStream) {
       return this.localAudioStream;
@@ -378,7 +439,11 @@ class GroupCallService {
     peer.remoteAudio.srcObject = null;
     peer.remoteAudio.remove();
     peer.remoteStream.getTracks().forEach((track) => track.stop());
+    peer.videoSender = null;
     this.peers.delete(peerId);
+    this.remoteCameraOn.delete(peerId);
+    this.remoteCameraSignalTs.delete(peerId);
+    this.emitMedia();
   }
 
   private resetSession(): void {
@@ -390,11 +455,15 @@ class GroupCallService {
     this.peers.clear();
     this.pendingIceByPeerId.clear();
     this.offeredPeerIds.clear();
+    this.remoteCameraOn.clear();
+    this.remoteCameraSignalTs.clear();
     this.stopLocalAudio();
+    this.stopLocalCamera();
     this.session = null;
     this.localPeerId = null;
     this.localMuted = false;
     this.emitState(true);
+    this.emitMedia();
   }
 
   private resetTransportForRecovery(): void {
@@ -430,6 +499,7 @@ class GroupCallService {
       pc,
       remoteStream,
       remoteAudio,
+      videoSender: null,
       pendingRemoteIce: this.pendingIceByPeerId.get(peerId) ?? [],
       disconnectTimer: null,
       connected: false,
@@ -474,6 +544,7 @@ class GroupCallService {
         });
       }
       this.attachRemoteAudio(peer);
+      this.emitMedia();
     };
 
     pc.onconnectionstatechange = () => {
@@ -487,6 +558,9 @@ class GroupCallService {
         }
         this.clearPeerDisconnectTimer(peer);
         this.clearJoinConnectTimer();
+        // Full-state sync on every (re)connection — announce our current camera
+        // state whether on OR off
+        this.announceCameraStateToPeer(peerId);
         this.emitState();
         return;
       }
@@ -535,6 +609,34 @@ class GroupCallService {
     if (!alreadyAdded) {
       peer.pc.addTrack(audioTrack, stream);
     }
+    const videoSender = this.ensurePeerVideoSender(peer);
+    // If our camera is already on when this peer is (re)negotiated, attach the
+    // live track up front so the negotiated SDP carries it and the peer receives
+    // video immediately — no separate renegotiation.
+    if (this.localCameraState === 'on') {
+      const cameraTrack = this.localCameraStream?.getVideoTracks()[0] ?? null;
+      if (cameraTrack && videoSender.track?.id !== cameraTrack.id) {
+        await videoSender.replaceTrack(cameraTrack);
+      }
+    }
+  }
+
+  // Pre-negotiate a single shared video transceiver per peer
+  private ensurePeerVideoSender(peer: PeerState): RTCRtpSender {
+    if (peer.videoSender) {
+      return peer.videoSender;
+    }
+    const existing = peer.pc.getTransceivers().find((transceiver) => (
+      transceiver.receiver.track?.kind === 'video' || transceiver.sender.track?.kind === 'video'
+    ));
+    if (existing) {
+      existing.direction = 'sendrecv';
+      peer.videoSender = existing.sender;
+      return existing.sender;
+    }
+    const transceiver = peer.pc.addTransceiver('video', { direction: 'sendrecv' });
+    peer.videoSender = transceiver.sender;
+    return transceiver.sender;
   }
 
   private async flushPendingIce(peer: PeerState): Promise<void> {
@@ -817,6 +919,8 @@ class GroupCallService {
             pendingDisconnects: [],
             localMuted: false,
             recoveryFailed: false,
+            localCameraState: 'off',
+            participantCameraOn: {},
           },
         });
         this.lastEmittedState = 'ended';
@@ -952,6 +1056,158 @@ class GroupCallService {
     }
   }
 
+  async startCamera(): Promise<{ success: boolean; error: string | null }> {
+    const session = this.session;
+    if (!session) {
+      return { success: false, error: 'No active group call' };
+    }
+    if (this.localCameraState === 'on' || this.localCameraState === 'starting') {
+      return { success: true, error: null };
+    }
+    // Let stop finish rather than racing it
+    if (this.localCameraState === 'stopping') {
+      return { success: false, error: 'Camera is busy' };
+    }
+
+    this.localCameraState = 'starting';
+    this.emitState();
+    try {
+      // `existing` is normally null here (a live camera would have
+      // returned early above); the fallback is purely defensive.
+      const existing = this.localCameraStream;
+      const stream = existing ?? await navigator.mediaDevices.getUserMedia({ audio: false, video: true });
+      // The call may have ended or switched while getUserMedia was in flight.
+      if (this.session !== session) {
+        if (!existing) {
+          stream.getTracks().forEach((track) => track.stop());
+        }
+        return { success: false, error: 'Group call is no longer active' };
+      }
+      const cameraTrack = stream.getVideoTracks()[0];
+      if (!cameraTrack) {
+        if (!existing) {
+          stream.getTracks().forEach((track) => track.stop());
+        }
+        throw new Error('Local camera track is not available');
+      }
+      this.localCameraStream = stream;
+      // Attach to every peer's pre-negotiated video sender
+      await Promise.all(
+        [...this.peers.values()].map(async (peer) => {
+          const sender = this.ensurePeerVideoSender(peer);
+          await sender.replaceTrack(cameraTrack).catch(() => {
+            // Peer may be closing
+          });
+        }),
+      );
+      if (this.session !== session) {
+        this.abandonCameraStart(stream);
+        return { success: false, error: 'Group call is no longer active' };
+      }
+      this.localCameraState = 'on';
+      this.emitState();
+      this.emitMedia();
+      this.announceCameraStateToConnectedPeers();
+      return { success: true, error: null };
+    } catch (error: unknown) {
+      // Only clean up if this is still our session
+      if (this.session === session) {
+        this.stopLocalCamera();
+        this.emitState();
+      }
+      return { success: false, error: errStr(error, 'Failed to start camera') };
+    }
+  }
+
+  // Stop and release a camera stream acquired by a start that lost its session
+  private abandonCameraStart(stream: MediaStream): void {
+    stream.getTracks().forEach((track) => track.stop());
+    if (this.localCameraStream === stream) {
+      this.localCameraStream = null;
+    }
+  }
+
+  async stopCamera(): Promise<{ success: boolean; error: string | null }> {
+    const session = this.session;
+    if (!session) {
+      return { success: false, error: 'No active group call' };
+    }
+    if (this.localCameraState === 'off' || this.localCameraState === 'stopping') {
+      return { success: true, error: null };
+    }
+    // A start is mid-flight for this same session; let it finish
+    if (this.localCameraState === 'starting') {
+      return { success: false, error: 'Camera is busy' };
+    }
+
+    this.localCameraState = 'stopping';
+    this.emitState();
+    await Promise.all(
+      [...this.peers.values()].map(async (peer) => {
+        if (peer.videoSender) {
+          await peer.videoSender.replaceTrack(null).catch(() => {
+            // Best-effort detach; the camera is being torn down regardless.
+          });
+        }
+      }),
+    );
+    // If the call ended or switched while detaching, teardown already stopped
+    // our camera (or a new session owns its own) — never tear down that one.
+    if (this.session !== session) {
+      return { success: false, error: 'Group call is no longer active' };
+    }
+    this.stopLocalCamera();
+    this.emitState();
+    this.emitMedia();
+    this.announceCameraStateToConnectedPeers();
+    return { success: true, error: null };
+  }
+
+  private announceCameraStateToConnectedPeers(): void {
+    this.peers.forEach((peer, peerId) => {
+      if (peer.connected) {
+        this.announceCameraStateToPeer(peerId);
+      }
+    });
+  }
+
+  private announceCameraStateToPeer(peerId: string): void {
+    if (!this.session) {
+      return;
+    }
+    void window.kiyeovoAPI.sendGroupCallPairSignal({
+      type: 'CALL_CAMERA_STATE',
+      groupId: this.session.groupId,
+      callId: this.session.callId,
+      toPeerId: peerId,
+      cameraOn: this.localCameraState === 'on',
+    }).then((result) => {
+      if (!result.success) {
+        log(`[GROUP-CALL][PAIR][CAMERA_SEND_FAIL] to=${peerId.slice(-8)} reason=${result.error || 'Failed to send camera state'}`);
+      }
+    }).catch((error: unknown) => {
+      log(`[GROUP-CALL][PAIR][CAMERA_SEND_FAIL] to=${peerId.slice(-8)} reason=${errStr(error, 'Failed to send camera state')}`);
+    });
+  }
+
+  private handleIncomingCameraState(
+    signal: Extract<GroupCallPairSignalForRenderer, { type: 'CALL_CAMERA_STATE' }>,
+  ): void {
+    // Last-writer-wins
+    const lastTs = this.remoteCameraSignalTs.get(signal.fromPeerId) ?? Number.NEGATIVE_INFINITY;
+    if (signal.timestamp < lastTs) {
+      return;
+    }
+    this.remoteCameraSignalTs.set(signal.fromPeerId, signal.timestamp);
+
+    const previous = this.remoteCameraOn.get(signal.fromPeerId) ?? false;
+    if (previous === signal.cameraOn) {
+      return;
+    }
+    this.remoteCameraOn.set(signal.fromPeerId, signal.cameraOn);
+    this.emitState();
+  }
+
   async leave(): Promise<{ success: boolean; error: string | null }> {
     if (!this.session || this.session.chatId === null) {
       return { success: false, error: 'No active group call' };
@@ -978,6 +1234,9 @@ class GroupCallService {
         return;
       case 'CALL_ICE':
         await this.handleIncomingIce(signal);
+        return;
+      case 'CALL_CAMERA_STATE':
+        this.handleIncomingCameraState(signal);
         return;
       default:
         return;
