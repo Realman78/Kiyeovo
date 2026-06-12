@@ -2594,10 +2594,18 @@ export class GroupCallOrchestrator {
     this.localTransportResetPeerIds.delete(peerId);
     const hadDisconnectTimer = this.pendingPeerDisconnectTimers.has(peerId);
     if (!hadDisconnectTimer || !this.session) {
+      if (hadDisconnectTimer && !this.session) {
+        // TEMP_LOG
+        log(`[GROUP-CALL][RECOVER][PEER_CONNECT_SKIP] peer=${peerId.slice(-8)} reason=no_session hadDisconnectTimer=true`);
+      }
       return;
     }
 
     if (this.session.role !== 'writer') {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][RECOVER][PEER_CONNECT_SKIP] peer=${peerId.slice(-8)} reason=not_writer role=${this.session.role} call=${this.session.callId.slice(0, 8)}`,
+      );
       return;
     }
 
@@ -2613,6 +2621,10 @@ export class GroupCallOrchestrator {
       || peerResponse.callId !== session.callId
       || peerResponse.writerPeerId !== this.localPeerId()
     ) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][RECOVER][PEER_CONNECT_SKIP] peer=${peerId.slice(-8)} reason=${!peerResponse ? 'no_active_call_response' : peerResponse.callId !== session.callId ? 'call_mismatch' : 'writer_mismatch'} expectedCall=${session.callId.slice(0, 8)} gotCall=${peerResponse?.callId.slice(0, 8) ?? 'none'} expectedWriter=${this.localPeerId().slice(-8)} gotWriter=${peerResponse?.writerPeerId.slice(-8) ?? 'none'}`,
+      );
       return;
     }
     if (
@@ -2652,6 +2664,10 @@ export class GroupCallOrchestrator {
     );
     const timer = setTimeout(() => {
       this.pendingPeerDisconnectTimers.delete(peerId);
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][DISCONNECT][GRACE_FIRE] group=${this.session?.groupId.slice(0, 8) ?? 'none'} call=${this.session?.callId.slice(0, 8) ?? 'none'} peer=${peerId.slice(-8)} role=${this.session?.role ?? 'none'}`,
+      );
       this.handlePeerDisconnectGraceExpired(peerId);
     }, PEER_DISCONNECT_GRACE_MS);
     this.pendingPeerDisconnectTimers.set(peerId, {
@@ -2666,6 +2682,10 @@ export class GroupCallOrchestrator {
       return;
     }
     if (!hasParticipant(this.session.authoritativeParticipants, peerId)) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][DISCONNECT][GRACE_SKIP] group=${this.session.groupId.slice(0, 8)} call=${this.session.callId.slice(0, 8)} peer=${peerId.slice(-8)} reason=not_in_authoritative_roster`,
+      );
       this.emitStateChanged(this.session.state, { reason: 'disconnect_grace_cleared', peerId });
       return;
     }
@@ -2693,6 +2713,10 @@ export class GroupCallOrchestrator {
     }
 
     if (peerId !== this.session.currentWriterPeerId) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][DISCONNECT][GRACE_EXPIRE] group=${this.session.groupId.slice(0, 8)} call=${this.session.callId.slice(0, 8)} peer=${peerId.slice(-8)} role=${this.session.role} writer=${this.session.currentWriterPeerId.slice(-8)} action=wait_no_failover`,
+      );
       this.emitStateChanged(this.session.state, { reason: 'disconnect_grace_expired', peerId });
       return;
     }

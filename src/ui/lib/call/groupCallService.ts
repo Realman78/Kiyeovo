@@ -418,18 +418,31 @@ class GroupCallService {
 
   private schedulePeerDisconnect(peerId: string, peer: PeerState): void {
     this.clearPeerDisconnectTimer(peer);
+    // TEMP_LOG
+    log(
+      `[GROUP-CALL][PEER][DISCONNECT_ARM] peer=${peerId.slice(-8)} graceMs=${PEER_DISCONNECT_GRACE_MS} connState=${peer.pc.connectionState} iceState=${peer.pc.iceConnectionState} sigState=${peer.pc.signalingState}`,
+    );
     peer.disconnectTimer = setTimeout(() => {
-      this.closePeer(peerId);
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][PEER][DISCONNECT_FIRE] peer=${peerId.slice(-8)} connState=${peer.pc.connectionState} iceState=${peer.pc.iceConnectionState} sigState=${peer.pc.signalingState}`,
+      );
+      this.closePeer(peerId, 'renderer_disconnect_grace_expired');
       this.emitState();
     }, PEER_DISCONNECT_GRACE_MS);
   }
 
-  private closePeer(peerId: string): void {
+  private closePeer(peerId: string, reason = 'unspecified'): void {
     const peer = this.peers.get(peerId);
     if (!peer) {
       return;
     }
 
+    const remoteTracks = peer.remoteStream.getTracks().map((track) => `${track.kind}:${track.readyState}`).join(',');
+    // TEMP_LOG
+    log(
+      `[GROUP-CALL][PEER][CLOSE] peer=${peerId.slice(-8)} reason=${reason} connected=${String(peer.connected)} connState=${peer.pc.connectionState} iceState=${peer.pc.iceConnectionState} sigState=${peer.pc.signalingState} remoteTracks=${remoteTracks || 'none'} remoteCameraOn=${String(this.remoteCameraOn.get(peerId) ?? false)}`,
+    );
     this.clearPeerDisconnectTimer(peer);
     try {
       peer.pc.close();
@@ -450,7 +463,7 @@ class GroupCallService {
     this.clearJoinConnectTimer();
     this.pendingJoinAdmission = null;
     this.peers.forEach((_, peerId) => {
-      this.closePeer(peerId);
+      this.closePeer(peerId, 'reset_session');
     });
     this.peers.clear();
     this.pendingIceByPeerId.clear();
@@ -470,7 +483,7 @@ class GroupCallService {
     this.clearJoinConnectTimer();
     this.pendingJoinAdmission = null;
     this.peers.forEach((_, peerId) => {
-      this.closePeer(peerId);
+      this.closePeer(peerId, 'transport_reset');
     });
     this.peers.clear();
     this.pendingIceByPeerId.clear();
@@ -530,6 +543,22 @@ class GroupCallService {
     };
 
     pc.ontrack = (event) => {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][PC][TRACK] peer=${peerId.slice(-8)} kind=${event.track.kind} id=${event.track.id} streams=${event.streams.length} readyState=${event.track.readyState}`,
+      );
+      // TEMP_LOG
+      event.track.onmute = () => {
+        log(`[GROUP-CALL][PC][TRACK_MUTE] peer=${peerId.slice(-8)} kind=${event.track.kind} id=${event.track.id} readyState=${event.track.readyState}`);
+      };
+      // TEMP_LOG
+      event.track.onunmute = () => {
+        log(`[GROUP-CALL][PC][TRACK_UNMUTE] peer=${peerId.slice(-8)} kind=${event.track.kind} id=${event.track.id} readyState=${event.track.readyState}`);
+      };
+      // TEMP_LOG
+      event.track.onended = () => {
+        log(`[GROUP-CALL][PC][TRACK_ENDED] peer=${peerId.slice(-8)} kind=${event.track.kind} id=${event.track.id} readyState=${event.track.readyState}`);
+      };
       if (event.streams.length === 0) {
         if (!peer.remoteStream.getTracks().some((track) => track.id === event.track.id)) {
           peer.remoteStream.addTrack(event.track);
@@ -545,6 +574,11 @@ class GroupCallService {
       }
       this.attachRemoteAudio(peer);
       this.emitMedia();
+    };
+
+    // TEMP_LOG
+    pc.onsignalingstatechange = () => {
+      log(`[GROUP-CALL][PC][SIG_STATE] peer=${peerId.slice(-8)} signalingState=${pc.signalingState} connState=${pc.connectionState} iceState=${pc.iceConnectionState}`);
     };
 
     pc.onconnectionstatechange = () => {
@@ -590,11 +624,21 @@ class GroupCallService {
   private async ensurePeer(peerId: string, replace = false): Promise<PeerState> {
     const existing = this.peers.get(peerId);
     if (existing && !replace) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][PEER][ENSURE] peer=${peerId.slice(-8)} action=reuse connState=${existing.pc.connectionState} iceState=${existing.pc.iceConnectionState} sigState=${existing.pc.signalingState} connected=${String(existing.connected)}`,
+      );
       return existing;
     }
     if (existing) {
-      this.closePeer(peerId);
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][PEER][ENSURE] peer=${peerId.slice(-8)} action=replace connState=${existing.pc.connectionState} iceState=${existing.pc.iceConnectionState} sigState=${existing.pc.signalingState} connected=${String(existing.connected)}`,
+      );
+      this.closePeer(peerId, 'ensure_peer_replace');
     }
+    // TEMP_LOG
+    log(`[GROUP-CALL][PEER][ENSURE] peer=${peerId.slice(-8)} action=create`);
     return this.createPeer(peerId);
   }
 
@@ -719,14 +763,20 @@ class GroupCallService {
 
   private async startWriterReconnectProbe(peerId: string): Promise<void> {
     if (!this.session || this.session.role !== 'writer' || this.writerReconnectProbeInProgress || !this.localPeerId) {
+      // TEMP_LOG
+      log(`[GROUP-CALL][WRITER_PROBE][SKIP_SINGLE] peer=${peerId.slice(-8)} reason=${!this.session ? 'no_session' : this.session.role !== 'writer' ? 'not_writer' : this.writerReconnectProbeInProgress ? 'already_in_progress' : 'no_local_peer_id'}`);
       return;
     }
     if (peerId === this.localPeerId || !this.session.participantPeerIds.includes(peerId)) {
+      // TEMP_LOG
+      log(`[GROUP-CALL][WRITER_PROBE][SKIP_SINGLE] peer=${peerId.slice(-8)} reason=${peerId === this.localPeerId ? 'self' : 'not_in_roster'}`);
       return;
     }
 
     this.writerReconnectProbeInProgress = true;
     this.offeredPeerIds.delete(peerId);
+    // TEMP_LOG
+    log(`[GROUP-CALL][WRITER_PROBE][START_SINGLE] call=${this.session.callId.slice(0, 8)} peer=${peerId.slice(-8)} timeoutMs=${JOIN_AUDIO_CONNECT_TIMEOUT_MS}`);
     this.scheduleJoinConnectTimeout(this.session.callId, 'writer_probe');
     await this.createOfferForPeer(peerId, undefined, true);
   }
@@ -768,6 +818,10 @@ class GroupCallService {
     }
 
     try {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][OFFER][START] to=${peerId.slice(-8)} replace=${String(replace)} hasAdmission=${String(Boolean(admissionToken))} call=${this.session.callId.slice(0, 8)}`,
+      );
       const peer = await this.ensurePeer(peerId, replace);
       await this.addLocalTracks(peer);
       const offer = await peer.pc.createOffer();
@@ -789,8 +843,12 @@ class GroupCallService {
       if (!response.success) {
         throw new Error(response.error || 'Failed to send group call offer');
       }
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][OFFER][SENT] to=${peerId.slice(-8)} replace=${String(replace)} sigState=${peer.pc.signalingState} connState=${peer.pc.connectionState} iceState=${peer.pc.iceConnectionState}`,
+      );
     } catch (error: unknown) {
-      this.closePeer(peerId);
+      this.closePeer(peerId, 'offer_start_failed');
       const sinceTransportReset = Date.now() - this.lastTransportResetAt;
       if (this.lastTransportResetAt > 0 && sinceTransportReset < this.LOCAL_RECOVERY_OFFER_TOAST_SUPPRESSION_MS) {
         // We're inside a recovery window — OFFER failures are expected while
@@ -808,7 +866,15 @@ class GroupCallService {
     }
 
     const existing = this.peers.get(signal.fromPeerId);
+    // TEMP_LOG
+    log(
+      `[GROUP-CALL][OFFER][IN] from=${signal.fromPeerId.slice(-8)} existing=${existing ? 'yes' : 'no'} existingConnected=${String(existing?.connected ?? false)} connState=${existing?.pc.connectionState ?? 'none'} iceState=${existing?.pc.iceConnectionState ?? 'none'} sigState=${existing?.pc.signalingState ?? 'none'}`,
+    );
     if (existing?.connected) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][OFFER][DROP] from=${signal.fromPeerId.slice(-8)} reason=existing_connected connState=${existing.pc.connectionState} iceState=${existing.pc.iceConnectionState} sigState=${existing.pc.signalingState}`,
+      );
       return;
     }
 
@@ -838,8 +904,12 @@ class GroupCallService {
       if (!response.success) {
         throw new Error(response.error || 'Failed to send group call answer');
       }
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][ANSWER][SENT] to=${signal.fromPeerId.slice(-8)} sigState=${peer.pc.signalingState} connState=${peer.pc.connectionState} iceState=${peer.pc.iceConnectionState}`,
+      );
     } catch (error: unknown) {
-      this.closePeer(signal.fromPeerId);
+      this.closePeer(signal.fromPeerId, 'offer_accept_failed');
       this.emitError(errStr(error, 'Failed to accept group call audio offer'));
     }
   }
@@ -863,7 +933,7 @@ class GroupCallService {
       // TEMP_LOG
       log(`[GROUP-CALL][ANSWER][APPLIED] from=${signal.fromPeerId.slice(-8)} signalingState=${peer.pc.signalingState}`);
     } catch (error: unknown) {
-      this.closePeer(signal.fromPeerId);
+      this.closePeer(signal.fromPeerId, 'answer_apply_failed');
       this.emitError(errStr(error, 'Failed to apply group call answer'));
     }
   }
@@ -893,6 +963,11 @@ class GroupCallService {
     if (event.state === 'idle') {
       return;
     }
+
+    // TEMP_LOG
+    log(
+      `[GROUP-CALL][CORE_SYNC] state=${event.state} reason=${event.reason ?? 'none'} role=${event.role ?? 'none'} group=${event.groupId.slice(0, 8)} call=${event.callId?.slice(0, 8) ?? 'none'} peer=${event.peerId?.slice(-8) ?? 'none'} participants=${event.participants?.map((participant) => participant.peerId.slice(-8)).join(',') ?? 'none'} pendingDisconnects=${event.pendingDisconnects?.map((entry) => entry.peerId.slice(-8)).join(',') ?? 'none'}`,
+    );
 
     if (event.state === 'ended') {
       if (
@@ -1224,6 +1299,8 @@ class GroupCallService {
     }
 
     this.localPeerId = signal.toPeerId;
+    // TEMP_LOG
+    log(`[GROUP-CALL][PAIR][IN] type=${signal.type} from=${signal.fromPeerId.slice(-8)} to=${signal.toPeerId.slice(-8)} call=${signal.callId.slice(0, 8)}`);
 
     switch (signal.type) {
       case 'CALL_OFFER':
