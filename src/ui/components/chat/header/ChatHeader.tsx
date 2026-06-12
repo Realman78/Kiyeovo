@@ -674,7 +674,7 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
     }
   };
 
-  const handleStartCallClick = async (callMode: 'audio' | 'video') => {
+  const handleStartCallClick = async () => {
     if (!peerId || !activeChat || activeChat.type !== 'direct') return;
     if (isBlocked) {
       toast.error('Cannot call a blocked user');
@@ -694,18 +694,14 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
       }
       return;
     }
-    const start = await callService.startOutgoingCall(peerId, callMode);
+    const start = await callService.startOutgoingCall(peerId);
     if (!start.success) {
       toast.error(start.error || 'Failed to start call');
     }
   };
 
-  const handleAudioCallClick = () => {
-    void handleStartCallClick('audio');
-  };
-
-  const handleVideoCallClick = () => {
-    void handleStartCallClick('video');
+  const handleCallClick = () => {
+    void handleStartCallClick();
   };
 
   const confirmDeleteAllMessages = async () => {
@@ -895,12 +891,9 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
   const groupCallActionDisabled = isInThisGroupCall
     ? isLeavingGroupCall
     : !canStartGroupCall || isGroupCallSyncBlocked || isStartingGroupCall || isJoiningGroupCall;
-  const audioCallButtonTitle = startCallDisabled
+  const callButtonTitle = startCallDisabled
     ? 'User is offline or another call is active'
-    : 'Start audio call';
-  const videoCallButtonTitle = startCallDisabled
-    ? 'User is offline or another call is active'
-    : 'Start video call';
+    : 'Start call';
 
   const groupCallButtonTitle = groupCallActionDisabled
     ? isLeavingGroupCall
@@ -1111,10 +1104,8 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
         canShowCallButtons={canShowCallButtons}
         hasActiveCallWithThisPeer={hasActiveCallWithThisPeer}
         startCallDisabled={startCallDisabled}
-        audioCallButtonTitle={audioCallButtonTitle}
-        videoCallButtonTitle={videoCallButtonTitle}
-        onAudioCallClick={handleAudioCallClick}
-        onVideoCallClick={handleVideoCallClick}
+        callButtonTitle={callButtonTitle}
+        onCallClick={handleCallClick}
       />
       {canShowGroupCallButton && <>
         {showGroupCallStatusMessage && (

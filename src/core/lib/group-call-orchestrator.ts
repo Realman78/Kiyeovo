@@ -689,13 +689,23 @@ export class GroupCallOrchestrator {
 
   async sendPairSignal(signal: GroupCallPairSignalOutgoingInput): Promise<{ success: boolean; error: string | null }> {
     if (!this.session) {
+      // TEMP_LOG
+      log(`[GROUP-CALL][PAIR][SEND][SKIP] type=${signal.type} to=${signal.toPeerId.slice(-8)} reason=no_session`);
       return { success: false, error: 'No active group call' };
     }
     if (signal.groupId !== this.session.groupId || signal.callId !== this.session.callId) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][PAIR][SEND][SKIP] type=${signal.type} to=${signal.toPeerId.slice(-8)} reason=session_mismatch activeGroup=${this.session.groupId.slice(0, 8)} activeCall=${this.session.callId.slice(0, 8)} signalGroup=${signal.groupId.slice(0, 8)} signalCall=${signal.callId.slice(0, 8)}`,
+      );
       return { success: false, error: 'Group call pair signal does not match the active call' };
     }
 
     const timestamp = signal.timestamp ?? Date.now();
+    // TEMP_LOG
+    log(
+      `[GROUP-CALL][PAIR][SEND][START] type=${signal.type} to=${signal.toPeerId.slice(-8)} call=${signal.callId.slice(0, 8)} ts=${timestamp}`,
+    );
     const sent = signal.type === 'CALL_OFFER'
       ? await this.trySendPairSignal({
         ...signal,
@@ -711,9 +721,13 @@ export class GroupCallOrchestrator {
         })
         : await this.trySendPairSignal({
           ...signal,
-          fromPeerId: this.localPeerId(),
-          timestamp,
-        });
+        fromPeerId: this.localPeerId(),
+        timestamp,
+      });
+    // TEMP_LOG
+    log(
+      `[GROUP-CALL][PAIR][SEND][RESULT] type=${signal.type} to=${signal.toPeerId.slice(-8)} call=${signal.callId.slice(0, 8)} sent=${String(sent)}`,
+    );
     return sent
       ? { success: true, error: null }
       : { success: false, error: 'Failed to send group call pair signal' };
@@ -787,15 +801,31 @@ export class GroupCallOrchestrator {
     if (!isGroupCallPairSignalMessage(signal)) {
       return false;
     }
+    // TEMP_LOG
+    log(
+      `[GROUP-CALL][PAIR][IN][RAW] type=${signal.type} from=${remotePeerId.slice(-8)} to=${signal.toPeerId.slice(-8)} group=${signal.groupId.slice(0, 8)} call=${signal.callId.slice(0, 8)} ts=${signal.timestamp}`,
+    );
     if (!this.verifyAndRecordIncomingSignal(remotePeerId, signal)) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][PAIR][IN][DROP] type=${signal.type} from=${remotePeerId.slice(-8)} reason=verify_or_dedupe_failed group=${signal.groupId.slice(0, 8)} call=${signal.callId.slice(0, 8)}`,
+      );
       return true;
     }
     if (!this.validateIncomingPairSignal(signal)) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][PAIR][IN][DROP] type=${signal.type} from=${remotePeerId.slice(-8)} reason=pair_validation_failed group=${signal.groupId.slice(0, 8)} call=${signal.callId.slice(0, 8)}`,
+      );
       return true;
     }
 
     this.maybeClearDisconnectGraceFromSignal(signal);
 
+    // TEMP_LOG
+    log(
+      `[GROUP-CALL][PAIR][IN][ACCEPT] type=${signal.type} from=${remotePeerId.slice(-8)} to=${signal.toPeerId.slice(-8)} group=${signal.groupId.slice(0, 8)} call=${signal.callId.slice(0, 8)}`,
+    );
     this.onPairSignalReceived({
       signal: this.stripPairSignalSecrets(signal),
       receivedAt: Date.now(),
@@ -1854,10 +1884,18 @@ export class GroupCallOrchestrator {
     // A restarted or not-yet-rejoined participant can receive late offer/ICE traffic before
     // a local group-call session exists again. Drop that pair traffic quietly.
     if (!this.session) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][PAIR][VALIDATE][DROP] type=${signal.type} from=${signal.fromPeerId.slice(-8)} reason=no_session group=${signal.groupId.slice(0, 8)} call=${signal.callId.slice(0, 8)}`,
+      );
       return false;
     }
 
     if (this.session.groupId !== signal.groupId || this.session.callId !== signal.callId) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][PAIR][VALIDATE][DROP] type=${signal.type} from=${signal.fromPeerId.slice(-8)} reason=session_mismatch activeGroup=${this.session.groupId.slice(0, 8)} activeCall=${this.session.callId.slice(0, 8)} signalGroup=${signal.groupId.slice(0, 8)} signalCall=${signal.callId.slice(0, 8)}`,
+      );
       this.emitError('Unexpected group call pair signal', {
         groupId: signal.groupId,
         callId: signal.callId,
@@ -1875,9 +1913,17 @@ export class GroupCallOrchestrator {
       (participant) => participant.peerId === signal.fromPeerId,
     );
     if (senderAlreadyAdmitted) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][PAIR][VALIDATE][ACCEPT] type=${signal.type} from=${signal.fromPeerId.slice(-8)} reason=sender_already_admitted call=${signal.callId.slice(0, 8)}`,
+      );
       return true;
     }
     if (!signal.admissionToken) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][PAIR][VALIDATE][DROP] type=${signal.type} from=${signal.fromPeerId.slice(-8)} reason=missing_admission_token call=${signal.callId.slice(0, 8)}`,
+      );
       this.emitError('Missing admission token for non-rostered group call offer', {
         chatId: this.session.chatId,
         groupId: signal.groupId,
@@ -1893,6 +1939,10 @@ export class GroupCallOrchestrator {
       (peerId) => this.database.getUserByPeerId(peerId)?.signing_public_key,
     );
     if (!tokenVerification.valid) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][PAIR][VALIDATE][DROP] type=${signal.type} from=${signal.fromPeerId.slice(-8)} reason=invalid_admission_token detail=${tokenVerification.error ?? 'unknown'} call=${signal.callId.slice(0, 8)}`,
+      );
       this.emitError(tokenVerification.error ?? 'Invalid admission token', {
         chatId: this.session.chatId,
         groupId: signal.groupId,
@@ -1905,6 +1955,10 @@ export class GroupCallOrchestrator {
 
     const now = Date.now();
     if (!this.session.recentWriterPeerIds.includes(signal.admissionToken.issuerPeerId)) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][PAIR][VALIDATE][DROP] type=${signal.type} from=${signal.fromPeerId.slice(-8)} reason=stale_admission_issuer issuer=${signal.admissionToken.issuerPeerId.slice(-8)} call=${signal.callId.slice(0, 8)}`,
+      );
       this.emitError('Admission token issuer is not a recent writer', {
         chatId: this.session.chatId,
         groupId: signal.groupId,
@@ -1915,6 +1969,10 @@ export class GroupCallOrchestrator {
       return false;
     }
     if (signal.admissionToken.admittedPeerId !== signal.fromPeerId) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][PAIR][VALIDATE][DROP] type=${signal.type} from=${signal.fromPeerId.slice(-8)} reason=admitted_peer_mismatch tokenPeer=${signal.admissionToken.admittedPeerId.slice(-8)} call=${signal.callId.slice(0, 8)}`,
+      );
       this.emitError('Admission token does not match the offered peer', {
         chatId: this.session.chatId,
         groupId: signal.groupId,
@@ -1925,6 +1983,10 @@ export class GroupCallOrchestrator {
       return false;
     }
     if (signal.admissionToken.callId !== signal.callId || signal.admissionToken.callId !== this.session.callId) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][PAIR][VALIDATE][DROP] type=${signal.type} from=${signal.fromPeerId.slice(-8)} reason=admission_call_mismatch tokenCall=${signal.admissionToken.callId.slice(0, 8)} signalCall=${signal.callId.slice(0, 8)} activeCall=${this.session.callId.slice(0, 8)}`,
+      );
       this.emitError('Admission token call does not match the active call', {
         chatId: this.session.chatId,
         groupId: signal.groupId,
@@ -1938,6 +2000,10 @@ export class GroupCallOrchestrator {
       signal.admissionToken.issuedAt > now + GROUP_CALL_SIGNAL_MAX_FUTURE_SKEW_MS
       || now - signal.admissionToken.issuedAt > ADMISSION_TOKEN_MAX_AGE_MS
     ) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][PAIR][VALIDATE][DROP] type=${signal.type} from=${signal.fromPeerId.slice(-8)} reason=admission_token_age issuedAt=${signal.admissionToken.issuedAt} now=${now} call=${signal.callId.slice(0, 8)}`,
+      );
       this.emitError('Admission token is too old', {
         chatId: this.session.chatId,
         groupId: signal.groupId,
@@ -1948,6 +2014,10 @@ export class GroupCallOrchestrator {
       return false;
     }
 
+    // TEMP_LOG
+    log(
+      `[GROUP-CALL][PAIR][VALIDATE][ACCEPT] type=${signal.type} from=${signal.fromPeerId.slice(-8)} reason=admission_token_ok call=${signal.callId.slice(0, 8)}`,
+    );
     return true;
   }
 
@@ -2116,11 +2186,19 @@ export class GroupCallOrchestrator {
 
   private async trySendPairSignal(unsignedSignal: GroupCallPairSignalWithoutSignature): Promise<boolean> {
     try {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][PAIR][WIRE][START] type=${unsignedSignal.type} from=${unsignedSignal.fromPeerId.slice(-8)} to=${unsignedSignal.toPeerId.slice(-8)} call=${unsignedSignal.callId.slice(0, 8)}`,
+      );
       const signedSignal = buildSignedGroupCallSignal(unsignedSignal, this.userIdentity);
       const stream = await this.openControlStream(unsignedSignal.toPeerId);
       const payloadBytes = new TextEncoder().encode(JSON.stringify(signedSignal));
       await stream.sink([payloadBytes]);
       await stream.close();
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][PAIR][WIRE][SENT] type=${unsignedSignal.type} from=${unsignedSignal.fromPeerId.slice(-8)} to=${unsignedSignal.toPeerId.slice(-8)} call=${unsignedSignal.callId.slice(0, 8)} bytes=${payloadBytes.byteLength}`,
+      );
       return true;
     } catch (error: unknown) {
       // TEMP_LOG
@@ -2594,10 +2672,26 @@ export class GroupCallOrchestrator {
     this.localTransportResetPeerIds.delete(peerId);
     const hadDisconnectTimer = this.pendingPeerDisconnectTimers.has(peerId);
     if (!hadDisconnectTimer || !this.session) {
+      if (hadDisconnectTimer && !this.session) {
+        // TEMP_LOG
+        log(`[GROUP-CALL][RECOVER][PEER_CONNECT_SKIP] peer=${peerId.slice(-8)} reason=no_session hadDisconnectTimer=true`);
+      }
       return;
     }
 
+    // A libp2p reconnect means the peer is reachable again. Cancel the disconnect
+    // grace regardless of role — it was armed by a libp2p disconnect, and letting
+    // it fire would fail over / evict a peer that is actually still present (which
+    // is what split-brains a call after a transient flap). WebRTC media health is
+    // tracked separately by the renderer, which runs its own grace + recovery.
+    this.clearPeerDisconnectTimer(peerId);
+    this.emitStateChanged(this.session.state, { reason: 'disconnect_grace_cleared', peerId });
+
     if (this.session.role !== 'writer') {
+      // Recovery probes are writer-only; a participant just cancels its grace.
+      log(
+        `[GROUP-CALL][RECOVER][PEER_CONNECT] peer=${peerId.slice(-8)} action=grace_cleared_no_probe role=${this.session.role} call=${this.session.callId.slice(0, 8)}`,
+      );
       return;
     }
 
@@ -2613,6 +2707,10 @@ export class GroupCallOrchestrator {
       || peerResponse.callId !== session.callId
       || peerResponse.writerPeerId !== this.localPeerId()
     ) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][RECOVER][PEER_CONNECT_SKIP] peer=${peerId.slice(-8)} reason=${!peerResponse ? 'no_active_call_response' : peerResponse.callId !== session.callId ? 'call_mismatch' : 'writer_mismatch'} expectedCall=${session.callId.slice(0, 8)} gotCall=${peerResponse?.callId.slice(0, 8) ?? 'none'} expectedWriter=${this.localPeerId().slice(-8)} gotWriter=${peerResponse?.writerPeerId.slice(-8) ?? 'none'}`,
+      );
       return;
     }
     if (
@@ -2652,6 +2750,10 @@ export class GroupCallOrchestrator {
     );
     const timer = setTimeout(() => {
       this.pendingPeerDisconnectTimers.delete(peerId);
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][DISCONNECT][GRACE_FIRE] group=${this.session?.groupId.slice(0, 8) ?? 'none'} call=${this.session?.callId.slice(0, 8) ?? 'none'} peer=${peerId.slice(-8)} role=${this.session?.role ?? 'none'}`,
+      );
       this.handlePeerDisconnectGraceExpired(peerId);
     }, PEER_DISCONNECT_GRACE_MS);
     this.pendingPeerDisconnectTimers.set(peerId, {
@@ -2666,6 +2768,10 @@ export class GroupCallOrchestrator {
       return;
     }
     if (!hasParticipant(this.session.authoritativeParticipants, peerId)) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][DISCONNECT][GRACE_SKIP] group=${this.session.groupId.slice(0, 8)} call=${this.session.callId.slice(0, 8)} peer=${peerId.slice(-8)} reason=not_in_authoritative_roster`,
+      );
       this.emitStateChanged(this.session.state, { reason: 'disconnect_grace_cleared', peerId });
       return;
     }
@@ -2693,6 +2799,10 @@ export class GroupCallOrchestrator {
     }
 
     if (peerId !== this.session.currentWriterPeerId) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][DISCONNECT][GRACE_EXPIRE] group=${this.session.groupId.slice(0, 8)} call=${this.session.callId.slice(0, 8)} peer=${peerId.slice(-8)} role=${this.session.role} writer=${this.session.currentWriterPeerId.slice(-8)} action=wait_no_failover`,
+      );
       this.emitStateChanged(this.session.state, { reason: 'disconnect_grace_expired', peerId });
       return;
     }
@@ -2769,8 +2879,16 @@ export class GroupCallOrchestrator {
         && validation.error === 'Sender is not a current member of this group'
         && this.tryDeferGroupQuery(remotePeerId, signal)
       ) {
+        // TEMP_LOG
+        log(
+          `[GROUP-CALL][SIGNAL][SKIP] type=${signal.type} group=${signal.groupId.slice(0, 8)} reason=deferred_query from=${remotePeerId.slice(-8)}`,
+        );
         return false;
       }
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][SIGNAL][DROP] type=${signal.type} group=${signal.groupId.slice(0, 8)} call=${'callId' in signal ? signal.callId.slice(0, 8) : 'none'} from=${remotePeerId.slice(-8)} reason=${validation.error ?? 'validation_failed'}`,
+      );
       const errorContext: Pick<GroupCallErrorEvent, 'groupId' | 'peerId' | 'code'> & { callId?: string } = {
         groupId: signal.groupId,
         peerId: remotePeerId,
@@ -2784,6 +2902,10 @@ export class GroupCallOrchestrator {
     }
 
     if (!this.recordSeenSignalSignature(signal.signature, signal.type, remotePeerId)) {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][SIGNAL][DROP] type=${signal.type} group=${signal.groupId.slice(0, 8)} call=${'callId' in signal ? signal.callId.slice(0, 8) : 'none'} from=${remotePeerId.slice(-8)} reason=duplicate_signature`,
+      );
       return false;
     }
     return true;

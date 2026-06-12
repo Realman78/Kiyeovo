@@ -197,6 +197,8 @@ export function isGroupCallPairSignalMessage(value: unknown): value is GroupCall
         && (value.sdpMid === null || typeof value.sdpMid === 'string')
         && (value.sdpMLineIndex === null || Number.isInteger(value.sdpMLineIndex))
         && (value.usernameFragment === null || typeof value.usernameFragment === 'string');
+    case 'CALL_CAMERA_STATE':
+      return typeof value.cameraOn === 'boolean';
     default:
       return false;
   }
@@ -350,6 +352,16 @@ export function toUnsignedGroupCallSignalPayload(signal: UnsignedGroupCallSignal
         sdpMid: signal.sdpMid,
         sdpMLineIndex: signal.sdpMLineIndex,
         usernameFragment: signal.usernameFragment,
+        fromPeerId: signal.fromPeerId,
+        toPeerId: signal.toPeerId,
+        timestamp: signal.timestamp,
+      };
+    case 'CALL_CAMERA_STATE':
+      return {
+        type: signal.type,
+        groupId: signal.groupId,
+        callId: signal.callId,
+        cameraOn: signal.cameraOn,
         fromPeerId: signal.fromPeerId,
         toPeerId: signal.toPeerId,
         timestamp: signal.timestamp,

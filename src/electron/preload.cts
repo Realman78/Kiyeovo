@@ -56,7 +56,7 @@ const kiyeovoAPI: KiyeovoAPI = {
   sendGroupMessage: (chatId, message, options) => invoke(IPC_CHANNELS.SEND_GROUP_MESSAGE_REQUEST, chatId, message, options),
   retryGroupOfflineBackup: (chatId, messageId) => invoke(IPC_CHANNELS.RETRY_GROUP_OFFLINE_BACKUP, chatId, messageId),
 
-  startCall: (peerId, callId, offerSdp, mediaType = 'audio') => invoke(IPC_CHANNELS.CALL_START, peerId, callId, offerSdp, mediaType),
+  startCall: (peerId, callId, offerSdp) => invoke(IPC_CHANNELS.CALL_START, peerId, callId, offerSdp),
   acceptCall: (peerId, callId, answerSdp) => invoke(IPC_CHANNELS.CALL_ACCEPT, peerId, callId, answerSdp),
   rejectCall: (peerId, callId, reason) => invoke(IPC_CHANNELS.CALL_REJECT, peerId, callId, reason),
   hangupCall: (peerId, callId, reason) => invoke(IPC_CHANNELS.CALL_HANGUP, peerId, callId, reason),

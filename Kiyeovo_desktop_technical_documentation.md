@@ -269,29 +269,34 @@ Protections:
 
 ---
 
-### 8. Calls (MVP scope)
+### 8. Direct 1:1 Calls
 
-Call support is implemented for direct chats in fast mode.
+Direct-call support is implemented for direct chats in fast mode.
 
 Scope:
-- 1:1 audio and video
+- audio-first 1:1 calling
+- optional per-participant camera enable during an active call
 - screen sharing inside active 1:1 calls
-- no group calls yet
 - no offline call queue (offline/unreachable peers fail immediately)
 - no system-audio sharing with screen share yet; microphone call audio continues through the normal call audio track
 
 Architecture:
-- signaling over `call-signal` protocol (`CALL_OFFER`, `CALL_ANSWER`, `CALL_ICE`, `CALL_REJECT`, `CALL_END`, `CALL_BUSY`, `CALL_SCREEN_SHARE_STARTED`, `CALL_SCREEN_SHARE_STOPPED`)
+- signaling over `call-signal` protocol (`CALL_OFFER`, `CALL_ANSWER`, `CALL_ICE`, `CALL_REJECT`, `CALL_END`, `CALL_BUSY`, `CALL_CAMERA_STARTED`, `CALL_CAMERA_STOPPED`, `CALL_SCREEN_SHARE_STARTED`, `CALL_SCREEN_SHARE_STOPPED`)
 - signaling signed and validated in core
-- renderer `CallService` owns `RTCPeerConnection` and media tracks
+- renderer `CallService` owns `RTCPeerConnection`, local audio/camera/display tracks, and sender replacement
 - Electron main owns the Linux fallback source-picker request and only returns a display source selected by the trusted renderer
 
 Behavior highlights:
+- direct 1:1 calls are a single `Call` product; new outgoing offers are audio-only
+- incoming legacy start-time `video` offers are explicitly rejected as unsupported (`policy`)
 - pre-check for direct contact and active connectivity before offer
 - outgoing ring timeout (30s)
 - busy/reject/end handling with local cleanup on both sides
-- media controls: mute/deafen
-- video UI includes compact/fullscreen variants, stream swap controls, and fullscreen idle control fade
+- media controls: mute/deafen/camera
+- camera is independent per participant; one side may enable video while the other stays audio-only
+- visual mode starts automatically when camera or screen-share media appears, but fullscreen remains manual
+- if the last visual source disappears, the call UI switches back to the audio-only layout automatically
+- visual UI includes compact/fullscreen variants, stream swap controls when both cameras are on, and fullscreen idle control fade
 - screen sharing replaces the main video surface while active; the camera is not kept as a second primary tile in the current phase
 - only one side may screen-share at a time; local sharing wins if a remote started signal arrives during local sharing
 - ICE servers default from `DEFAULT_WEBRTC_ICE_SERVERS` in `src/core/network/default-infrastructure.ts`
@@ -299,11 +304,13 @@ Behavior highlights:
 - runtime overrides are stored in the settings table and loaded by renderer `CallService` when a call starts or is accepted
 - validation is format-based only; there is no built-in health check for STUN/TURN reachability
 
-Screen sharing implementation notes:
+Camera and screen-share implementation notes:
 - calls pre-negotiate a shared video transceiver so screen sharing can start without mid-call SDP renegotiation
-- audio calls also pre-negotiate the optional video m-line; starting screen share replaces the shared video sender's track with the captured display track
-- video calls use the same shared sender for camera and screen; starting screen share replaces the camera track, and stopping restores the camera track
-- stopping screen share on an audio call replaces the shared video sender track with `null`
+- audio-only direct calls still pre-negotiate the optional video m-line so camera or screen sharing can attach later
+- local camera and screen share reuse the same shared video sender
+- camera state is signaled explicitly with STARTED/STOPPED messages so the remote UI can update deterministically
+- starting screen share replaces the shared visual sender's track with the captured display track
+- stopping screen share restores the camera track if camera is on; otherwise it restores `null`
 - display capture is requested at up to 1920x1080 and 30fps, with `contentHint = "detail"` for screen/text readability
 - screen-share sender parameters currently cap bitrate at 4 Mbps and prefer maintaining resolution
 - remote screen-share UI is driven by signed STARTED/STOPPED call signals, not only by WebRTC track `ended`/`mute` state
@@ -531,7 +538,7 @@ Current resilience layers:
 - Single SQLite file increases mode-scoping complexity.
 - Offline behavior is eventual consistency over DHT propagation.
 - Group control delivery is ACK/republish based (not strict real-time consensus).
-- Calls are currently fast-mode direct-chat only (1:1, no group call).
+- Direct 1:1 calls are currently fast-mode only.
 - Screen sharing currently sends display video only; system/window audio sharing is intentionally out of scope for the current phase.
 - STUN/TURN validation is format-only; there is no live health-check/testing UI yet.
 - On some Linux environments, sandboxed unpackaged Electron runs may still require host-specific sandbox-helper setup during development.
@@ -567,6 +574,6 @@ Kiyeovo Desktop MVP combines:
 - robust offline fallback
 - group state reconciliation and encrypted group metadata distribution
 - controlled file transfer pipeline
-- fast-mode direct audio/video calling
+- fast-mode direct calling with optional camera and screen sharing
 
 The main engineering priorities going forward are preserving mode isolation, keeping flow complexity manageable in message/group handlers, and documenting trust/identity/DHT-semantic changes as first-class artifacts.

@@ -15,6 +15,7 @@ export type MessageSentStatus = 'online' | 'offline' | null;
 export type CallDirection = 'incoming' | 'outgoing';
 export type CallLifecycleState = 'idle' | 'ringing_out' | 'ringing_in' | 'connecting' | 'active' | 'ended';
 export type CallMediaType = 'audio' | 'video';
+export type CameraLifecycleState = 'off' | 'starting' | 'on' | 'stopping';
 export type ScreenShareLifecycleState = 'idle' | 'starting' | 'sharing' | 'stopping';
 export type ScreenShareStopReason = 'manual' | 'track-ended' | 'call-ended' | 'failed';
 
@@ -36,6 +37,8 @@ export type CallSignal = {
     | 'CALL_REJECT'
     | 'CALL_END'
     | 'CALL_BUSY'
+    | 'CALL_CAMERA_STARTED'
+    | 'CALL_CAMERA_STOPPED'
     | 'CALL_SCREEN_SHARE_STARTED'
     | 'CALL_SCREEN_SHARE_STOPPED';
   callId: string;

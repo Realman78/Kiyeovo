@@ -4,7 +4,7 @@ import Sidebar from '../components/sidebar/Sidebar';
 import ChatWrapper from '../components/chat/ChatWrapper';
 import { setChats, addChat, removePendingKeyExchange, setActiveChat, markOfflineFetched, markOfflineFetchFailed, updateFileTransferProgress, updateFileTransferStatus, updateFileTransferError, setPendingFileStatus, updateChat, setActivePendingKeyExchange, setOfflineFetchStatus } from '../state/slices/chatSlice';
 import { removeContactAttempt, setActiveContactAttempt, addMessage, type Chat } from '../state/slices/chatSlice';
-import { applyCoreCallState, applyLocalCallState, applyScreenShareState, setCallError, setIncomingCall, setCallPeerName } from '../state/slices/callSlice';
+import { applyCameraState, applyCoreCallState, applyLocalCallState, applyScreenShareState, setCallError, setIncomingCall, setCallPeerName } from '../state/slices/callSlice';
 import { useToast } from '../components/ui/use-toast';
 import type { RootState } from '../state/store';
 import { useNotifications } from '../hooks/useNotifications';
@@ -433,7 +433,6 @@ export const Main = () => {
         peerId: data.signal.fromPeerId,
         peerName,
         offerSdp: data.signal.offerSdp,
-        mediaType: data.signal.mediaType,
         receivedAt: data.receivedAt,
       }));
     });
@@ -449,7 +448,6 @@ export const Main = () => {
         peerId: data.peerId,
         peerName,
         direction: data.direction,
-        mediaType: data.mediaType,
         state: data.state,
         reason: data.reason,
         timestamp: data.timestamp,
@@ -541,11 +539,23 @@ export const Main = () => {
         }));
         return;
       }
+
+      if (event.type === 'camera') {
+        dispatch(applyCameraState({
+          callId: event.callId,
+          peerId: event.peerId,
+          localState: event.localState,
+          remoteEnabled: event.remoteEnabled,
+        }));
+      }
     });
 
     const unsubGroupCallService = groupCallService.subscribe((event) => {
       if (event.type === 'error') {
         toast.error(event.message);
+        return;
+      }
+      if (event.type !== 'state') {
         return;
       }
       if (event.previousState !== 'active' && event.snapshot.state === 'active') {
