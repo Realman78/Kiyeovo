@@ -761,6 +761,13 @@ class GroupCallService {
     });
   }
 
+  // A peer whose RTCPeerConnection is live carries media regardless of libp2p
+  // churn; recovery probes must never replace it (that would drop working video).
+  private isPeerConnectionHealthy(peerId: string): boolean {
+    const peer = this.peers.get(peerId);
+    return Boolean(peer && peer.connected && peer.pc.connectionState === 'connected');
+  }
+
   private async startWriterReconnectProbe(peerId: string): Promise<void> {
     if (!this.session || this.session.role !== 'writer' || this.writerReconnectProbeInProgress || !this.localPeerId) {
       // TEMP_LOG
@@ -770,6 +777,11 @@ class GroupCallService {
     if (peerId === this.localPeerId || !this.session.participantPeerIds.includes(peerId)) {
       // TEMP_LOG
       log(`[GROUP-CALL][WRITER_PROBE][SKIP_SINGLE] peer=${peerId.slice(-8)} reason=${peerId === this.localPeerId ? 'self' : 'not_in_roster'}`);
+      return;
+    }
+    // A libp2p reconnect must not tear down a still-healthy media connection
+    if (this.isPeerConnectionHealthy(peerId)) {
+      log(`[GROUP-CALL][WRITER_PROBE][SKIP_SINGLE] peer=${peerId.slice(-8)} reason=already_connected`);
       return;
     }
 
@@ -789,7 +801,7 @@ class GroupCallService {
     }
 
     const targets = this.session.participantPeerIds
-      .filter((peerId) => peerId !== this.localPeerId);
+      .filter((peerId) => peerId !== this.localPeerId && !this.isPeerConnectionHealthy(peerId));
     if (targets.length === 0) {
       // TEMP_LOG
       log('[GROUP-CALL][WRITER_PROBE][SKIP] reason=no_targets');
@@ -871,11 +883,11 @@ class GroupCallService {
       `[GROUP-CALL][OFFER][IN] from=${signal.fromPeerId.slice(-8)} existing=${existing ? 'yes' : 'no'} existingConnected=${String(existing?.connected ?? false)} connState=${existing?.pc.connectionState ?? 'none'} iceState=${existing?.pc.iceConnectionState ?? 'none'} sigState=${existing?.pc.signalingState ?? 'none'}`,
     );
     if (existing?.connected) {
-      // TEMP_LOG
+      // Do NOT drop. A peer only re-offers after tearing down and rebuilding its
+      // own side (a healthy sender never re-offers)
       log(
-        `[GROUP-CALL][OFFER][DROP] from=${signal.fromPeerId.slice(-8)} reason=existing_connected connState=${existing.pc.connectionState} iceState=${existing.pc.iceConnectionState} sigState=${existing.pc.signalingState}`,
+        `[GROUP-CALL][OFFER][REBUILD] from=${signal.fromPeerId.slice(-8)} reason=stale_local_connected connState=${existing.pc.connectionState} iceState=${existing.pc.iceConnectionState} sigState=${existing.pc.signalingState}`,
       );
-      return;
     }
 
     try {

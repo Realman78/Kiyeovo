@@ -109,6 +109,10 @@ export const GroupCallManagerCard = () => {
   };
 
   const disconnectSecondsRemaining = (peerId: string): number | null => {
+    // Suppress the countdown when the peer's media connection is healthy
+    if (connectedPeerIds.has(peerId)) {
+      return null;
+    }
     const expiresAt = pendingDisconnects.get(peerId);
     if (typeof expiresAt !== 'number' || !Number.isFinite(expiresAt)) {
       return null;
@@ -485,7 +489,7 @@ export const GroupCallManagerCard = () => {
                   </div>
                   <div className="shrink-0 text-right text-[11px] uppercase tracking-wide text-muted-foreground">
                     <div>
-                      {pendingDisconnects.has(peerId)
+                      {pendingDisconnects.has(peerId) && !connectedPeerIds.has(peerId)
                         ? `Disconnect ${disconnectSecondsRemaining(peerId) ?? MAX_DISCONNECT_COUNTDOWN_SECONDS}s`
                         : isConnected
                           ? <><span className='text-sm'>{isWriter ? '🎮 ' : ''}</span><span className='text-emerald-600 font-extrabold text-xl'>•</span></>
