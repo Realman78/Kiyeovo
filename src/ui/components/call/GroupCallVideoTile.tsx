@@ -88,7 +88,7 @@ export const GroupCallVideoTile = ({
         </button>
       )}
 
-      <div className="absolute inset-x-0 bottom-0 flex items-center justify-between gap-1 bg-gradient-to-t from-black/70 to-transparent px-2 py-1">
+      <div className="absolute inset-x-0 bottom-0 flex items-center justify-between gap-1 bg-linear-to-t from-black/70 to-transparent px-2 py-1">
         <span className="truncate text-[11px] font-medium text-white">
           {isWriter ? '🎮 ' : ''}{name}
         </span>

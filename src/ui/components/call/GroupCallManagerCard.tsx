@@ -47,6 +47,7 @@ export const GroupCallManagerCard = () => {
   const { toast } = useToast();
   const chats = useAppSelector((state) => state.chat.chats);
   const userPeerId = useAppSelector((state) => state.user.peerId);
+  const localUsername = useAppSelector((state) => state.user.username?.trim() ?? '');
   const [snapshot, setSnapshot] = useState<GroupCallSnapshot>(() => groupCallService.getSnapshot());
   const [participantMedia, setParticipantMedia] = useState<GroupParticipantMedia[]>(() => groupCallService.getParticipantMedia());
   const [localCameraStream, setLocalCameraStream] = useState<MediaStream | null>(() => groupCallService.getLocalCameraStream());
@@ -102,7 +103,7 @@ export const GroupCallManagerCard = () => {
 
   const resolvePeerName = (peerId: string): string => {
     if (peerId === userPeerId || peerId === snapshot.localPeerId) {
-      return 'You';
+      return localUsername ? `${localUsername} (You)` : 'You';
     }
     return chats.find((chat) => chat.type === 'direct' && chat.peerId === peerId)?.name
       ?? `user_${peerId.slice(-8)}`;
