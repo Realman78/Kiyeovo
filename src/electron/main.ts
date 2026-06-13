@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, session } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, powerMonitor, session } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -51,6 +51,27 @@ import { getPackagedAppEntryUrl, registerAppProtocolHandler, registerAppProtocol
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// // Temporary diagnostic: prefix all main-process console output with a timestamp. 
+// function installLogTimestamps(): void {
+//   if (!isDebugModeEnabled()) {
+//     return;
+//   }
+//   const orig = {
+//     log: console.log.bind(console),
+//     warn: console.warn.bind(console),
+//     error: console.error.bind(console),
+//   };
+//   const ts = (): string => {
+//     const d = new Date();
+//     const p = (n: number, w = 2) => String(n).padStart(w, '0');
+//     return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
+//   };
+//   console.log = (...args: unknown[]) => orig.log(`[${ts()}]`, ...args);
+//   console.warn = (...args: unknown[]) => orig.warn(`[${ts()}]`, ...args);
+//   console.error = (...args: unknown[]) => orig.error(`[${ts()}]`, ...args);
+// }
+// installLogTimestamps();
 
 let mainWindow: BrowserWindow | null = null;
 let p2pCore: P2PCore | null = null;
@@ -682,6 +703,19 @@ async function initializeApp() {
     // Setup IPC handlers
     setupIPCHandlers(ipcMain, () => p2pCore, () => mainWindow);
     log('[Electron] IPC handlers registered');
+
+    // OS wake/unlock
+    const handlePowerResume = (trigger: string) => {
+      if (!p2pCore) {
+        return;
+      }
+      log(`[Electron][POWER] ${trigger} - forcing immediate reconnect`);
+      void p2pCore.requestImmediateReconnect().catch((error) => {
+        console.warn(`[Electron][POWER] reconnect after ${trigger} failed:`, errStr(error));
+      });
+    };
+    powerMonitor.on('resume', () => handlePowerResume('resume'));
+    powerMonitor.on('unlock-screen', () => handlePowerResume('unlock-screen'));
     trustedIpcMain.handle(IPC_CHANNELS.INIT_STATE, () => {
       return {
         initialized: isCoreInitialized,

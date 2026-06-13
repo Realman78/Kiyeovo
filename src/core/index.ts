@@ -57,6 +57,8 @@ export interface P2PCore {
   groupCallOrchestrator: GroupCallOrchestrator;
   networkMode: NetworkMode;
   getCurrentDhtStatus: () => boolean | null;
+  // Force a close-all + redial reconnect. Used on OS wake from sleep
+  requestImmediateReconnect: () => Promise<boolean>;
   retryBootstrap: () => Promise<BootstrapConnectResult>;
   retryRelays: () => Promise<{ attempted: number; connected: number }>;
   cleanup: () => Promise<void>;
@@ -534,6 +536,7 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     getCurrentDhtStatus: () => {
       return currentDhtConnected;
     },
+    requestImmediateReconnect,
     retryBootstrap: async () => {
       if (reconnectController.isReconnectInProgress()) {
         console.log('[Core] Reconnect already in progress, ignoring manual retry');
