@@ -2,7 +2,10 @@ import { useState, useEffect } from 'react'
 import './App.css'
 import { Login } from './pages/Login';
 import { Main } from './pages/Main';
-import { setPeerId, setTorEnabled } from './state/slices/userSlice';
+import { OfflineBanner } from './components/OfflineBanner';
+import { useOnlineStatus } from './hooks/useOnlineStatus';
+import { useReconnectOnNetworkReturn } from './hooks/useReconnectOnNetworkReturn';
+import { setPeerId, setTorEnabled, setNetworkOnline } from './state/slices/userSlice';
 import { fetchAppConfig } from './state/slices/appConfigSlice';
 import { useAppDispatch } from './state/hooks';
 
@@ -82,7 +85,15 @@ function App() {
     void dispatch(fetchAppConfig());
   }, [isInitialized, dispatch]);
 
+  // Single source of OS-connectivity truth
+  const isOnline = useOnlineStatus();
+  useReconnectOnNetworkReturn(isOnline);
+  useEffect(() => {
+    dispatch(setNetworkOnline(isOnline));
+  }, [isOnline, dispatch]);
+
   return <div className='w-full h-full'>
+    <OfflineBanner />
     {isInitialized ? <Main /> : <Login initStatus={initStatus} />}
   </div>
 }

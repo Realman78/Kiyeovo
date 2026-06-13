@@ -40,6 +40,9 @@ const kiyeovoAPI: KiyeovoAPI = {
 
   onDHTConnectionStatus: (callback) => subscribe(IPC_CHANNELS.DHT_CONNECTION_STATUS, callback),
   getDHTConnectionStatus: () => invoke(IPC_CHANNELS.GET_DHT_CONNECTION_STATUS),
+  isNetworkConnected: () => invoke(IPC_CHANNELS.GET_NETWORK_CONNECTED),
+  notifyNetworkReconnected: () => invoke(IPC_CHANNELS.NOTIFY_NETWORK_RECONNECTED),
+  getNodesLiveness: (addresses) => invoke(IPC_CHANNELS.GET_NODES_LIVENESS, addresses),
   getNetworkMode: () => invoke(IPC_CHANNELS.GET_NETWORK_MODE),
   setNetworkMode: (mode) => invoke(IPC_CHANNELS.SET_NETWORK_MODE, mode),
 

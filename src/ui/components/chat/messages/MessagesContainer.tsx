@@ -9,6 +9,7 @@ import type { MessageSentStatus } from "../../../types";
 import type { FileTransferStatus } from "../../../../core/types";
 import { FILE_ACCEPTANCE_TIMEOUT, INITIAL_MESSAGES_LIMIT, LOAD_MORE_MESSAGES_LIMIT, SHOW_TIMESTAMP_INTERVAL } from "../../../constants";
 import { useToast } from "../../ui/use-toast";
+import { useOfflineSendWarning } from "../../../hooks/useOfflineSendWarning";
 import type { Message } from "../../../../core/db/database";
 import { errStr } from '../../../../core/utils/general-error';
 
@@ -76,6 +77,7 @@ export const MessagesContainer = ({ messages, isPending }: MessagesContainerProp
   const activePendingKeyExchange = useSelector((state: RootState) => state.chat.activePendingKeyExchange);
   const dispatch = useDispatch();
   const { toast } = useToast();
+  const warnOfflineSend = useOfflineSendWarning();
 
   const [error, setError] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(true);
@@ -320,6 +322,7 @@ export const MessagesContainer = ({ messages, isPending }: MessagesContainerProp
           toast.error(error || 'Failed to resend group message');
           return;
         }
+        warnOfflineSend();
         if (warning && offlineBackupRetry) {
           toast.warningAction(
             warning,
@@ -363,6 +366,7 @@ export const MessagesContainer = ({ messages, isPending }: MessagesContainerProp
         dispatch(updateLocalMessageSendState({ messageId: message.id, state: 'failed' }));
         toast.error(error || 'Failed to resend message');
       } else if (sentMessage?.messageId) {
+        warnOfflineSend();
         dispatch(finalizeSendingMessage({
           localMessageId: message.id,
           finalMessage: {

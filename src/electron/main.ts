@@ -39,7 +39,7 @@ import { setupIPCHandlers } from './ipc-handlers.js';
 import { TorManager, getTorBinaryPath, BUNDLED_TOR_SOCKS_PORT } from '../core/transport/tor-manager.js';
 import { ChatDatabase } from '../core/db/database.js';
 import type { NetworkMode } from '../core/types.js';
-import { log } from '../shared/logger.js';
+import { isDebugModeEnabled, log } from '../shared/logger.js';
 import { errStr } from '../core/utils/general-error.js';
 import { scheduleAppRelaunch } from './relaunch.js';
 import { createTrustedIpcMainHandle } from './trusted-ipc.js';
@@ -52,26 +52,26 @@ import { getPackagedAppEntryUrl, registerAppProtocolHandler, registerAppProtocol
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// // Temporary diagnostic: prefix all main-process console output with a timestamp. 
-// function installLogTimestamps(): void {
-//   if (!isDebugModeEnabled()) {
-//     return;
-//   }
-//   const orig = {
-//     log: console.log.bind(console),
-//     warn: console.warn.bind(console),
-//     error: console.error.bind(console),
-//   };
-//   const ts = (): string => {
-//     const d = new Date();
-//     const p = (n: number, w = 2) => String(n).padStart(w, '0');
-//     return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
-//   };
-//   console.log = (...args: unknown[]) => orig.log(`[${ts()}]`, ...args);
-//   console.warn = (...args: unknown[]) => orig.warn(`[${ts()}]`, ...args);
-//   console.error = (...args: unknown[]) => orig.error(`[${ts()}]`, ...args);
-// }
-// installLogTimestamps();
+// Temporary diagnostic: prefix all main-process console output with a timestamp. 
+function installLogTimestamps(): void {
+  if (!isDebugModeEnabled()) {
+    return;
+  }
+  const orig = {
+    log: console.log.bind(console),
+    warn: console.warn.bind(console),
+    error: console.error.bind(console),
+  };
+  const ts = (): string => {
+    const d = new Date();
+    const p = (n: number, w = 2) => String(n).padStart(w, '0');
+    return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
+  };
+  console.log = (...args: unknown[]) => orig.log(`[${ts()}]`, ...args);
+  console.warn = (...args: unknown[]) => orig.warn(`[${ts()}]`, ...args);
+  console.error = (...args: unknown[]) => orig.error(`[${ts()}]`, ...args);
+}
+installLogTimestamps();
 
 let mainWindow: BrowserWindow | null = null;
 let p2pCore: P2PCore | null = null;

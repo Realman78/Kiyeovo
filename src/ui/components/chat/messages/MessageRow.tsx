@@ -83,7 +83,7 @@ export const MessageRow = memo(({
             isFromCurrentUser={message.senderPeerId === myPeerId}
           />
         ) : (
-          <p className="text-sm text-left leading-relaxed">{message.content}</p>
+          <p className="text-left text-sm leading-relaxed whitespace-pre-wrap wrap-anywhere">{message.content}</p>
         )}
       </div>
       {showTimestamp && (

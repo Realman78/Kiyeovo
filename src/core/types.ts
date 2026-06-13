@@ -1200,13 +1200,23 @@ export type BootstrapConnectResult = {
 
 export type ConnectionNodeStatus = {
   address: string;
-  connected: boolean;
+  // null = liveness not yet determined
+  connected: boolean | null;
 };
 
 export type ConnectionNodesResponse = {
   success: boolean;
   nodes: ConnectionNodeStatus[];
   error: string | null;
+};
+
+export type NodeLivenessResult = {
+  address: string;
+  connected: boolean;
+};
+
+export type NodesLivenessResponse = {
+  statuses: NodeLivenessResult[];
 };
 
 export type BootstrapRetryResponse = {

@@ -1,4 +1,6 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, type Dispatch, type SetStateAction } from "react";
+import { useSelector } from "react-redux";
+import type { RootState } from "../../../state/store";
 import { Wifi, WifiOff, Loader2 } from "lucide-react";
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "../../ui/Dialog";
 import { useToast } from "../../ui/use-toast";
@@ -11,12 +13,12 @@ import { UNEXPECTED_ERROR } from "../../../constants";
 interface BootstrapNode {
   id: string;
   address: string;
-  connected: boolean;
+  connected: boolean | null;
 }
 
 interface RelayNode {
   address: string;
-  connected: boolean;
+  connected: boolean | null;
 }
 
 type IceServerDraft = {
@@ -63,6 +65,7 @@ const ConnectionStatusDialog = ({
   isConnected,
 }: ConnectionStatusDialogProps) => {
   const { toast } = useToast();
+  const networkOnline = useSelector((state: RootState) => state.user.networkOnline);
   const [activeTab, setActiveTab] = useState<'bootstrap' | 'relays' | 'ice'>('bootstrap');
   const [networkMode, setNetworkMode] = useState<NetworkMode>('fast');
 
@@ -94,12 +97,16 @@ const ConnectionStatusDialog = ({
       await window.kiyeovoAPI.getBootstrapNodes(),
       'Failed to fetch bootstrap nodes',
     );
-    const fetchedNodes: BootstrapNode[] = nodes.map((node, index) => ({
-      id: `${index}`,
-      address: node.address,
-      connected: node.connected,
+
+    setBootstrapNodes((prev) => nodes.map((node, index) => {
+      const existing = prev.find((p) => p.address === node.address);
+      return {
+        id: `${index}`,
+        address: node.address,
+        connected: existing ? existing.connected : node.connected,
+      };
     }));
-    setBootstrapNodes(fetchedNodes);
+    void refreshNodeLiveness(nodes.map((n) => n.address), setBootstrapNodes);
   };
 
   const refreshRelayNodes = async () => {
@@ -107,7 +114,32 @@ const ConnectionStatusDialog = ({
       await window.kiyeovoAPI.getRelayStatus(),
       'Failed to fetch relay nodes',
     );
-    setRelayNodes(nodes);
+    setRelayNodes((prev) => nodes.map((node) => {
+      const existing = prev.find((p) => p.address === node.address);
+      return {
+        address: node.address,
+        connected: existing ? existing.connected : node.connected,
+      };
+    }));
+    void refreshNodeLiveness(nodes.map((n) => n.address), setRelayNodes);
+  };
+
+  const refreshNodeLiveness = async <T extends { address: string; connected: boolean | null }>(
+    addresses: string[],
+    setNodes: Dispatch<SetStateAction<T[]>>,
+  ) => {
+    if (addresses.length === 0) return;
+    try {
+      const { statuses } = await window.kiyeovoAPI.getNodesLiveness(addresses);
+      const statusByAddress = new Map(statuses.map((s) => [s.address, s.connected]));
+      setNodes((prev) => prev.map((node) => (
+        statusByAddress.has(node.address)
+          ? { ...node, connected: statusByAddress.get(node.address)! }
+          : node
+      )));
+    } catch {
+      // Leave the last-known status if the probe fails.
+    }
   };
 
   const refreshIceServers = async () => {
@@ -571,12 +603,14 @@ const ConnectionStatusDialog = ({
       : isConnected
         ? 'text-success'
         : 'text-destructive';
+  // Reachable peer but no real network interface = connected to local peers only.
+  const localOnly = isConnected === true && networkOnline === false;
   const networkStatusLabel = isRetryingAny
     ? 'RETRYING'
     : isConnected === null
       ? 'CONNECTING'
       : isConnected
-        ? 'ONLINE'
+        ? (localOnly ? 'ONLINE (LOCAL)' : 'ONLINE')
         : 'OFFLINE';
 
   const headerDescription = isRetryingAny
@@ -584,7 +618,7 @@ const ConnectionStatusDialog = ({
     : isConnected === null
       ? 'Connecting to the DHT network...'
       : isConnected
-        ? 'Connected to the DHT network'
+        ? (localOnly ? 'Connected to local peers (no internet)' : 'Connected to the DHT network')
         : 'Not connected to the DHT network';
 
   return (

@@ -13,6 +13,7 @@ import { addPendingKeyExchange, removeContactAttempt, removePendingKeyExchange, 
 import type { RootState } from "../../../state/store";
 import { DropdownMenu, DropdownMenuItem } from "../../ui/DropdownMenu";
 import { useToast } from "../../ui/use-toast";
+import { useOfflineSendWarning } from "../../../hooks/useOfflineSendWarning";
 import { errStr } from '../../../../core/utils/general-error';
 import { UNEXPECTED_ERROR } from "../../../constants";
 
@@ -31,6 +32,10 @@ export const SidebarHeader: FC<SidebarHeaderProps> = ({ collapsed = false }) => 
     const [error, setError] = useState<string | undefined>(undefined);
     const [isTorEnabled, setIsTorEnabled] = useState<boolean>(false);
     const isConnected = useSelector((state: RootState) => state.user.connected);
+    const networkOnline = useSelector((state: RootState) => state.user.networkOnline);
+    // Status reflects real DHT-peer reachability (liveness)
+    const statusSuffix = networkOnline === false ? ' (local)' : isTorEnabled ? ' (tor)' : '';
+    const statusText = isDHTConnected === null ? 'Connecting...' : isDHTConnected ? `Connected${statusSuffix}` : 'Offline';
     const isRegistered = useSelector((state: RootState) => state.user.registered);
     const registrationInProgress = useSelector((state: RootState) => state.user.registrationInProgress);
     const chats = useSelector((state: RootState) => state.chat.chats);
@@ -40,6 +45,7 @@ export const SidebarHeader: FC<SidebarHeaderProps> = ({ collapsed = false }) => 
 
     const dispatch = useDispatch();
     const { toast } = useToast();
+    const warnOfflineSend = useOfflineSendWarning();
 
     // Ref to track latest newConversationDialogOpen value without recreating listeners
     const newConversationDialogOpenRef = useRef(newConversationDialogOpen);
@@ -88,6 +94,7 @@ export const SidebarHeader: FC<SidebarHeaderProps> = ({ collapsed = false }) => 
             const result = await window.kiyeovoAPI.sendMessage(peerIdOrUsername, message);
 
             if (result.success) {
+                warnOfflineSend();
                 setNewConversationDialogOpen(false);
                 dispatch(setActivePendingKeyExchange(null));
             } else {
@@ -365,7 +372,7 @@ export const SidebarHeader: FC<SidebarHeaderProps> = ({ collapsed = false }) => 
                     <button
                         onClick={handleShowDhtDialog}
                         className="flex cursor-pointer items-center justify-center w-8 h-8 rounded-md transition-colors hover:bg-sidebar-accent"
-                        title={isDHTConnected === null ? "Connecting..." : isDHTConnected ? `Connected${isTorEnabled ? ' (tor)' : ''}` : "Offline"}
+                        title={statusText}
                         aria-label="DHT status"
                     >
                         <span className={`w-2.5 h-2.5 rounded-full ${isDHTConnected === null ? "bg-muted-foreground" : isDHTConnected ? "bg-success pulse-online" : "bg-destructive"}`} />
@@ -376,7 +383,7 @@ export const SidebarHeader: FC<SidebarHeaderProps> = ({ collapsed = false }) => 
                         className={`flex cursor-pointer items-center gap-2 px-2 py-1 rounded-md transition-colors hover:bg-sidebar-accent group ${isDHTConnected === null ? "text-muted-foreground" : isDHTConnected ? "text-success" : "text-destructive"}`}
                     >
                         <span className="font-mono text-xs uppercase tracking-wider">
-                            {isDHTConnected === null ? "Connecting..." : isDHTConnected ? `Connected${isTorEnabled ? ' (tor)' : ''}` : "Offline"}
+                            {statusText}
                         </span>
                         <span className={`w-2 h-2 rounded-full mb-0.5 ${isDHTConnected === null ? "bg-muted-foreground" : isDHTConnected ? "bg-success pulse-online" : "bg-destructive"}`} />
                     </button>

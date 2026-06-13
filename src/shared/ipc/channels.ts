@@ -14,6 +14,13 @@ export const IPC_CHANNELS = {
   DHT_CONNECTION_STATUS: 'dht:connectionStatus',
   GET_DHT_CONNECTION_STATUS: 'dht:getConnectionStatus',
 
+  // OS-level network connectivity (is there a real, non-virtual interface up)
+  GET_NETWORK_CONNECTED: 'network:getConnected',
+  // Renderer tells core that OS connectivity returned, to reconnect immediately
+  NOTIFY_NETWORK_RECONNECTED: 'network:reconnected',
+  // Per-node liveness probe (pings configured bootstrap/relay addresses)
+  GET_NODES_LIVENESS: 'network:getNodesLiveness',
+
   // Register
   REGISTER_REQUEST: 'register:request',
   GET_USER_STATE: 'user:getState',

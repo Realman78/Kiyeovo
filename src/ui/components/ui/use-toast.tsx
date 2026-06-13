@@ -19,7 +19,7 @@ type ToastContextValue = {
   toast: {
     success: (message: string, title?: string) => void;
     error: (message: string, title?: string) => void;
-    warning: (message: string, title?: string) => void;
+    warning: (message: string, title?: string, duration?: number) => void;
     warningAction: (message: string, actionLabel: string, onAction: () => void, title?: string) => void;
     info: (message: string, title?: string) => void;
   };
@@ -54,8 +54,8 @@ export function ToastContextProvider({ children }: { children: React.ReactNode }
     error: (message: string, title?: string) => {
       addToast({ description: message, title, variant: "error" });
     },
-    warning: (message: string, title?: string) => {
-      addToast({ description: message, title, variant: "warning" });
+    warning: (message: string, title?: string, duration?: number) => {
+      addToast({ description: message, title, variant: "warning", duration });
     },
     warningAction: (message: string, actionLabel: string, onAction: () => void, title?: string) => {
       addToast({

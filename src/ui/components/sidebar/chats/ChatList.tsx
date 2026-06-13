@@ -16,6 +16,9 @@ export const ChatList: FC = () => {
     const contactAttempts = useSelector((state: RootState) => state.chat.contactAttempts);
     const selectedChatId = useSelector((state: RootState) => state.chat.activeChat);
     const isConnected = useSelector((state: RootState) => state.user.connected);
+    // Gate on OFFLINE to avoid futile fetches while offline.
+    const networkOnline = useSelector((state: RootState) => state.user.networkOnline);
+    const canFetchOffline = !!isConnected && networkOnline;
     const dispatch = useDispatch();
 
     const shouldFetchOfflineForChat = (chat: Chat): boolean => {
@@ -25,7 +28,7 @@ export const ChatList: FC = () => {
     const fetchDirectOfflineForChat = async (chat: Chat): Promise<void> => {
         if (chat.type !== 'direct') return;
         if (!shouldFetchOfflineForChat(chat)) return;
-        if (!isConnected) return;
+        if (!canFetchOffline) return;
 
         dispatch(setOfflineFetchStatus({ chatId: chat.id, isFetching: true }));
         try {
@@ -77,7 +80,7 @@ export const ChatList: FC = () => {
         // Check if we need to fetch offline messages for this chat
         const chat = chats.find(c => c.id === chatId);
         if (!chat || !shouldFetchOfflineForChat(chat)) return;
-        if (!isConnected) return;
+        if (!canFetchOffline) return;
 
         // Group open path: first ensure creator's direct chat is fetched if it still needs sync.
         // This helps ingest GROUP_STATE_UPDATE control messages before group epoch scanning.

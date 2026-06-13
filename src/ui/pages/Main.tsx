@@ -21,6 +21,8 @@ export const Main = () => {
   const dispatch = useDispatch();
   const { toast } = useToast();
   const isConnected = useSelector((state: RootState) => state.user.connected);
+  const networkOnline = useSelector((state: RootState) => state.user.networkOnline);
+  const canFetchOffline = !!isConnected && networkOnline;
   const chats = useSelector((state: RootState) => state.chat.chats);
   const activeCall = useSelector((state: RootState) => state.call.activeCall);
   const incomingCall = useSelector((state: RootState) => state.call.incomingCall);
@@ -638,7 +640,7 @@ export const Main = () => {
 
 
         const groupCheckTask = async () => {
-          if (topGroupChatIds.length === 0 || !isConnected) {
+          if (topGroupChatIds.length === 0 || !canFetchOffline) {
             return;
           }
 
@@ -696,7 +698,7 @@ export const Main = () => {
         };
 
         const directCheckTask = async () => {
-          if (topDirectChatIds.length === 0 || !isConnected) {
+          if (topDirectChatIds.length === 0 || !canFetchOffline) {
             return;
           }
 
@@ -747,7 +749,7 @@ export const Main = () => {
     };
 
     fetchChats();
-  }, [dispatch, isConnected]);
+  }, [dispatch, isConnected, networkOnline]);
 
   return (
     <div className='h-screen w-screen flex overflow-hidden'>

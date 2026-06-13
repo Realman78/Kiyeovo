@@ -8,6 +8,7 @@ import type {
   CallStateChangedEvent,
   ChatCreatedEvent,
   ConnectionNodesResponse,
+  NodesLivenessResponse,
   ContactRequestCancelledEvent,
   ContactRequestEvent,
   FileTransferCompleteEvent,
@@ -108,6 +109,12 @@ export interface KiyeovoAPI {
 
   onDHTConnectionStatus: (callback: (status: { connected: boolean | null }) => void) => Unsubscribe;
   getDHTConnectionStatus: () => Promise<{ success: boolean; connected: boolean | null; error: string | null }>;
+  // OS-level connectivity: true if a real (non-virtual, non-internal) network interface is up.
+  isNetworkConnected: () => Promise<{ connected: boolean }>;
+  // Notify core that OS connectivity just returned, to trigger an immediate DHT reconnect.
+  notifyNetworkReconnected: () => Promise<void>;
+  // Liveness probe for the given node addresses (pings each); fills in dialog status.
+  getNodesLiveness: (addresses: string[]) => Promise<NodesLivenessResponse>;
   getNetworkMode: () => Promise<{ success: boolean; mode: NetworkMode; error: string | null }>;
   setNetworkMode: (mode: NetworkMode) => Promise<{ success: boolean; error: string | null }>;
 

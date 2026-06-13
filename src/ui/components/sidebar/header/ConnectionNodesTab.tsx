@@ -5,7 +5,8 @@ import { Input } from "../../ui/Input";
 export interface ConnectionNodeEntry {
   key: string;
   address: string;
-  connected: boolean;
+  // null = liveness still being probed (shows a spinner instead of a status dot).
+  connected: boolean | null;
 }
 
 interface ConnectionNodesTabProps {
@@ -82,7 +83,11 @@ export function ConnectionNodesTab({
           <div className="space-y-2 max-h-56 overflow-y-auto">
             {nodes.map((node, index) => (
               <div key={node.key} className="flex items-center gap-4 p-2 rounded-md bg-secondary/50 border border-border">
-                <div className={`w-2 h-2 rounded-full ${node.connected ? 'bg-success' : 'bg-muted-foreground'}`} />
+                {node.connected === null ? (
+                  <Loader2 className="w-2.5 h-2.5 shrink-0 animate-spin text-muted-foreground" aria-label="Checking connectivity" />
+                ) : (
+                  <div className={`w-2 h-2 shrink-0 rounded-full ${node.connected ? 'bg-success' : 'bg-muted-foreground'}`} />
+                )}
                 <span className="flex-1 text-sm font-mono text-foreground break-all" title={node.address}>
                   {node.address}
                 </span>

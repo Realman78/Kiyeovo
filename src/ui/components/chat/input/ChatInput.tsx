@@ -1,8 +1,8 @@
-import { useState, useEffect, useRef, type FC } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, type FC } from "react";
 import { Button } from "../../ui/Button";
 import { Paperclip, Send, Smile } from "lucide-react";
-import { Input } from "../../ui/Input";
 import { useToast } from "../../ui/use-toast";
+import { useOfflineSendWarning } from "../../../hooks/useOfflineSendWarning";
 import { useDispatch, useSelector } from "react-redux";
 import type { RootState } from "../../../state/store";
 import { SendFileDialog } from "./SendFileDialog";
@@ -25,8 +25,11 @@ type SendResult = {
     failedReason?: 'group_rekeying' | 'other';
 };
 
+const MAX_COMPOSER_LINES = 5;
+
 export const ChatInput: FC = () => {
     const { toast } = useToast();
+    const warnOfflineSend = useOfflineSendWarning();
     const dispatch = useDispatch();
     const [draftByChatId, setDraftByChatId] = useState<Record<number, string>>({});
     const [fileDialogOpen, setFileDialogOpen] = useState(false);
@@ -92,12 +95,13 @@ export const ChatInput: FC = () => {
     const isDisabled = isBlocked || !!groupBlockedReason;
     const sendQueueRef = useRef<Record<number, PendingSendJob[]>>({});
     const processingQueueRef = useRef<Record<number, boolean>>({});
-    const inputRef = useRef<HTMLInputElement>(null);
+    const inputRef = useRef<HTMLTextAreaElement>(null);
     const sendButtonRef = useRef<HTMLButtonElement>(null);
     const emojiPickerRef = useRef<HTMLDivElement>(null);
     const selectionRef = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
     const caretRestoreFrameRef = useRef<number | null>(null);
     const selectionSyncUnlockFrameRef = useRef<number | null>(null);
+    const resizeAnimationFrameRef = useRef<number | null>(null);
     const suppressSelectionSyncRef = useRef(false);
 
     // Auto-focus input when chat changes
@@ -114,6 +118,9 @@ export const ChatInput: FC = () => {
             }
             if (selectionSyncUnlockFrameRef.current !== null) {
                 cancelAnimationFrame(selectionSyncUnlockFrameRef.current);
+            }
+            if (resizeAnimationFrameRef.current !== null) {
+                cancelAnimationFrame(resizeAnimationFrameRef.current);
             }
         };
     }, []);
@@ -156,6 +163,58 @@ export const ChatInput: FC = () => {
     const activeChatId = activeChat?.id;
     const inputQuery = activeChatId ? (draftByChatId[activeChatId] ?? "") : "";
 
+    const resizeComposer = (target?: HTMLTextAreaElement | null) => {
+        const textarea = target ?? inputRef.current;
+        if (!textarea) {
+            return;
+        }
+
+        if (resizeAnimationFrameRef.current !== null) {
+            cancelAnimationFrame(resizeAnimationFrameRef.current);
+            resizeAnimationFrameRef.current = null;
+        }
+
+        const currentHeight = textarea.getBoundingClientRect().height;
+
+        textarea.style.height = 'auto';
+
+        const computedStyle = window.getComputedStyle(textarea);
+        const lineHeight = Number.parseFloat(computedStyle.lineHeight) || 24;
+        const paddingTop = Number.parseFloat(computedStyle.paddingTop) || 0;
+        const paddingBottom = Number.parseFloat(computedStyle.paddingBottom) || 0;
+        const borderTop = Number.parseFloat(computedStyle.borderTopWidth) || 0;
+        const borderBottom = Number.parseFloat(computedStyle.borderBottomWidth) || 0;
+        const singleLineHeight = Math.ceil(lineHeight + paddingTop + paddingBottom + borderTop + borderBottom);
+        const maxHeight = Math.ceil((lineHeight * MAX_COMPOSER_LINES) + paddingTop + paddingBottom + borderTop + borderBottom);
+        const contentHeight = textarea.scrollHeight;
+        const targetHeight = Math.max(singleLineHeight, Math.min(contentHeight, maxHeight));
+        const shouldScroll = contentHeight > maxHeight;
+
+        textarea.style.overflowY = shouldScroll ? 'auto' : 'hidden';
+
+        if (!Number.isFinite(currentHeight) || currentHeight <= 0) {
+            textarea.style.height = `${targetHeight}px`;
+            return;
+        }
+
+        if (Math.abs(currentHeight - targetHeight) < 0.5) {
+            textarea.style.height = `${targetHeight}px`;
+            return;
+        }
+
+        textarea.style.height = `${currentHeight}px`;
+        void textarea.offsetHeight;
+
+        resizeAnimationFrameRef.current = requestAnimationFrame(() => {
+            resizeAnimationFrameRef.current = null;
+            textarea.style.height = `${targetHeight}px`;
+        });
+    };
+
+    useLayoutEffect(() => {
+        resizeComposer();
+    }, [activeChatId, inputQuery]);
+
     const setDraftForChat = (
         chatId: number,
         value: string | ((currentValue: string) => string)
@@ -167,7 +226,7 @@ export const ChatInput: FC = () => {
         });
     };
 
-    const syncSelectionFromInput = (target?: HTMLInputElement | null) => {
+    const syncSelectionFromInput = (target?: HTMLTextAreaElement | null) => {
         if (suppressSelectionSyncRef.current) return;
         const input = target ?? inputRef.current;
         const currentLength = input?.value.length ?? inputQuery.length;
@@ -229,6 +288,7 @@ export const ChatInput: FC = () => {
                 toast.error(error || 'Failed to send message');
                 return { success: false };
             }
+            warnOfflineSend();
             return {
                 success: true,
                 messageId: message?.messageId,
@@ -279,6 +339,7 @@ export const ChatInput: FC = () => {
                     },
                 );
             }
+            warnOfflineSend();
             return {
                 success: true,
                 messageId: message?.messageId,
@@ -354,9 +415,7 @@ export const ChatInput: FC = () => {
         void processQueueForChat(job.chatId);
     };
 
-    const handleSubmit = async (e: React.FormEvent) => {
-        e.preventDefault();
-
+    const sendCurrentDraft = async () => {
         const activeElement = document.activeElement;
         if (
             activeElement &&
@@ -407,6 +466,18 @@ export const ChatInput: FC = () => {
         setDraftForChat(chatId, '');
         selectionRef.current = { start: 0, end: 0 };
         setEmojiPickerOpen(false);
+    };
+
+    const handleSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        await sendCurrentDraft();
+    };
+
+    const handleComposerKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+        if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+            event.preventDefault();
+            void sendCurrentDraft();
+        }
     };
 
     const handleSendFile = async (filePath: string, fileName: string, fileSize: number) => {
@@ -508,9 +579,9 @@ export const ChatInput: FC = () => {
         <div className="relative">
             <form
                 onSubmit={handleSubmit}
-                className={`h-20 px-4 flex items-center justify-between border-t border-border gap-4`}
+                className="flex min-h-20 items-end justify-between gap-4 border-t border-border px-4 py-3"
             >
-                <div ref={emojiPickerRef} className="relative flex items-center gap-2">
+                <div ref={emojiPickerRef} className="relative flex shrink-0 items-center gap-2 self-end">
                     {activeChat?.type !== 'group' && <Button
                         type="button"
                         variant="ghost"
@@ -555,32 +626,36 @@ export const ChatInput: FC = () => {
                         </div>
                     )}
                 </div>
-                <Input
-                    ref={inputRef}
-                    placeholder={isBlocked ? "Cannot send messages to blocked users" : groupBlockedReason ?? "Type a message..."}
-                    parentClassName="flex flex-1 w-full"
-                    value={inputQuery}
-                    disabled={isDisabled}
-                    onChange={(e) => {
-                        if (!activeChat) return;
-                        setDraftForChat(activeChat.id, e.target.value);
-                        syncSelectionFromInput(e.target);
-                    }}
-                    onClick={(e) => syncSelectionFromInput(e.currentTarget)}
-                    onFocus={(e) => syncSelectionFromInput(e.currentTarget)}
-                    onKeyUp={(e) => syncSelectionFromInput(e.currentTarget)}
-                    onSelect={(e) => syncSelectionFromInput(e.currentTarget)}
-                />
-                <Button
-                    ref={sendButtonRef}
-                    type="submit"
-                    disabled={!inputQuery.trim() || isDisabled}
-                    size="icon"
-                    className={isTorActive ? 'bg-[#5a3184] hover:bg-[#4d2a72] text-white' : ''}
-                    aria-label="Send message"
-                >
-                    <Send className="w-4 h-4" />
-                </Button>
+                <div className="flex flex-1 items-end gap-4">
+                    <textarea
+                        ref={inputRef}
+                        rows={1}
+                        placeholder={isBlocked ? "Cannot send messages to blocked users" : groupBlockedReason ?? "Type a message..."}
+                        value={inputQuery}
+                        disabled={isDisabled}
+                        className="flex w-full resize-none overflow-hidden rounded-md border border-border bg-input px-4 py-2 text-sm font-mono leading-6 placeholder:text-muted-foreground/60 transition-[height,border-color,box-shadow] duration-150 ease-out focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/50 disabled:cursor-not-allowed disabled:opacity-50"
+                        onChange={(e) => {
+                            if (!activeChat) return;
+                            setDraftForChat(activeChat.id, e.target.value);
+                            syncSelectionFromInput(e.target);
+                        }}
+                        onClick={(e) => syncSelectionFromInput(e.currentTarget)}
+                        onFocus={(e) => syncSelectionFromInput(e.currentTarget)}
+                        onKeyDown={handleComposerKeyDown}
+                        onKeyUp={(e) => syncSelectionFromInput(e.currentTarget)}
+                        onSelect={(e) => syncSelectionFromInput(e.currentTarget)}
+                    />
+                    <Button
+                        ref={sendButtonRef}
+                        type="submit"
+                        disabled={!inputQuery.trim() || isDisabled}
+                        size="icon"
+                        className={`shrink-0 self-end ${isTorActive ? 'bg-[#5a3184] hover:bg-[#4d2a72] text-white' : ''}`}
+                        aria-label="Send message"
+                    >
+                        <Send className="w-4 h-4" />
+                    </Button>
+                </div>
             </form>
         </div>
 

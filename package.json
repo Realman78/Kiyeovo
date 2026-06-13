@@ -12,6 +12,7 @@
     "dev:electron": "npm run transpile:electron && NODE_ENV=development electron .",
     "start:local": "npm run transpile:electron && npm run build && electron .",
     "start:local:debug": "npm run transpile:electron && npm run build && DEBUG_MODE=true electron .",
+    "start:local:debug:net": "npm run transpile:electron && npm run build && DEBUG_MODE=true DEBUG=libp2p:circuit-relay*,libp2p:dcutr*,libp2p:connection-manager*,libp2p:upgrader* electron .",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "bootstrap": "tsx src/core/bootstrap.ts",

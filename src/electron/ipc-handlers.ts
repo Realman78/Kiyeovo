@@ -3,6 +3,7 @@ import { app, dialog, Notification, shell } from 'electron';
 import {
   IPC_CHANNELS,
   type P2PCore,
+  type ChatNode,
   type AppConfig,
   type NetworkMode,
   type CallSignalOutgoingInput,
@@ -10,6 +11,7 @@ import {
   type BootstrapRetryResponse,
   type ConnectionNodeStatus,
   type ConnectionNodesResponse,
+  type NodesLivenessResponse,
   type RelayRetryResponse,
   type IceServerConfig,
   type IceServerType,
@@ -37,6 +39,7 @@ import { copyFile, stat } from 'fs/promises';
 import { log } from '../shared/logger.js';
 import { errStr } from '../core/utils/general-error.js';
 import { ChatDatabase } from '../core/db/database.js';
+import { isNetworkConnected } from './network-connectivity.js';
 import { scheduleAppRelaunch } from './relaunch.js';
 import { createTrustedIpcMainHandle, type IpcMainHandleRegistrar } from './trusted-ipc.js';
 
@@ -194,6 +197,27 @@ function getConfiguredIceServers(database: ChatDatabase): IceServerConfig[] {
   } catch (error) {
     console.warn(`[IPC] Falling back to default ICE servers: ${errStr(error)}`);
     return buildDefaultIceServerConfigs();
+  }
+}
+
+const NODE_LIVENESS_PING_TIMEOUT_MS = 2000;
+
+// True only if we have a connection to this peer AND it answers a ping
+async function isPeerReachable(node: ChatNode, peerIdStr: string | null): Promise<boolean> {
+  if (!peerIdStr) {
+    return false;
+  }
+  const hasConnection = node.getConnections().some((conn) => conn.remotePeer.toString() === peerIdStr);
+  if (!hasConnection) {
+    return false;
+  }
+  try {
+    const peerId = peerIdFromString(peerIdStr);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (node.services as any).ping.ping(peerId, { signal: AbortSignal.timeout(NODE_LIVENESS_PING_TIMEOUT_MS) });
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -728,6 +752,41 @@ function setupBootstrapHandlers(
     }
   });
 
+  // OS-level network connectivity snapshot
+  ipcMain.handle(IPC_CHANNELS.GET_NETWORK_CONNECTED, async () => {
+    return { connected: isNetworkConnected() };
+  });
+
+  // OS connectivity just returned: reconnect to the DHT now instead of waiting 
+  ipcMain.handle(IPC_CHANNELS.NOTIFY_NETWORK_RECONNECTED, async () => {
+    const p2pCore = getP2PCore();
+    if (!p2pCore) {
+      return;
+    }
+    log('[IPC] OS connectivity returned — requesting immediate DHT reconnect');
+    void p2pCore.requestImmediateReconnect().catch((error) => {
+      console.warn('[IPC] Network-return reconnect failed:', errStr(error));
+    });
+  });
+
+  // Per-node liveness probe: pings each address (short timeout, never dials)
+  ipcMain.handle(IPC_CHANNELS.GET_NODES_LIVENESS, async (_event, addresses: string[]) => {
+    const p2pCore = getP2PCore();
+    if (!p2pCore) {
+      return { statuses: [] } satisfies NodesLivenessResponse;
+    }
+    const statuses = await Promise.all((addresses ?? []).map(async (address) => {
+      let peerIdStr: string | null = null;
+      try {
+        peerIdStr = multiaddr(address).getPeerId();
+      } catch {
+        peerIdStr = null;
+      }
+      return { address, connected: await isPeerReachable(p2pCore.node, peerIdStr) };
+    }));
+    return { statuses } satisfies NodesLivenessResponse;
+  });
+
   // Get bootstrap nodes from database
   ipcMain.handle(IPC_CHANNELS.GET_BOOTSTRAP_NODES, async () => {
     try {
@@ -738,22 +797,12 @@ function setupBootstrapHandlers(
 
       log('[IPC] Fetching bootstrap nodes from database...');
       const dbNodes = p2pCore.database.getBootstrapNodes();
-      const connectedRemoteAddrs = new Set(
-        p2pCore.node.getConnections().map((connection) => connection.remoteAddr.toString()),
-      );
-      const nodes: ConnectionNodeStatus[] = dbNodes.map((node) => {
-        let normalizedAddress: string | null = null;
-        try {
-          normalizedAddress = multiaddr(node.address).toString();
-        } catch {
-          normalizedAddress = null;
-        }
-
-        return {
-          address: node.address,
-          connected: normalizedAddress !== null && connectedRemoteAddrs.has(normalizedAddress),
-        };
-      });
+      // Fast: addresses only. Status is left null ("checking") and filled in by the
+      // separate liveness probe, so the slow ping never blocks the list from loading.
+      const nodes: ConnectionNodeStatus[] = dbNodes.map((node) => ({
+        address: node.address,
+        connected: null,
+      }));
       log(`[IPC] Found ${nodes.length} bootstrap nodes`);
 
       return { success: true, nodes, error: null };
@@ -817,7 +866,12 @@ function setupBootstrapHandlers(
         return { success: true, nodes: [], error: null };
       }
 
-      const { nodes } = getFastRelayStatusSnapshot(p2pCore.node, p2pCore.database);
+      const snapshot = getFastRelayStatusSnapshot(p2pCore.node, p2pCore.database);
+      // Fast: addresses only, status left null. Liveness is filled in by the probe.
+      const nodes: ConnectionNodeStatus[] = snapshot.nodes.map((node) => ({
+        address: node.address,
+        connected: null,
+      }));
 
       return { success: true, nodes, error: null };
     } catch (error) {
