@@ -50,10 +50,20 @@ index a8a01b8..2b6d186 100644
       * How often to query our own PeerId in order to ensure we have a
       * good view on the KAD address space local to our PeerId
 diff --git a/node_modules/@libp2p/kad-dht/dist/src/kad-dht.js b/node_modules/@libp2p/kad-dht/dist/src/kad-dht.js
-index 79b18c0..d8bcc42 100644
+index 79b18c0..155efde 100644
 --- a/node_modules/@libp2p/kad-dht/dist/src/kad-dht.js
 +++ b/node_modules/@libp2p/kad-dht/dist/src/kad-dht.js
-@@ -221,6 +221,7 @@ export class KadDHT extends TypedEventEmitter {
+@@ -152,7 +152,8 @@ export class KadDHT extends TypedEventEmitter {
+         this.network = new Network(components, {
+             protocol: this.protocol,
+             logPrefix,
+-            metricsPrefix
++            metricsPrefix,
++            timeout: init.networkDialTimeout
+         });
+         this.routingTable = new RoutingTable(components, {
+             kBucketSize: this.k,
+@@ -221,6 +222,7 @@ export class KadDHT extends TypedEventEmitter {
              providers: this.providers,
              peerRouting: this.peerRouting,
              validators: this.validators,
@@ -155,10 +165,20 @@ index 4f556be..12e2f78 100644
     * How often to query our own PeerId in order to ensure we have a
     * good view on the KAD address space local to our PeerId
 diff --git a/node_modules/@libp2p/kad-dht/src/kad-dht.ts b/node_modules/@libp2p/kad-dht/src/kad-dht.ts
-index 6d9aded..4bf2b17 100644
+index 6d9aded..73ea75d 100644
 --- a/node_modules/@libp2p/kad-dht/src/kad-dht.ts
 +++ b/node_modules/@libp2p/kad-dht/src/kad-dht.ts
-@@ -266,6 +266,7 @@ export class KadDHT extends TypedEventEmitter<PeerDiscoveryEvents> implements Ka
+@@ -192,7 +192,8 @@ export class KadDHT extends TypedEventEmitter<PeerDiscoveryEvents> implements Ka
+     this.network = new Network(components, {
+       protocol: this.protocol,
+       logPrefix,
+-      metricsPrefix
++      metricsPrefix,
++      timeout: init.networkDialTimeout
+     })
+ 
+     this.routingTable = new RoutingTable(components, {
+@@ -266,6 +267,7 @@ export class KadDHT extends TypedEventEmitter<PeerDiscoveryEvents> implements Ka
        providers: this.providers,
        peerRouting: this.peerRouting,
        validators: this.validators,

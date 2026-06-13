@@ -474,35 +474,65 @@ export class OfflineMessageManager {
         log(`PUT to DHT - Key: ${key}, Original: ${jsonBytes.length} bytes`);
         log(`Compressed: ${compressedBytes.length} bytes (${Math.round((1 - compressedBytes.length / jsonBytes.length) * 100)}% reduction)`);
 
+        const putSignal = AbortSignal.timeout(timeoutMs);
+
+        // Diagnostic tally of the Kademlia walk. The put yields a stream of
+        // QueryEvents (DIALING_PEER, PEER_RESPONSE, QUERY_ERROR, FINAL_PEER, ...)
+        // as it routes toward the closest peers. On timeout the whole walk is
+        // discarded, so we record per-name counts plus when the first/last event
+        // arrived to tell apart "couldn't dial out at all" from "reached peers
+        // but storage was slow/failing".
+        const putStartedAtMs = Date.now();
+        const eventCounts: Record<string, number> = {};
+        let totalEvents = 0;
+        let firstEventAtMs: number | null = null;
+        let lastEventAtMs: number | null = null;
+
+        const formatEventTally = (): string => {
+            const names = Object.keys(eventCounts).sort();
+            const byName = names.length > 0
+                ? names.map((name) => `${name}=${eventCounts[name]}`).join(',')
+                : 'none';
+            const firstOffset = firstEventAtMs !== null ? firstEventAtMs - putStartedAtMs : -1;
+            const lastOffset = lastEventAtMs !== null ? lastEventAtMs - putStartedAtMs : -1;
+            return `total=${totalEvents} byName=${byName} firstEventMs=${firstOffset} lastEventMs=${lastOffset}`;
+        };
+
         try {
             let hadSuccess = false;
             let errorCount = 0;
-            const events: QueryEvent[] = [];
-            const putSignal = AbortSignal.timeout(timeoutMs);
 
             for await (const event of node.services.dht.put(
                 keyBytes,
                 compressedBytes,
                 { signal: putSignal },
             ) as AsyncIterable<QueryEvent>) {
-                events.push(event);
+                totalEvents++;
+                const nowMs = Date.now();
+                if (firstEventAtMs === null) firstEventAtMs = nowMs;
+                lastEventAtMs = nowMs;
+                eventCounts[event.name] = (eventCounts[event.name] ?? 0) + 1;
 
                 if (event.name === 'QUERY_ERROR') errorCount++;
                 else if (event.name === 'PEER_RESPONSE') hadSuccess = true;
             }
             if (errorCount > 0 && !hadSuccess) {
+                log(`[OFFLINE][PUT][EVENTS][FAIL] ${formatEventTally()}`);
                 throw new Error(`DHT PUT failed: All ${errorCount} peers unreachable`);
             }
 
-            log(`DHT PUT completed with ${events.length} events`);
+            log(`[OFFLINE][PUT][EVENTS][DONE] ${formatEventTally()}`);
+            log(`DHT PUT completed with ${totalEvents} events`);
 
             await new Promise(resolve => setTimeout(resolve, 1000));
         } catch (error: unknown) {
             if (error instanceof Error && error.name === 'AbortError') {
+                log(`[OFFLINE][PUT][EVENTS][TIMEOUT] ${formatEventTally()}`);
                 const timeoutError = new Error(`Offline DHT write timed out after ${timeoutMs}ms`);
                 generalErrorHandler(timeoutError, 'PUT to DHT failed');
                 throw timeoutError;
             }
+            log(`[OFFLINE][PUT][EVENTS][ERROR] ${formatEventTally()}`);
             generalErrorHandler(error, "PUT to DHT failed");
             throw error;
         }
