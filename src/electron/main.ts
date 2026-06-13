@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, session } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, powerMonitor, session } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -682,6 +682,19 @@ async function initializeApp() {
     // Setup IPC handlers
     setupIPCHandlers(ipcMain, () => p2pCore, () => mainWindow);
     log('[Electron] IPC handlers registered');
+
+    // OS wake/unlock
+    const handlePowerResume = (trigger: string) => {
+      if (!p2pCore) {
+        return;
+      }
+      log(`[Electron][POWER] ${trigger} - forcing immediate reconnect`);
+      void p2pCore.requestImmediateReconnect().catch((error) => {
+        console.warn(`[Electron][POWER] reconnect after ${trigger} failed:`, errStr(error));
+      });
+    };
+    powerMonitor.on('resume', () => handlePowerResume('resume'));
+    powerMonitor.on('unlock-screen', () => handlePowerResume('unlock-screen'));
     trustedIpcMain.handle(IPC_CHANNELS.INIT_STATE, () => {
       return {
         initialized: isCoreInitialized,
