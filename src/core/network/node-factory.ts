@@ -324,7 +324,10 @@ function createChatNodeServices(runtimeConfig: ChatNodeRuntimeConfig) {
     }),
     ping: ping({
       timeout: runtimeConfig.isAnonymousMode ? 60000 : 10000,
-      runOnLimitedConnection: true
+      runOnLimitedConnection: true,
+      // A single health-probe ping that fails/aborts can leave its outbound stream
+      // stuck, permanently occupying the only slot  so every later probe fails
+      maxOutboundStreams: 8,
     }),
     ...(runtimeConfig.networkMode === NETWORK_MODES.FAST && runtimeConfig.relayRuntime.dcutrFactory
       ? { dcutr: runtimeConfig.relayRuntime.dcutrFactory }
