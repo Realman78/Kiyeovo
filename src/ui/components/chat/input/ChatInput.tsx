@@ -23,6 +23,9 @@ type SendResult = {
     messageSentStatus?: 'online' | 'offline' | null;
     error?: string;
     failedReason?: 'group_rekeying' | 'other';
+    // Accepted but still in flight (non-blocking offline send): keep the spinner
+    // until a MESSAGE_SEND_STATE_CHANGED event settles the row.
+    localSendState?: 'sending';
 };
 
 const MAX_COMPOSER_LINES = 5;
@@ -282,18 +285,26 @@ export const ChatInput: FC = () => {
 
     const performSendMessage = async (peerIdOrUsername: string, messageContent: string): Promise<SendResult> => {
         try {
-            const { success, error, message, messageSentStatus } = await window.kiyeovoAPI.sendMessage(peerIdOrUsername, messageContent);
+            const { success, error, message, messageSentStatus, localSendState } = await window.kiyeovoAPI.sendMessage(peerIdOrUsername, messageContent);
 
             if (!success) {
-                toast.error(error || 'Failed to send message');
-                return { success: false };
+                toast.error(
+                    error === 'OFFLINE_BUCKET_FULL'
+                        ? 'Offline delivery bucket is full — wait until this contact comes online.'
+                        : (error || 'Failed to send message'),
+                );
+                return { success: false, error: error ?? undefined };
             }
-            warnOfflineSend();
+            // Don't warn yet for a still-in-flight offline send — we don't know the outcome.
+            if (localSendState !== 'sending') {
+                warnOfflineSend();
+            }
             return {
                 success: true,
                 messageId: message?.messageId,
                 timestamp: message?.timestamp,
                 messageSentStatus: messageSentStatus ?? undefined,
+                localSendState,
             };
             // Note: Message will be added to Redux via onMessageReceived event in Main.tsx
             // This ensures single source of truth and correct sender information
@@ -378,7 +389,10 @@ export const ChatInput: FC = () => {
                         retryAfterTs: isRekeyFailure ? Date.now() + 30_000 : undefined,
                     }));
                 } else if (result.messageId) {
-                    // Finalize local sending row immediately using backend response.
+                    // Finalize local sending row using the backend response. For a
+                    // non-blocking offline send (localSendState 'sending') keep the
+                    // spinner — the MESSAGE_SEND_STATE_CHANGED event settles it later.
+                    const stillSending = result.localSendState === 'sending';
                     dispatch(finalizeSendingMessage({
                         localMessageId: next.localMessageId,
                         finalMessage: {
@@ -389,7 +403,8 @@ export const ChatInput: FC = () => {
                             content: next.content,
                             timestamp: result.timestamp ?? Date.now(),
                             messageType: 'text',
-                            messageSentStatus: result.messageSentStatus ?? 'online',
+                            messageSentStatus: stillSending ? null : (result.messageSentStatus ?? 'online'),
+                            localSendState: stillSending ? 'sending' : undefined,
                             currentUserPeerId: myPeerId ?? undefined,
                         },
                     }));
@@ -438,6 +453,18 @@ export const ChatInput: FC = () => {
             return;
         }
         const chatId = activeChat.id;
+
+        // Capacity pre-check (direct chats): a full offline mailbox must not even
+        // create an optimistic row — keep the draft, toast, and stop. Online peers
+        // and new contacts report room, so the common path is unaffected.
+        if (activeChat.type === 'direct' && activeChat.peerId) {
+            const { hasRoom } = await window.kiyeovoAPI.checkOfflineCapacity(activeChat.peerId);
+            if (!hasRoom) {
+                toast.error('Offline delivery bucket is full — wait until this contact comes online.');
+                return;
+            }
+        }
+
         const localMessageId = `local-send-${chatId}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
         dispatch(addSendingMessage({

@@ -3,7 +3,7 @@ import { useDispatch, useSelector } from 'react-redux';
 import Sidebar from '../components/sidebar/Sidebar';
 import ChatWrapper from '../components/chat/ChatWrapper';
 import { setChats, addChat, removePendingKeyExchange, setActiveChat, markOfflineFetched, markOfflineFetchFailed, updateFileTransferProgress, updateFileTransferStatus, updateFileTransferError, setPendingFileStatus, updateChat, setActivePendingKeyExchange, setOfflineFetchStatus } from '../state/slices/chatSlice';
-import { removeContactAttempt, setActiveContactAttempt, addMessage, type Chat } from '../state/slices/chatSlice';
+import { removeContactAttempt, setActiveContactAttempt, addMessage, resolveMessageSendOutcome, type Chat } from '../state/slices/chatSlice';
 import { applyCameraState, applyCoreCallState, applyLocalCallState, applyScreenShareState, setCallError, setIncomingCall, setCallPeerName } from '../state/slices/callSlice';
 import { useToast } from '../components/ui/use-toast';
 import type { RootState } from '../state/store';
@@ -175,6 +175,17 @@ export const Main = () => {
         transferStatus: data.transferStatus,
         transferProgress: data.transferProgress,
         transferError: data.transferError
+      }));
+    });
+
+    // Core-driven send-state outcome for backgrounded sends (offline DHT write, etc).
+    const unsubMessageSendStateChanged = window.kiyeovoAPI.onMessageSendStateChanged((data) => {
+      dispatch(resolveMessageSendOutcome({
+        messageId: data.messageId,
+        outcome: data.outcome,
+        messageSentStatus: data.messageSentStatus,
+        failedReason: data.failedReason,
+        retryAfterTs: data.retryAfterTs,
       }));
     });
 
@@ -568,6 +579,7 @@ export const Main = () => {
     return () => {
       unsubKeyExchangeFailed();
       unsubMessageReceived();
+      unsubMessageSendStateChanged();
       unsubGroupChatActivated();
       unsubGroupMembersUpdated();
       unsubChatCreated();

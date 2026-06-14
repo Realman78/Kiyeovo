@@ -458,12 +458,48 @@ function setupMessagingHandlers(
       log(`[IPC] Message sent response: ${JSON.stringify(response)}`);
 
       if (response.success) {
-        return { success: true, messageSentStatus: response.messageSentStatus, error: null, message: response.message };
+        return {
+          success: true,
+          messageSentStatus: response.messageSentStatus,
+          error: null,
+          message: response.message,
+          localSendState: response.localSendState,
+        };
       }
       return { success: false, messageSentStatus: null, error: response.error ?? 'Failed to send message' };
     } catch (error) {
       console.error('[IPC] Failed to send message:', error);
       return { success: false, messageSentStatus: null, error: errStr(error, "Failed to send message") };
+    }
+  });
+
+  // Fast pre-send capacity check so the renderer can refuse (toast + keep draft)
+  // before creating an optimistic row when the offline bucket is full.
+  ipcMain.handle(IPC_CHANNELS.CHECK_OFFLINE_CAPACITY, async (_event, peerId: string) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { hasRoom: true };
+      }
+      return { hasRoom: p2pCore.messageHandler.checkOfflineCapacity(peerId) };
+    } catch (error) {
+      console.error('[IPC] checkOfflineCapacity failed:', error);
+      return { hasRoom: true };
+    }
+  });
+
+  // Manual retry of a failed 1:1 offline send.
+  ipcMain.handle(IPC_CHANNELS.RETRY_OFFLINE_SEND, async (_event, messageId: string) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { success: false, error: 'P2P core not initialized' };
+      }
+      p2pCore.messageHandler.retryOfflineSend(messageId);
+      return { success: true, error: null };
+    } catch (error) {
+      console.error('[IPC] retryOfflineSend failed:', error);
+      return { success: false, error: errStr(error, 'Failed to retry offline send') };
     }
   });
 

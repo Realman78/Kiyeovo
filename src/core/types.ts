@@ -37,6 +37,10 @@ export interface SendMessageResponse {
     chatId: number;
     messageId: string;
   } | null;
+  // Set when the send was accepted but is still in flight (non-blocking offline
+  // path): the row stays on the spinner until a MESSAGE_SEND_STATE_CHANGED event
+  // settles it. Without this the renderer would finalize the row as delivered.
+  localSendState?: 'sending';
 }
 
 // We dont have to send sender info because we have it in the chat state
@@ -622,6 +626,15 @@ export interface MessageReceivedEvent {
 }
 
 export type MessageSentStatus = 'online' | 'offline' | null;
+
+export interface MessageSendStateChangedEvent {
+  messageId: string;
+  chatId: number;
+  outcome: 'sending' | 'delivered' | 'failed';
+  messageSentStatus?: MessageSentStatus;
+  failedReason?: 'group_rekeying' | 'other';
+  retryAfterTs?: number;
+}
 
 export interface FileTransferProgressEvent {
   chatId: number;

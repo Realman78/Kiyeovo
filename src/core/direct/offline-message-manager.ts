@@ -69,6 +69,25 @@ export class OfflineMessageManager {
             bypassControlReserve?: boolean;
         }
     ): Promise<void> {
+        return OfflineMessageManager.storeOfflineMessages(
+            node, bucketKey, [message], signingPrivateKey, database, options,
+        );
+    }
+
+    // Append a batch of offline messages to the bucket in a SINGLE DHT PUT
+    static async storeOfflineMessages(
+        node: ChatNode,
+        bucketKey: string,
+        newMessages: OfflineMessage[],
+        signingPrivateKey: Uint8Array,
+        database: ChatDatabase,
+        options?: {
+            bypassControlReserve?: boolean;
+        }
+    ): Promise<void> {
+        if (newMessages.length === 0) {
+            return;
+        }
         return OfflineMessageManager.withBucketMutationLock(bucketKey, async () => {
             try {
                 const bypassControlReserve = options?.bypassControlReserve === true;
@@ -77,22 +96,23 @@ export class OfflineMessageManager {
 
                 const messages: OfflineMessage[] = OfflineMessageManager.filterExpiredMessages(local.messages);
                 let version = local.version;
+                const projected = messages.length + newMessages.length;
 
-                if (!bypassControlReserve && messages.length >= userCapacityLimit) {
+                if (!bypassControlReserve && projected > userCapacityLimit) {
                     throw new Error(
-                        `Offline message reserve reached (${messages.length}/${userCapacityLimit}); ` +
+                        `Offline message reserve reached (${messages.length}+${newMessages.length}/${userCapacityLimit}); ` +
                         `${OFFLINE_CONTROL_MESSAGE_RESERVE} slots reserved for group control messages`,
                     );
                 }
 
-                if (messages.length >= MAX_MESSAGES_PER_STORE) {
-                    throw new Error(`Offline message store full (${messages.length}/${MAX_MESSAGES_PER_STORE})`);
+                if (projected > MAX_MESSAGES_PER_STORE) {
+                    throw new Error(`Offline message store full (${messages.length}+${newMessages.length}/${MAX_MESSAGES_PER_STORE})`);
                 }
 
                 log(
-                    `[OFFLINE][WRITE][START] bucket=${bucketKey.slice(-12)} appendType=${message.message_type}`
+                    `[OFFLINE][WRITE][START] bucket=${bucketKey.slice(-12)} batch=${newMessages.length}`
                 );
-                messages.push(message);
+                messages.push(...newMessages);
                 version++;
 
                 // Sign the store before putting to DHT
@@ -227,6 +247,16 @@ export class OfflineMessageManager {
     }
 
     /**
+     * Live (non-expired) count of messages already stored in a bucket. Used by the
+     * capacity gate so it matches the write path, which prunes expired entries
+     * before counting — otherwise stale entries that have aged out would keep the
+     * gate rejecting new sends until the next write/ACK cleared the cache.
+     */
+    static liveBucketMessageCount(database: ChatDatabase, bucketKey: string): number {
+        return OfflineMessageManager.filterExpiredMessages(database.getOfflineSentMessages(bucketKey).messages).length;
+    }
+
+    /**
      * Sign the entire store to prevent unauthorized modifications
      *
      * The signature covers: message_ids, version, timestamp, bucket_key
@@ -307,13 +337,18 @@ export class OfflineMessageManager {
         recipientPublicKey: string,           // RSA public key of recipient (PEM format)
         senderSigningPrivateKey: Uint8Array,  // Ed25519 private key for signing
         bucketKey: string,                    // Full bucket key for signature binding
-        offlineAckTimestamp?: number          // Optional ACK for messages we've read from recipient's bucket
+        offlineAckTimestamp?: number,         // Optional ACK for messages we've read from recipient's bucket
+        // Optional stable identity for idempotent rebuilds (the background-send
+        // queue passes the chat message id + original send time). The recipient
+        // dedupes by `id`, so a retry of the same message can't deliver twice.
+        stableId?: string,
+        stableTimestamp?: number,
     ): OfflineMessage {
         // RSA-OAEP (Node default) max plaintext for a 2048-bit key: 256 - 2*20 - 2 = 214 bytes
         const RSA_MAX_PLAINTEXT = 214;
 
         try {
-            const timestamp = Date.now();
+            const timestamp = stableTimestamp ?? Date.now();
 
             const contentBytes = Buffer.from(content, 'utf8');
             let encryptedContentB64: string;
@@ -367,7 +402,7 @@ export class OfflineMessageManager {
             const signature = Buffer.from(signatureBytes).toString('base64');
 
             return {
-                id: randomUUID(),
+                id: stableId ?? randomUUID(),
                 encrypted_sender_info: encryptedSenderInfoB64,
                 content: encryptedContentB64,
                 signature,

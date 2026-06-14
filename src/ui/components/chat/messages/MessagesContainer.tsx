@@ -57,7 +57,13 @@ function mapDbMessage(msg: Message & { sender_username?: string }): ChatMessage 
     transferStatus: inferredTransferStatus as FileTransferStatus | undefined,
     transferProgress: msg.transfer_progress,
     transferError: msg.transfer_error,
-    transferExpiresAt
+    transferExpiresAt,
+    // Restore outbound send lifecycle (incl. the retry cooldown, so a
+    // group-rekey block survives a restart instead of becoming immediately
+    // retryable).
+    localSendState: msg.local_send_state ?? undefined,
+    failedReason: (msg.failed_reason as ChatMessage['failedReason']) ?? undefined,
+    retryAfterTs: msg.retry_after_ts ?? undefined,
   };
 }
 
@@ -361,20 +367,34 @@ export const MessagesContainer = ({ messages, isPending }: MessagesContainerProp
         return;
       }
 
-      const { success, error, message: sentMessage, messageSentStatus } = await window.kiyeovoAPI.sendMessage(activeChat.peerId, message.content);
+      // A persisted offline-queue send (real backend id) is requeued + reflushed in
+      // place — re-sending would create a duplicate row. A never-persisted optimistic
+      // row (local-send-… id) is re-sent from scratch.
+      if (!message.id.startsWith('local-send-')) {
+        const res = await window.kiyeovoAPI.retryOfflineSend(message.id);
+        if (!res.success) {
+          dispatch(updateLocalMessageSendState({ messageId: message.id, state: 'failed' }));
+          toast.error(res.error || 'Failed to retry message');
+        }
+        // success → backend emits 'sending' then the settled outcome via events.
+        return;
+      }
+
+      const { success, error, message: sentMessage, messageSentStatus, localSendState } = await window.kiyeovoAPI.sendMessage(activeChat.peerId, message.content);
       if (!success) {
         dispatch(updateLocalMessageSendState({ messageId: message.id, state: 'failed' }));
         toast.error(error || 'Failed to resend message');
       } else if (sentMessage?.messageId) {
-        warnOfflineSend();
+        const stillSending = localSendState === 'sending';
+        if (!stillSending) warnOfflineSend();
         dispatch(finalizeSendingMessage({
           localMessageId: message.id,
           finalMessage: {
             ...message,
             id: sentMessage.messageId,
             timestamp: sentMessage.timestamp ?? Date.now(),
-            messageSentStatus: messageSentStatus ?? 'online',
-            localSendState: undefined,
+            messageSentStatus: stillSending ? null : (messageSentStatus ?? 'online'),
+            localSendState: stillSending ? 'sending' : undefined,
           },
         }));
       }

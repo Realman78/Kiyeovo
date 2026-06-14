@@ -26,6 +26,7 @@ import type {
   ChatCreatedEvent,
   KeyExchangeFailedEvent,
   MessageReceivedEvent,
+  MessageSendStateChangedEvent,
   FileTransferProgressEvent,
   FileTransferCompleteEvent,
   FileTransferFailedEvent,
@@ -83,6 +84,7 @@ export interface P2PCoreConfig {
   onChatCreated: (data: ChatCreatedEvent) => void;
   onKeyExchangeFailed: (data: KeyExchangeFailedEvent) => void;
   onMessageReceived: (data: MessageReceivedEvent) => void;
+  onMessageSendStateChanged: (data: MessageSendStateChangedEvent) => void;
   onBootstrapNodes: (nodes: string[]) => void;
   onRestoreUsername: (username: string) => void;
   onFileTransferProgress: (data: FileTransferProgressEvent) => void;
@@ -117,6 +119,7 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     onChatCreated,
     onKeyExchangeFailed,
     onMessageReceived,
+    onMessageSendStateChanged,
     onRestoreUsername,
     onFileTransferProgress,
     onFileTransferComplete,
@@ -163,6 +166,10 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
 
   const sendMessageReceived = (data: MessageReceivedEvent) => {
     onMessageReceived(data);
+  };
+
+  const sendMessageSendStateChanged = (data: MessageSendStateChangedEvent) => {
+    onMessageSendStateChanged(data);
   };
 
   const sendRestoreUsername = (username: string) => {
@@ -497,6 +504,7 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
   );
 
   messageHandler.setRequestReconnect(requestImmediateReconnect);
+  messageHandler.setMessageSendStateEmitter(sendMessageSendStateChanged);
 
   // After a destructive reconnect succeeds, start a group offline-message check
   reconnectController.onReconnectSucceeded(() => {
