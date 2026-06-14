@@ -290,7 +290,7 @@ export const ChatInput: FC = () => {
             if (!success) {
                 toast.error(
                     error === 'OFFLINE_BUCKET_FULL'
-                        ? 'Offline delivery bucket is full — wait until this contact comes online.'
+                        ? `${activeChat?.name || 'This contact'}'s offline inbox is full — wait until they come online.`
                         : (error || 'Failed to send message'),
                 );
                 return { success: false, error: error ?? undefined };
@@ -456,11 +456,15 @@ export const ChatInput: FC = () => {
 
         // Capacity pre-check (direct chats): a full offline mailbox must not even
         // create an optimistic row — keep the draft, toast, and stop. Online peers
-        // and new contacts report room, so the common path is unaffected.
+        // and new contacts report room, so the common path is unaffected. We pass
+        // our own in-flight burst (queued + processing, not yet counted by the core)
+        // so a fast burst doesn't all pass a stale snapshot.
         if (activeChat.type === 'direct' && activeChat.peerId) {
-            const { hasRoom } = await window.kiyeovoAPI.checkOfflineCapacity(activeChat.peerId);
+            const inFlight = (sendQueueRef.current[chatId]?.length ?? 0)
+                + (processingQueueRef.current[chatId] ? 1 : 0);
+            const { hasRoom } = await window.kiyeovoAPI.checkOfflineCapacity(activeChat.peerId, inFlight);
             if (!hasRoom) {
-                toast.error('Offline delivery bucket is full — wait until this contact comes online.');
+                toast.error(`${activeChat.name || 'This contact'}'s offline inbox is full — wait until they come online.`);
                 return;
             }
         }

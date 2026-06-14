@@ -56,7 +56,7 @@ const kiyeovoAPI: KiyeovoAPI = {
   unregister: () => invoke(IPC_CHANNELS.UNREGISTER_REQUEST),
 
   sendMessage: (identifier, message) => invoke(IPC_CHANNELS.SEND_MESSAGE_REQUEST, identifier, message),
-  checkOfflineCapacity: (peerId) => invoke(IPC_CHANNELS.CHECK_OFFLINE_CAPACITY, peerId),
+  checkOfflineCapacity: (peerId, additional) => invoke(IPC_CHANNELS.CHECK_OFFLINE_CAPACITY, peerId, additional),
   retryOfflineSend: (messageId) => invoke(IPC_CHANNELS.RETRY_OFFLINE_SEND, messageId),
   sendGroupMessage: (chatId, message, options) => invoke(IPC_CHANNELS.SEND_GROUP_MESSAGE_REQUEST, chatId, message, options),
   retryGroupOfflineBackup: (chatId, messageId) => invoke(IPC_CHANNELS.RETRY_GROUP_OFFLINE_BACKUP, chatId, messageId),

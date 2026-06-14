@@ -129,7 +129,7 @@ export interface KiyeovoAPI {
   unregister: () => Promise<{ usernameUnregistered: boolean; peerIdUnregistered: boolean }>;
 
   sendMessage: (identifier: string, message: string) => Promise<SendMessageResponse>;
-  checkOfflineCapacity: (peerId: string) => Promise<{ hasRoom: boolean }>;
+  checkOfflineCapacity: (peerId: string, additional?: number) => Promise<{ hasRoom: boolean }>;
   retryOfflineSend: (messageId: string) => Promise<{ success: boolean; error: string | null }>;
   sendGroupMessage: (
     chatId: number,

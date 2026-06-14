@@ -2071,7 +2071,8 @@ export class ChatDatabase {
                 .get(pending.bucketKey) as { messages: string } | undefined;
             const now = Date.now();
             const storedLive = storedRow
-                ? (JSON.parse(storedRow.messages) as Array<{ expires_at: number }>).filter(m => m.expires_at > now).length
+                ? (JSON.parse(storedRow.messages) as Array<{ expires_at: number; signed_payload?: { ack_only?: boolean } }>)
+                    .filter(m => m.expires_at > now && m.signed_payload?.ack_only !== true).length
                 : 0;
             const pendingActive = (this.db.prepare(
                 `SELECT COUNT(*) AS c FROM pending_offline_sends WHERE bucket_key = ? AND status IN ('queued', 'failed')`,

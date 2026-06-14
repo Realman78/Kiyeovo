@@ -475,13 +475,13 @@ function setupMessagingHandlers(
 
   // Fast pre-send capacity check so the renderer can refuse (toast + keep draft)
   // before creating an optimistic row when the offline bucket is full.
-  ipcMain.handle(IPC_CHANNELS.CHECK_OFFLINE_CAPACITY, async (_event, peerId: string) => {
+  ipcMain.handle(IPC_CHANNELS.CHECK_OFFLINE_CAPACITY, async (_event, peerId: string, additional?: number) => {
     try {
       const p2pCore = getP2PCore();
       if (!p2pCore) {
         return { hasRoom: true };
       }
-      return { hasRoom: p2pCore.messageHandler.checkOfflineCapacity(peerId) };
+      return { hasRoom: p2pCore.messageHandler.checkOfflineCapacity(peerId, additional ?? 0) };
     } catch (error) {
       console.error('[IPC] checkOfflineCapacity failed:', error);
       return { hasRoom: true };

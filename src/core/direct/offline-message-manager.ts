@@ -8,6 +8,7 @@ import { errStr, generalErrorHandler } from '../utils/general-error.js';
 import {
     MAX_MESSAGES_PER_STORE,
     MESSAGE_TTL,
+    OFFLINE_ACK_RESERVE,
     OFFLINE_CONTROL_MESSAGE_RESERVE,
     OFFLINE_MESSAGE_MAX_FUTURE_SKEW_MS,
 } from '../constants.js';
@@ -91,21 +92,25 @@ export class OfflineMessageManager {
         return OfflineMessageManager.withBucketMutationLock(bucketKey, async () => {
             try {
                 const bypassControlReserve = options?.bypassControlReserve === true;
-                const userCapacityLimit = Math.max(0, MAX_MESSAGES_PER_STORE - OFFLINE_CONTROL_MESSAGE_RESERVE);
+                const userCapacityLimit = Math.max(0, MAX_MESSAGES_PER_STORE - OFFLINE_CONTROL_MESSAGE_RESERVE - OFFLINE_ACK_RESERVE);
                 const local = database.getOfflineSentMessages(bucketKey);
 
                 const messages: OfflineMessage[] = OfflineMessageManager.filterExpiredMessages(local.messages);
                 let version = local.version;
-                const projected = messages.length + newMessages.length;
+                // User cap counts only user messages (the ack-only entry has its own
+                // reserved slot); the hard cap counts everything in the payload.
+                const userStored = messages.filter(m => m.signed_payload?.ack_only !== true).length;
+                const userProjected = userStored + newMessages.length;
+                const totalProjected = messages.length + newMessages.length;
 
-                if (!bypassControlReserve && projected > userCapacityLimit) {
+                if (!bypassControlReserve && userProjected > userCapacityLimit) {
                     throw new Error(
-                        `Offline message reserve reached (${messages.length}+${newMessages.length}/${userCapacityLimit}); ` +
+                        `Offline message reserve reached (${userStored}+${newMessages.length}/${userCapacityLimit}); ` +
                         `${OFFLINE_CONTROL_MESSAGE_RESERVE} slots reserved for group control messages`,
                     );
                 }
 
-                if (projected > MAX_MESSAGES_PER_STORE) {
+                if (totalProjected > MAX_MESSAGES_PER_STORE) {
                     throw new Error(`Offline message store full (${messages.length}+${newMessages.length}/${MAX_MESSAGES_PER_STORE})`);
                 }
 
@@ -131,6 +136,36 @@ export class OfflineMessageManager {
                 generalErrorHandler(error);
                 throw error;
             }
+        });
+    }
+
+    /**
+     * Write a standalone offline ACK into the bucket. Supersedes any prior ack-only
+     * entry (only the latest lastReadTs matters) and may use the reserved ack slot
+     * even when the bucket is otherwise full — so an ACK is always writable and never
+     * accumulates.
+     */
+    static async storeOfflineAck(
+        node: ChatNode,
+        bucketKey: string,
+        ackMessage: OfflineMessage,
+        signingPrivateKey: Uint8Array,
+        database: ChatDatabase,
+    ): Promise<void> {
+        return OfflineMessageManager.withBucketMutationLock(bucketKey, async () => {
+            const local = database.getOfflineSentMessages(bucketKey);
+            // Drop expired + any existing ACK (supersede), keep real messages.
+            const kept = OfflineMessageManager.filterExpiredMessages(local.messages)
+                .filter(m => m.signed_payload?.ack_only !== true);
+            const messages = [...kept, ackMessage];
+            if (messages.length > MAX_MESSAGES_PER_STORE) {
+                throw new Error(`Offline store full even for ACK (${messages.length}/${MAX_MESSAGES_PER_STORE})`);
+            }
+            const version = local.version + 1;
+            const signedStore = OfflineMessageManager.signStore(messages, version, bucketKey, signingPrivateKey);
+            await OfflineMessageManager.putToDHT(node, bucketKey, signedStore, database);
+            database.saveOfflineSentMessages(bucketKey, messages, version);
+            log(`[OFFLINE][ACK][WRITE][DONE] bucket=*${bucketKey.slice(-12)} newVersion=${version} newCount=${messages.length}`);
         });
     }
 
@@ -247,13 +282,15 @@ export class OfflineMessageManager {
     }
 
     /**
-     * Live (non-expired) count of messages already stored in a bucket. Used by the
-     * capacity gate so it matches the write path, which prunes expired entries
-     * before counting — otherwise stale entries that have aged out would keep the
-     * gate rejecting new sends until the next write/ACK cleared the cache.
+     * Live (non-expired) count of **user** messages stored in a bucket — excludes
+     * the ack-only entry, which lives in its own reserved slot (so it must not be
+     * counted against the user cap, and a lone stale ACK must not look like
+     * "pending messages"). Prunes expired entries to match the write path.
      */
     static liveBucketMessageCount(database: ChatDatabase, bucketKey: string): number {
-        return OfflineMessageManager.filterExpiredMessages(database.getOfflineSentMessages(bucketKey).messages).length;
+        return OfflineMessageManager.filterExpiredMessages(database.getOfflineSentMessages(bucketKey).messages)
+            .filter(m => m.signed_payload?.ack_only !== true)
+            .length;
     }
 
     /**
@@ -343,6 +380,9 @@ export class OfflineMessageManager {
         // dedupes by `id`, so a retry of the same message can't deliver twice.
         stableId?: string,
         stableTimestamp?: number,
+        // Standalone ACK marker (signed). The recipient processes the ACK but does
+        // not display/save it or advance its lastReadTs.
+        ackOnly?: boolean,
     ): OfflineMessage {
         // RSA-OAEP (Node default) max plaintext for a 2048-bit key: 256 - 2*20 - 2 = 214 bytes
         const RSA_MAX_PLAINTEXT = 214;
@@ -394,7 +434,8 @@ export class OfflineMessageManager {
                 content_hash: Buffer.from(sha256(encryptedContentBuf)).toString('base64'),
                 sender_info_hash: Buffer.from(sha256(encryptedSenderInfo)).toString('base64'),
                 timestamp,
-                bucket_key: bucketKey
+                bucket_key: bucketKey,
+                ...(ackOnly ? { ack_only: true } : {}),
             };
 
             const payloadBytes = new TextEncoder().encode(JSON.stringify(signedPayload));

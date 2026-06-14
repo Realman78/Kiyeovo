@@ -213,6 +213,7 @@ export interface EncryptedMessage {
   timestamp: number
   senderUsername: string // Username of sender
   offline_ack_timestamp?: number // ACK for offline messages we've read from sender's bucket
+  ack_only?: boolean // Standalone ACK: process offline_ack_timestamp, do not display/save
 }
 
 export interface AuthenticatedEncryptedMessage extends EncryptedMessage {
@@ -230,6 +231,7 @@ export interface OfflineSignedPayload {
   sender_info_hash: string   // SHA256 of encrypted sender info (base64)
   timestamp: number
   bucket_key: string         // Full bucket key for binding
+  ack_only?: boolean         // Standalone ACK marker (authenticated by the signature)
 }
 
 // Offline message types

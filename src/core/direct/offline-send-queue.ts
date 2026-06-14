@@ -1,6 +1,6 @@
 import type { ChatNode, OfflineMessage, MessageSendStateChangedEvent } from '../types.js';
 import type { ChatDatabase, PendingOfflineSend } from '../db/database.js';
-import { MAX_MESSAGES_PER_STORE, OFFLINE_CONTROL_MESSAGE_RESERVE } from '../constants.js';
+import { MAX_MESSAGES_PER_STORE, OFFLINE_ACK_RESERVE, OFFLINE_CONTROL_MESSAGE_RESERVE } from '../constants.js';
 import { errStr } from '../utils/general-error.js';
 import { log } from '../../shared/logger.js';
 import { OfflineMessageManager } from './offline-message-manager.js';
@@ -16,7 +16,7 @@ export interface OfflineSendQueueDeps {
   emitSendState: (data: MessageSendStateChangedEvent) => void;
 }
 
-const userCapacityLimit = (): number => Math.max(0, MAX_MESSAGES_PER_STORE - OFFLINE_CONTROL_MESSAGE_RESERVE);
+const userCapacityLimit = (): number => Math.max(0, MAX_MESSAGES_PER_STORE - OFFLINE_CONTROL_MESSAGE_RESERVE - OFFLINE_ACK_RESERVE);
 
 /**
  * Durable, batched background queue for 1:1 offline sends.
@@ -46,12 +46,13 @@ export class OfflineSendQueue {
    * row when obviously full). The authoritative, atomic gate is the
    * count-and-insert inside `createMessageWithPendingOfflineSend`.
    */
-  hasCapacity(bucketKey: string): boolean {
+  hasCapacity(bucketKey: string, additional = 0): boolean {
     // Live (expiry-pruned) count so the gate matches the write path; otherwise
     // aged-out entries would keep rejecting new sends until the cache is cleared.
+    // `additional` = caller's in-flight messages not yet in the queue.
     const stored = OfflineMessageManager.liveBucketMessageCount(this.deps.database, bucketKey);
     const pending = this.deps.database.countActivePendingOfflineSendsByBucket(bucketKey);
-    return stored + pending < userCapacityLimit();
+    return stored + pending + additional < userCapacityLimit();
   }
 
   /** Max user messages a bucket may hold (the atomic insert enforces this). */
