@@ -96,17 +96,7 @@ export function createTransportArray(params: {
 }
 
 function getFastModeListenAddrs(port: number): string[] {
-  // TODO EXPERIMENT: dropped the bare '/p2p-circuit'. That bare listen puts the
-  // circuit-relay transport into CircuitSearch mode, which pushes a never-
-  // satisfied pending reservation (our fixed relay reserves via the
-  // 'configured' path, not 'discovered'), so relay discovery runs forever and
-  // perpetually dials random/dead peers. Those discovery dials create shared
-  // dial-queue targets that DHT puts "join", bypassing the per-peer dial cap.
-  // Our actual relay reservation/announcement comes from the keepalive's
-  // specific-relay listen (CircuitListen -> 'configured' -> addedRelay), which
-  // is self-sufficient for reachability. REVERT this line if inbound relay
-  // reachability regresses (peer on another network can no longer dial us).
-  return [`/ip4/0.0.0.0/tcp/${port}`];
+  return [`/ip4/0.0.0.0/tcp/${port}`, '/p2p-circuit'];
 }
 
 function getRelayRuntime(networkMode: NetworkMode): RelayRuntime {
