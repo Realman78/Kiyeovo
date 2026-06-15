@@ -519,6 +519,19 @@ export class ChatDatabase {
         `);
         this.db.exec(`CREATE INDEX IF NOT EXISTS idx_pending_offline_sends_bucket ON pending_offline_sends(bucket_key, status)`);
 
+        // Durable mirror of group messages that were published online but whose
+        // offline DHT backup failed — so an app-close mid-backup doesn't lose them.
+        // payload is the serialized GroupContentMessage; retried on startup.
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS pending_group_offline_backups (
+                message_id TEXT PRIMARY KEY NOT NULL,
+                chat_id INTEGER NOT NULL,
+                group_id TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            )
+        `);
+
         // Group offline sent messages table (local cache of messages we've sent to group DHT buckets)
         // Allows optimistic local append/write without pre-read DHT GET.
         this.db.exec(`
@@ -1977,6 +1990,23 @@ export class ChatDatabase {
     deleteGroupOfflineSentMessages(bucketKey: string): void {
         const stmt = this.db.prepare('DELETE FROM group_offline_sent_messages WHERE bucket_key = ?');
         stmt.run(bucketKey);
+    }
+
+    // --- Pending group offline backups (durable retry across restart) ---
+
+    upsertPendingGroupOfflineBackup(row: { messageId: string; chatId: number; groupId: string; payload: string }): void {
+        this.db.prepare(`
+            INSERT OR REPLACE INTO pending_group_offline_backups (message_id, chat_id, group_id, payload, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        `).run(row.messageId, row.chatId, row.groupId, row.payload, Date.now());
+    }
+
+    deletePendingGroupOfflineBackup(messageId: string): void {
+        this.db.prepare('DELETE FROM pending_group_offline_backups WHERE message_id = ?').run(messageId);
+    }
+
+    getAllPendingGroupOfflineBackups(): Array<{ message_id: string; chat_id: number; group_id: string; payload: string }> {
+        return this.db.prepare('SELECT message_id, chat_id, group_id, payload FROM pending_group_offline_backups').all() as Array<{ message_id: string; chat_id: number; group_id: string; payload: string }>;
     }
 
     deleteGroupOfflineSentMessagesByPrefix(bucketKeyPrefix: string): void {

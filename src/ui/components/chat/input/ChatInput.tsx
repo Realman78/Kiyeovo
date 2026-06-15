@@ -26,6 +26,9 @@ type SendResult = {
     // Accepted but still in flight (non-blocking offline send): keep the spinner
     // until a MESSAGE_SEND_STATE_CHANGED event settles the row.
     localSendState?: 'sending';
+    // Group message delivered online but the DHT backup failed → show the
+    // "Retry offline backup" affordance (re-store only, not re-send).
+    backupFailed?: boolean;
 };
 
 const MAX_COMPOSER_LINES = 5;
@@ -334,21 +337,7 @@ export const ChatInput: FC = () => {
                 toast.error(errorText);
                 return { success: false, error: errorText, failedReason };
             } else if (warning && offlineBackupRetry) {
-                toast.warningAction(
-                    warning,
-                    'Retry offline backup',
-                    async () => {
-                        const retry = await window.kiyeovoAPI.retryGroupOfflineBackup(
-                            offlineBackupRetry.chatId,
-                            offlineBackupRetry.messageId,
-                        );
-                        if (retry.success) {
-                            toast.success('Group offline backup synced');
-                        } else {
-                            toast.error(retry.error || 'Failed to retry group offline backup');
-                        }
-                    },
-                );
+                toast.warning(warning);
             }
             warnOfflineSend();
             return {
@@ -356,6 +345,7 @@ export const ChatInput: FC = () => {
                 messageId: message?.messageId,
                 timestamp: message?.timestamp,
                 messageSentStatus: messageSentStatus ?? undefined,
+                backupFailed: !!(warning && offlineBackupRetry),
             };
         } catch (err) {
             console.error('Failed to send group message:', err);
@@ -408,6 +398,16 @@ export const ChatInput: FC = () => {
                             currentUserPeerId: myPeerId ?? undefined,
                         },
                     }));
+                    // Delivered online but DHT backup failed → mark the row for the
+                    // "Retry offline backup" affordance (by backend id, robust to the
+                    // finalize/onMessageReceived dedupe).
+                    if (result.backupFailed) {
+                        dispatch(updateLocalMessageSendState({
+                            messageId: result.messageId,
+                            state: 'failed',
+                            failedReason: 'offline_backup',
+                        }));
+                    }
                 } else {
                     dispatch(updateLocalMessageSendState({ messageId: next.localMessageId, state: 'failed' }));
                 }

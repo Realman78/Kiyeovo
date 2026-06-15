@@ -31,7 +31,8 @@ export interface ChatMessage {
   transferError?: string;
   transferExpiresAt?: number;
   localSendState?: 'queued' | 'sending' | 'failed';
-  failedReason?: 'group_rekeying' | 'other';
+  // 'offline_backup' = delivered online, only the DHT backup failed (retry re-stores, not re-sends)
+  failedReason?: 'group_rekeying' | 'other' | 'offline_backup';
   retryAfterTs?: number;
 }
 
@@ -457,7 +458,7 @@ const chatSlice = createSlice({
       action: PayloadAction<{
         messageId: string;
         state: 'queued' | 'sending' | 'failed';
-        failedReason?: 'group_rekeying' | 'other';
+        failedReason?: 'group_rekeying' | 'other' | 'offline_backup';
         retryAfterTs?: number;
       }>
     ) => {
@@ -489,7 +490,7 @@ const chatSlice = createSlice({
         messageId: string;
         outcome: 'sending' | 'delivered' | 'failed';
         messageSentStatus?: MessageSentStatus;
-        failedReason?: 'group_rekeying' | 'other';
+        failedReason?: 'group_rekeying' | 'other' | 'offline_backup';
         retryAfterTs?: number;
       }>
     ) => {
