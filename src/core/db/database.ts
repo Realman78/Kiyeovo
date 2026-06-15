@@ -96,6 +96,25 @@ export interface Message {
     transfer_status?: FileTransferStatus
     transfer_progress?: number
     transfer_error?: string
+    // Local outbound send lifecycle for optimistic UI / offline-send queue
+    local_send_state?: 'queued' | 'sending' | 'failed' | null
+    failed_reason?: string | null
+    // Absolute ms timestamp before which a failed send may not be retried
+    // (e.g. group-rekey cooldown). Persisted so the block survives a restart.
+    retry_after_ts?: number | null
+}
+
+// A 1:1 message awaiting an offline DHT write (durable background-send queue).
+export interface PendingOfflineSend {
+    message_id: string
+    chat_id: number
+    peer_id: string
+    bucket_key: string
+    content: string
+    created_at: number
+    status: 'queued' | 'failed'
+    attempts: number
+    last_error: string | null
 }
 
 export interface EncryptedUserIdentityDb {
@@ -481,6 +500,38 @@ export class ChatDatabase {
             )
         `);
 
+        // Durable queue of 1:1 messages awaiting an offline DHT write. The
+        // background flush worker batches all 'queued' rows for a bucket into one
+        // PUT. 'failed' rows wait for a manual retry (give-up threshold = 0).
+        // message_id is the chat message id (shared with the UI row).
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS pending_offline_sends (
+                message_id TEXT PRIMARY KEY NOT NULL,
+                chat_id INTEGER NOT NULL,
+                peer_id TEXT NOT NULL,
+                bucket_key TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'queued',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT
+            )
+        `);
+        this.db.exec(`CREATE INDEX IF NOT EXISTS idx_pending_offline_sends_bucket ON pending_offline_sends(bucket_key, status)`);
+
+        // Durable mirror of group messages that were published online but whose
+        // offline DHT backup failed — so an app-close mid-backup doesn't lose them.
+        // payload is the serialized GroupContentMessage; retried on startup.
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS pending_group_offline_backups (
+                message_id TEXT PRIMARY KEY NOT NULL,
+                chat_id INTEGER NOT NULL,
+                group_id TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            )
+        `);
+
         // Group offline sent messages table (local cache of messages we've sent to group DHT buckets)
         // Allows optimistic local append/write without pre-read DHT GET.
         this.db.exec(`
@@ -745,6 +796,9 @@ export class ChatDatabase {
         this.ensureColumnExists('blocked_peers', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
         this.ensureColumnExists('failed_key_exchanges', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
         this.ensureColumnExists('login_attempts', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
+        this.ensureColumnExists('messages', 'local_send_state', 'TEXT');
+        this.ensureColumnExists('messages', 'failed_reason', 'TEXT');
+        this.ensureColumnExists('messages', 'retry_after_ts', 'INTEGER');
         this.db.prepare(`UPDATE bootstrap_nodes SET network_mode = ? WHERE address LIKE '%/onion%'`).run(NETWORK_MODES.ANONYMOUS);
         this.db.prepare(`UPDATE bootstrap_nodes SET network_mode = ? WHERE address NOT LIKE '%/onion%'`).run(NETWORK_MODES.FAST);
     }
@@ -1810,6 +1864,104 @@ export class ChatDatabase {
         stmt.run(bucketKey);
     }
 
+    // --- Pending offline sends queue (durable, batched background flush) ---
+
+    insertPendingOfflineSend(row: {
+        messageId: string;
+        chatId: number;
+        peerId: string;
+        bucketKey: string;
+        content: string;
+        createdAt: number;
+    }): void {
+        const stmt = this.db.prepare(`
+            INSERT OR REPLACE INTO pending_offline_sends
+                (message_id, chat_id, peer_id, bucket_key, content, created_at, status, attempts, last_error)
+            VALUES (?, ?, ?, ?, ?, ?, 'queued', 0, NULL)
+        `);
+        stmt.run(row.messageId, row.chatId, row.peerId, row.bucketKey, row.content, row.createdAt);
+    }
+
+    // 'queued' rows for a bucket, oldest first — the batch the flush worker drains.
+    getQueuedPendingOfflineSendsByBucket(bucketKey: string): PendingOfflineSend[] {
+        const stmt = this.db.prepare(`
+            SELECT * FROM pending_offline_sends
+            WHERE bucket_key = ? AND status = 'queued'
+            ORDER BY created_at ASC
+        `);
+        return stmt.all(bucketKey) as PendingOfflineSend[];
+    }
+
+    // Count rows that still occupy a bucket slot (queued or awaiting manual retry),
+    // used for the capacity pre-check alongside the already-stored bucket count.
+    countActivePendingOfflineSendsByBucket(bucketKey: string): number {
+        const stmt = this.db.prepare(`
+            SELECT COUNT(*) AS count FROM pending_offline_sends
+            WHERE bucket_key = ? AND status IN ('queued', 'failed')
+        `);
+        return (stmt.get(bucketKey) as { count: number }).count;
+    }
+
+    getPendingOfflineSend(messageId: string): PendingOfflineSend | null {
+        const stmt = this.db.prepare('SELECT * FROM pending_offline_sends WHERE message_id = ?');
+        return (stmt.get(messageId) as PendingOfflineSend | undefined) ?? null;
+    }
+
+    getAllPendingOfflineSends(): PendingOfflineSend[] {
+        return this.db.prepare('SELECT * FROM pending_offline_sends').all() as PendingOfflineSend[];
+    }
+
+    // Atomic settle of delivered sends: drop the queue rows AND clear the matching
+    // chat rows' send-state in one transaction, so a crash can never split them
+    // (leaving a row stuck on `sending`).
+    settlePendingOfflineSendsDelivered(messageIds: string[]): void {
+        if (messageIds.length === 0) return;
+        const placeholders = messageIds.map(() => '?').join(',');
+        const tx = this.db.transaction((ids: string[]) => {
+            this.db.prepare(`DELETE FROM pending_offline_sends WHERE message_id IN (${placeholders})`).run(...ids);
+            this.db.prepare(
+                `UPDATE messages SET local_send_state = NULL, failed_reason = NULL, retry_after_ts = NULL WHERE id IN (${placeholders})`,
+            ).run(...ids);
+        });
+        tx(messageIds);
+    }
+
+    // Atomic settle of failed sends: mark the queue rows failed AND the chat rows
+    // failed in one transaction.
+    settlePendingOfflineSendsFailed(messageIds: string[], lastError?: string): void {
+        if (messageIds.length === 0) return;
+        const placeholders = messageIds.map(() => '?').join(',');
+        const tx = this.db.transaction((ids: string[]) => {
+            this.db.prepare(
+                `UPDATE pending_offline_sends SET status = 'failed', attempts = attempts + 1, last_error = ? WHERE message_id IN (${placeholders})`,
+            ).run(lastError ?? null, ...ids);
+            this.db.prepare(
+                `UPDATE messages SET local_send_state = 'failed', failed_reason = COALESCE(NULLIF(failed_reason, ''), 'other') WHERE id IN (${placeholders})`,
+            ).run(...ids);
+        });
+        tx(messageIds);
+    }
+
+    // Manual retry: move a failed row back to 'queued' so the flush picks it up.
+    requeuePendingOfflineSend(messageId: string): void {
+        this.db.prepare(`UPDATE pending_offline_sends SET status = 'queued' WHERE message_id = ?`).run(messageId);
+    }
+
+    // Startup reconcile (atomic, idempotent): no auto-resume. Any send interrupted
+    // mid-flight (`queued`) becomes `failed`, and every chat row that still has a
+    // pending queue row but shows `sending` is corrected to `failed` (manual retry).
+    // Delivered sends left no pending row (atomic settle), so they're untouched.
+    reconcileInterruptedOfflineSends(): void {
+        const tx = this.db.transaction(() => {
+            this.db.prepare(`UPDATE pending_offline_sends SET status = 'failed' WHERE status = 'queued'`).run();
+            this.db.prepare(`
+                UPDATE messages SET local_send_state = 'failed', failed_reason = COALESCE(NULLIF(failed_reason, ''), 'other')
+                WHERE local_send_state = 'sending' AND id IN (SELECT message_id FROM pending_offline_sends)
+            `).run();
+        });
+        tx();
+    }
+
     // Group offline sent messages operations (local cache to avoid DHT reads before writes)
     getGroupOfflineSentMessages(bucketKey: string): { messages: GroupContentMessage[]; version: number } {
         const stmt = this.db.prepare('SELECT messages, version FROM group_offline_sent_messages WHERE bucket_key = ?');
@@ -1840,6 +1992,23 @@ export class ChatDatabase {
         stmt.run(bucketKey);
     }
 
+    // --- Pending group offline backups (durable retry across restart) ---
+
+    upsertPendingGroupOfflineBackup(row: { messageId: string; chatId: number; groupId: string; payload: string }): void {
+        this.db.prepare(`
+            INSERT OR REPLACE INTO pending_group_offline_backups (message_id, chat_id, group_id, payload, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        `).run(row.messageId, row.chatId, row.groupId, row.payload, Date.now());
+    }
+
+    deletePendingGroupOfflineBackup(messageId: string): void {
+        this.db.prepare('DELETE FROM pending_group_offline_backups WHERE message_id = ?').run(messageId);
+    }
+
+    getAllPendingGroupOfflineBackups(): Array<{ message_id: string; chat_id: number; group_id: string; payload: string }> {
+        return this.db.prepare('SELECT message_id, chat_id, group_id, payload FROM pending_group_offline_backups').all() as Array<{ message_id: string; chat_id: number; group_id: string; payload: string }>;
+    }
+
     deleteGroupOfflineSentMessagesByPrefix(bucketKeyPrefix: string): void {
         const stmt = this.db.prepare('DELETE FROM group_offline_sent_messages WHERE bucket_key LIKE ?');
         stmt.run(`${bucketKeyPrefix}%`);
@@ -1868,9 +2037,12 @@ export class ChatDatabase {
                     transfer_status,
                     transfer_progress,
                     transfer_error,
+                    local_send_state,
+                    failed_reason,
+                    retry_after_ts,
                     event_timestamp
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `);
 
             stmt.run(
@@ -1886,6 +2058,9 @@ export class ChatDatabase {
                 message.transfer_status ?? null,
                 message.transfer_progress ?? null,
                 message.transfer_error ?? null,
+                message.local_send_state ?? null,
+                message.failed_reason ?? null,
+                message.retry_after_ts ?? null,
                 message.event_timestamp
                     ? (message.event_timestamp instanceof Date
                         ? message.event_timestamp.toISOString()
@@ -1904,6 +2079,84 @@ export class ChatDatabase {
 
             return message.id;
         });
+    }
+
+    /**
+     * Atomically persist a new outbound message AND its pending offline-send queue
+     * row in one transaction — and enforce the bucket capacity within that same
+     * transaction so two concurrent sends can't both observe room and overfill.
+     * Returns false (and writes nothing) if the bucket is full. The crash-safety
+     * guarantee also holds: never a `sending` message row without its queue row.
+     */
+    createMessageWithPendingOfflineSend(
+        message: Omit<Message, 'created_at'>,
+        pending: { peerId: string; bucketKey: string; content: string; createdAt: number },
+        capacityLimit: number,
+    ): boolean {
+        const ts = message.timestamp instanceof Date ? message.timestamp.toISOString() : message.timestamp;
+        const tx = this.db.transaction(() => {
+            // Capacity check inside the transaction: live (non-expired) stored count
+            // + still-pending count, matching the write path's pruning.
+            const storedRow = this.db.prepare('SELECT messages FROM offline_sent_messages WHERE bucket_key = ?')
+                .get(pending.bucketKey) as { messages: string } | undefined;
+            const now = Date.now();
+            const storedLive = storedRow
+                ? (JSON.parse(storedRow.messages) as Array<{ expires_at: number; signed_payload?: { ack_only?: boolean } }>)
+                    .filter(m => m.expires_at > now && m.signed_payload?.ack_only !== true).length
+                : 0;
+            const pendingActive = (this.db.prepare(
+                `SELECT COUNT(*) AS c FROM pending_offline_sends WHERE bucket_key = ? AND status IN ('queued', 'failed')`,
+            ).get(pending.bucketKey) as { c: number }).c;
+            if (storedLive + pendingActive >= capacityLimit) {
+                return false;
+            }
+            this.db.prepare(`
+                INSERT INTO messages (
+                    id, chat_id, sender_peer_id, content, message_type, timestamp,
+                    file_name, file_size, file_path, transfer_status, transfer_progress,
+                    transfer_error, local_send_state, failed_reason, retry_after_ts, event_timestamp
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(
+                message.id, message.chat_id, message.sender_peer_id, message.content,
+                message.message_type, ts,
+                message.file_name ?? null, message.file_size ?? null, message.file_path ?? null,
+                message.transfer_status ?? null, message.transfer_progress ?? null, message.transfer_error ?? null,
+                message.local_send_state ?? null, message.failed_reason ?? null, message.retry_after_ts ?? null,
+                null,
+            );
+            this.db.prepare(`UPDATE chats SET updated_at = ? WHERE id = ?`).run(ts, message.chat_id);
+            this.db.prepare(`
+                INSERT OR REPLACE INTO pending_offline_sends
+                    (message_id, chat_id, peer_id, bucket_key, content, created_at, status, attempts, last_error)
+                VALUES (?, ?, ?, ?, ?, ?, 'queued', 0, NULL)
+            `).run(message.id, message.chat_id, pending.peerId, pending.bucketKey, pending.content, pending.createdAt);
+            return true;
+        });
+        return tx() as boolean;
+    }
+
+    /**
+     * Update the local outbound send lifecycle of a message. Pass state=null to
+     * settle it (delivered) — clears the failure reason and retry cooldown.
+     * retryAfterTs only persists for 'failed' (e.g. group-rekey cooldown).
+     */
+    updateMessageSendState(
+        messageId: string,
+        state: 'queued' | 'sending' | 'failed' | null,
+        failedReason?: string | null,
+        retryAfterTs?: number | null,
+    ): void {
+        const isFailed = state === 'failed';
+        const stmt = this.db.prepare(`
+            UPDATE messages SET local_send_state = ?, failed_reason = ?, retry_after_ts = ? WHERE id = ?
+        `);
+        stmt.run(
+            state,
+            isFailed ? (failedReason ?? 'other') : null,
+            isFailed ? (retryAfterTs ?? null) : null,
+            messageId,
+        );
     }
 
     updateMessageTransfer(messageId: string, updates: {

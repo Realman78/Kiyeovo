@@ -14,6 +14,7 @@ import type {
   ChatCreatedEvent,
   KeyExchangeFailedEvent,
   MessageReceivedEvent,
+  MessageSendStateChangedEvent,
   SendMessageResponse,
   StrippedMessage,
   MessageSentStatus,
@@ -60,8 +61,9 @@ import { MessageEncryption } from '../direct/message-encryption.js';
 import { PeerConnectionHandler } from '../direct/peer-connection-handler.js';
 import { StreamHandler } from '../transport/stream-handler.js';
 import { KeyExchange } from '../direct/key-exchange.js';
-import { ChatDatabase, User } from '../db/database.js';
+import { ChatDatabase, User, type PendingOfflineSend } from '../db/database.js';
 import { OfflineMessageManager } from '../direct/offline-message-manager.js';
+import { OfflineSendQueue } from '../direct/offline-send-queue.js';
 import { UsernameRegistry } from '../username/username-registry.js';
 import { FileHandler } from './file-handler.js';
 import { errStr, generalErrorHandler } from '../utils/general-error.js';
@@ -92,7 +94,8 @@ function hasChatId(info: OfflineReadBucketInfoAny): info is OfflineReadBucketInf
 
 type BucketNudgePayload =
   | { kind: 'GROUP_REKEY_REFETCH'; groupId: string }
-  | { kind: 'DIRECT_SESSION_RESET' };
+  | { kind: 'DIRECT_SESSION_RESET' }
+  | { kind: 'DIRECT_OFFLINE_REFETCH' };
 
 type ActiveCall = {
   callId: string;
@@ -159,6 +162,7 @@ export class MessageHandler {
   private nudgeSendAttemptSeq = 0;
   private groupOfflineManager: GroupOfflineManager;
   private groupMessaging: GroupMessaging;
+  private offlineSendQueue: OfflineSendQueue;
   private groupAckRepublisher: GroupAckRepublisher;
   private groupInfoRepublisher: GroupInfoRepublisher;
   private readonly bucketNudgeProtocol: string;
@@ -174,12 +178,13 @@ export class MessageHandler {
   private groupCallOrchestrator: GroupCallOrchestrator | null;
   private groupCallHintHandler: ((groupId: string) => void | Promise<void>) | null = null;
   private requestReconnect: (() => Promise<boolean>) | null = null;
+  private emitMessageSendState: (data: MessageSendStateChangedEvent) => void = () => undefined;
 
   private formatNudgeTarget(payload: BucketNudgePayload): string {
     if (payload.kind === 'GROUP_REKEY_REFETCH') {
       return `group=${payload.groupId.slice(0, 8)}`;
     }
-    return 'kind=direct_session_reset';
+    return `kind=${payload.kind.toLowerCase()}`;
   }
 
   private getNudgeConnectionSnapshot(peerId: string): {
@@ -312,6 +317,21 @@ export class MessageHandler {
       database: this.database,
       networkMode: sessionNetworkMode,
     });
+    this.offlineSendQueue = new OfflineSendQueue({
+      node: this.node,
+      database: this.database,
+      buildOfflineMessage: (row) => this.buildOfflineMessageForQueue(row),
+      getSigningKey: () => {
+        const identity = this.usernameRegistry.getUserIdentity();
+        if (!identity) {
+          throw new Error('User identity unavailable for offline send');
+        }
+        return identity.signingPrivateKey;
+      },
+      emitSendState: (data) => this.notifyMessageSendState(data),
+    });
+    // No auto-resume: surface anything interrupted mid-flight as failed (manual retry).
+    this.offlineSendQueue.recoverOnStartup();
     const recoveredRekeying = this.database.recoverRekeyingGroupsOnStartup();
     if (recoveredRekeying > 0) {
       console.warn(
@@ -321,7 +341,14 @@ export class MessageHandler {
     this.setupProtocolHandler();
     this.groupMessaging.start();
     this.cleanupPeerEvents = PeerConnectionHandler.setupPeerEvents(node, this.sessionManager, {
-      onPeerConnect: (peerId) => this.handlePeerConnectForActiveCall(peerId),
+      onPeerConnect: (peerId) => {
+        this.handlePeerConnectForActiveCall(peerId);
+        // Now reachable: flush any ACK we owe this peer (retry path for a failed
+        // earlier ACK; also clears their bucket promptly once we reconnect).
+        void this.flushPendingOfflineAck(peerId);
+        // And if we have messages waiting for them, nudge them to fetch + ACK now.
+        this.maybeNudgeForPendingOfflineMessages(peerId);
+      },
       onPeerDisconnect: (peerId) => this.handlePeerDisconnectForActiveCall(peerId),
     });
     this.startSessionCleanup();
@@ -343,12 +370,38 @@ export class MessageHandler {
     this.sendBucketNudge(peerId, { kind: 'DIRECT_SESSION_RESET' }, `direct-reset:${peerId}`);
   }
 
+  /**
+   * On connecting to a peer, if our write-bucket for them still holds undelivered
+   * messages, nudge them to fetch now (rather than waiting for their periodic
+   * check) — they read, ACK, and our bucket clears promptly. Rate-limited by the
+   * nudge cooldown; a no-op if the bucket is empty or we have no offline channel.
+   */
+  private maybeNudgeForPendingOfflineMessages(peerId: string): void {
+    const bucketSecret = this.database.getOfflineBucketSecretByPeerId(peerId);
+    if (!bucketSecret) {
+      return;
+    }
+    const writeBucketKey = this.keyExchange.constructWriteBucketKey(bucketSecret);
+    if (OfflineMessageManager.liveBucketMessageCount(this.database, writeBucketKey) > 0) {
+      this.sendBucketNudge(peerId, { kind: 'DIRECT_OFFLINE_REFETCH' }, `direct-offline:${peerId}`);
+    }
+  }
+
   setGroupCallHintHandler(handler: ((groupId: string) => void | Promise<void>) | null): void {
     this.groupCallHintHandler = handler;
   }
 
   setRequestReconnect(handler: (() => Promise<boolean>) | null): void {
     this.requestReconnect = handler;
+  }
+
+  setMessageSendStateEmitter(emit: (data: MessageSendStateChangedEvent) => void): void {
+    this.emitMessageSendState = emit;
+  }
+
+  /** Report an outbound message's send-state transition to the renderer. */
+  notifyMessageSendState(data: MessageSendStateChangedEvent): void {
+    this.emitMessageSendState(data);
   }
 
   async storeGroupCallHint(groupId: string): Promise<void> {
@@ -584,6 +637,12 @@ export class MessageHandler {
         if (message.offline_ack_timestamp) {
           log(`Clearing acknowledged messages up to ${message.offline_ack_timestamp}`);
           await this.processOfflineAck(remoteId, message.offline_ack_timestamp);
+        }
+
+        // Standalone ACK: the ACK was processed above; do not deliver/save it.
+        if (message.ack_only) {
+          log(`[OFFLINE-ACK][IN][ONLINE] from=${remoteId.slice(-8)} ts=${message.offline_ack_timestamp}`);
+          return;
         }
 
         try {
@@ -1462,6 +1521,14 @@ export class MessageHandler {
       return;
     }
 
+    if (nudgePayload.kind === 'DIRECT_OFFLINE_REFETCH') {
+      // Sender has messages waiting for us — fetch their bucket now instead of
+      // waiting for the periodic check. Reading advances lastReadTs → we emit the
+      // ACK → their bucket clears promptly.
+      this.schedulePeerActivityOfflineCheck(remoteId);
+      return;
+    }
+
     if (nudgePayload.kind === 'GROUP_REKEY_REFETCH') {
       this.handleGroupRefetchNudge(remoteId, nudgePayload.groupId);
       return;
@@ -2194,12 +2261,179 @@ export class MessageHandler {
     throw error;
   }
 
+  /**
+   * Capacity gate for the renderer's pre-send check. True = the send is allowed.
+   * Only gates sends that would actually go to the offline bucket — a peer we're
+   * currently connected to receives a realtime message regardless of how full
+   * their offline mailbox is, so connected peers (and new contacts) are never
+   * blocked.
+   */
+  checkOfflineCapacity(peerId: string, additional = 0): boolean {
+    const connected = this.node.getConnections().some(conn => conn.remotePeer.toString() === peerId);
+    if (connected) {
+      return true; // goes online → offline bucket is irrelevant
+    }
+    const secret = this.database.getOfflineBucketSecretByPeerId(peerId);
+    if (!secret) {
+      return true; // not offline-capable (new contact) → no offline gate
+    }
+    // `additional` counts the caller's in-flight burst (optimistic rows not yet
+    // persisted in the queue), so a fast burst doesn't all pass a stale pre-check.
+    return this.offlineSendQueue.hasCapacity(this.keyExchange.constructWriteBucketKey(secret), additional);
+  }
+
+  /** Manual retry of a failed offline send (the queue requeues + reflushes). */
+  retryOfflineSend(messageId: string): void {
+    this.offlineSendQueue.retry(messageId);
+  }
+
+  // Dial + encrypt + write a direct (online) message. Shared by the synchronous
+  // send path and the non-blocking background delivery.
+  private async writeMessageOnline(
+    targetPeerId: PeerId,
+    message: string,
+    session: ConversationSession,
+    ackTimestamp?: number,
+  ): Promise<void> {
+    await this.logPeerDialDiagnostics(targetPeerId, 'send_message_online');
+    const stream = await dialProtocolWithRelayFallback({
+      node: this.node,
+      database: this.database,
+      targetPeerId,
+      protocol: this.chatProtocol,
+      context: 'send_message_online',
+    });
+
+    const myPeerId = this.node.peerId.toString();
+    const myUsername = this.database.getUserByPeerId(myPeerId)?.username || `user_${myPeerId.slice(-8)}`;
+
+    const encryptedMessage = MessageEncryption.encryptMessage(message, session);
+    encryptedMessage.senderUsername = myUsername;
+    if (ackTimestamp !== undefined) {
+      encryptedMessage.offline_ack_timestamp = ackTimestamp;
+    }
+
+    await StreamHandler.writeMessageToStream(stream, encryptedMessage);
+
+    this.sessionManager.incrementMessageCount(targetPeerId.toString());
+    this.sessionManager.updateSessionUsage(targetPeerId.toString());
+  }
+
+  /**
+   * Non-blocking send for a known, currently-unconnected, offline-capable contact.
+   * Persists the message + queue row atomically, returns immediately with a
+   * `sending` marker, then drives delivery in the background: try online first,
+   * fall back to the batched offline queue. (Connected peers and new contacts use
+   * the synchronous sendMessage path.)
+   */
+  private startNonBlockingOfflineSend(user: User, message: string, bucketSecret: string): SendMessageResponse {
+    const writeBucketKey = this.keyExchange.constructWriteBucketKey(bucketSecret);
+    const chat = this.database.getChatByPeerId(user.peer_id);
+    if (!chat) {
+      return { success: false, messageSentStatus: null, error: 'Chat not found' };
+    }
+    const messageId = crypto.randomUUID();
+    const now = Date.now();
+    // Atomic gate: capacity check + both inserts in one transaction. Returns false
+    // (and writes nothing) when the bucket is full — no concurrent overfill.
+    const inserted = this.database.createMessageWithPendingOfflineSend(
+      {
+        id: messageId,
+        chat_id: chat.id,
+        sender_peer_id: this.node.peerId.toString(),
+        content: message,
+        message_type: 'text',
+        timestamp: new Date(now),
+        local_send_state: 'sending',
+      },
+      { peerId: user.peer_id, bucketKey: writeBucketKey, content: message, createdAt: now },
+      this.offlineSendQueue.capacityLimit(),
+    );
+    if (!inserted) {
+      return { success: false, messageSentStatus: null, error: 'OFFLINE_BUCKET_FULL' };
+    }
+    const strippedMessage: StrippedMessage = {
+      chatId: chat.id,
+      messageId,
+      content: message,
+      timestamp: now,
+      messageType: 'text',
+    };
+    void this.deliverNotConnectedInBackground(user, message, messageId, chat.id, writeBucketKey);
+    return { success: true, messageSentStatus: null, error: null, message: strippedMessage, localSendState: 'sending' };
+  }
+
+  private async deliverNotConnectedInBackground(
+    user: User,
+    message: string,
+    messageId: string,
+    chatId: number,
+    writeBucketKey: string,
+  ): Promise<void> {
+    // Phase 1: attempt realtime delivery. ONLY failures here mean "peer offline →
+    // queue it". Bookkeeping after a successful send is deliberately outside this
+    // try, so a settle error can't enqueue a duplicate offline copy of a message
+    // that was already delivered online.
+    let online: { targetPeerId: PeerId; keyExchangeOccurred: boolean; ackTimestamp: number | undefined };
+    try {
+      const { session, peerId: targetPeerId, keyExchangeOccurred } = await this.ensureUserSession(
+        user.peer_id, message, false, user,
+      );
+      const lastRead = this.database.getOfflineLastReadTimestampByPeerId(targetPeerId.toString());
+      const lastAck = this.database.getOfflineLastAckSentByPeerId(targetPeerId.toString());
+      const shouldSendAck = lastRead > lastAck;
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => { reject(new Error('Message timeout')); }, MESSAGE_TIMEOUT)
+      );
+      await Promise.race([
+        this.writeMessageOnline(targetPeerId, message, session, shouldSendAck ? lastRead : undefined),
+        timeoutPromise,
+      ]);
+      online = { targetPeerId, keyExchangeOccurred, ackTimestamp: shouldSendAck ? lastRead : undefined };
+    } catch (err: unknown) {
+      // Peer offline / dial / key-exchange failed → hand to the batched offline queue.
+      log(`[OFFLINE-SEND][BG] online attempt failed, queueing offline messageId=${messageId.slice(0, 8)} reason=${errStr(err)}`);
+      void this.offlineSendQueue.flushBucket(writeBucketKey);
+      return;
+    }
+
+    // Phase 2: delivered online — settle bookkeeping. Errors here must NOT fall
+    // back to offline (the message is already delivered); just log.
+    try {
+      if (online.ackTimestamp !== undefined) {
+        this.database.updateOfflineLastAckSentByPeerId(online.targetPeerId.toString(), online.ackTimestamp);
+      }
+      this.database.settlePendingOfflineSendsDelivered([messageId]);
+      this.notifyMessageSendState({ messageId, chatId, outcome: 'delivered', messageSentStatus: 'online' });
+      if (online.keyExchangeOccurred) {
+        this.schedulePeerActivityOfflineCheck(online.targetPeerId.toString());
+      }
+      log(`[OFFLINE-SEND][BG] delivered online messageId=${messageId.slice(0, 8)}`);
+    } catch (settleErr: unknown) {
+      generalErrorHandler(settleErr, `[OFFLINE-SEND][BG] delivered online but settle failed messageId=${messageId.slice(0, 8)}`);
+    }
+  }
+
   async sendMessage(targetUsernameOrPeerId: string, message: string): Promise<SendMessageResponse> {
     let user: User | null = null;
     try {
       const dbUser = this.database.getUserByPeerIdThenUsername(targetUsernameOrPeerId);
       const initialUser = dbUser && this.database.getChatByPeerId(dbUser.peer_id) ? dbUser : null;
       const hadUserAtStart = !!initialUser;
+
+      // Non-blocking offline path: a known contact we're not currently connected
+      // to, for which we hold the offline bucket secret. Returns immediately with
+      // a `sending` marker and delivers in the background (online attempt, then
+      // batched offline queue). Connected peers and new contacts fall through to
+      // the synchronous flow below.
+      if (initialUser) {
+        const connected = this.node.getConnections().some(conn => conn.remotePeer.toString() === initialUser.peer_id);
+        const bucketSecret = this.database.getOfflineBucketSecretByPeerId(initialUser.peer_id);
+        if (!connected && bucketSecret) {
+          return this.startNonBlockingOfflineSend(initialUser, message, bucketSecret);
+        }
+      }
+
       const hadConnectionBefore = initialUser
         ? this.node.getConnections().some(conn => conn.remotePeer.toString() === initialUser.peer_id)
         : false;
@@ -2221,45 +2455,16 @@ export class MessageHandler {
       const lastAckSent = this.database.getOfflineLastAckSentByPeerId(targetPeerId.toString());
       const shouldSendAck = lastReadTimestamp > lastAckSent;
 
-      const sendWithTimeout = async (): Promise<boolean> => {
-        await this.logPeerDialDiagnostics(targetPeerId, 'send_message_online');
-        const stream = await dialProtocolWithRelayFallback({
-          node: this.node,
-          database: this.database,
-          targetPeerId,
-          protocol: this.chatProtocol,
-          context: 'send_message_online',
-        });
-
-        // Get my own username from database (last registered username) or generate fallback
-        const myPeerId = this.node.peerId.toString();
-        const myUser = this.database.getUserByPeerId(myPeerId);
-        const myUsername = myUser?.username || `user_${myPeerId.slice(-8)}`;
-
-        const encryptedMessage = MessageEncryption.encryptMessage(
-          message,
-          session
-        );
-
-        encryptedMessage.senderUsername = myUsername;
-
-        // Include ACK if we've read new offline messages from this peer
-        if (shouldSendAck) {
-          encryptedMessage.offline_ack_timestamp = lastReadTimestamp;
-        }
-
-        await StreamHandler.writeMessageToStream(stream, encryptedMessage);
-
-        this.sessionManager.incrementMessageCount(targetPeerId.toString());
-        this.sessionManager.updateSessionUsage(targetPeerId.toString());
-        return true;
-      };
-
       const timeoutPromise = new Promise<never>((_, reject) =>
         setTimeout(() => { reject(new Error('Message timeout')); }, MESSAGE_TIMEOUT)
       );
 
-      const res = await Promise.race([sendWithTimeout(), timeoutPromise]);
+      const res = await Promise.race([
+        this.writeMessageOnline(
+          targetPeerId, message, session, shouldSendAck ? lastReadTimestamp : undefined,
+        ).then(() => true),
+        timeoutPromise,
+      ]);
       if (res) {
         const strippedMessage = await this.saveMessageToDatabase(targetPeerId.toString(), message, 'online');
         // Update ACK sent timestamp if we included an ACK
@@ -2581,6 +2786,36 @@ export class MessageHandler {
     }
   }
 
+  /**
+   * Build the signed OfflineMessage for a queued send. Deterministic from the
+   * row (stable id + timestamp) so a retry rebuilds an equivalent message the
+   * recipient dedupes by id. No ACK piggyback here — that would make rebuilds
+   * non-idempotent (the ack timestamp changes between attempts).
+   */
+  private buildOfflineMessageForQueue(row: PendingOfflineSend): OfflineMessage {
+    const userIdentity = this.usernameRegistry.getUserIdentity();
+    if (!userIdentity) {
+      throw new Error('User identity not available');
+    }
+    const recipient = this.database.getUserByPeerId(row.peer_id);
+    if (!recipient?.offline_public_key) {
+      throw new Error(`No offline public key for ${row.peer_id}`);
+    }
+    const myPeerId = this.node.peerId.toString();
+    const myUsername = this.database.getUserByPeerId(myPeerId)?.username || `user_${myPeerId.slice(-8)}`;
+    return OfflineMessageManager.createOfflineMessage(
+      myPeerId,
+      myUsername,
+      row.content,
+      Buffer.from(recipient.offline_public_key, 'base64').toString(),
+      userIdentity.signingPrivateKey,
+      row.bucket_key,
+      undefined,
+      row.message_id,
+      row.created_at,
+    );
+  }
+
   private async storeOfflineMessageDB(user: User, writeBucketKey: string, message: string): Promise<StrippedMessage> {
     try {
       const userIdentity = this.usernameRegistry.getUserIdentity();
@@ -2834,6 +3069,14 @@ export class MessageHandler {
           await this.processOfflineAck(senderInfo.peer_id, senderInfo.offline_ack_timestamp);
         }
 
+        // Standalone ACK: the ACK was processed above. Do NOT deliver it and do NOT
+        // advance maxTimestampPerPeer — advancing our lastReadTs here would make us
+        // ACK back, producing an infinite ACK ping-pong.
+        if (msg.signed_payload?.ack_only === true) {
+          log(`[OFFLINE-ACK][IN][OFFLINE] run=${runId} from=${senderInfo.peer_id.slice(-8)} ts=${senderInfo.offline_ack_timestamp}`);
+          continue;
+        }
+
         // Decrypt message content early so we can inspect its type
         let decryptedContent = msg.content;
         if (msg.message_type === 'encrypted' || msg.message_type === 'hybrid') {
@@ -2894,6 +3137,9 @@ export class MessageHandler {
     for (const [peerId, maxTimestamp] of maxTimestampPerPeer.entries()) {
       this.database.updateOfflineLastReadTimestampByPeerId(peerId, maxTimestamp);
       log(`[OFFLINE][PROCESS] run=${runId} updatedLastRead peer=${peerId.slice(-8)} ts=${maxTimestamp}`);
+      // We owe this peer an ACK now (read advanced). Fire-and-forget; a failure
+      // leaves lastAckSent behind so it retries on the next read / peer-connect.
+      void this.flushPendingOfflineAck(peerId);
     }
 
     if (processedCount > 0) {
@@ -2972,6 +3218,100 @@ export class MessageHandler {
     });
 
     await responder.syncGroupInfoForLocalChat(groupId);
+  }
+
+  /**
+   * If we owe a peer an offline ACK (we've read past what we've acknowledged),
+   * send a standalone ACK and advance lastAckSent — but only on success, and
+   * monotonically, so a failure retries on the next trigger.
+   */
+  async flushPendingOfflineAck(peerId: string): Promise<void> {
+    try {
+      const lastRead = this.database.getOfflineLastReadTimestampByPeerId(peerId);
+      const lastAck = this.database.getOfflineLastAckSentByPeerId(peerId);
+      if (lastRead <= lastAck) {
+        return;
+      }
+      const sent = await this.sendStandaloneOfflineAck(peerId, lastRead);
+      if (sent) {
+        const current = this.database.getOfflineLastAckSentByPeerId(peerId);
+        if (lastRead > current) {
+          this.database.updateOfflineLastAckSentByPeerId(peerId, lastRead);
+        }
+        log(`[OFFLINE-ACK][SENT] peer=${peerId.slice(-8)} ts=${lastRead}`);
+      }
+    } catch (error: unknown) {
+      generalErrorHandler(error, `[OFFLINE-ACK] flush failed peer=${peerId.slice(-8)}`);
+    }
+  }
+
+  /**
+   * Send a standalone ACK (offline_ack_timestamp, no content): online over an
+   * existing session if connected, else durably queued into our write-bucket for
+   * the peer. Returns true only if the ACK was actually delivered/persisted.
+   */
+  private async sendStandaloneOfflineAck(peerId: string, ackTimestamp: number): Promise<boolean> {
+    const recipient = this.database.getUserByPeerId(peerId);
+    if (!recipient?.offline_public_key) {
+      return false;
+    }
+    const myPeerId = this.node.peerId.toString();
+    const myUsername = this.database.getUserByPeerId(myPeerId)?.username || `user_${myPeerId.slice(-8)}`;
+
+    // Fast path: online ACK over an existing session (no key exchange).
+    const session = this.sessionManager.getSession(peerId);
+    const connected = this.node.getConnections().some(conn => conn.remotePeer.toString() === peerId);
+    if (connected && session) {
+      try {
+        const ackMessage = MessageEncryption.encryptMessage('', session);
+        ackMessage.senderUsername = myUsername;
+        ackMessage.offline_ack_timestamp = ackTimestamp;
+        ackMessage.ack_only = true;
+        const stream = await dialProtocolWithRelayFallback({
+          node: this.node,
+          database: this.database,
+          targetPeerId: peerIdFromString(peerId),
+          protocol: this.chatProtocol,
+          context: 'offline_ack',
+        });
+        await StreamHandler.writeMessageToStream(stream, ackMessage);
+        return true;
+      } catch (error: unknown) {
+        log(`[OFFLINE-ACK] online ack failed, falling back to offline peer=${peerId.slice(-8)} reason=${errStr(error)}`);
+      }
+    }
+
+    // Durable path: offline-queued ACK.
+    const bucketSecret = this.database.getOfflineBucketSecretByPeerId(peerId);
+    if (!bucketSecret) {
+      return false;
+    }
+    const userIdentity = this.usernameRegistry.getUserIdentity();
+    if (!userIdentity) {
+      return false;
+    }
+    try {
+      const writeBucketKey = this.keyExchange.constructWriteBucketKey(bucketSecret);
+      const ackOfflineMsg = OfflineMessageManager.createOfflineMessage(
+        myPeerId,
+        myUsername,
+        '',
+        Buffer.from(recipient.offline_public_key, 'base64').toString(),
+        userIdentity.signingPrivateKey,
+        writeBucketKey,
+        ackTimestamp,
+        undefined,
+        undefined,
+        true,
+      );
+      await OfflineMessageManager.storeOfflineAck(
+        this.node, writeBucketKey, ackOfflineMsg, userIdentity.signingPrivateKey, this.database,
+      );
+      return true;
+    } catch (error: unknown) {
+      log(`[OFFLINE-ACK] offline ack failed peer=${peerId.slice(-8)} reason=${errStr(error)}`);
+      return false;
+    }
   }
 
   // Process an ACK from a peer - clear acknowledged messages from our bucket.

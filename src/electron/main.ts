@@ -14,6 +14,7 @@ import {
   type ChatCreatedEvent,
   type KeyExchangeFailedEvent,
   type MessageReceivedEvent,
+  type MessageSendStateChangedEvent,
   type FileTransferProgressEvent,
   type FileTransferCompleteEvent,
   type FileTransferFailedEvent,
@@ -330,6 +331,12 @@ function sendMessageReceived(data: MessageReceivedEvent) {
   }
 }
 
+function sendMessageSendStateChanged(data: MessageSendStateChangedEvent) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC_CHANNELS.MESSAGE_SEND_STATE_CHANGED, data);
+  }
+}
+
 function sendRestoreUsername(username: string) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     log(`[Electron] Restore username: ${username}`);
@@ -602,6 +609,9 @@ async function initializeP2PAfterWindow() {
       },
       onMessageReceived: (data: MessageReceivedEvent) => {
         sendMessageReceived(data);
+      },
+      onMessageSendStateChanged: (data: MessageSendStateChangedEvent) => {
+        sendMessageSendStateChanged(data);
       },
       onRestoreUsername: (username: string) => {
         sendRestoreUsername(username);

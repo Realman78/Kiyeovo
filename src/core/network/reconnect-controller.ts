@@ -4,6 +4,8 @@ import type { DhtStatusCheckSource } from './network-health.js';
 
 const DHT_RECONNECT_FAILURE_THRESHOLD = 3;
 const DHT_RECONNECT_COOLDOWN_MS = 120_000;
+// Shorter cooldown applied after a reconnect that reached zero peers
+const DHT_RECONNECT_FAILURE_FLOOR_MS = 5_000;
 const POST_RETRY_VERIFY_DELAY_FAST_MS = 3_000;
 const POST_RETRY_VERIFY_DELAY_ANONYMOUS_MS = 7_000;
 
@@ -63,6 +65,14 @@ export function createReconnectController() {
 
   const resetProbeFailures = () => {
     consecutiveProbeFailures = 0;
+  };
+
+  // Just-finished reconnect failed to establish connectivity
+  const noteFailedReconnect = () => {
+    lastReconnectAt = Date.now() - (DHT_RECONNECT_COOLDOWN_MS - DHT_RECONNECT_FAILURE_FLOOR_MS);
+    log(
+      `[DHT-STATUS][CORE][RECONNECT][COOLDOWN_FLOOR] reason=zero_peers floorMs=${DHT_RECONNECT_FAILURE_FLOOR_MS}`,
+    );
   };
 
   const tryBeginReconnect = (): boolean => {
@@ -137,6 +147,7 @@ export function createReconnectController() {
     },
     recordHealthStatus,
     resetProbeFailures,
+    noteFailedReconnect,
     schedulePostRetryVerify,
     shouldSuppressNegativeStatusDuringBootstrapRetry,
     tryBeginReconnect,

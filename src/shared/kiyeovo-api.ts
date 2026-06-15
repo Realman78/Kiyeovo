@@ -28,6 +28,7 @@ import type {
   KeyExchangeEvent,
   KeyExchangeFailedEvent,
   MessageReceivedEvent,
+  MessageSendStateChangedEvent,
   NetworkMode,
   OutgoingFileOfferPendingEvent,
   PasswordRequest,
@@ -128,6 +129,8 @@ export interface KiyeovoAPI {
   unregister: () => Promise<{ usernameUnregistered: boolean; peerIdUnregistered: boolean }>;
 
   sendMessage: (identifier: string, message: string) => Promise<SendMessageResponse>;
+  checkOfflineCapacity: (peerId: string, additional?: number) => Promise<{ hasRoom: boolean }>;
+  retryOfflineSend: (messageId: string) => Promise<{ success: boolean; error: string | null }>;
   sendGroupMessage: (
     chatId: number,
     message: string,
@@ -224,6 +227,7 @@ export interface KiyeovoAPI {
     error: string | null;
   }>;
   onMessageReceived: (callback: (data: MessageReceivedEvent) => void) => Unsubscribe;
+  onMessageSendStateChanged: (callback: (data: MessageSendStateChangedEvent) => void) => Unsubscribe;
 
   checkOfflineMessages: (chatIds?: number[]) => Promise<{
     success: boolean;

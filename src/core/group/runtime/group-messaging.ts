@@ -82,6 +82,7 @@ export class GroupMessaging {
   start(): void {
     if (this.started) return;
     this.started = true;
+    this.recoverPendingOfflineBackups();
     this.deps.node.services.pubsub.addEventListener('message', this.onPubsubMessage as EventListener);
     this.deps.node.addEventListener('peer:connect', this.onPeerConnect as EventListener);
     void this.reconcileSubscriptions();
@@ -298,6 +299,7 @@ export class GroupMessaging {
       );
       await this.deps.groupOfflineManager.storeGroupMessage(signedMessage);
       this.pendingOfflineBackups.delete(signedMessage.messageId);
+      this.deps.database.deletePendingGroupOfflineBackup(signedMessage.messageId);
 
       if (!published && options?.rekeyRetryHint) {
         participants
@@ -313,6 +315,12 @@ export class GroupMessaging {
       offlineBackupRetry = { chatId: ctx.chatId, messageId: signedMessage.messageId };
 
       this.pendingOfflineBackups.set(signedMessage.messageId, signedMessage);
+      this.deps.database.upsertPendingGroupOfflineBackup({
+        messageId: signedMessage.messageId,
+        chatId: ctx.chatId,
+        groupId,
+        payload: JSON.stringify(signedMessage),
+      });
       console.warn(`[GROUP-OFFLINE] ${warning}`);
     }
 
@@ -337,6 +345,13 @@ export class GroupMessaging {
         messageSentStatus: published ? 'online' : 'offline',
         messageType: 'text',
       });
+    }
+
+    // Delivered online but the DHT backup failed → persist a distinct failed
+    // state on the row so the "Retry offline backup" affordance shows and survives
+    // restart (the message itself was delivered; this is backup-only, manual retry).
+    if (offlineBackupRetry) {
+      this.deps.database.updateMessageSendState(signedMessage.messageId, 'failed', 'offline_backup');
     }
 
     const strippedMessage: StrippedMessage = {
@@ -423,6 +438,27 @@ export class GroupMessaging {
 
     await this.deps.groupOfflineManager.storeGroupMessage(pending);
     this.pendingOfflineBackups.delete(messageId);
+    this.deps.database.deletePendingGroupOfflineBackup(messageId);
+    this.deps.database.updateMessageSendState(messageId, null);
+  }
+
+  /**
+   * On startup, rehydrate persisted offline backups (published online but the DHT
+   * backup failed before app-close) into the in-memory map, so `retryOfflineBackup`
+   * works again. No auto-retry — the persisted `failed`/`offline_backup` row shows
+   * the "Retry offline backup" button and the user re-stores manually.
+   */
+  private recoverPendingOfflineBackups(): void {
+    const rows = this.deps.database.getAllPendingGroupOfflineBackups();
+    if (rows.length === 0) return;
+    for (const row of rows) {
+      try {
+        this.pendingOfflineBackups.set(row.message_id, JSON.parse(row.payload) as GroupContentMessage);
+      } catch (error: unknown) {
+        log(`[GROUP-OFFLINE][RECOVER] failed to rehydrate msgId=${row.message_id}: ${errStr(error)}`);
+      }
+    }
+    log(`[GROUP-OFFLINE][RECOVER] rehydrated ${this.pendingOfflineBackups.size} pending backup(s) for manual retry`);
   }
 
   private scheduleReconcile(delayMs: number): void {

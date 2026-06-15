@@ -31,7 +31,8 @@ export interface ChatMessage {
   transferError?: string;
   transferExpiresAt?: number;
   localSendState?: 'queued' | 'sending' | 'failed';
-  failedReason?: 'group_rekeying' | 'other';
+  // 'offline_backup' = delivered online, only the DHT backup failed (retry re-stores, not re-sends)
+  failedReason?: 'group_rekeying' | 'other' | 'offline_backup';
   retryAfterTs?: number;
 }
 
@@ -457,7 +458,7 @@ const chatSlice = createSlice({
       action: PayloadAction<{
         messageId: string;
         state: 'queued' | 'sending' | 'failed';
-        failedReason?: 'group_rekeying' | 'other';
+        failedReason?: 'group_rekeying' | 'other' | 'offline_backup';
         retryAfterTs?: number;
       }>
     ) => {
@@ -478,6 +479,41 @@ const chatSlice = createSlice({
       const chat = state.chats.find((c) => c.id === action.payload.chatId);
       if (chat) {
         chat.hasPendingFile = action.payload.hasPendingFile;
+      }
+    },
+    // outcome for a backgrounded send (offline DHT write).
+    // 'delivered' settles the row (clears the spinner, stamps messageSentStatus);
+    // 'failed' surfaces Retry; 'sending' keeps it in flight.
+    resolveMessageSendOutcome: (
+      state,
+      action: PayloadAction<{
+        messageId: string;
+        outcome: 'sending' | 'delivered' | 'failed';
+        messageSentStatus?: MessageSentStatus;
+        failedReason?: 'group_rekeying' | 'other' | 'offline_backup';
+        retryAfterTs?: number;
+      }>
+    ) => {
+      const message = state.sendingMessages.find((m) => m.id === action.payload.messageId)
+        ?? state.messages.find((m) => m.id === action.payload.messageId);
+      if (!message) {
+        return;
+      }
+      if (action.payload.outcome === 'delivered') {
+        message.localSendState = undefined;
+        message.failedReason = undefined;
+        message.retryAfterTs = undefined;
+        if (action.payload.messageSentStatus !== undefined) {
+          message.messageSentStatus = action.payload.messageSentStatus;
+        }
+      } else if (action.payload.outcome === 'failed') {
+        message.localSendState = 'failed';
+        message.failedReason = action.payload.failedReason ?? 'other';
+        message.retryAfterTs = action.payload.retryAfterTs;
+      } else {
+        message.localSendState = 'sending';
+        message.failedReason = undefined;
+        message.retryAfterTs = undefined;
       }
     },
   },
@@ -512,6 +548,7 @@ export const {
   updateFileTransferStatus,
   updateFileTransferError,
   updateLocalMessageSendState,
+  resolveMessageSendOutcome,
   setPendingFileStatus,
   removeMessageById
 } = chatSlice.actions;

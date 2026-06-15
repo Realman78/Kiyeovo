@@ -37,6 +37,10 @@ export interface SendMessageResponse {
     chatId: number;
     messageId: string;
   } | null;
+  // Set when the send was accepted but is still in flight (non-blocking offline
+  // path): the row stays on the spinner until a MESSAGE_SEND_STATE_CHANGED event
+  // settles it. Without this the renderer would finalize the row as delivered.
+  localSendState?: 'sending';
 }
 
 // We dont have to send sender info because we have it in the chat state
@@ -209,6 +213,7 @@ export interface EncryptedMessage {
   timestamp: number
   senderUsername: string // Username of sender
   offline_ack_timestamp?: number // ACK for offline messages we've read from sender's bucket
+  ack_only?: boolean // Standalone ACK: process offline_ack_timestamp, do not display/save
 }
 
 export interface AuthenticatedEncryptedMessage extends EncryptedMessage {
@@ -226,6 +231,7 @@ export interface OfflineSignedPayload {
   sender_info_hash: string   // SHA256 of encrypted sender info (base64)
   timestamp: number
   bucket_key: string         // Full bucket key for binding
+  ack_only?: boolean         // Standalone ACK marker (authenticated by the signature)
 }
 
 // Offline message types
@@ -622,6 +628,15 @@ export interface MessageReceivedEvent {
 }
 
 export type MessageSentStatus = 'online' | 'offline' | null;
+
+export interface MessageSendStateChangedEvent {
+  messageId: string;
+  chatId: number;
+  outcome: 'sending' | 'delivered' | 'failed';
+  messageSentStatus?: MessageSentStatus;
+  failedReason?: 'group_rekeying' | 'other';
+  retryAfterTs?: number;
+}
 
 export interface FileTransferProgressEvent {
   chatId: number;

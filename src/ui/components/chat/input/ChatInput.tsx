@@ -23,6 +23,12 @@ type SendResult = {
     messageSentStatus?: 'online' | 'offline' | null;
     error?: string;
     failedReason?: 'group_rekeying' | 'other';
+    // Accepted but still in flight (non-blocking offline send): keep the spinner
+    // until a MESSAGE_SEND_STATE_CHANGED event settles the row.
+    localSendState?: 'sending';
+    // Group message delivered online but the DHT backup failed → show the
+    // "Retry offline backup" affordance (re-store only, not re-send).
+    backupFailed?: boolean;
 };
 
 const MAX_COMPOSER_LINES = 5;
@@ -282,18 +288,26 @@ export const ChatInput: FC = () => {
 
     const performSendMessage = async (peerIdOrUsername: string, messageContent: string): Promise<SendResult> => {
         try {
-            const { success, error, message, messageSentStatus } = await window.kiyeovoAPI.sendMessage(peerIdOrUsername, messageContent);
+            const { success, error, message, messageSentStatus, localSendState } = await window.kiyeovoAPI.sendMessage(peerIdOrUsername, messageContent);
 
             if (!success) {
-                toast.error(error || 'Failed to send message');
-                return { success: false };
+                toast.error(
+                    error === 'OFFLINE_BUCKET_FULL'
+                        ? `${activeChat?.name || 'This contact'}'s offline inbox is full — wait until they come online.`
+                        : (error || 'Failed to send message'),
+                );
+                return { success: false, error: error ?? undefined };
             }
-            warnOfflineSend();
+            // Don't warn yet for a still-in-flight offline send — we don't know the outcome.
+            if (localSendState !== 'sending') {
+                warnOfflineSend();
+            }
             return {
                 success: true,
                 messageId: message?.messageId,
                 timestamp: message?.timestamp,
                 messageSentStatus: messageSentStatus ?? undefined,
+                localSendState,
             };
             // Note: Message will be added to Redux via onMessageReceived event in Main.tsx
             // This ensures single source of truth and correct sender information
@@ -323,21 +337,7 @@ export const ChatInput: FC = () => {
                 toast.error(errorText);
                 return { success: false, error: errorText, failedReason };
             } else if (warning && offlineBackupRetry) {
-                toast.warningAction(
-                    warning,
-                    'Retry offline backup',
-                    async () => {
-                        const retry = await window.kiyeovoAPI.retryGroupOfflineBackup(
-                            offlineBackupRetry.chatId,
-                            offlineBackupRetry.messageId,
-                        );
-                        if (retry.success) {
-                            toast.success('Group offline backup synced');
-                        } else {
-                            toast.error(retry.error || 'Failed to retry group offline backup');
-                        }
-                    },
-                );
+                toast.warning(warning);
             }
             warnOfflineSend();
             return {
@@ -345,6 +345,7 @@ export const ChatInput: FC = () => {
                 messageId: message?.messageId,
                 timestamp: message?.timestamp,
                 messageSentStatus: messageSentStatus ?? undefined,
+                backupFailed: !!(warning && offlineBackupRetry),
             };
         } catch (err) {
             console.error('Failed to send group message:', err);
@@ -378,7 +379,10 @@ export const ChatInput: FC = () => {
                         retryAfterTs: isRekeyFailure ? Date.now() + 30_000 : undefined,
                     }));
                 } else if (result.messageId) {
-                    // Finalize local sending row immediately using backend response.
+                    // Finalize local sending row using the backend response. For a
+                    // non-blocking offline send (localSendState 'sending') keep the
+                    // spinner — the MESSAGE_SEND_STATE_CHANGED event settles it later.
+                    const stillSending = result.localSendState === 'sending';
                     dispatch(finalizeSendingMessage({
                         localMessageId: next.localMessageId,
                         finalMessage: {
@@ -389,10 +393,21 @@ export const ChatInput: FC = () => {
                             content: next.content,
                             timestamp: result.timestamp ?? Date.now(),
                             messageType: 'text',
-                            messageSentStatus: result.messageSentStatus ?? 'online',
+                            messageSentStatus: stillSending ? null : (result.messageSentStatus ?? 'online'),
+                            localSendState: stillSending ? 'sending' : undefined,
                             currentUserPeerId: myPeerId ?? undefined,
                         },
                     }));
+                    // Delivered online but DHT backup failed → mark the row for the
+                    // "Retry offline backup" affordance (by backend id, robust to the
+                    // finalize/onMessageReceived dedupe).
+                    if (result.backupFailed) {
+                        dispatch(updateLocalMessageSendState({
+                            messageId: result.messageId,
+                            state: 'failed',
+                            failedReason: 'offline_backup',
+                        }));
+                    }
                 } else {
                     dispatch(updateLocalMessageSendState({ messageId: next.localMessageId, state: 'failed' }));
                 }
@@ -438,6 +453,22 @@ export const ChatInput: FC = () => {
             return;
         }
         const chatId = activeChat.id;
+
+        // Capacity pre-check (direct chats): a full offline mailbox must not even
+        // create an optimistic row — keep the draft, toast, and stop. Online peers
+        // and new contacts report room, so the common path is unaffected. We pass
+        // our own in-flight burst (queued + processing, not yet counted by the core)
+        // so a fast burst doesn't all pass a stale snapshot.
+        if (activeChat.type === 'direct' && activeChat.peerId) {
+            const inFlight = (sendQueueRef.current[chatId]?.length ?? 0)
+                + (processingQueueRef.current[chatId] ? 1 : 0);
+            const { hasRoom } = await window.kiyeovoAPI.checkOfflineCapacity(activeChat.peerId, inFlight);
+            if (!hasRoom) {
+                toast.error(`${activeChat.name || 'This contact'}'s offline inbox is full — wait until they come online.`);
+                return;
+            }
+        }
+
         const localMessageId = `local-send-${chatId}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
         dispatch(addSendingMessage({
