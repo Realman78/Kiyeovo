@@ -268,6 +268,7 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
   // Drop stale connections, re-dial bootstrap, and verify DHT liveness. Shared
   // by the periodic health gate and on-demand (send-triggered) reconnects
   const performReconnect = async (): Promise<boolean> => {
+    let succeeded = false;
     try {
       reconnectController.markCatchupNeeded();
       console.log('[Core] All sampled connections appear stale; closing and reconnecting...');
@@ -288,11 +289,17 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
       });
       const liveCount = aliveAfterReconnect ? dhtAfterReconnect.length : 0;
       emitDhtStatus(liveCount > 0, 'post_reconnect_dht_probe');
-      if (liveCount > 0) {
+      succeeded = liveCount > 0;
+      if (succeeded) {
         reconnectController.resetProbeFailures();
       }
-      return liveCount > 0;
+      return succeeded;
     } finally {
+      // A reconnect that established no connectivity (zero peers, or it threw)
+      // must not hold the full anti-thrash cooldown
+      if (!succeeded) {
+        reconnectController.noteFailedReconnect();
+      }
       reconnectController.finishReconnect();
     }
   };
