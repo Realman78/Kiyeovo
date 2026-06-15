@@ -183,6 +183,12 @@ When direct online send cannot complete:
 - validators/selectors enforce integrity and update policy
 - offline ACK processing prunes acknowledged local sent backlog
 
+Offline send is **non-blocking and batched**:
+- not-connected sends return immediately (optimistic `sending` row) and deliver in the background (online attempt → fall back to a durable per-recipient send queue)
+- the queue coalesces a burst into one DHT write per flush; outcomes are dual-written (DB + live event) so the row settles to `offline` or `failed`
+- durable across restart; **retries are manual** (no auto-resume/auto-retry); bucket-full is pre-checked (toast, draft kept, no phantom row)
+- a **standalone offline ACK** (online or DHT-queued, capacity-reserved, ping-pong-guarded) clears the sender's bucket even when the recipient reads but never replies; an on-connect refetch nudge speeds it up
+
 ---
 
 ### 6. Group chat flow
@@ -234,6 +240,7 @@ If realtime publish has no subscribers/reachability:
 - message is written to sender-specific group offline bucket (`groupId` + `keyVersion` + sender)
 - store is compressed, signed, and versioned
 - periodic and targeted checks reconcile missed content
+- the offline-backup retry queue is **durable** (survives restart) with **manual retry**: a message delivered online but whose backup failed shows a distinct "Retry offline backup" affordance (re-stores only, does not re-send)
 
 #### 6.6 Nudge mechanism
 
@@ -355,7 +362,9 @@ Core tables include:
 - `chat_participants`
 - `settings`
 - `offline_sent_messages`
+- `pending_offline_sends` (durable 1:1 offline-send queue)
 - `group_offline_sent_messages`
+- `pending_group_offline_backups` (durable group offline-backup retry)
 - `group_key_history`
 - `group_offline_cursors`
 - `group_pending_acks`
@@ -534,8 +543,9 @@ Current resilience layers:
 - bootstrap/relay retry mechanisms
 - pending-ACK republish cycles (including retirement/reactivation behavior)
 - per-bucket mutation locks for offline store writes
+- durable offline-send / group-backup queues with crash-safe (transactional) state and manual retry
 - group offline check orchestration with single-flight style guards
-- startup cleanup of interrupted file transfers
+- startup cleanup of interrupted file transfers (and reconciliation of interrupted offline sends → `failed`)
 
 ---
 
