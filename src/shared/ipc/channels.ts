@@ -37,6 +37,7 @@ export const IPC_CHANNELS = {
   SEND_MESSAGE_REQUEST: 'sendMessage:request',
   CHECK_OFFLINE_CAPACITY: 'offlineSend:checkCapacity',
   RETRY_OFFLINE_SEND: 'offlineSend:retry',
+  GET_OFFLINE_INBOX_CAPACITY: 'offlineInbox:getCapacity',
 
   // Key exchange events
   KEY_EXCHANGE_SENT: 'keyExchange:sent',
@@ -57,6 +58,7 @@ export const IPC_CHANNELS = {
   // Message events
   MESSAGE_RECEIVED: 'message:received',
   MESSAGE_SEND_STATE_CHANGED: 'message:sendStateChanged',
+  OFFLINE_INBOX_CAPACITY_CHANGED: 'offlineInbox:capacityChanged',
 
   // Call signaling
   CALL_START: 'call:start',

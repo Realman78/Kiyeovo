@@ -488,6 +488,27 @@ function setupMessagingHandlers(
     }
   });
 
+  ipcMain.handle(IPC_CHANNELS.GET_OFFLINE_INBOX_CAPACITY, async (_event, chatId: number) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { success: false, snapshot: null, error: 'P2P core not initialized' };
+      }
+      return {
+        success: true,
+        snapshot: p2pCore.messageHandler.getOfflineInboxCapacity(chatId),
+        error: null,
+      };
+    } catch (error) {
+      console.error('[IPC] getOfflineInboxCapacity failed:', error);
+      return {
+        success: false,
+        snapshot: null,
+        error: errStr(error, 'Failed to fetch offline inbox capacity'),
+      };
+    }
+  });
+
   // Manual retry of a failed 1:1 offline send.
   ipcMain.handle(IPC_CHANNELS.RETRY_OFFLINE_SEND, async (_event, messageId: string) => {
     try {

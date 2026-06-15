@@ -14,6 +14,8 @@ export interface OfflineSendQueueDeps {
   getSigningKey: () => Uint8Array;
   /** Dual-write partner: push the send-state transition to the renderer. */
   emitSendState: (data: MessageSendStateChangedEvent) => void;
+  /** Capacity panel partner: notify the renderer-facing owner to refetch this chat. */
+  emitInboxCapacityChanged: (chatId: number) => void;
 }
 
 const userCapacityLimit = (): number => Math.max(0, MAX_MESSAGES_PER_STORE - OFFLINE_CONTROL_MESSAGE_RESERVE - OFFLINE_ACK_RESERVE);
@@ -69,6 +71,7 @@ export class OfflineSendQueue {
     this.deps.database.requeuePendingOfflineSend(messageId);
     this.deps.database.updateMessageSendState(messageId, 'sending');
     this.deps.emitSendState({ messageId, chatId: row.chat_id, outcome: 'sending' });
+    this.deps.emitInboxCapacityChanged(row.chat_id);
     void this.flushBucket(row.bucket_key);
   }
 
@@ -108,6 +111,7 @@ export class OfflineSendQueue {
           );
           // Atomic: drop queue rows + clear chat rows together (crash-safe).
           this.deps.database.settlePendingOfflineSendsDelivered(ids);
+          const changedChatIds = new Set<number>();
           for (const r of rows) {
             this.deps.emitSendState({
               messageId: r.message_id,
@@ -115,12 +119,17 @@ export class OfflineSendQueue {
               outcome: 'delivered',
               messageSentStatus: 'offline',
             });
+            changedChatIds.add(r.chat_id);
+          }
+          for (const chatId of changedChatIds) {
+            this.deps.emitInboxCapacityChanged(chatId);
           }
           // Loop: pick up anything that arrived during the PUT (trailing coalesce).
         } catch (error: unknown) {
           const reason = errStr(error);
           // Atomic: mark queue rows + chat rows failed together (crash-safe).
           this.deps.database.settlePendingOfflineSendsFailed(ids, reason);
+          const changedChatIds = new Set<number>();
           for (const r of rows) {
             this.deps.emitSendState({
               messageId: r.message_id,
@@ -128,6 +137,10 @@ export class OfflineSendQueue {
               outcome: 'failed',
               failedReason: 'other',
             });
+            changedChatIds.add(r.chat_id);
+          }
+          for (const chatId of changedChatIds) {
+            this.deps.emitInboxCapacityChanged(chatId);
           }
           log(`[OFFLINE-QUEUE][FLUSH][FAIL] bucket=${bucketKey.slice(-12)} count=${ids.length} reason=${reason}`);
           break; // give-up = 0: stop on failure, await manual retry.

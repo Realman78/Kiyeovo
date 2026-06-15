@@ -30,6 +30,8 @@ import type {
   MessageReceivedEvent,
   MessageSendStateChangedEvent,
   NetworkMode,
+  OfflineInboxCapacityChangedEvent,
+  OfflineInboxCapacitySnapshot,
   OutgoingFileOfferPendingEvent,
   PasswordRequest,
   PendingFileReceivedEvent,
@@ -130,6 +132,11 @@ export interface KiyeovoAPI {
 
   sendMessage: (identifier: string, message: string) => Promise<SendMessageResponse>;
   checkOfflineCapacity: (peerId: string, additional?: number) => Promise<{ hasRoom: boolean }>;
+  getOfflineInboxCapacity: (chatId: number) => Promise<{
+    success: boolean;
+    snapshot: OfflineInboxCapacitySnapshot | null;
+    error: string | null;
+  }>;
   retryOfflineSend: (messageId: string) => Promise<{ success: boolean; error: string | null }>;
   sendGroupMessage: (
     chatId: number,
@@ -228,6 +235,7 @@ export interface KiyeovoAPI {
   }>;
   onMessageReceived: (callback: (data: MessageReceivedEvent) => void) => Unsubscribe;
   onMessageSendStateChanged: (callback: (data: MessageSendStateChangedEvent) => void) => Unsubscribe;
+  onOfflineInboxCapacityChanged: (callback: (data: OfflineInboxCapacityChangedEvent) => void) => Unsubscribe;
 
   checkOfflineMessages: (chatIds?: number[]) => Promise<{
     success: boolean;

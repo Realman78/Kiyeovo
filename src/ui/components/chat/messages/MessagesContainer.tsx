@@ -16,6 +16,8 @@ import { errStr } from '../../../../core/utils/general-error';
 type MessagesContainerProps = {
   messages: ChatMessage[];
   isPending: boolean;
+  onOfflineInboxRelevant?: () => void;
+  bottomOverlayClearancePx?: number;
 }
 
 function mapDbMessage(msg: Message & { sender_username?: string }): ChatMessage {
@@ -67,7 +69,12 @@ function mapDbMessage(msg: Message & { sender_username?: string }): ChatMessage 
   };
 }
 
-export const MessagesContainer = ({ messages, isPending }: MessagesContainerProps) => {
+export const MessagesContainer = ({
+  messages,
+  isPending,
+  onOfflineInboxRelevant,
+  bottomOverlayClearancePx = 0,
+}: MessagesContainerProps) => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const skipNextAutoScrollRef = useRef(false);
@@ -355,6 +362,7 @@ export const MessagesContainer = ({ messages, isPending }: MessagesContainerProp
           toast.warning(warning!);
         }
         if (sentMessage?.messageId) {
+          onOfflineInboxRelevant?.();
           dispatch(finalizeSendingMessage({
             localMessageId: message.id,
             finalMessage: {
@@ -391,6 +399,8 @@ export const MessagesContainer = ({ messages, isPending }: MessagesContainerProp
         if (!res.success) {
           dispatch(updateLocalMessageSendState({ messageId: message.id, state: 'failed' }));
           toast.error(res.error || 'Failed to retry message');
+        } else {
+          onOfflineInboxRelevant?.();
         }
         // success → backend emits 'sending' then the settled outcome via events.
         return;
@@ -399,10 +409,16 @@ export const MessagesContainer = ({ messages, isPending }: MessagesContainerProp
       const { success, error, message: sentMessage, messageSentStatus, localSendState } = await window.kiyeovoAPI.sendMessage(activeChat.peerId, message.content);
       if (!success) {
         dispatch(updateLocalMessageSendState({ messageId: message.id, state: 'failed' }));
+        if (error === 'OFFLINE_BUCKET_FULL') {
+          onOfflineInboxRelevant?.();
+        }
         toast.error(error || 'Failed to resend message');
       } else if (sentMessage?.messageId) {
         const stillSending = localSendState === 'sending';
         if (!stillSending) warnOfflineSend();
+        if (stillSending || messageSentStatus === 'offline') {
+          onOfflineInboxRelevant?.();
+        }
         dispatch(finalizeSendingMessage({
           localMessageId: message.id,
           finalMessage: {
@@ -481,6 +497,7 @@ export const MessagesContainer = ({ messages, isPending }: MessagesContainerProp
     onTouchStart={markUserInteraction}
     onPointerDown={markUserInteraction}
     className={`flex-1 overflow-y-auto p-6 space-y-2`}
+    style={{ paddingBottom: `${bottomOverlayClearancePx}px` }}
   >
     {activeChat?.offlineFetchNeedsSync && !activeChat.blocked && (
       <div className="sticky top-2 z-20 mb-2 flex items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">

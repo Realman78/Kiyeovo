@@ -1,6 +1,6 @@
 import { ed25519 } from '@noble/curves/ed25519';
 import { xchacha20poly1305 } from '@noble/ciphers/chacha';
-import { gzip, gunzip } from 'zlib';
+import { gzip, gunzip, gzipSync } from 'zlib';
 import { promisify } from 'util';
 import type { QueryEvent } from '@libp2p/kad-dht';
 import type { ChatNode, GroupOfflineGapWarning, MessageReceivedEvent } from '../../types.js';
@@ -41,6 +41,7 @@ interface GroupOfflineManagerDeps {
   myPeerId: string;
   onMessageReceived: (data: MessageReceivedEvent) => void;
   onGroupCallHint?: (data: { groupId: string; senderPeerId: string; timestamp: number }) => void | Promise<void>;
+  onOfflineInboxCapacityChanged?: (chatId: number) => void;
   // Forces an immediate reconnect when a DHT write hits dead connections.
   // Resolves true if a live DHT path exists afterwards.
   requestReconnect?: () => Promise<boolean>;
@@ -86,6 +87,14 @@ export interface GroupOfflineCheckResult {
   gapWarnings: GroupOfflineGapWarning[];
 }
 
+export interface GroupOfflineBucketUsage {
+  messageCountUsed: number;
+  messageCountLimit: number;
+  compressedBytesUsed: number;
+  compressedBytesLimit: number;
+  fullnessRatio: number;
+}
+
 export class GroupOfflineManager {
   private readonly deps: GroupOfflineManagerDeps;
   private readonly networkMode: string;
@@ -114,9 +123,59 @@ export class GroupOfflineManager {
     this.groupInfoVersionPrefix = runtime.config.dhtNamespaces.groupInfoVersion;
   }
 
-  async storeGroupMessage(message: GroupContentMessage): Promise<void> {
+  private notifyOfflineInboxCapacityChanged(chatId: number): void {
+    this.deps.onOfflineInboxCapacityChanged?.(chatId);
+  }
+
+  private notifyGroupInboxCapacityChangedByGroupId(groupId: string): void {
+    const chat = this.deps.database.getChatByGroupId(groupId);
+    if (chat) {
+      this.notifyOfflineInboxCapacityChanged(chat.id);
+    }
+  }
+
+  getOwnBucketKey(groupId: string, keyVersion: number): string {
     const ownPubKeyBase64url = toBase64Url(this.deps.userIdentity.signingPublicKey);
-    const bucketKey = `${this.groupOfflineBucketPrefix}/${message.groupId}/${message.keyVersion}/${ownPubKeyBase64url}`;
+    return `${this.groupOfflineBucketPrefix}/${groupId}/${keyVersion}/${ownPubKeyBase64url}`;
+  }
+
+  getLocalBucketUsage(bucketKey: string): GroupOfflineBucketUsage {
+    const local = this.deps.database.getGroupOfflineSentMessages(bucketKey);
+    const {
+      messages,
+    } = this.normalizeStoreMessages(
+      this.filterLiveMessages(local.messages),
+      bucketKey,
+      'Snapshot overflow',
+    );
+
+    if (messages.length === 0) {
+      return {
+        messageCountUsed: 0,
+        messageCountLimit: GROUP_MAX_MESSAGES_PER_SENDER,
+        compressedBytesUsed: 0,
+        compressedBytesLimit: GROUP_OFFLINE_STORE_MAX_COMPRESSED_BYTES,
+        fullnessRatio: 0,
+      };
+    }
+
+    const highestSeq = messages.reduce((max, message) => Math.max(max, message.seq), 0);
+    const { signedStore } = this.buildSignedStore(messages, bucketKey, local.version, highestSeq);
+    const compressedBytesUsed = gzipSync(Buffer.from(JSON.stringify(signedStore), 'utf8')).length;
+    const countRatio = messages.length / GROUP_MAX_MESSAGES_PER_SENDER;
+    const sizeRatio = compressedBytesUsed / GROUP_OFFLINE_STORE_MAX_COMPRESSED_BYTES;
+
+    return {
+      messageCountUsed: messages.length,
+      messageCountLimit: GROUP_MAX_MESSAGES_PER_SENDER,
+      compressedBytesUsed,
+      compressedBytesLimit: GROUP_OFFLINE_STORE_MAX_COMPRESSED_BYTES,
+      fullnessRatio: Math.max(countRatio, sizeRatio),
+    };
+  }
+
+  async storeGroupMessage(message: GroupContentMessage): Promise<void> {
+    const bucketKey = this.getOwnBucketKey(message.groupId, message.keyVersion);
     const queuedAt = Date.now();
     const bucketTag = bucketKey.slice(-12);
     log(
@@ -161,6 +220,7 @@ export class GroupOfflineManager {
             );
             await this.putStore(bucketKey, signedStore);
             this.deps.database.saveGroupOfflineSentMessages(bucketKey, normalizedExistingMessages, version);
+            this.notifyGroupInboxCapacityChangedByGroupId(message.groupId);
           }
           return;
         }
@@ -180,6 +240,7 @@ export class GroupOfflineManager {
         try {
           await this.putStore(bucketKey, signedStore);
           this.deps.database.saveGroupOfflineSentMessages(bucketKey, nextMessages, version);
+          this.notifyGroupInboxCapacityChangedByGroupId(message.groupId);
           return;
         } catch (firstError: unknown) {
           // Oversized stores cannot be recovered via remote merge.
@@ -199,6 +260,7 @@ export class GroupOfflineManager {
             }
             await this.putStore(bucketKey, signedStore);
             this.deps.database.saveGroupOfflineSentMessages(bucketKey, nextMessages, version);
+            this.notifyGroupInboxCapacityChangedByGroupId(message.groupId);
             return;
           }
 
@@ -235,6 +297,7 @@ export class GroupOfflineManager {
           );
           await this.putStore(bucketKey, mergedStore);
           this.deps.database.saveGroupOfflineSentMessages(bucketKey, mergedMessages, mergedVersion);
+          this.notifyGroupInboxCapacityChangedByGroupId(message.groupId);
         }
       } finally {
         const lockHeldMs = Date.now() - lockAcquiredAt;
@@ -1308,6 +1371,7 @@ export class GroupOfflineManager {
 
     const bucketPrefix = `${this.groupOfflineBucketPrefix}/${chat.group_id}/${epoch.key_version}/`;
     this.deps.database.deleteGroupOfflineSentMessagesByPrefix(bucketPrefix);
+    this.notifyOfflineInboxCapacityChanged(chat.id);
     log(
       `[GROUP-OFFLINE][TIMING][PRUNE][CHAT:${chat.id}] epoch=${epoch.key_version} action=pruned reason=${reason}`
     );

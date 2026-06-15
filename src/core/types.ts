@@ -638,6 +638,52 @@ export interface MessageSendStateChangedEvent {
   retryAfterTs?: number;
 }
 
+export interface OfflineInboxCapacityChangedEvent {
+  chatId: number;
+}
+
+export interface DirectOfflineInboxCategorySnapshot {
+  stored: number;
+  pending: number;
+  total: number;
+  limit: number;
+}
+
+export interface ReservedOfflineInboxCategorySnapshot {
+  stored: number;
+  total: number;
+  limit: number;
+}
+
+export interface DirectOfflineInboxCapacitySnapshot {
+  kind: 'direct';
+  chatId: number;
+  peerId: string | null;
+  totalCapacity: number;
+  mainUsed: number;
+  mainLimit: number;
+  mainRatio: number;
+  regular: DirectOfflineInboxCategorySnapshot;
+  control: ReservedOfflineInboxCategorySnapshot;
+  ack: ReservedOfflineInboxCategorySnapshot;
+}
+
+export interface GroupOfflineInboxCapacitySnapshot {
+  kind: 'group';
+  chatId: number;
+  groupId: string;
+  currentKeyVersion: number;
+  mainUsed: number;
+  mainLimit: number;
+  mainRatio: number;
+  mainCompressedBytesUsed: number;
+  mainCompressedBytesLimit: number;
+}
+
+export type OfflineInboxCapacitySnapshot =
+  | DirectOfflineInboxCapacitySnapshot
+  | GroupOfflineInboxCapacitySnapshot;
+
 export interface FileTransferProgressEvent {
   chatId: number;
   messageId: string;

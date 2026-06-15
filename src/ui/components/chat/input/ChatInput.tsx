@@ -33,7 +33,11 @@ type SendResult = {
 
 const MAX_COMPOSER_LINES = 5;
 
-export const ChatInput: FC = () => {
+type ChatInputProps = {
+    onOfflineInboxRelevant?: () => void;
+};
+
+export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
     const { toast } = useToast();
     const warnOfflineSend = useOfflineSendWarning();
     const dispatch = useDispatch();
@@ -291,6 +295,9 @@ export const ChatInput: FC = () => {
             const { success, error, message, messageSentStatus, localSendState } = await window.kiyeovoAPI.sendMessage(peerIdOrUsername, messageContent);
 
             if (!success) {
+                if (error === 'OFFLINE_BUCKET_FULL') {
+                    onOfflineInboxRelevant?.();
+                }
                 toast.error(
                     error === 'OFFLINE_BUCKET_FULL'
                         ? `${activeChat?.name || 'This contact'}'s offline inbox is full — wait until they come online.`
@@ -301,6 +308,9 @@ export const ChatInput: FC = () => {
             // Don't warn yet for a still-in-flight offline send — we don't know the outcome.
             if (localSendState !== 'sending') {
                 warnOfflineSend();
+            }
+            if (localSendState === 'sending' || messageSentStatus === 'offline') {
+                onOfflineInboxRelevant?.();
             }
             return {
                 success: true,
@@ -340,6 +350,7 @@ export const ChatInput: FC = () => {
                 toast.warning(warning);
             }
             warnOfflineSend();
+            onOfflineInboxRelevant?.();
             return {
                 success: true,
                 messageId: message?.messageId,
@@ -464,6 +475,7 @@ export const ChatInput: FC = () => {
                 + (processingQueueRef.current[chatId] ? 1 : 0);
             const { hasRoom } = await window.kiyeovoAPI.checkOfflineCapacity(activeChat.peerId, inFlight);
             if (!hasRoom) {
+                onOfflineInboxRelevant?.();
                 toast.error(`${activeChat.name || 'This contact'}'s offline inbox is full — wait until they come online.`);
                 return;
             }

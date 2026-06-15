@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { ChatHeader } from "./header/ChatHeader";
 import { useSelector } from "react-redux";
 import type { RootState } from "../../state/store";
@@ -9,6 +9,10 @@ import { InvitationManager } from "./input/InvitationManager";
 import { EmptyState } from "./messages/EmptyState";
 import { PendingKxManager } from "./input/PendingKxManager";
 import { getGroupCreatorLinkState, type GroupCreatorLinkState } from "../../utils/groupCreatorLinkHealth";
+import { OfflineInboxCapacity } from "./OfflineInboxCapacity";
+
+const OFFLINE_INBOX_COLLAPSED_CLEARANCE_PX = 44;
+const OFFLINE_INBOX_EXPANDED_CLEARANCE_PX = 120;
 
 const ChatWrapper = () => {
   const activeChat = useSelector((state: RootState) => state.chat.activeChat);
@@ -18,6 +22,7 @@ const ChatWrapper = () => {
   const sendingMessages = useSelector((state: RootState) => state.chat.sendingMessages);
   const chats = useSelector((state: RootState) => state.chat.chats);
   const myPeerId = useSelector((state: RootState) => state.user.peerId);
+  const [offlineInboxExpandedByChatId, setOfflineInboxExpandedByChatId] = useState<Record<number, boolean>>({});
 
   const messagesToDisplay = useMemo(() => {
     if (activeContactAttempt) {
@@ -32,19 +37,6 @@ const ChatWrapper = () => {
     return [...persisted, ...sending].sort((a, b) => a.timestamp - b.timestamp);
   }, [activePendingKeyExchange, activeContactAttempt, activeChat, messages, sendingMessages]);
 
-  const FooterToDisplay = useMemo(() => {
-    if (activeContactAttempt) {
-      return <InvitationManager key={activeContactAttempt.peerId} peerId={activeContactAttempt.peerId} />
-    }
-    if (activePendingKeyExchange) {
-      return <PendingKxManager peerId={activePendingKeyExchange.peerId} />
-    }
-    if (activeChat) {
-      return <ChatInput />;
-    }
-    return null;
-  }, [activePendingKeyExchange, activeContactAttempt, activeChat]);
-
   const groupCreatorLinkState = useMemo<GroupCreatorLinkState>(() => {
     if (!activeChat) return { broken: false };
     return getGroupCreatorLinkState(activeChat, chats, myPeerId);
@@ -53,6 +45,42 @@ const ChatWrapper = () => {
   const creatorLabel = groupCreatorLinkState.creatorName
     ? `${groupCreatorLinkState.creatorName} (${groupCreatorLinkState.creatorPeerId})`
     : groupCreatorLinkState.creatorPeerId;
+
+  const isOfflineInboxExpanded = activeChat ? !!offlineInboxExpandedByChatId[activeChat.id] : false;
+
+  const toggleOfflineInbox = useCallback(() => {
+    if (!activeChat) return;
+    setOfflineInboxExpandedByChatId((prev) => ({
+      ...prev,
+      [activeChat.id]: !prev[activeChat.id],
+    }));
+  }, [activeChat]);
+
+  const openOfflineInbox = useCallback(() => {
+    if (!activeChat) return;
+    setOfflineInboxExpandedByChatId((prev) => {
+      if (prev[activeChat.id]) {
+        return prev;
+      }
+      return {
+        ...prev,
+        [activeChat.id]: true,
+      };
+    });
+  }, [activeChat]);
+
+  const FooterToDisplay = useMemo(() => {
+    if (activeContactAttempt) {
+      return <InvitationManager key={activeContactAttempt.peerId} peerId={activeContactAttempt.peerId} />
+    }
+    if (activePendingKeyExchange) {
+      return <PendingKxManager peerId={activePendingKeyExchange.peerId} />
+    }
+    if (activeChat) {
+      return <ChatInput onOfflineInboxRelevant={openOfflineInbox} />;
+    }
+    return null;
+  }, [activePendingKeyExchange, activeContactAttempt, activeChat, openOfflineInbox]);
 
   return (
     <div className="min-w-12 flex-1 flex flex-col h-full bg-background">
@@ -74,11 +102,32 @@ const ChatWrapper = () => {
               To fix this: make sure {groupCreatorLinkState.creatorName || 'the creator'} also deletes you, then establish a new conversation.
             </div>
           )}
-          <MessagesContainer
-            messages={messagesToDisplay}
-            isPending={!!activeContactAttempt || !!activePendingKeyExchange}
-          />
-          {FooterToDisplay}
+          <div className="relative flex min-h-0 flex-1 flex-col">
+            <MessagesContainer
+              messages={messagesToDisplay}
+              isPending={!!activeContactAttempt || !!activePendingKeyExchange}
+              onOfflineInboxRelevant={openOfflineInbox}
+              bottomOverlayClearancePx={activeChat
+                ? (isOfflineInboxExpanded
+                  ? OFFLINE_INBOX_EXPANDED_CLEARANCE_PX
+                  : OFFLINE_INBOX_COLLAPSED_CLEARANCE_PX)
+                : 0}
+            />
+            <div className="relative">
+              {activeChat && (
+                <div className="pointer-events-none absolute bottom-full left-0 z-30">
+                  <div className="pointer-events-auto">
+                    <OfflineInboxCapacity
+                      chatId={activeChat.id}
+                      expanded={isOfflineInboxExpanded}
+                      onToggle={toggleOfflineInbox}
+                    />
+                  </div>
+                </div>
+              )}
+              {FooterToDisplay}
+            </div>
+          </div>
         </>
       )}
     </div>

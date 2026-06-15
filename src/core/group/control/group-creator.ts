@@ -54,6 +54,7 @@ export interface GroupCreatorDeps {
   myUsername: string;
   onGroupMembersUpdated?: (data: GroupMembersUpdatedEvent) => void;
   onMessageReceived?: (data: MessageReceivedEvent) => void;
+  onOfflineInboxCapacityChanged?: (chatId: number) => void;
   nudgeGroupRefetch?: (peerId: string, groupId: string) => void;
   onRegisterPrevEpochGrace?: (groupId: string, keyVersion: number) => void;
 }
@@ -1900,11 +1901,16 @@ export class GroupCreator {
       offlineMessage,
       userIdentity.signingPrivateKey,
       database,
-      { bypassControlReserve: true },
+      { bypassControlReserve: true, category: 'control' },
     );
     log(
       `[GROUP][TRACE][SEND][DHT_OK] to=${peerId.slice(-8)} bucket=*${bucketTag} offlineMsgId=${offlineMessage.id} ${this.describeControlMessage(message)}`,
     );
+
+    const directChat = database.getChatByPeerId(peerId);
+    if (directChat) {
+      this.deps.onOfflineInboxCapacityChanged?.(directChat.id);
+    }
 
     if (shouldSendAck) {
       database.updateOfflineLastAckSentByPeerId(peerId, lastReadTimestamp);

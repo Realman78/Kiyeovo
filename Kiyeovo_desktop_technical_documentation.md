@@ -187,7 +187,7 @@ Offline send is **non-blocking and batched**:
 - not-connected sends return immediately (optimistic `sending` row) and deliver in the background (online attempt → fall back to a durable per-recipient send queue)
 - the queue coalesces a burst into one DHT write per flush; outcomes are dual-written (DB + live event) so the row settles to `offline` or `failed`
 - durable across restart; **retries are manual** (no auto-resume/auto-retry); bucket-full is pre-checked (toast, draft kept, no phantom row)
-- a **standalone offline ACK** (online or DHT-queued, capacity-reserved, ping-pong-guarded) clears the sender's bucket even when the recipient reads but never replies; an on-connect refetch nudge speeds it up
+- a **standalone offline ACK** (online or DHT-queued, capacity-reserved, ping-pong-guarded) clears the sender's bucket even when the recipient reads but never replies; on-connect refetch nudges and an ACK-side best-effort return nudge speed it up
 
 ---
 
@@ -337,9 +337,13 @@ Primary categories:
 2. Direct offline stores
    - per-recipient bucket model
    - message/store signatures + validateUpdate
+   - local UX capacity view is derived from the local mirror plus the durable pending queue
+   - effective direct capacity is split into `30` sendable slots, `10` reserved group-control slots, and `1` reserved ACK slot
 
 3. Group offline stores
    - sender buckets per group and epoch
+   - local UX capacity view shows only the current sender epoch (the bucket the next group message would use)
+   - group fullness is tracked by both message count and compressed store size (`64 KiB` app-level cap)
 
 4. Group info records
    - `latest` pointer record
@@ -362,6 +366,7 @@ Core tables include:
 - `chat_participants`
 - `settings`
 - `offline_sent_messages`
+- `offline_sent_message_categories` (local sidecar for direct-bucket breakdown: `regular`, `control`, `ack`)
 - `pending_offline_sends` (durable 1:1 offline-send queue)
 - `group_offline_sent_messages`
 - `pending_group_offline_backups` (durable group offline-backup retry)

@@ -27,6 +27,7 @@ import type {
   KeyExchangeFailedEvent,
   MessageReceivedEvent,
   MessageSendStateChangedEvent,
+  OfflineInboxCapacityChangedEvent,
   FileTransferProgressEvent,
   FileTransferCompleteEvent,
   FileTransferFailedEvent,
@@ -85,6 +86,7 @@ export interface P2PCoreConfig {
   onKeyExchangeFailed: (data: KeyExchangeFailedEvent) => void;
   onMessageReceived: (data: MessageReceivedEvent) => void;
   onMessageSendStateChanged: (data: MessageSendStateChangedEvent) => void;
+  onOfflineInboxCapacityChanged: (data: OfflineInboxCapacityChangedEvent) => void;
   onBootstrapNodes: (nodes: string[]) => void;
   onRestoreUsername: (username: string) => void;
   onFileTransferProgress: (data: FileTransferProgressEvent) => void;
@@ -120,6 +122,7 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     onKeyExchangeFailed,
     onMessageReceived,
     onMessageSendStateChanged,
+    onOfflineInboxCapacityChanged,
     onRestoreUsername,
     onFileTransferProgress,
     onFileTransferComplete,
@@ -170,6 +173,10 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
 
   const sendMessageSendStateChanged = (data: MessageSendStateChangedEvent) => {
     onMessageSendStateChanged(data);
+  };
+
+  const sendOfflineInboxCapacityChanged = (data: OfflineInboxCapacityChangedEvent) => {
+    onOfflineInboxCapacityChanged(data);
   };
 
   const sendRestoreUsername = (username: string) => {
@@ -512,6 +519,7 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
 
   messageHandler.setRequestReconnect(requestImmediateReconnect);
   messageHandler.setMessageSendStateEmitter(sendMessageSendStateChanged);
+  messageHandler.setOfflineInboxCapacityChangedEmitter(sendOfflineInboxCapacityChanged);
 
   // After a destructive reconnect succeeds, start a group offline-message check
   reconnectController.onReconnectSucceeded(() => {

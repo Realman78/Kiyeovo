@@ -15,6 +15,7 @@ import {
   type KeyExchangeFailedEvent,
   type MessageReceivedEvent,
   type MessageSendStateChangedEvent,
+  type OfflineInboxCapacityChangedEvent,
   type FileTransferProgressEvent,
   type FileTransferCompleteEvent,
   type FileTransferFailedEvent,
@@ -337,6 +338,12 @@ function sendMessageSendStateChanged(data: MessageSendStateChangedEvent) {
   }
 }
 
+function sendOfflineInboxCapacityChanged(data: OfflineInboxCapacityChangedEvent) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC_CHANNELS.OFFLINE_INBOX_CAPACITY_CHANGED, data);
+  }
+}
+
 function sendRestoreUsername(username: string) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     log(`[Electron] Restore username: ${username}`);
@@ -612,6 +619,9 @@ async function initializeP2PAfterWindow() {
       },
       onMessageSendStateChanged: (data: MessageSendStateChangedEvent) => {
         sendMessageSendStateChanged(data);
+      },
+      onOfflineInboxCapacityChanged: (data: OfflineInboxCapacityChangedEvent) => {
+        sendOfflineInboxCapacityChanged(data);
       },
       onRestoreUsername: (username: string) => {
         sendRestoreUsername(username);

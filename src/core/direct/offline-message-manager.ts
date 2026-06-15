@@ -12,7 +12,7 @@ import {
     OFFLINE_CONTROL_MESSAGE_RESERVE,
     OFFLINE_MESSAGE_MAX_FUTURE_SKEW_MS,
 } from '../constants.js';
-import type { ChatDatabase } from '../db/database.js';
+import type { ChatDatabase, OfflineMessageCategory } from '../db/database.js';
 import { QueryEvent } from '@libp2p/kad-dht';
 import { log } from '../../shared/logger.js';
 
@@ -68,6 +68,7 @@ export class OfflineMessageManager {
         database: ChatDatabase,
         options?: {
             bypassControlReserve?: boolean;
+            category?: Exclude<OfflineMessageCategory, 'ack'>;
         }
     ): Promise<void> {
         return OfflineMessageManager.storeOfflineMessages(
@@ -84,6 +85,7 @@ export class OfflineMessageManager {
         database: ChatDatabase,
         options?: {
             bypassControlReserve?: boolean;
+            category?: Exclude<OfflineMessageCategory, 'ack'>;
         }
     ): Promise<void> {
         if (newMessages.length === 0) {
@@ -130,6 +132,9 @@ export class OfflineMessageManager {
 
                 await OfflineMessageManager.putToDHT(node, bucketKey, signedStore, database);
                 database.saveOfflineSentMessages(bucketKey, messages, version);
+                OfflineMessageManager.syncLocalCategoryMirror(database, bucketKey, messages, new Map(
+                    newMessages.map(message => [message.id, options?.category ?? 'regular'])
+                ));
 
                 log(`[OFFLINE][WRITE][DONE] bucket=*${bucketKey.slice(-12)} newVersion=${version} newCount=${messages.length}`);
             } catch (error: unknown) {
@@ -165,6 +170,7 @@ export class OfflineMessageManager {
             const signedStore = OfflineMessageManager.signStore(messages, version, bucketKey, signingPrivateKey);
             await OfflineMessageManager.putToDHT(node, bucketKey, signedStore, database);
             database.saveOfflineSentMessages(bucketKey, messages, version);
+            OfflineMessageManager.syncLocalCategoryMirror(database, bucketKey, messages, new Map([[ackMessage.id, 'ack']]));
             log(`[OFFLINE][ACK][WRITE][DONE] bucket=*${bucketKey.slice(-12)} newVersion=${version} newCount=${messages.length}`);
         });
     }
@@ -293,6 +299,33 @@ export class OfflineMessageManager {
             .length;
     }
 
+    private static syncLocalCategoryMirror(
+        database: ChatDatabase,
+        bucketKey: string,
+        messages: OfflineMessage[],
+        newCategoryByMessageId?: Map<string, OfflineMessageCategory>,
+    ): void {
+        const existingCategories = new Map(
+            database.getOfflineSentMessageCategories(bucketKey).map(entry => [entry.message_id, entry.category]),
+        );
+
+        database.syncOfflineSentMessageCategories(
+            bucketKey,
+            messages.map((message) => {
+                if (message.signed_payload?.ack_only === true) {
+                    return { messageId: message.id, category: 'ack' as const };
+                }
+
+                return {
+                    messageId: message.id,
+                    category: newCategoryByMessageId?.get(message.id)
+                        ?? existingCategories.get(message.id)
+                        ?? 'regular',
+                };
+            }),
+        );
+    }
+
     /**
      * Sign the entire store to prevent unauthorized modifications
      *
@@ -338,8 +371,15 @@ export class OfflineMessageManager {
             const local = database.getOfflineSentMessages(bucketKey);
             const remainingMessages = local.messages.filter(msg => msg.timestamp > ackTimestamp);
             const bucketTag = bucketKey.slice(-12);
+            const ackOnlyBefore = local.messages.filter(msg => msg.signed_payload?.ack_only === true).length;
 
             const cleanMessages = OfflineMessageManager.filterExpiredMessages(remainingMessages);
+            const ackOnlyAfter = cleanMessages.filter(msg => msg.signed_payload?.ack_only === true).length;
+
+            // TEMP_LOG: detailed sender-side mirror diff for ACK-clearing investigations.
+            log(
+                `[TEMP_LOG][OFFLINE][ACK_CLEAR][EVAL] bucket=*${bucketTag} ackTs=${ackTimestamp} before=${local.messages.length} afterCandidate=${cleanMessages.length} ackOnlyBefore=${ackOnlyBefore} ackOnlyAfter=${ackOnlyAfter}`
+            );
 
             if (cleanMessages.length === local.messages.length) {
                 log(
@@ -351,6 +391,7 @@ export class OfflineMessageManager {
             const version = local.version + 1;
             // Local save is sufficient, next outbound write will publish pruned state.
             database.saveOfflineSentMessages(bucketKey, cleanMessages, version);
+            OfflineMessageManager.syncLocalCategoryMirror(database, bucketKey, cleanMessages);
 
             log(
                 `[OFFLINE][ACK_CLEAR][DONE] bucket=*${bucketTag} removed=${local.messages.length - cleanMessages.length} newVersion=${version} newCount=${cleanMessages.length}`

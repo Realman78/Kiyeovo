@@ -15,6 +15,8 @@ import type {
   KeyExchangeFailedEvent,
   MessageReceivedEvent,
   MessageSendStateChangedEvent,
+  OfflineInboxCapacityChangedEvent,
+  OfflineInboxCapacitySnapshot,
   SendMessageResponse,
   StrippedMessage,
   MessageSentStatus,
@@ -79,6 +81,7 @@ import { GroupInfoRepublisher } from '../group/dht/group-info-republisher.js';
 import { dialProtocolWithRelayFallback } from '../transport/protocol-dialer.js';
 import { STALE_DIAL_ERROR_PATTERN } from '../transport/dial-errors.js';
 import { EncryptedUserIdentity } from '../identity/encrypted-user-identity.js';
+import { OfflineInboxCapacityService } from '../offline/offline-inbox-capacity.js';
 import { log } from '../../shared/logger.js';
 import { CallActivityRegistry } from './call-activity-registry.js';
 import { GroupCallOrchestrator } from './group-call-orchestrator.js';
@@ -179,6 +182,8 @@ export class MessageHandler {
   private groupCallHintHandler: ((groupId: string) => void | Promise<void>) | null = null;
   private requestReconnect: (() => Promise<boolean>) | null = null;
   private emitMessageSendState: (data: MessageSendStateChangedEvent) => void = () => undefined;
+  private emitOfflineInboxCapacityChanged: (data: OfflineInboxCapacityChangedEvent) => void = () => undefined;
+  private offlineInboxCapacityService: OfflineInboxCapacityService;
 
   private formatNudgeTarget(payload: BucketNudgePayload): string {
     if (payload.kind === 'GROUP_REKEY_REFETCH') {
@@ -290,8 +295,15 @@ export class MessageHandler {
       onGroupCallHint: async ({ groupId }) => {
         await this.groupCallHintHandler?.(groupId);
       },
+      onOfflineInboxCapacityChanged: (chatId) => this.notifyOfflineInboxCapacityChanged(chatId),
       // Closes over `this` so it picks up the handler set after construction.
       requestReconnect: async () => (await this.requestReconnect?.()) ?? false,
+    });
+    this.offlineInboxCapacityService = new OfflineInboxCapacityService({
+      database: this.database,
+      keyExchange: this.keyExchange,
+      groupOfflineManager: this.groupOfflineManager,
+      myPeerId: this.node.peerId.toString(),
     });
     this.groupMessaging = new GroupMessaging({
       node: this.node,
@@ -310,6 +322,7 @@ export class MessageHandler {
       usernameRegistry: this.usernameRegistry,
       onGroupChatActivated: this.onGroupChatActivated,
       onGroupMembersUpdated: this.onGroupMembersUpdated,
+      onOfflineInboxCapacityChanged: (chatId) => this.notifyOfflineInboxCapacityChanged(chatId),
       nudgeGroupRefetch: this.nudgePeerGroupRefetch.bind(this),
     });
     this.groupInfoRepublisher = new GroupInfoRepublisher({
@@ -329,6 +342,7 @@ export class MessageHandler {
         return identity.signingPrivateKey;
       },
       emitSendState: (data) => this.notifyMessageSendState(data),
+      emitInboxCapacityChanged: (chatId) => this.notifyOfflineInboxCapacityChanged(chatId),
     });
     // No auto-resume: surface anything interrupted mid-flight as failed (manual retry).
     this.offlineSendQueue.recoverOnStartup();
@@ -347,7 +361,7 @@ export class MessageHandler {
         // earlier ACK; also clears their bucket promptly once we reconnect).
         void this.flushPendingOfflineAck(peerId);
         // And if we have messages waiting for them, nudge them to fetch + ACK now.
-        this.maybeNudgeForPendingOfflineMessages(peerId);
+        this.nudgeForPendingOfflineMessages(peerId);
       },
       onPeerDisconnect: (peerId) => this.handlePeerDisconnectForActiveCall(peerId),
     });
@@ -370,13 +384,8 @@ export class MessageHandler {
     this.sendBucketNudge(peerId, { kind: 'DIRECT_SESSION_RESET' }, `direct-reset:${peerId}`);
   }
 
-  /**
-   * On connecting to a peer, if our write-bucket for them still holds undelivered
-   * messages, nudge them to fetch now (rather than waiting for their periodic
-   * check) — they read, ACK, and our bucket clears promptly. Rate-limited by the
-   * nudge cooldown; a no-op if the bucket is empty or we have no offline channel.
-   */
-  private maybeNudgeForPendingOfflineMessages(peerId: string): void {
+  // On connecting to a peer nudge them to fetch now 
+  private nudgeForPendingOfflineMessages(peerId: string): void {
     const bucketSecret = this.database.getOfflineBucketSecretByPeerId(peerId);
     if (!bucketSecret) {
       return;
@@ -399,9 +408,70 @@ export class MessageHandler {
     this.emitMessageSendState = emit;
   }
 
+  setOfflineInboxCapacityChangedEmitter(emit: (data: OfflineInboxCapacityChangedEvent) => void): void {
+    this.emitOfflineInboxCapacityChanged = emit;
+  }
+
   /** Report an outbound message's send-state transition to the renderer. */
   notifyMessageSendState(data: MessageSendStateChangedEvent): void {
     this.emitMessageSendState(data);
+  }
+
+  notifyOfflineInboxCapacityChanged(chatId: number): void {
+    this.emitOfflineInboxCapacityChanged({ chatId });
+  }
+
+  private notifyOfflineInboxCapacityChangedForPeer(peerId: string): void {
+    const chat = this.database.getChatByPeerId(peerId);
+    if (chat) {
+      // TEMP_LOG: trace sender-side capacity refreshes while debugging stale direct counts.
+      log(`[TEMP_LOG][OFFLINE][CAPACITY][EMIT] peer=${peerId.slice(-8)} chatId=${chat.id}`);
+      this.notifyOfflineInboxCapacityChanged(chat.id);
+    }
+  }
+
+  getOfflineInboxCapacity(chatId: number): OfflineInboxCapacitySnapshot | null {
+    return this.offlineInboxCapacityService.getSnapshot(chatId);
+  }
+
+  private createGroupResponderDeps(
+    userIdentity: EncryptedUserIdentity,
+    myPeerId: string,
+    myUsername: string,
+  ) {
+    return {
+      node: this.node,
+      database: this.database,
+      userIdentity,
+      myPeerId,
+      myUsername,
+      onGroupChatActivated: this.onGroupChatActivated,
+      onGroupMembersUpdated: this.onGroupMembersUpdated,
+      onMessageReceived: this.onMessageReceived,
+      onOfflineInboxCapacityChanged: (chatId: number) => this.notifyOfflineInboxCapacityChanged(chatId),
+      nudgeGroupRefetch: this.nudgePeerGroupRefetch.bind(this),
+    };
+  }
+
+  private createGroupCreatorDeps(
+    userIdentity: EncryptedUserIdentity,
+    myPeerId: string,
+    myUsername: string,
+  ) {
+    return {
+      node: this.node,
+      database: this.database,
+      userIdentity,
+      myPeerId,
+      myUsername,
+      onGroupMembersUpdated: this.onGroupMembersUpdated,
+      onMessageReceived: this.onMessageReceived,
+      onOfflineInboxCapacityChanged: (chatId: number) => this.notifyOfflineInboxCapacityChanged(chatId),
+      nudgeGroupRefetch: this.nudgePeerGroupRefetch.bind(this),
+      onRegisterPrevEpochGrace: (groupId: string, keyVersion: number) => {
+        this.groupMessaging.registerGraceContextForEpoch(groupId, keyVersion);
+      },
+    };
   }
 
   async storeGroupCallHint(groupId: string): Promise<void> {
@@ -1522,9 +1592,8 @@ export class MessageHandler {
     }
 
     if (nudgePayload.kind === 'DIRECT_OFFLINE_REFETCH') {
-      // Sender has messages waiting for us — fetch their bucket now instead of
-      // waiting for the periodic check. Reading advances lastReadTs → we emit the
-      // ACK → their bucket clears promptly.
+      // TEMP_LOG: trace the prompt-refetch path that should cause the recipient to ACK.
+      log(`[TEMP_LOG][OFFLINE][NUDGE][DIRECT_REFETCH] from=${remoteId.slice(-8)}`);
       this.schedulePeerActivityOfflineCheck(remoteId);
       return;
     }
@@ -1700,19 +1769,7 @@ export class MessageHandler {
     const myUser = this.database.getUserByPeerId(myPeerId);
     const myUsername = myUser?.username || `user_${myPeerId.slice(-8)}`;
     const creator = userIdentity
-      ? new GroupCreator({
-        node: this.node,
-        database: this.database,
-        userIdentity,
-        myPeerId,
-        myUsername,
-        onGroupMembersUpdated: this.onGroupMembersUpdated,
-        onMessageReceived: this.onMessageReceived,
-        nudgeGroupRefetch: this.nudgePeerGroupRefetch.bind(this),
-        onRegisterPrevEpochGrace: (groupId: string, keyVersion: number) => {
-          this.groupMessaging.registerGraceContextForEpoch(groupId, keyVersion);
-        },
-      })
+      ? new GroupCreator(this.createGroupCreatorDeps(userIdentity, myPeerId, myUsername))
       : null;
     const groupChats = this.database.getAllGroupChats();
 
@@ -2210,6 +2267,27 @@ export class MessageHandler {
     return MessageHandler.OFFLINE_FALLBACK_REGEX.test(errorText);
   }
 
+  /**
+   * Close any connections we still hold to a peer that just failed to receive a
+   * message within the send budget. When a peer goes away abruptly (e.g. laptop
+   * lid closed), its TCP connection lingers in the connection manager as
+   * "connected" until libp2p detects it's dead — so every follow-up send keeps
+   * taking the synchronous online path and blocks for MESSAGE_TIMEOUT before
+   * falling back. Pruning here flips the peer to disconnected immediately, so
+   * (a) subsequent sends take the fast non-blocking offline path, and (b) the
+   * offline DHT PUT is less likely to route through the dead peer.
+   */
+  private async pruneUnreachablePeerConnections(peerId: string): Promise<void> {
+    const stale = this.node.getConnections().filter(
+      conn => conn.remotePeer.toString() === peerId,
+    );
+    if (stale.length === 0) {
+      return;
+    }
+    log(`[OFFLINE-SEND][PRUNE] closing ${stale.length} stale connection(s) to ${peerId.slice(0, 8)} after send failure`);
+    await Promise.allSettled(stale.map(conn => conn.close()));
+  }
+
   private async storeOfflineMessageFallback(
     targetUsernameOrPeerId: string,
     message: string,
@@ -2225,6 +2303,9 @@ export class MessageHandler {
     if (!fallbackUser) {
       throw new Error('User not found in database');
     }
+
+    // Treat any lingering connection to this peer as dead and prune it
+    await this.pruneUnreachablePeerConnections(fallbackUser.peer_id);
 
     const bucketSecret = this.database.getOfflineBucketSecretByPeerId(fallbackUser.peer_id);
     if (!bucketSecret) {
@@ -2352,6 +2433,7 @@ export class MessageHandler {
     if (!inserted) {
       return { success: false, messageSentStatus: null, error: 'OFFLINE_BUCKET_FULL' };
     }
+    this.notifyOfflineInboxCapacityChanged(chat.id);
     const strippedMessage: StrippedMessage = {
       chatId: chat.id,
       messageId,
@@ -2553,17 +2635,7 @@ export class MessageHandler {
       }
     }
 
-    const responder = new GroupResponder({
-      node: this.node,
-      database: this.database,
-      userIdentity,
-      myPeerId,
-      myUsername,
-      onGroupChatActivated: this.onGroupChatActivated,
-      onGroupMembersUpdated: this.onGroupMembersUpdated,
-      onMessageReceived: this.onMessageReceived,
-      nudgeGroupRefetch: this.nudgePeerGroupRefetch.bind(this),
-    });
+    const responder = new GroupResponder(this.createGroupResponderDeps(userIdentity, myPeerId, myUsername));
 
     await responder.leaveGroup(chat.group_id);
     this.groupMessaging.deactivateGroup(chat.group_id);
@@ -2589,19 +2661,7 @@ export class MessageHandler {
     const myPeerId = this.node.peerId.toString();
     const myUser = this.database.getUserByPeerId(myPeerId);
     const myUsername = myUser?.username || `user_${myPeerId.slice(-8)}`;
-    const creator = new GroupCreator({
-      node: this.node,
-      database: this.database,
-      userIdentity,
-      myPeerId,
-      myUsername,
-      onGroupMembersUpdated: this.onGroupMembersUpdated,
-      onMessageReceived: this.onMessageReceived,
-      nudgeGroupRefetch: this.nudgePeerGroupRefetch.bind(this),
-      onRegisterPrevEpochGrace: (groupId: string, keyVersion: number) => {
-        this.groupMessaging.registerGraceContextForEpoch(groupId, keyVersion);
-      },
-    });
+    const creator = new GroupCreator(this.createGroupCreatorDeps(userIdentity, myPeerId, myUsername));
 
     await creator.kickMember(chat.group_id, targetPeerId);
 
@@ -2628,19 +2688,7 @@ export class MessageHandler {
     const myPeerId = this.node.peerId.toString();
     const myUser = this.database.getUserByPeerId(myPeerId);
     const myUsername = myUser?.username || `user_${myPeerId.slice(-8)}`;
-    const creator = new GroupCreator({
-      node: this.node,
-      database: this.database,
-      userIdentity,
-      myPeerId,
-      myUsername,
-      onGroupMembersUpdated: this.onGroupMembersUpdated,
-      onMessageReceived: this.onMessageReceived,
-      nudgeGroupRefetch: this.nudgePeerGroupRefetch.bind(this),
-      onRegisterPrevEpochGrace: (groupId: string, keyVersion: number) => {
-        this.groupMessaging.registerGraceContextForEpoch(groupId, keyVersion);
-      },
-    });
+    const creator = new GroupCreator(this.createGroupCreatorDeps(userIdentity, myPeerId, myUsername));
 
     await creator.disbandGroup(chat.group_id);
     this.groupMessaging.deactivateGroup(chat.group_id);
@@ -2713,17 +2761,7 @@ export class MessageHandler {
     const myPeerId = this.node.peerId.toString();
     const myUser = this.database.getUserByPeerId(myPeerId);
     const myUsername = myUser?.username || `user_${myPeerId.slice(-8)}`;
-    const responder = new GroupResponder({
-      node: this.node,
-      database: this.database,
-      userIdentity,
-      myPeerId,
-      myUsername,
-      onGroupChatActivated: this.onGroupChatActivated,
-      onGroupMembersUpdated: this.onGroupMembersUpdated,
-      onMessageReceived: this.onMessageReceived,
-      nudgeGroupRefetch: this.nudgePeerGroupRefetch.bind(this),
-    });
+    const responder = new GroupResponder(this.createGroupResponderDeps(userIdentity, myPeerId, myUsername));
 
     await responder.requestGroupStateResync(chat.group_id);
     this.groupStateResyncRequestCooldowns.set(chat.group_id, now);
@@ -2847,7 +2885,8 @@ export class MessageHandler {
         writeBucketKey,
         offlineMessage,
         userIdentity.signingPrivateKey,
-        this.database
+        this.database,
+        { category: 'regular' },
       );
       log(`Stored encrypted offline message for ${user.username}`);
 
@@ -2857,6 +2896,7 @@ export class MessageHandler {
       }
 
       const strippedMessage = await this.saveMessageToDatabase(user.peer_id, message, 'offline');
+      this.notifyOfflineInboxCapacityChanged(strippedMessage.chatId);
       log(`Saved offline message to sender's database`);
       return strippedMessage;
     } catch (error: unknown) {
@@ -3205,17 +3245,7 @@ export class MessageHandler {
     const myPeerId = this.node.peerId.toString();
     const myUser = this.database.getUserByPeerId(myPeerId);
     const myUsername = myUser?.username || `user_${myPeerId.slice(-8)}`;
-    const responder = new GroupResponder({
-      node: this.node,
-      database: this.database,
-      userIdentity,
-      myPeerId,
-      myUsername,
-      onGroupChatActivated: this.onGroupChatActivated,
-      onGroupMembersUpdated: this.onGroupMembersUpdated,
-      onMessageReceived: this.onMessageReceived,
-      nudgeGroupRefetch: this.nudgePeerGroupRefetch.bind(this),
-    });
+    const responder = new GroupResponder(this.createGroupResponderDeps(userIdentity, myPeerId, myUsername));
 
     await responder.syncGroupInfoForLocalChat(groupId);
   }
@@ -3229,6 +3259,10 @@ export class MessageHandler {
     try {
       const lastRead = this.database.getOfflineLastReadTimestampByPeerId(peerId);
       const lastAck = this.database.getOfflineLastAckSentByPeerId(peerId);
+      // TEMP_LOG: show when a recipient owes a direct offline ACK after reading.
+      log(
+        `[TEMP_LOG][OFFLINE][ACK][FLUSH] peer=${peerId.slice(-8)} lastRead=${lastRead} lastAck=${lastAck} action=${lastRead <= lastAck ? 'skip' : 'send'}`,
+      );
       if (lastRead <= lastAck) {
         return;
       }
@@ -3253,6 +3287,8 @@ export class MessageHandler {
   private async sendStandaloneOfflineAck(peerId: string, ackTimestamp: number): Promise<boolean> {
     const recipient = this.database.getUserByPeerId(peerId);
     if (!recipient?.offline_public_key) {
+      // TEMP_LOG: missing recipient/offline key prevents ACK creation entirely.
+      log(`[TEMP_LOG][OFFLINE][ACK][SEND][SKIP] peer=${peerId.slice(-8)} reason=missing_recipient_or_offline_key`);
       return false;
     }
     const myPeerId = this.node.peerId.toString();
@@ -3261,6 +3297,10 @@ export class MessageHandler {
     // Fast path: online ACK over an existing session (no key exchange).
     const session = this.sessionManager.getSession(peerId);
     const connected = this.node.getConnections().some(conn => conn.remotePeer.toString() === peerId);
+    // TEMP_LOG: show which ACK transport path we're about to try.
+    log(
+      `[TEMP_LOG][OFFLINE][ACK][SEND][START] peer=${peerId.slice(-8)} ackTs=${ackTimestamp} connected=${connected} hasSession=${!!session}`,
+    );
     if (connected && session) {
       try {
         const ackMessage = MessageEncryption.encryptMessage('', session);
@@ -3275,6 +3315,8 @@ export class MessageHandler {
           context: 'offline_ack',
         });
         await StreamHandler.writeMessageToStream(stream, ackMessage);
+        // TEMP_LOG: online ACK reached the live stream path.
+        log(`[TEMP_LOG][OFFLINE][ACK][SEND][ONLINE_OK] peer=${peerId.slice(-8)} ackTs=${ackTimestamp}`);
         return true;
       } catch (error: unknown) {
         log(`[OFFLINE-ACK] online ack failed, falling back to offline peer=${peerId.slice(-8)} reason=${errStr(error)}`);
@@ -3284,10 +3326,14 @@ export class MessageHandler {
     // Durable path: offline-queued ACK.
     const bucketSecret = this.database.getOfflineBucketSecretByPeerId(peerId);
     if (!bucketSecret) {
+      // TEMP_LOG: without the shared bucket secret we cannot queue a durable ACK.
+      log(`[TEMP_LOG][OFFLINE][ACK][SEND][SKIP] peer=${peerId.slice(-8)} reason=missing_bucket_secret`);
       return false;
     }
     const userIdentity = this.usernameRegistry.getUserIdentity();
     if (!userIdentity) {
+      // TEMP_LOG: identity loss would prevent signing the durable ACK.
+      log(`[TEMP_LOG][OFFLINE][ACK][SEND][SKIP] peer=${peerId.slice(-8)} reason=missing_user_identity`);
       return false;
     }
     try {
@@ -3307,6 +3353,12 @@ export class MessageHandler {
       await OfflineMessageManager.storeOfflineAck(
         this.node, writeBucketKey, ackOfflineMsg, userIdentity.signingPrivateKey, this.database,
       );
+      // TEMP_LOG: offline ACK was durably written into our write bucket for the peer.
+      log(
+        `[TEMP_LOG][OFFLINE][ACK][SEND][OFFLINE_OK] peer=${peerId.slice(-8)} ackTs=${ackTimestamp} bucket=*${writeBucketKey.slice(-12)}`,
+      );
+      // Ask the original sender to fetch our direct offline bucket now
+      this.notifyOfflineInboxCapacityChangedForPeer(peerId);
       return true;
     } catch (error: unknown) {
       log(`[OFFLINE-ACK] offline ack failed peer=${peerId.slice(-8)} reason=${errStr(error)}`);
@@ -3343,6 +3395,7 @@ export class MessageHandler {
       }
 
       const writeBucketKey = this.keyExchange.constructWriteBucketKey(bucketSecret);
+      const beforeMessages = this.database.getOfflineSentMessages(writeBucketKey).messages.length;
 
       // Clear acknowledged messages from our local sent store.
       // Pruned state is published on the next outbound write to this bucket.
@@ -3351,6 +3404,12 @@ export class MessageHandler {
         ackTimestamp,
         this.database
       );
+      const afterMessages = this.database.getOfflineSentMessages(writeBucketKey).messages.length;
+      // TEMP_LOG: show whether processing the ACK actually shrank the sender-side mirror.
+      log(
+        `[TEMP_LOG][OFFLINE][ACK][PROCESS] peer=${peerId.slice(-8)} ackTs=${ackTimestamp} bucket=*${writeBucketKey.slice(-12)} before=${beforeMessages} after=${afterMessages}`,
+      );
+      this.notifyOfflineInboxCapacityChangedForPeer(peerId);
 
       log(`Processed ACK from ${peerId} - cleared messages up to ${ackTimestamp}`);
     } catch (error: unknown) {
@@ -3545,24 +3604,9 @@ export class MessageHandler {
     const myUser = this.database.getUserByPeerId(myPeerId);
     const myUsername = myUser?.username || `user_${myPeerId.slice(-8)}`;
 
-    const deps = {
-      node: this.node,
-      database: this.database,
-      userIdentity,
-      myPeerId,
-      myUsername,
-      onGroupChatActivated: this.onGroupChatActivated,
-      onGroupMembersUpdated: this.onGroupMembersUpdated,
-      onMessageReceived: this.onMessageReceived,
-      nudgeGroupRefetch: this.nudgePeerGroupRefetch.bind(this),
-      onRegisterPrevEpochGrace: (groupId: string, keyVersion: number) => {
-        this.groupMessaging.registerGraceContextForEpoch(groupId, keyVersion);
-      },
-    };
-
     try {
-      const responder = new GroupResponder(deps);
-      const creator = new GroupCreator(deps);
+      const responder = new GroupResponder(this.createGroupResponderDeps(userIdentity, myPeerId, myUsername));
+      const creator = new GroupCreator(this.createGroupCreatorDeps(userIdentity, myPeerId, myUsername));
       const groupId = (parsed as { groupId: string }).groupId;
 
       switch (type) {

@@ -38,6 +38,7 @@ export interface GroupResponderDeps {
   onGroupChatActivated?: (data: GroupChatActivatedEvent) => void;
   onGroupMembersUpdated?: (data: GroupMembersUpdatedEvent) => void;
   onMessageReceived?: (data: MessageReceivedEvent) => void;
+  onOfflineInboxCapacityChanged?: (chatId: number) => void;
   nudgeGroupRefetch?: (peerId: string, groupId: string) => void;
 }
 
@@ -1048,11 +1049,16 @@ export class GroupResponder {
       offlineMessage,
       userIdentity.signingPrivateKey,
       database,
-      { bypassControlReserve: true },
+      { bypassControlReserve: true, category: 'control' },
     );
     log(
       `[GROUP][SEND][DHT_OK] to=${peerId.slice(-8)} bucket=*${bucketTag} offlineMsgId=${offlineMessage.id} ${this.describeControlMessage(message)}`,
     );
+
+    const directChat = database.getChatByPeerId(peerId);
+    if (directChat) {
+      this.deps.onOfflineInboxCapacityChanged?.(directChat.id);
+    }
 
     if (shouldSendAck) {
       database.updateOfflineLastAckSentByPeerId(peerId, lastReadTimestamp);
@@ -1356,6 +1362,7 @@ export class GroupResponder {
     database.deleteGroupMemberSeqs(groupId);
     database.deleteGroupKeyHistory(groupId);
     database.deleteGroupOfflineSentMessagesByPrefix(`${this.groupOfflineBucketPrefix}/${groupId}/`);
+    this.deps.onOfflineInboxCapacityChanged?.(chatId);
     database.deleteChatById(chatId);
   }
 
@@ -1366,6 +1373,7 @@ export class GroupResponder {
     database.removeInviteDeliveryAcksForMember(groupId, myPeerId);
     // Keep cursors/seqs so post-removal catch-up can resume without rescanning from scratch.
     database.deleteGroupOfflineSentMessagesByPrefix(`${this.groupOfflineBucketPrefix}/${groupId}/`);
+    this.deps.onOfflineInboxCapacityChanged?.(chatId);
   }
 
   private applyLocalGroupDisbandedState(chatId: number, groupId: string): void {
@@ -1375,6 +1383,7 @@ export class GroupResponder {
     database.removePendingAcksForGroup(groupId);
     database.removeInviteDeliveryAcksForMember(groupId, myPeerId);
     database.deleteGroupOfflineSentMessagesByPrefix(`${this.groupOfflineBucketPrefix}/${groupId}/`);
+    this.deps.onOfflineInboxCapacityChanged?.(chatId);
     this.expirePendingGroupInviteNotifications(groupId);
   }
 

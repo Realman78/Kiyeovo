@@ -165,6 +165,15 @@ export interface OfflineSentMessages {
     updated_at: Date
 }
 
+export type OfflineMessageCategory = 'regular' | 'control' | 'ack';
+
+export interface OfflineSentMessageCategoryEntry {
+    bucket_key: string
+    message_id: string
+    category: OfflineMessageCategory
+    updated_at: string
+}
+
 export interface LoginAttempt {
     id: number
     network_mode: NetworkMode
@@ -500,6 +509,16 @@ export class ChatDatabase {
             )
         `);
 
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS offline_sent_message_categories (
+                bucket_key TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                category TEXT NOT NULL CHECK(category IN ('regular', 'control', 'ack')),
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (bucket_key, message_id)
+            )
+        `);
+
         // Durable queue of 1:1 messages awaiting an offline DHT write. The
         // background flush worker batches all 'queued' rows for a bucket into one
         // PUT. 'failed' rows wait for a manual retry (give-up threshold = 0).
@@ -720,6 +739,7 @@ export class ChatDatabase {
       CREATE UNIQUE INDEX IF NOT EXISTS idx_login_attempts_unique_mode_peer ON login_attempts(network_mode, peer_id);
       CREATE INDEX IF NOT EXISTS idx_notifications_status_created ON notifications(status, created_at);
       CREATE INDEX IF NOT EXISTS idx_notifications_mode_status_created ON notifications(network_mode, status, created_at);
+      CREATE INDEX IF NOT EXISTS idx_offline_sent_message_categories_bucket ON offline_sent_message_categories(bucket_key, category);
 
       -- Group indexes
       CREATE INDEX IF NOT EXISTS idx_group_key_history_group ON group_key_history(group_id);
@@ -1860,8 +1880,41 @@ export class ChatDatabase {
     }
 
     deleteOfflineSentMessages(bucketKey: string): void {
-        const stmt = this.db.prepare('DELETE FROM offline_sent_messages WHERE bucket_key = ?');
-        stmt.run(bucketKey);
+        const tx = this.db.transaction((key: string) => {
+            this.db.prepare('DELETE FROM offline_sent_messages WHERE bucket_key = ?').run(key);
+            this.db.prepare('DELETE FROM offline_sent_message_categories WHERE bucket_key = ?').run(key);
+        });
+        tx(bucketKey);
+    }
+
+    getOfflineSentMessageCategories(bucketKey: string): OfflineSentMessageCategoryEntry[] {
+        const stmt = this.db.prepare(`
+            SELECT bucket_key, message_id, category, updated_at
+            FROM offline_sent_message_categories
+            WHERE bucket_key = ?
+        `);
+        return stmt.all(bucketKey) as OfflineSentMessageCategoryEntry[];
+    }
+
+    syncOfflineSentMessageCategories(
+        bucketKey: string,
+        entries: Array<{ messageId: string; category: OfflineMessageCategory }>,
+    ): void {
+        const tx = this.db.transaction((key: string, rows: Array<{ messageId: string; category: OfflineMessageCategory }>) => {
+            this.db.prepare('DELETE FROM offline_sent_message_categories WHERE bucket_key = ?').run(key);
+            if (rows.length === 0) {
+                return;
+            }
+
+            const insert = this.db.prepare(`
+                INSERT OR REPLACE INTO offline_sent_message_categories (bucket_key, message_id, category, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            `);
+            for (const row of rows) {
+                insert.run(key, row.messageId, row.category);
+            }
+        });
+        tx(bucketKey, entries);
     }
 
     // --- Pending offline sends queue (durable, batched background flush) ---

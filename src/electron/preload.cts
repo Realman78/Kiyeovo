@@ -57,6 +57,7 @@ const kiyeovoAPI: KiyeovoAPI = {
 
   sendMessage: (identifier, message) => invoke(IPC_CHANNELS.SEND_MESSAGE_REQUEST, identifier, message),
   checkOfflineCapacity: (peerId, additional) => invoke(IPC_CHANNELS.CHECK_OFFLINE_CAPACITY, peerId, additional),
+  getOfflineInboxCapacity: (chatId) => invoke(IPC_CHANNELS.GET_OFFLINE_INBOX_CAPACITY, chatId),
   retryOfflineSend: (messageId) => invoke(IPC_CHANNELS.RETRY_OFFLINE_SEND, messageId),
   sendGroupMessage: (chatId, message, options) => invoke(IPC_CHANNELS.SEND_GROUP_MESSAGE_REQUEST, chatId, message, options),
   retryGroupOfflineBackup: (chatId, messageId) => invoke(IPC_CHANNELS.RETRY_GROUP_OFFLINE_BACKUP, chatId, messageId),
@@ -116,6 +117,7 @@ const kiyeovoAPI: KiyeovoAPI = {
   getMessages: (chatId, limit, offset) => invoke(IPC_CHANNELS.GET_MESSAGES, chatId, limit, offset),
   onMessageReceived: (callback) => subscribe(IPC_CHANNELS.MESSAGE_RECEIVED, callback),
   onMessageSendStateChanged: (callback) => subscribe(IPC_CHANNELS.MESSAGE_SEND_STATE_CHANGED, callback),
+  onOfflineInboxCapacityChanged: (callback) => subscribe(IPC_CHANNELS.OFFLINE_INBOX_CAPACITY_CHANGED, callback),
 
   checkOfflineMessages: (chatIds) => invoke(IPC_CHANNELS.CHECK_OFFLINE_MESSAGES, chatIds),
   checkOfflineMessagesForChat: (chatId) => invoke(IPC_CHANNELS.CHECK_OFFLINE_MESSAGES_FOR_CHAT, chatId),
