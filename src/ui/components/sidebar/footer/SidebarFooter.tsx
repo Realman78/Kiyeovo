@@ -10,6 +10,7 @@ import { SettingsDialog } from "./SettingsDialog";
 import RegisterDialog from "./RegisterDialog";
 import { errStr } from '../../../../core/utils/general-error';
 import { UNEXPECTED_ERROR } from "../../../constants";
+import { useToast } from "../../ui/use-toast";
 
 type SidebarFooterProps = {
   collapsed?: boolean;
@@ -29,6 +30,7 @@ export const SidebarFooter: FC<SidebarFooterProps> = ({ collapsed = false }) => 
   const [registerIdentityError, setRegisterIdentityError] = useState<string | undefined>(undefined);
   const [pendingRegisterUsername, setPendingRegisterUsername] = useState("");
   const dispatch = useDispatch();
+  const { toast } = useToast();
   const effectiveIsRegistering = isRegisteringIdentity || registrationInProgress;
   const effectivePendingUsername = pendingRegisterUsername || pendingRegistrationUsername;
 
@@ -65,11 +67,15 @@ export const SidebarFooter: FC<SidebarFooterProps> = ({ collapsed = false }) => 
             dispatch(setUsername(username));
             dispatch(setRegistered(true));
         } else {
-            setUpdateUsernameError(result.error || 'Failed to register username');
+            const message = result.error || 'Failed to register username';
+            setUpdateUsernameError(message);
+            toast.error(message, 'Username registration failed');
         }
     } catch (err) {
         console.error('Registration error:', err);
-        setUpdateUsernameError(errStr(err, UNEXPECTED_ERROR));
+        const message = errStr(err, UNEXPECTED_ERROR);
+        setUpdateUsernameError(message);
+        toast.error(message, 'Username registration failed');
     } finally {
         setIsUpdatingUsername(false);
         dispatch(setRegistrationInProgress({ inProgress: false, pendingUsername: '' }));
@@ -90,11 +96,15 @@ export const SidebarFooter: FC<SidebarFooterProps> = ({ collapsed = false }) => 
         setRegisterIdentityError(undefined);
         setRegisterDialogOpen(false);
       } else {
-        setRegisterIdentityError(result.error || 'Failed to register username');
+        const message = result.error || 'Failed to register username';
+        setRegisterIdentityError(message);
+        toast.error(message, 'Username registration failed');
       }
     } catch (err) {
       console.error('Registration error:', err);
-      setRegisterIdentityError(errStr(err, UNEXPECTED_ERROR));
+      const message = errStr(err, UNEXPECTED_ERROR);
+      setRegisterIdentityError(message);
+      toast.error(message, 'Username registration failed');
     } finally {
         setIsRegisteringIdentity(false);
         dispatch(setRegistrationInProgress({ inProgress: false, pendingUsername: '' }));

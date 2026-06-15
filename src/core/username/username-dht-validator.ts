@@ -1,4 +1,4 @@
-import { NETWORK_MODE_CONFIG, REREGISTRATION_INTERVAL } from '../constants.js';
+import { NETWORK_MODE_CONFIG, REREGISTRATION_INTERVAL, USERNAME_MAX_FUTURE_SKEW_MS } from '../constants.js';
 import type { UserRegistration } from '../types.js';
 import { hashUsingSha256 } from '../utils/crypto.js';
 import { errStr } from '../utils/general-error.js';
@@ -69,6 +69,15 @@ export async function usernameRegistrationValidator(
     throw new Error('Username registration key binding mismatch');
   }
 
+  // Reject records timestamped too far in the future
+  const futureSkew = registration.timestamp - Date.now();
+  if (futureSkew > USERNAME_MAX_FUTURE_SKEW_MS) {
+    const keyStr = new TextDecoder().decode(key);
+    console.warn(
+      `[USERNAME-VALIDATOR][REJECT] reason=timestamp_future key=${keyStr} ts=${registration.timestamp} skewMs=${futureSkew} peer=${registration.peerID}`
+    );
+    throw new Error('future-dated record rejected');
+  }
 }
 
 export function usernameRegistrationSelector(
@@ -110,7 +119,6 @@ export async function usernameRegistrationValidateUpdate(
   existing: Uint8Array,
   incoming: Uint8Array,
 ): Promise<void> {
-  const startedAt = Date.now();
   const keyStr = new TextDecoder().decode(key);
   const { kind, hash } = parseUsernameKey(key);
   let existingRegistration: UserRegistration;

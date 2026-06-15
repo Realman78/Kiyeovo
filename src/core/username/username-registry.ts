@@ -1,6 +1,6 @@
 import { ChatDatabase, User } from '../db/database.js';
 import type { ChatNode, UserRegistration } from '../types.js';
-import { ERRORS, NETWORK_MODES, REREGISTRATION_INTERVAL, getNetworkModeRuntime } from '../constants.js';
+import { ERRORS, NETWORK_MODES, REREGISTRATION_INTERVAL, USERNAME_MAX_FUTURE_SKEW_MS, getNetworkModeRuntime } from '../constants.js';
 import { EncryptedUserIdentity } from '../identity/encrypted-user-identity.js';
 import { errStr, generalErrorHandler } from '../utils/general-error.js';
 import { hashUsingSha256 } from '../utils/crypto.js';
@@ -391,6 +391,11 @@ export class UsernameRegistry {
           continue;
         }
 
+        // Ignore future-dated records
+        if (-age > USERNAME_MAX_FUTURE_SKEW_MS) {
+          continue;
+        }
+
         if (existingRegistration.peerID && existingRegistration.peerID !== myPeerId) {
           throw new Error(ERRORS.USERNAME_TAKEN);
         }
@@ -571,6 +576,12 @@ export class UsernameRegistry {
     const age = currentTime - registration.timestamp;
     if (age > UsernameRegistry.MAX_REGISTRATION_AGE) {
       log(`Discarding old registration for ${keyLabel} (age: ${Math.round(age / 1000)}s)`);
+      return null;
+    }
+
+    // Discard future-dated records (negative age)
+    if (-age > USERNAME_MAX_FUTURE_SKEW_MS) {
+      log(`Discarding future-dated registration for ${keyLabel} (skew: ${Math.round(-age / 1000)}s)`);
       return null;
     }
 

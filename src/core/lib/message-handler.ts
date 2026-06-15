@@ -393,12 +393,13 @@ export class MessageHandler {
     const writeBucketKey = this.keyExchange.constructWriteBucketKey(bucketSecret);
     const storedCount = OfflineMessageManager.liveBucketMessageCount(this.database, writeBucketKey);
     const pendingCount = this.database.countActivePendingOfflineSendsByBucket(writeBucketKey);
+    const hasLiveEntries = OfflineMessageManager.hasLiveBucketEntries(this.database, writeBucketKey);
     // TEMP_LOG: diagnose whether the peer connected before the offline queue had
     // actually flushed a message into the sender-side local bucket mirror.
     log(
-      `[TEMP_LOG][OFFLINE][NUDGE][DECIDE] peer=${peerId.slice(-8)} bucket=*${writeBucketKey.slice(-12)} stored=${storedCount} pending=${pendingCount} willNudge=${storedCount > 0}`,
+      `[TEMP_LOG][OFFLINE][NUDGE][DECIDE] peer=${peerId.slice(-8)} bucket=*${writeBucketKey.slice(-12)} stored=${storedCount} pending=${pendingCount} willNudge=${hasLiveEntries}`,
     );
-    if (storedCount > 0) {
+    if (hasLiveEntries) {
       this.sendBucketNudge(peerId, { kind: 'DIRECT_OFFLINE_REFETCH' }, `direct-offline:${peerId}`);
     }
   }
@@ -1914,6 +1915,9 @@ export class MessageHandler {
       if (parsed.kind === 'DIRECT_SESSION_RESET') {
         return { kind: 'DIRECT_SESSION_RESET' };
       }
+      if (parsed.kind === 'DIRECT_OFFLINE_REFETCH') {
+        return { kind: 'DIRECT_OFFLINE_REFETCH' };
+      }
       if (parsed.kind === 'GROUP_REKEY_REFETCH' && typeof parsed.groupId === 'string' && parsed.groupId.length > 0) {
         return { kind: 'GROUP_REKEY_REFETCH', groupId: parsed.groupId };
       }
@@ -3369,7 +3373,7 @@ export class MessageHandler {
       log(
         `[TEMP_LOG][OFFLINE][ACK][SEND][OFFLINE_OK] peer=${peerId.slice(-8)} ackTs=${ackTimestamp} bucket=*${writeBucketKey.slice(-12)}`,
       );
-      // Ask the original sender to fetch our direct offline bucket now
+      this.sendBucketNudge(peerId, { kind: 'DIRECT_OFFLINE_REFETCH' }, `direct-offline:${peerId}`);
       this.notifyOfflineInboxCapacityChangedForPeer(peerId);
       return true;
     } catch (error: unknown) {

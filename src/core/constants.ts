@@ -163,6 +163,7 @@ export const NETWORK_CHECK_DELAY = 3 * SECOND;      // 3 seconds
 export const MESSAGE_TIMEOUT = 10 * SECOND;         // 10 seconds
 export const MAX_KEY_EXCHANGE_AGE = 5 * MINUTE;     // 5 minutes
 export const KEY_EXCHANGE_MAX_FUTURE_SKEW_MS = 2 * MINUTE; // 2 minutes
+export const USERNAME_MAX_FUTURE_SKEW_MS = 2 * MINUTE;     // 2 minutes
 export const ROTATION_COOLDOWN = 30 * SECOND;       // 30 seconds - min time between rotations
 export const RECENT_KEY_EXCHANGE_ATTEMPTS_WINDOW = 5 * MINUTE; // 5 minutes
 /**

@@ -299,6 +299,10 @@ export class OfflineMessageManager {
             .length;
     }
 
+    static hasLiveBucketEntries(database: ChatDatabase, bucketKey: string): boolean {
+        return OfflineMessageManager.filterExpiredMessages(database.getOfflineSentMessages(bucketKey).messages).length > 0;
+    }
+
     private static syncLocalCategoryMirror(
         database: ChatDatabase,
         bucketKey: string,

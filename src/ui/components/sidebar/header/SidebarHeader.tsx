@@ -160,6 +160,8 @@ export const SidebarHeader: FC<SidebarHeaderProps> = ({ collapsed = false }) => 
                     if (result.success && result.username) {
                         dispatch(setUsername(result.username));
                         dispatch(setRegistered(true));
+                    } else if (!isDisposed && result.error) {
+                        toast.error(result.error, 'Username registration failed');
                     }
                 } finally {
                     dispatch(setRegistrationInProgress({ inProgress: false, pendingUsername: '' }));
