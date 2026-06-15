@@ -90,6 +90,9 @@ export class OfflineSendQueue {
   async flushBucket(bucketKey: string): Promise<void> {
     if (this.flushing.has(bucketKey)) {
       this.reflush.add(bucketKey);
+      // TEMP_LOG: burst coalescing path — a second send arrived while a bucket
+      // flush was already in flight.
+      log(`[TEMP_LOG][OFFLINE][QUEUE][REFLUSH] bucket=*${bucketKey.slice(-12)} reason=already_flushing`);
       return;
     }
     this.flushing.add(bucketKey);
@@ -99,6 +102,15 @@ export class OfflineSendQueue {
         if (rows.length === 0) {
           break;
         }
+        const peerIds = Array.from(new Set(rows.map(r => r.peer_id)));
+        const connectedPeers = peerIds.filter(peerId =>
+          this.deps.node.getConnections().some(conn => conn.remotePeer.toString() === peerId),
+        );
+        // TEMP_LOG: tells us whether a flush started while the target peer was
+        // already connected, which is the key race for the refetch nudge.
+        log(
+          `[TEMP_LOG][OFFLINE][QUEUE][FLUSH][START] bucket=*${bucketKey.slice(-12)} count=${rows.length} peers=${peerIds.map(id => id.slice(-8)).join(',')} connected=${connectedPeers.map(id => id.slice(-8)).join(',') || 'none'}`,
+        );
         const ids = rows.map(r => r.message_id);
         try {
           const offlineMessages = rows.map(r => this.deps.buildOfflineMessage(r));
@@ -124,6 +136,11 @@ export class OfflineSendQueue {
           for (const chatId of changedChatIds) {
             this.deps.emitInboxCapacityChanged(chatId);
           }
+          // TEMP_LOG: confirms the offline message became live in the local
+          // bucket mirror, and whether the peer was connected at that moment.
+          log(
+            `[TEMP_LOG][OFFLINE][QUEUE][FLUSH][DONE] bucket=*${bucketKey.slice(-12)} count=${rows.length} peers=${peerIds.map(id => id.slice(-8)).join(',')} connected=${connectedPeers.map(id => id.slice(-8)).join(',') || 'none'}`,
+          );
           // Loop: pick up anything that arrived during the PUT (trailing coalesce).
         } catch (error: unknown) {
           const reason = errStr(error);
@@ -142,6 +159,11 @@ export class OfflineSendQueue {
           for (const chatId of changedChatIds) {
             this.deps.emitInboxCapacityChanged(chatId);
           }
+          // TEMP_LOG: distinguishes "nudge race" from "the flush itself never
+          // finished", which would make a refetch impossible.
+          log(
+            `[TEMP_LOG][OFFLINE][QUEUE][FLUSH][FAIL] bucket=*${bucketKey.slice(-12)} count=${rows.length} peers=${peerIds.map(id => id.slice(-8)).join(',')} connected=${connectedPeers.map(id => id.slice(-8)).join(',') || 'none'} reason=${reason}`,
+          );
           log(`[OFFLINE-QUEUE][FLUSH][FAIL] bucket=${bucketKey.slice(-12)} count=${ids.length} reason=${reason}`);
           break; // give-up = 0: stop on failure, await manual retry.
         }

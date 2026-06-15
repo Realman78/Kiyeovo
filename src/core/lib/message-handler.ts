@@ -391,7 +391,14 @@ export class MessageHandler {
       return;
     }
     const writeBucketKey = this.keyExchange.constructWriteBucketKey(bucketSecret);
-    if (OfflineMessageManager.liveBucketMessageCount(this.database, writeBucketKey) > 0) {
+    const storedCount = OfflineMessageManager.liveBucketMessageCount(this.database, writeBucketKey);
+    const pendingCount = this.database.countActivePendingOfflineSendsByBucket(writeBucketKey);
+    // TEMP_LOG: diagnose whether the peer connected before the offline queue had
+    // actually flushed a message into the sender-side local bucket mirror.
+    log(
+      `[TEMP_LOG][OFFLINE][NUDGE][DECIDE] peer=${peerId.slice(-8)} bucket=*${writeBucketKey.slice(-12)} stored=${storedCount} pending=${pendingCount} willNudge=${storedCount > 0}`,
+    );
+    if (storedCount > 0) {
       this.sendBucketNudge(peerId, { kind: 'DIRECT_OFFLINE_REFETCH' }, `direct-offline:${peerId}`);
     }
   }
@@ -2433,6 +2440,11 @@ export class MessageHandler {
     if (!inserted) {
       return { success: false, messageSentStatus: null, error: 'OFFLINE_BUCKET_FULL' };
     }
+    // TEMP_LOG: show the queued-but-not-yet-flushed state that can race with a
+    // peer reconnect and the connect-time refetch nudge.
+    log(
+      `[TEMP_LOG][OFFLINE][QUEUE][ENQUEUE] peer=${user.peer_id.slice(-8)} chatId=${chat.id} messageId=${messageId.slice(0, 8)} bucket=*${writeBucketKey.slice(-12)} pending=${this.database.countActivePendingOfflineSendsByBucket(writeBucketKey)}`,
+    );
     this.notifyOfflineInboxCapacityChanged(chat.id);
     const strippedMessage: StrippedMessage = {
       chatId: chat.id,
