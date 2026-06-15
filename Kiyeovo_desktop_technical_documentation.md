@@ -455,6 +455,13 @@ Main event sinks from Electron:
 - call incoming/signal/state/error events
 - screen-share source selection requests from Electron main
 
+Composer behavior:
+- chat composer is multiline
+- `Enter` sends the current message while `Shift+Enter` inserts a newline
+- drafts auto-expand up to five visible lines, then switch to internal scrolling
+- pasted line breaks are preserved in both the draft and rendered text messages
+- inbound message notifications are batched over a short renderer-side window so offline/startup bursts produce one sound and one summary desktop notification instead of one per message
+
 UI is event-driven while core remains authoritative.
 
 Call UI state:
