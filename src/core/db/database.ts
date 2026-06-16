@@ -1945,12 +1945,12 @@ export class ChatDatabase {
         return stmt.all(bucketKey) as PendingOfflineSend[];
     }
 
-    // Count rows that still occupy a bucket slot (queued or awaiting manual retry),
-    // used for the capacity pre-check alongside the already-stored bucket count.
+    // Count rows that are still actively queued for a bucket write. Failed rows
+    // remain retryable local state but do not occupy DHT bucket capacity.
     countActivePendingOfflineSendsByBucket(bucketKey: string): number {
         const stmt = this.db.prepare(`
             SELECT COUNT(*) AS count FROM pending_offline_sends
-            WHERE bucket_key = ? AND status IN ('queued', 'failed')
+            WHERE bucket_key = ? AND status = 'queued'
         `);
         return (stmt.get(bucketKey) as { count: number }).count;
     }
@@ -2158,7 +2158,7 @@ export class ChatDatabase {
                     .filter(m => m.expires_at > now && m.signed_payload?.ack_only !== true).length
                 : 0;
             const pendingActive = (this.db.prepare(
-                `SELECT COUNT(*) AS c FROM pending_offline_sends WHERE bucket_key = ? AND status IN ('queued', 'failed')`,
+                `SELECT COUNT(*) AS c FROM pending_offline_sends WHERE bucket_key = ? AND status = 'queued'`,
             ).get(pending.bucketKey) as { c: number }).c;
             if (storedLive + pendingActive >= capacityLimit) {
                 return false;

@@ -45,6 +45,7 @@ import {
   BUCKET_NUDGE_COOLDOWN_MS,
   BUCKET_NUDGE_DIAL_TIMEOUT_MS,
   BUCKET_NUDGE_FETCH_DELAY_MS,
+  DIRECT_OFFLINE_REFETCH_DELAY_MS,
   BUCKET_NUDGE_RETRY_DELAY_MS,
   GROUP_ACK_REPUBLISH_STARTUP_DELAY,
   GROUP_ACK_REPUBLISH_INTERVAL,
@@ -1602,7 +1603,7 @@ export class MessageHandler {
     if (nudgePayload.kind === 'DIRECT_OFFLINE_REFETCH') {
       // TEMP_LOG: trace the prompt-refetch path that should cause the recipient to ACK.
       log(`[TEMP_LOG][OFFLINE][NUDGE][DIRECT_REFETCH] from=${remoteId.slice(-8)}`);
-      this.schedulePeerActivityOfflineCheck(remoteId);
+      this.scheduleDirectOfflineRefetchCheck(remoteId);
       return;
     }
 
@@ -1674,6 +1675,23 @@ export class MessageHandler {
     }, BUCKET_NUDGE_FETCH_DELAY_MS);
 
     this.nudgeFetchTimers.set(remoteId, timer);
+  }
+
+  private scheduleDirectOfflineRefetchCheck(peerId: string): void {
+    const chat = this.database.getChatByPeerId(peerId);
+    if (!chat) return;
+
+    const existingTimer = this.nudgeFetchTimers.get(peerId);
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+    }
+
+    const timer = setTimeout(() => {
+      this.nudgeFetchTimers.delete(peerId);
+      void this.runNudgeOfflineCheck(peerId, chat.id, false, false);
+    }, DIRECT_OFFLINE_REFETCH_DELAY_MS);
+
+    this.nudgeFetchTimers.set(peerId, timer);
   }
 
   private scheduleGroupNudgeOfflineCheck(remoteId: string, chatId: number, groupId: string): void {

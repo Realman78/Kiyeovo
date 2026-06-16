@@ -88,7 +88,7 @@ const DirectDetails = ({ snapshot }: { snapshot: DirectOfflineInboxCapacitySnaps
       </div>
       <DetailBar
         label="Sendable messages"
-        caption={`${snapshot.regular.stored} delivered • ${snapshot.regular.pending} pending`}
+        caption={`${snapshot.regular.stored} delivered • ${snapshot.regular.pending} queued`}
         used={snapshot.regular.total}
         limit={snapshot.regular.limit}
         ratio={snapshot.regular.limit > 0 ? snapshot.regular.total / snapshot.regular.limit : 0}
