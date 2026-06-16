@@ -40,7 +40,7 @@ export const OfflineBanner = ({ wakeRecovery = null }: OfflineBannerProps) => {
         className="fixed inset-x-0 top-0 z-100 flex items-center justify-center gap-2 bg-warning px-4 py-1.5 text-center text-xs font-medium text-warning-foreground shadow-md"
       >
         <RefreshCw className="h-3.5 w-3.5 shrink-0 animate-spin" />
-        <span>Waking up... give me 30 more seconds</span>
+        <span>Waking up... give me {secondsLeft} more seconds</span>
         <span className="shrink-0 tabular-nums">{secondsLeft}s</span>
       </div>
     );

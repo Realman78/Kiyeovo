@@ -419,7 +419,7 @@ export const MessagesContainer = ({
       } else if (sentMessage?.messageId) {
         const stillSending = localSendState === 'sending';
         if (!stillSending) warnOfflineSend();
-        if (stillSending || messageSentStatus === 'offline') {
+        if (messageSentStatus === 'offline') {
           onOfflineInboxRelevant?.();
         }
         dispatch(finalizeSendingMessage({

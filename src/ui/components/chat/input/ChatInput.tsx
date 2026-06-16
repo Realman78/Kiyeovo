@@ -312,7 +312,7 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
             if (localSendState !== 'sending') {
                 warnOfflineSend();
             }
-            if (localSendState === 'sending' || messageSentStatus === 'offline') {
+            if (messageSentStatus === 'offline') {
                 onOfflineInboxRelevant?.();
             }
             return {

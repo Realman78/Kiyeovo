@@ -93,6 +93,7 @@ import { isGroupCallControlSignalMessage, isGroupCallPairSignalMessage } from '.
 type OfflineReadBucketInfo = ReturnType<ChatDatabase['getOfflineReadBucketInfo']>[number];
 type OfflineReadBucketInfoForChats = ReturnType<ChatDatabase['getOfflineReadBucketInfoForChats']>[number];
 type OfflineReadBucketInfoAny = OfflineReadBucketInfo | OfflineReadBucketInfoForChats;
+type OfflineCheckResult = { checkedChatIds: number[]; unreadFromChats: Map<number, number> };
 
 function hasChatId(info: OfflineReadBucketInfoAny): info is OfflineReadBucketInfoForChats {
   return 'chat_id' in info;
@@ -165,6 +166,9 @@ export class MessageHandler {
   private groupInfoSyncInFlight = new Map<string, Promise<void>>();
   private groupInfoSyncPending = new Set<string>();
   private offlineCheckRunSeq = 0;
+  // Single-flight for offline checks, keyed by scope
+  private offlineCheckInFlight = new Map<string, Promise<OfflineCheckResult>>();
+  private offlineCheckPending = new Map<string, Promise<OfflineCheckResult>>();
   private nudgeSendAttemptSeq = 0;
   private groupOfflineManager: GroupOfflineManager;
   private groupMessaging: GroupMessaging;
@@ -2600,6 +2604,7 @@ export class MessageHandler {
         this.database.updateOfflineLastAckSentByPeerId(online.targetPeerId.toString(), online.ackTimestamp);
       }
       this.database.settlePendingOfflineSendsDelivered([messageId]);
+      this.notifyOfflineInboxCapacityChanged(chatId);
       this.notifyMessageSendState({ messageId, chatId, outcome: 'delivered', messageSentStatus: 'online' });
       if (online.keyExchangeOccurred) {
         this.schedulePeerActivityOfflineCheck(online.targetPeerId.toString());
@@ -3263,6 +3268,16 @@ export class MessageHandler {
         }
 
         // 'not_group': fall through to regular message handling
+        if (this.database.messageExists(msg.id)) {
+          const persistedMax = maxTimestampPerPeer.get(bucketInfo.peerId) ?? 0;
+          if (msg.timestamp > persistedMax) {
+            maxTimestampPerPeer.set(bucketInfo.peerId, msg.timestamp);
+          }
+          log(
+            `[OFFLINE][MSG][SKIP] run=${runId} msgId=${msg.id} peer=${bucketInfo.peerId.slice(-8)} reason=already_persisted`,
+          );
+          continue;
+        }
         // eslint-disable-next-line no-await-in-loop
         const msgChatId = await this.saveOfflineMessageToDatabase(msg, senderInfo, decryptedContent);
         const unreadCount = unreadFromChats.get(msgChatId) ?? 0;
@@ -3306,13 +3321,48 @@ export class MessageHandler {
     return { checkedChatIds: checkedChats, unreadFromChats: unreadFromChats };
   }
 
-  async checkOfflineMessages(chatIds?: number[]): Promise<{ checkedChatIds: number[], unreadFromChats: Map<number, number> }> {
-    try {
-      return await this.performOfflineMessageCheck(chatIds);
-    } catch (error: unknown) {
-      generalErrorHandler(error);
-      return { checkedChatIds: [], unreadFromChats: new Map() };
+  async checkOfflineMessages(chatIds?: number[]): Promise<OfflineCheckResult> {
+    const scopeKey = chatIds && chatIds.length > 0
+      ? [...chatIds].sort((a, b) => a - b).join(',')
+      : 'default';
+
+    const inFlight = this.offlineCheckInFlight.get(scopeKey);
+    if (!inFlight) {
+      return this.runGuardedOfflineCheck(scopeKey, chatIds);
     }
+
+    // A run for this scope is already in flight
+    let pending = this.offlineCheckPending.get(scopeKey);
+    if (!pending) {
+      pending = inFlight
+        .catch(() => undefined)
+        .then(() => {
+          this.offlineCheckPending.delete(scopeKey);
+          return this.runGuardedOfflineCheck(scopeKey, chatIds);
+        });
+      this.offlineCheckPending.set(scopeKey, pending);
+    }
+    log(`[OFFLINE][CHECK][COALESCE] scope=${scopeKey}`);
+    return pending;
+  }
+
+  private runGuardedOfflineCheck(scopeKey: string, chatIds?: number[]): Promise<OfflineCheckResult> {
+    const run = (async (): Promise<OfflineCheckResult> => {
+      try {
+        return await this.performOfflineMessageCheck(chatIds);
+      } catch (error: unknown) {
+        generalErrorHandler(error);
+        return { checkedChatIds: [], unreadFromChats: new Map() };
+      }
+    })();
+    this.offlineCheckInFlight.set(scopeKey, run);
+    void run.finally(() => {
+      // Only clear if we're still the registered run
+      if (this.offlineCheckInFlight.get(scopeKey) === run) {
+        this.offlineCheckInFlight.delete(scopeKey);
+      }
+    });
+    return run;
   }
 
   private reactivateRetiredPendingAcksForPeer(peerId: string): void {
@@ -3553,7 +3603,7 @@ export class MessageHandler {
     }
 
     const messageId = await this.database.createMessage({
-      id: crypto.randomUUID(),
+      id: msg.id,
       chat_id: chat.id,
       sender_peer_id: senderInfo.peer_id,
       content: decryptedContent,
@@ -3651,6 +3701,8 @@ export class MessageHandler {
     this.peerActivityCheckCooldowns.clear();
     this.groupInfoSyncInFlight.clear();
     this.groupInfoSyncPending.clear();
+    this.offlineCheckInFlight.clear();
+    this.offlineCheckPending.clear();
     this.clearCallRingWatchdog();
     this.clearActiveCallPeerDisconnectTimer();
     this.activeCall = null;
