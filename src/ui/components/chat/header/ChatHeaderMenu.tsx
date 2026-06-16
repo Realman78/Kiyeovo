@@ -1,5 +1,5 @@
 import type { FC, ReactNode } from "react";
-import { Ban, Bell, BellOff, Info, LogOut, MoreVertical, RefreshCw, Trash2, UserCheck, UserMinus, UserPlus } from "lucide-react";
+import { Ban, Bell, BellOff, Info, LogOut, MoreVertical, Pencil, RefreshCw, Trash2, UserCheck, UserMinus, UserPlus } from "lucide-react";
 import { Button } from "../../ui/Button";
 import { DropdownMenu, DropdownMenuItem } from "../../ui/DropdownMenu";
 
@@ -144,7 +144,7 @@ export const ChatHeaderMenu: FC<ChatHeaderMenuProps> = ({
     {
       key: 'edit-username',
       label: 'Edit username',
-      icon: <Info className="w-4 h-4" />,
+      icon: <Pencil className="w-4 h-4" />,
       onClick: onEditUsername,
     },
     {

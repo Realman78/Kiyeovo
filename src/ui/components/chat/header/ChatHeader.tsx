@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useSelector, useDispatch } from "react-redux";
 import type { RootState } from "../../../state/store";
-import { Shield, UserPlus, AlertCircle, Users, Clock, Phone, PhoneOff, Loader2 } from "lucide-react";
+import { UserPlus, AlertCircle, Users, Clock, Phone, PhoneOff, Loader2 } from "lucide-react";
 import { updateChat, clearMessages, removeChat, setOfflineFetchStatus, markOfflineFetched, markOfflineFetchFailed } from "../../../state/slices/chatSlice";
 import { AboutUserModal } from "./AboutUserModal";
 import { useToast } from "../../ui/use-toast";
@@ -1081,9 +1081,8 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
         ) : (
           <div className="flex flex-col gap-0.5">
             <div className="flex items-center gap-1.5">
-              <Shield className="w-3 h-3 text-primary" />
               <span className="text-xs text-muted-foreground font-mono truncate">
-                {peerId}
+                Peer ID: {peerId}
               </span>
             </div>
             {showDirectInactivityWarning && (
