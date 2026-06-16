@@ -411,6 +411,9 @@ export const MessagesContainer = ({
         dispatch(updateLocalMessageSendState({ messageId: message.id, state: 'failed' }));
         if (error === 'OFFLINE_BUCKET_FULL') {
           onOfflineInboxRelevant?.();
+          if (activeChat.type === 'direct' && activeChat.peerId) {
+            void window.kiyeovoAPI.requestOfflineInboxRecovery(activeChat.peerId).catch(() => undefined);
+          }
         }
         toast.error(error || 'Failed to resend message');
       } else if (sentMessage?.messageId) {

@@ -40,6 +40,8 @@ const kiyeovoAPI: KiyeovoAPI = {
 
   onDHTConnectionStatus: (callback) => subscribe(IPC_CHANNELS.DHT_CONNECTION_STATUS, callback),
   getDHTConnectionStatus: () => invoke(IPC_CHANNELS.GET_DHT_CONNECTION_STATUS),
+  onWakeRecoveryStarted: (callback) => subscribe(IPC_CHANNELS.WAKE_RECOVERY_STARTED, callback),
+  onWakeRecoveryReconnectSettled: (callback) => subscribe(IPC_CHANNELS.WAKE_RECOVERY_RECONNECT_SETTLED, callback),
   isNetworkConnected: () => invoke(IPC_CHANNELS.GET_NETWORK_CONNECTED),
   notifyNetworkReconnected: () => invoke(IPC_CHANNELS.NOTIFY_NETWORK_RECONNECTED),
   getNodesLiveness: (addresses) => invoke(IPC_CHANNELS.GET_NODES_LIVENESS, addresses),
@@ -57,6 +59,7 @@ const kiyeovoAPI: KiyeovoAPI = {
 
   sendMessage: (identifier, message) => invoke(IPC_CHANNELS.SEND_MESSAGE_REQUEST, identifier, message),
   checkOfflineCapacity: (peerId, additional) => invoke(IPC_CHANNELS.CHECK_OFFLINE_CAPACITY, peerId, additional),
+  requestOfflineInboxRecovery: (peerId) => invoke(IPC_CHANNELS.REQUEST_OFFLINE_INBOX_RECOVERY, peerId),
   getOfflineInboxCapacity: (chatId) => invoke(IPC_CHANNELS.GET_OFFLINE_INBOX_CAPACITY, chatId),
   retryOfflineSend: (messageId) => invoke(IPC_CHANNELS.RETRY_OFFLINE_SEND, messageId),
   sendGroupMessage: (chatId, message, options) => invoke(IPC_CHANNELS.SEND_GROUP_MESSAGE_REQUEST, chatId, message, options),

@@ -188,6 +188,8 @@ Offline send is **non-blocking and batched**:
 - the queue coalesces a burst into one DHT write per flush; outcomes are dual-written (DB + live event) so the row settles to `offline` or `failed`
 - durable across restart; **retries are manual** (no auto-resume/auto-retry); bucket-full is pre-checked (toast, draft kept, no phantom row)
 - a **standalone offline ACK** (online or DHT-queued, capacity-reserved, ping-pong-guarded) clears the sender's bucket even when the recipient reads but never replies; on-connect refetch nudges and an ACK-side best-effort return nudge speed it up
+- if a direct bucket is full and the user tries to send, the sender runs a bounded recovery: fetch ACKs locally, request an immediate reconnect, send one direct refetch nudge with a dedicated dial path, then fetch once more; this is single-flight and cooldown-limited per peer
+- direct `DIRECT_OFFLINE_REFETCH` nudges schedule a short `500 ms` fetch delay; generic peer-activity fallback checks keep the longer debounce window
 
 ---
 
@@ -337,7 +339,7 @@ Primary categories:
 2. Direct offline stores
    - per-recipient bucket model
    - message/store signatures + validateUpdate
-   - local UX capacity view is derived from the local mirror plus the durable pending queue
+   - local UX capacity view is derived from the local mirror plus actively queued pending writes; failed offline-backup rows remain retryable local state but do not consume capacity
    - effective direct capacity is split into `30` sendable slots, `10` reserved group-control slots, and `1` reserved ACK slot
 
 3. Group offline stores
@@ -474,9 +476,14 @@ Composer behavior:
 - `Enter` sends the current message while `Shift+Enter` inserts a newline
 - drafts auto-expand up to five visible lines, then switch to internal scrolling
 - pasted line breaks are preserved in both the draft and rendered text messages
+- rendered text message bubbles expose an inline hover/focus copy affordance that copies only the message text content to the clipboard
 - inbound message notifications are batched over a short renderer-side window so offline/startup bursts produce one sound and one summary desktop notification instead of one per message
 
 UI is event-driven while core remains authoritative.
+
+Wake/resume behavior:
+- on OS `resume` / `unlock-screen`, the renderer shows a temporary banner: `Waking up... give me 30 more seconds`
+- the banner hides early when the wake-triggered reconnect and recent-chat offline sync both settle; otherwise it auto-hides after 30 seconds
 
 Call UI state:
 - Redux tracks active call state plus screen-share local lifecycle (`idle` / `starting` / `sharing` / `stopping`) and remote sharing state

@@ -13,6 +13,8 @@ export const IPC_CHANNELS = {
   // DHT connection status
   DHT_CONNECTION_STATUS: 'dht:connectionStatus',
   GET_DHT_CONNECTION_STATUS: 'dht:getConnectionStatus',
+  WAKE_RECOVERY_STARTED: 'power:wakeRecoveryStarted',
+  WAKE_RECOVERY_RECONNECT_SETTLED: 'power:wakeRecoveryReconnectSettled',
 
   // OS-level network connectivity (is there a real, non-virtual interface up)
   GET_NETWORK_CONNECTED: 'network:getConnected',
@@ -36,6 +38,7 @@ export const IPC_CHANNELS = {
   // Send message
   SEND_MESSAGE_REQUEST: 'sendMessage:request',
   CHECK_OFFLINE_CAPACITY: 'offlineSend:checkCapacity',
+  REQUEST_OFFLINE_INBOX_RECOVERY: 'offlineSend:requestRecovery',
   RETRY_OFFLINE_SEND: 'offlineSend:retry',
   GET_OFFLINE_INBOX_CAPACITY: 'offlineInbox:getCapacity',
 

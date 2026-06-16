@@ -488,6 +488,19 @@ function setupMessagingHandlers(
     }
   });
 
+  ipcMain.handle(IPC_CHANNELS.REQUEST_OFFLINE_INBOX_RECOVERY, async (_event, peerId: string) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { started: false };
+      }
+      return { started: p2pCore.messageHandler.requestDirectOfflineInboxRecovery(peerId) };
+    } catch (error) {
+      console.error('[IPC] requestOfflineInboxRecovery failed:', error);
+      return { started: false };
+    }
+  });
+
   ipcMain.handle(IPC_CHANNELS.GET_OFFLINE_INBOX_CAPACITY, async (_event, chatId: number) => {
     try {
       const p2pCore = getP2PCore();

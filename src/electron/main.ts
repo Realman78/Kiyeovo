@@ -77,6 +77,7 @@ installLogTimestamps();
 
 let mainWindow: BrowserWindow | null = null;
 let p2pCore: P2PCore | null = null;
+let wakeRecoverySeq = 0;
 let torManager: TorManager | null = null;
 let lastInitStatus: InitStatus | null = null;
 let initError: string | null = null;
@@ -280,6 +281,18 @@ function sendDHTConnectionStatus(status: { connected: boolean | null }) {
     log(`[Electron] Sending DHT connection status: ${status.connected}`);
     log(`[DHT-STATUS][ELECTRON][EMIT] connected=${status.connected}`);
     mainWindow.webContents.send(IPC_CHANNELS.DHT_CONNECTION_STATUS, status);
+  }
+}
+
+function sendWakeRecoveryStarted(data: { token: number; deadlineAt: number; trigger: string }) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC_CHANNELS.WAKE_RECOVERY_STARTED, data);
+  }
+}
+
+function sendWakeRecoveryReconnectSettled(data: { token: number }) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC_CHANNELS.WAKE_RECOVERY_RECONNECT_SETTLED, data);
   }
 }
 
@@ -729,10 +742,20 @@ async function initializeApp() {
       if (!p2pCore) {
         return;
       }
-      log(`[Electron][POWER] ${trigger} - forcing immediate reconnect`);
-      void p2pCore.requestImmediateReconnect().catch((error) => {
-        console.warn(`[Electron][POWER] reconnect after ${trigger} failed:`, errStr(error));
+      const token = ++wakeRecoverySeq;
+      sendWakeRecoveryStarted({
+        token,
+        deadlineAt: Date.now() + 30_000,
+        trigger,
       });
+      log(`[Electron][POWER] ${trigger} - forcing immediate reconnect`);
+      void p2pCore.requestImmediateReconnect()
+        .catch((error) => {
+          console.warn(`[Electron][POWER] reconnect after ${trigger} failed:`, errStr(error));
+        })
+        .finally(() => {
+          sendWakeRecoveryReconnectSettled({ token });
+        });
     };
     powerMonitor.on('resume', () => handlePowerResume('resume'));
     powerMonitor.on('unlock-screen', () => handlePowerResume('unlock-screen'));

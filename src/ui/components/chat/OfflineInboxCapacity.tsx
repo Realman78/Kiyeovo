@@ -218,7 +218,7 @@ export const OfflineInboxCapacity = ({
         <button
           type="button"
           onClick={onToggle}
-          className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border bg-card text-muted-foreground transition-colors hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring ${expanded ? tone.badge : "border-border/70"}`}
+          className={`inline-flex cursor-pointer h-8 w-8 shrink-0 items-center justify-center rounded-xl border bg-card text-muted-foreground transition-colors hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring ${expanded ? tone.badge : "border-border/70"}`}
           aria-expanded={expanded}
           aria-label="Toggle offline inbox capacity"
           title="Offline inbox capacity"

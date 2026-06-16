@@ -46,6 +46,8 @@ import {
   BUCKET_NUDGE_DIAL_TIMEOUT_MS,
   BUCKET_NUDGE_FETCH_DELAY_MS,
   DIRECT_OFFLINE_REFETCH_DELAY_MS,
+  DIRECT_OFFLINE_INBOX_RECOVERY_COOLDOWN_MS,
+  DIRECT_OFFLINE_INBOX_RECOVERY_RECHECK_DELAY_MS,
   BUCKET_NUDGE_RETRY_DELAY_MS,
   GROUP_ACK_REPUBLISH_STARTUP_DELAY,
   GROUP_ACK_REPUBLISH_INTERVAL,
@@ -185,6 +187,8 @@ export class MessageHandler {
   private emitMessageSendState: (data: MessageSendStateChangedEvent) => void = () => undefined;
   private emitOfflineInboxCapacityChanged: (data: OfflineInboxCapacityChangedEvent) => void = () => undefined;
   private offlineInboxCapacityService: OfflineInboxCapacityService;
+  private readonly directOfflineInboxRecoveryInFlight = new Map<string, Promise<void>>();
+  private readonly directOfflineInboxRecoveryCooldowns = new Map<string, number>();
 
   private formatNudgeTarget(payload: BucketNudgePayload): string {
     if (payload.kind === 'GROUP_REKEY_REFETCH') {
@@ -439,6 +443,79 @@ export class MessageHandler {
     }
   }
 
+  requestDirectOfflineInboxRecovery(peerId: string): boolean {
+    const chat = this.database.getChatByPeerId(peerId);
+    if (!chat || chat.type !== 'direct') {
+      log(`[OFFLINE][RECOVERY][SKIP] peer=${peerId.slice(-8)} reason=no_direct_chat`);
+      return false;
+    }
+
+    const existing = this.directOfflineInboxRecoveryInFlight.get(peerId);
+    if (existing) {
+      log(`[OFFLINE][RECOVERY][SKIP] peer=${peerId.slice(-8)} reason=in_flight`);
+      return false;
+    }
+
+    const now = Date.now();
+    const lastStartedAt = this.directOfflineInboxRecoveryCooldowns.get(peerId) ?? 0;
+    if (now - lastStartedAt < DIRECT_OFFLINE_INBOX_RECOVERY_COOLDOWN_MS) {
+      log(
+        `[OFFLINE][RECOVERY][SKIP] peer=${peerId.slice(-8)} reason=cooldown remainingMs=${DIRECT_OFFLINE_INBOX_RECOVERY_COOLDOWN_MS - (now - lastStartedAt)}`,
+      );
+      return false;
+    }
+
+    this.directOfflineInboxRecoveryCooldowns.set(peerId, now);
+    const recovery = this.runDirectOfflineInboxRecovery(peerId, chat.id)
+      .catch((error: unknown) => {
+        generalErrorHandler(error, `[OFFLINE][RECOVERY] failed for peer=${peerId.slice(-8)}`);
+      })
+      .finally(() => {
+        if (this.directOfflineInboxRecoveryInFlight.get(peerId) === recovery) {
+          this.directOfflineInboxRecoveryInFlight.delete(peerId);
+        }
+      });
+    this.directOfflineInboxRecoveryInFlight.set(peerId, recovery);
+    return true;
+  }
+
+  private async runDirectOfflineInboxRecovery(peerId: string, chatId: number): Promise<void> {
+    log(`[OFFLINE][RECOVERY][START] peer=${peerId.slice(-8)} chatId=${chatId}`);
+    this.notifyOfflineInboxCapacityChanged(chatId);
+
+    if (this.checkOfflineCapacity(peerId)) {
+      log(`[OFFLINE][RECOVERY][DONE] peer=${peerId.slice(-8)} chatId=${chatId} cleared=true stage=precheck`);
+      return;
+    }
+
+    await this.checkOfflineMessages([chatId]);
+    if (this.checkOfflineCapacity(peerId)) {
+      log(`[OFFLINE][RECOVERY][DONE] peer=${peerId.slice(-8)} chatId=${chatId} cleared=true stage=initial_fetch`);
+      this.notifyOfflineInboxCapacityChanged(chatId);
+      return;
+    }
+
+    const reconnectSettled = await (this.requestReconnect?.() ?? Promise.resolve(false));
+    log(
+      `[OFFLINE][RECOVERY][RECONNECT] peer=${peerId.slice(-8)} chatId=${chatId} success=${String(reconnectSettled)}`,
+    );
+
+    this.sendBucketNudge(
+      peerId,
+      { kind: 'DIRECT_OFFLINE_REFETCH' },
+      `direct-offline-recovery:${peerId}`,
+      { allowDialWithoutConnection: true },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, DIRECT_OFFLINE_INBOX_RECOVERY_RECHECK_DELAY_MS));
+    await this.checkOfflineMessages([chatId]);
+    const cleared = this.checkOfflineCapacity(peerId);
+    log(
+      `[OFFLINE][RECOVERY][DONE] peer=${peerId.slice(-8)} chatId=${chatId} cleared=${String(cleared)} stage=final_fetch`,
+    );
+    this.notifyOfflineInboxCapacityChanged(chatId);
+  }
+
   getOfflineInboxCapacity(chatId: number): OfflineInboxCapacitySnapshot | null {
     return this.offlineInboxCapacityService.getSnapshot(chatId);
   }
@@ -490,19 +567,22 @@ export class MessageHandler {
   private sendBucketNudge(
     peerId: string,
     payload: BucketNudgePayload,
-    cooldownKey: string
+    cooldownKey: string,
+    options?: { allowDialWithoutConnection?: boolean },
   ): void {
     const attemptId = ++this.nudgeSendAttemptSeq;
     const startSnapshot = this.getNudgeConnectionSnapshot(peerId);
+    const allowDialWithoutConnection = options?.allowDialWithoutConnection === true;
     log(
       `[NUDGE][SEND][START] attempt=${attemptId} peer=${peerId.slice(-8)} ${this.formatNudgeTarget(payload)} ` +
       `cooldownKey=${cooldownKey} totalConnections=${startSnapshot.totalConnections} ` +
-      `peerConnections=${startSnapshot.peerConnectionCount} peerConnAddrs=${startSnapshot.peerConnectionAddrs}`,
+      `peerConnections=${startSnapshot.peerConnectionCount} peerConnAddrs=${startSnapshot.peerConnectionAddrs} ` +
+      `allowDialWithoutConnection=${String(allowDialWithoutConnection)}`,
     );
 
-    // Do not force-dial just to send a nudge.
+    // Default behavior: do not force-dial just to send a nudge.
     const hasActiveConnection = startSnapshot.peerConnectionCount > 0;
-    if (!hasActiveConnection) {
+    if (!hasActiveConnection && !allowDialWithoutConnection) {
       log(
         `[NUDGE][SKIP_NO_CONN] peer=${peerId.slice(-8)} ${this.formatNudgeTarget(payload)} ` +
         `reason=no_active_connection attempt=${attemptId} totalConnections=${startSnapshot.totalConnections} ` +
@@ -520,7 +600,7 @@ export class MessageHandler {
       if (!this.nudgeTrailingTimers.has(cooldownKey)) {
         const timer = setTimeout(() => {
           this.nudgeTrailingTimers.delete(cooldownKey);
-          this.sendBucketNudge(peerId, payload, cooldownKey);
+          this.sendBucketNudge(peerId, payload, cooldownKey, options);
         }, remaining);
         this.nudgeTrailingTimers.set(cooldownKey, timer);
       }

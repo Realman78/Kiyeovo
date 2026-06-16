@@ -1,5 +1,5 @@
-import { memo } from "react";
-import { Info, Loader2 } from "lucide-react";
+import { memo, useEffect, useState } from "react";
+import { Check, Copy, Info, Loader2 } from "lucide-react";
 import { formatTimestampToHourMinute } from "../../../utils/dateUtils";
 import { FileMessage } from "./FileMessage";
 import type { ChatMessage } from "../../../state/slices/chatSlice";
@@ -24,7 +24,18 @@ export const MessageRow = memo(({
   membershipInfoTooltip,
   onRetry,
 }: MessageRowProps) => {
+  const [isCopied, setIsCopied] = useState(false);
   const isSystemMessage = message.messageType === 'system';
+
+  useEffect(() => {
+    if (!isCopied) return;
+
+    const timeoutId = window.setTimeout(() => {
+      setIsCopied(false);
+    }, 2000);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [isCopied]);
 
   if (isSystemMessage) {
     return (
@@ -57,6 +68,28 @@ export const MessageRow = memo(({
   }
 
   const isOwnMessage = message.senderPeerId === myPeerId || hasActivePendingKeyExchange;
+  const isCopyableTextMessage = message.messageType === 'text' && message.content.length > 0;
+
+  const handleCopyMessage = async () => {
+    try {
+      await navigator.clipboard.writeText(message.content);
+      setIsCopied(true);
+    } catch (error) {
+      console.error("Failed to copy message:", error);
+    }
+  };
+
+  const copyButton = isCopyableTextMessage ? (
+    <button
+      type="button"
+      onClick={() => void handleCopyMessage()}
+      className={`inline-flex cursor-pointer shrink-0 self-center items-center justify-center rounded-full p-1 transition-opacity hover:bg-background/15 focus:outline-none focus-visible:ring-1 focus-visible:ring-ring ${isCopied ? "opacity-100" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"}`}
+      aria-label={isCopied ? "Message copied" : "Copy message"}
+      title={isCopied ? "Copied" : "Copy message"}
+    >
+      {isCopied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+    </button>
+  ) : null;
 
   return (
     <div
@@ -65,26 +98,33 @@ export const MessageRow = memo(({
       {showSenderLabel &&
         <span className="text-xs text-muted-foreground font-mono">{message.senderUsername ?? message.senderPeerId}</span>
       }
-      <div
-        className={`max-w-[70%] rounded-lg px-4 py-2.5 ${isOwnMessage ? "bg-message-sent text-message-sent-foreground rounded-br-sm" : "bg-message-received text-message-received-foreground rounded-bl-sm"}`}
-        style={{ wordBreak: "break-word" }}
-      >
-        {message.messageType === 'file' && message.fileName ? (
-          <FileMessage
-            fileId={message.id}
-            chatId={message.chatId}
-            fileName={message.fileName}
-            fileSize={message.fileSize || 0}
-            filePath={message.filePath}
-            transferStatus={message.transferStatus || 'pending'}
-            transferProgress={message.transferProgress}
-            transferError={message.transferError}
-            transferExpiresAt={message.transferExpiresAt}
-            isFromCurrentUser={message.senderPeerId === myPeerId}
-          />
-        ) : (
-          <p className="text-left text-sm leading-relaxed whitespace-pre-wrap wrap-anywhere">{message.content}</p>
+      <div className={`group flex w-full items-center gap-2 ${isOwnMessage ? "justify-end" : "justify-start"}`}>
+        {copyButton && (
+          <div className={isOwnMessage ? "order-1" : "order-2"}>
+            {copyButton}
+          </div>
         )}
+        <div
+          className={`max-w-[70%] rounded-lg px-4 py-2.5 ${isOwnMessage ? "order-2 bg-message-sent text-message-sent-foreground rounded-br-sm" : "order-1 bg-message-received text-message-received-foreground rounded-bl-sm"}`}
+          style={{ wordBreak: "break-word" }}
+        >
+          {message.messageType === 'file' && message.fileName ? (
+            <FileMessage
+              fileId={message.id}
+              chatId={message.chatId}
+              fileName={message.fileName}
+              fileSize={message.fileSize || 0}
+              filePath={message.filePath}
+              transferStatus={message.transferStatus || 'pending'}
+              transferProgress={message.transferProgress}
+              transferError={message.transferError}
+              transferExpiresAt={message.transferExpiresAt}
+              isFromCurrentUser={message.senderPeerId === myPeerId}
+            />
+          ) : (
+            <p className="text-left text-sm leading-relaxed whitespace-pre-wrap wrap-anywhere">{message.content}</p>
+          )}
+        </div>
       </div>
       {showTimestamp && (
         <span className="text-xs text-muted-foreground mt-1 font-mono inline-flex items-center gap-1">

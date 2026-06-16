@@ -82,6 +82,16 @@ export type ScreenShareSourceRequest = {
   sources: ScreenShareSource[];
 };
 
+export type WakeRecoveryStartedEvent = {
+  token: number;
+  deadlineAt: number;
+  trigger: string;
+};
+
+export type WakeRecoveryReconnectSettledEvent = {
+  token: number;
+};
+
 export type GroupCallActionResult = {
   success: boolean;
   error: string | null;
@@ -112,6 +122,8 @@ export interface KiyeovoAPI {
 
   onDHTConnectionStatus: (callback: (status: { connected: boolean | null }) => void) => Unsubscribe;
   getDHTConnectionStatus: () => Promise<{ success: boolean; connected: boolean | null; error: string | null }>;
+  onWakeRecoveryStarted: (callback: (data: WakeRecoveryStartedEvent) => void) => Unsubscribe;
+  onWakeRecoveryReconnectSettled: (callback: (data: WakeRecoveryReconnectSettledEvent) => void) => Unsubscribe;
   // OS-level connectivity: true if a real (non-virtual, non-internal) network interface is up.
   isNetworkConnected: () => Promise<{ connected: boolean }>;
   // Notify core that OS connectivity just returned, to trigger an immediate DHT reconnect.
@@ -132,6 +144,7 @@ export interface KiyeovoAPI {
 
   sendMessage: (identifier: string, message: string) => Promise<SendMessageResponse>;
   checkOfflineCapacity: (peerId: string, additional?: number) => Promise<{ hasRoom: boolean }>;
+  requestOfflineInboxRecovery: (peerId: string) => Promise<{ started: boolean }>;
   getOfflineInboxCapacity: (chatId: number) => Promise<{
     success: boolean;
     snapshot: OfflineInboxCapacitySnapshot | null;

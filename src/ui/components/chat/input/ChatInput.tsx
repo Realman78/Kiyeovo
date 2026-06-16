@@ -297,6 +297,9 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
             if (!success) {
                 if (error === 'OFFLINE_BUCKET_FULL') {
                     onOfflineInboxRelevant?.();
+                    if (activeChat?.type === 'direct' && activeChat.peerId) {
+                        void window.kiyeovoAPI.requestOfflineInboxRecovery(activeChat.peerId).catch(() => undefined);
+                    }
                 }
                 toast.error(
                     error === 'OFFLINE_BUCKET_FULL'
@@ -476,6 +479,9 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
             const { hasRoom } = await window.kiyeovoAPI.checkOfflineCapacity(activeChat.peerId, inFlight);
             if (!hasRoom) {
                 onOfflineInboxRelevant?.();
+                if (activeChat.type === 'direct' && activeChat.peerId) {
+                    void window.kiyeovoAPI.requestOfflineInboxRecovery(activeChat.peerId).catch(() => undefined);
+                }
                 toast.error(`${activeChat.name || 'This contact'}'s offline inbox is full — wait until they come online.`);
                 return;
             }
