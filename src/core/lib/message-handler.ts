@@ -60,7 +60,12 @@ import {
   OFFLINE_MESSAGE_MAX_FUTURE_SKEW_MS,
   ERRORS,
   getNetworkModeRuntime,
+  NETWORK_MODES,
+  RESUME_RELAY_GRACE_MS,
+  RESUME_RELAY_READY_WAIT_MS,
+  RESUME_RELAY_READY_POLL_MS,
 } from '../constants.js';
+import { triggerFastRelayRefresh } from '../network/relay-keepalive.js';
 import { SessionManager } from '../direct/session-manager.js';
 import { MessageEncryption } from '../direct/message-encryption.js';
 import { PeerConnectionHandler } from '../direct/peer-connection-handler.js';
@@ -166,6 +171,7 @@ export class MessageHandler {
   private groupInfoSyncInFlight = new Map<string, Promise<void>>();
   private groupInfoSyncPending = new Set<string>();
   private offlineCheckRunSeq = 0;
+  private lastPowerResumeAt = 0;
   // Single-flight for offline checks, keyed by scope
   private offlineCheckInFlight = new Map<string, Promise<OfflineCheckResult>>();
   private offlineCheckPending = new Map<string, Promise<OfflineCheckResult>>();
@@ -2563,6 +2569,44 @@ export class MessageHandler {
     return { success: true, messageSentStatus: null, error: null, message: strippedMessage, localSendState: 'sending' };
   }
 
+  notePowerResume(): void {
+    this.lastPowerResumeAt = Date.now();
+  }
+
+  /** True once the node holds at least one relay-circuit reservation. */
+  private isRelayReady(): boolean {
+    return this.node.getMultiaddrs().some(addr => addr.toString().includes('/p2p-circuit'));
+  }
+
+  private async awaitRelayReadyAfterResume(): Promise<void> {
+    if (this.database.getSessionNetworkMode() !== NETWORK_MODES.FAST) {
+      return;
+    }
+    const sinceResumeMs = Date.now() - this.lastPowerResumeAt;
+    if (sinceResumeMs > RESUME_RELAY_GRACE_MS || this.isRelayReady()) {
+      return;
+    }
+    log(
+      `[OFFLINE-SEND][RESUME] relay not ready ${sinceResumeMs}ms after resume; ` +
+      `nudging refresh and waiting up to ${RESUME_RELAY_READY_WAIT_MS}ms`,
+    );
+    try {
+      await triggerFastRelayRefresh();
+    } catch (error: unknown) {
+      log(`[OFFLINE-SEND][RESUME] relay refresh failed: ${errStr(error)}`);
+    }
+    const deadline = Date.now() + RESUME_RELAY_READY_WAIT_MS;
+    while (Date.now() < deadline) {
+      if (this.isRelayReady()) {
+        log(`[OFFLINE-SEND][RESUME] relay ready after ${Date.now() - (deadline - RESUME_RELAY_READY_WAIT_MS)}ms; attempting online`);
+        return;
+      }
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise<void>(resolve => setTimeout(resolve, RESUME_RELAY_READY_POLL_MS));
+    }
+    log(`[OFFLINE-SEND][RESUME] relay still not ready after ${RESUME_RELAY_READY_WAIT_MS}ms; proceeding (likely offline fallback)`);
+  }
+
   private async deliverNotConnectedInBackground(
     user: User,
     message: string,
@@ -2576,6 +2620,7 @@ export class MessageHandler {
     // that was already delivered online.
     let online: { targetPeerId: PeerId; keyExchangeOccurred: boolean; ackTimestamp: number | undefined };
     try {
+      await this.awaitRelayReadyAfterResume();
       const { session, peerId: targetPeerId, keyExchangeOccurred } = await this.ensureUserSession(
         user.peer_id, message, false, user,
       );

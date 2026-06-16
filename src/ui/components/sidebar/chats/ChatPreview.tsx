@@ -58,7 +58,7 @@ export const ChatPreview: FC<ChatPreviewProps> = ({ chat, onSelectChat, selected
                         )}
                         {isDisbandedGroup && (
                             <span className="text-[10px] px-1.5 py-0.5 rounded bg-destructive/15 text-destructive uppercase tracking-wide shrink-0">
-                                Disbanded
+                                Deactivated
                             </span>
                         )}
                         {!isDisbandedGroup && creatorLinkState.broken && (

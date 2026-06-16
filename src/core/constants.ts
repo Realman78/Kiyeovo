@@ -290,6 +290,15 @@ export const KEEP_ALIVE_INTERVAL = 90 * SECOND; // 90 seconds
 export const RELAY_KEEP_ALIVE_INTERVAL = KEEP_ALIVE_INTERVAL; // 90 seconds
 export const RELAY_KEEP_ALIVE_START_DELAY = 30 * SECOND; // 30 seconds
 export const RELAY_KEEP_ALIVE_PING_TIMEOUT = 10 * SECOND; // 10 seconds
+// After an OS resume, all connections (incl. the relay reservation) are torn down
+// and re-established. A send fired inside this window can otherwise burn its whole
+// dial budget on a not-yet-ready relay and get demoted to offline even though the
+// peer is online. Sends within RESUME_RELAY_GRACE_MS of a resume wait up to
+// RESUME_RELAY_READY_WAIT_MS (polling every RESUME_RELAY_READY_POLL_MS, after
+// nudging a refresh) for the relay reservation to return before attempting online.
+export const RESUME_RELAY_GRACE_MS = 30 * SECOND;
+export const RESUME_RELAY_READY_WAIT_MS = 12 * SECOND;
+export const RESUME_RELAY_READY_POLL_MS = 250; // 0.25 seconds
 export const OFFLINE_MESSAGE_LIMIT = 50; // 50 messages
 export const OFFLINE_MESSAGE_CHECK_INTERVAL = 5 * MINUTE; // 5 minutes
 export const KEY_ROTATION_TIMEOUT = 30 * SECOND; // 30 seconds

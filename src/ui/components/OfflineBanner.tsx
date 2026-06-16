@@ -41,7 +41,6 @@ export const OfflineBanner = ({ wakeRecovery = null }: OfflineBannerProps) => {
       >
         <RefreshCw className="h-3.5 w-3.5 shrink-0 animate-spin" />
         <span>Waking up... give me {secondsLeft} more seconds</span>
-        <span className="shrink-0 tabular-nums">{secondsLeft}s</span>
       </div>
     );
   }

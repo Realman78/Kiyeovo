@@ -742,6 +742,7 @@ async function initializeApp() {
       if (!p2pCore) {
         return;
       }
+      p2pCore.messageHandler.notePowerResume();
       const token = ++wakeRecoverySeq;
       sendWakeRecoveryStarted({
         token,
