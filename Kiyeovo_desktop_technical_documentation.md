@@ -415,6 +415,18 @@ Operational notes:
 
 #### 11.3 Client connectivity UX
 
+The main window sidebar is now split into:
+- a thin left navigation rail for `Chats`, `Groups`, and `Setup`
+- a context pane that changes based on the selected rail section
+- utility rail actions at the bottom for `Help` and `Settings`
+
+Current navigation rollout status:
+- `Chats` shows the legacy mixed sidebar content (direct chats, group chats, and request/invite sections)
+- `Groups` shows group invites plus a groups-only chat list
+- `Setup`, `Help`, and `Settings` can exist as placeholder panes while their dedicated content is being migrated
+- the left rail remains visible while the adjacent sidebar pane can collapse independently
+- the left rail may expand on hover/focus as an overlay to reveal labels without shifting the main layout
+
 Connection Status dialog supports:
 - bootstrap list management and ordering
 - relay reservation retry in fast mode
