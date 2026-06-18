@@ -65,7 +65,7 @@ export const Sidebar: FC = () => {
       }
     };
     void fetchContactAttempts();
-  }, []);
+  }, [dispatch]);
 
   useEffect(() => {
     // Pull current user state on mount (solves race condition)
@@ -114,7 +114,7 @@ export const Sidebar: FC = () => {
       unsubscribeCancelled();
       restoreUnsubscribe();
     };
-  }, []);
+  }, [dispatch, toast]);
 
   const renderCollapsedPane = () => (
     <>
@@ -165,11 +165,14 @@ export const Sidebar: FC = () => {
   return (
     <div className={`relative z-10 h-full overflow-visible border-r border-sidebar-border bg-sidebar-background transition-[width] duration-300 ease-in-out ${isCollapsed ? 'w-30' : 'w-110'}`}>
       <div className="flex h-full">
-        <SidebarRail activeSection={activeSection} onSelectSection={setActiveSection} isTorEnabled={isTorEnabled} />
+        <SidebarRail
+          activeSection={activeSection}
+          onSelectSection={setActiveSection}
+          isTorEnabled={isTorEnabled}
+        />
         <div
-          className={`relative z-0 flex min-w-0 flex-col overflow-hidden border-l border-sidebar-border transition-[width] duration-300 ease-in-out ${
-            isCollapsed ? 'w-16' : 'flex-1'
-          }`}
+          className={`relative z-0 flex min-w-0 flex-col overflow-hidden border-l border-sidebar-border transition-[width] duration-300 ease-in-out ${isCollapsed ? 'w-16' : 'flex-1'
+            }`}
         >
           {renderSectionPane()}
         </div>

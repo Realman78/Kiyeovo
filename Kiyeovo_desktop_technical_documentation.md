@@ -308,7 +308,7 @@ Behavior highlights:
 - visual UI includes compact/fullscreen variants, stream swap controls when both cameras are on, and fullscreen idle control fade
 - screen sharing replaces the main video surface while active; the camera is not kept as a second primary tile in the current phase
 - only one side may screen-share at a time; local sharing wins if a remote started signal arrives during local sharing
-- ICE servers default from `DEFAULT_WEBRTC_ICE_SERVERS` in `src/core/network/default-infrastructure.ts`
+- ICE servers fall back to `DEFAULT_WEBRTC_ICE_SERVERS` in `src/core/network/default-infrastructure.ts`; the current default list is empty
 - fast mode has a runtime ICE editor in `Connection status -> Calls`
 - runtime overrides are stored in the settings table and loaded by renderer `CallService` when a call starts or is accepted
 - validation is format-based only; there is no built-in health check for STUN/TURN reachability
@@ -427,6 +427,18 @@ Current navigation rollout status:
 - the left rail remains visible while the adjacent sidebar pane can collapse independently
 - the left rail may expand on hover/focus as an overlay to reveal labels without shifting the main layout
 
+Setup readiness is mode-aware:
+- anonymous mode evaluates bootstrap only
+- fast mode evaluates bootstrap, relays, and ICE configuration
+- no configured bootstrap produces a red Setup indicator
+- in fast mode, no configured relay produces an amber Setup indicator
+- missing ICE configuration produces an amber Setup indicator unless the user explicitly acknowledges that they do not plan to use calls
+- acknowledging missing ICE suppresses only its global warning; it does not mark calls as configured
+- setup readiness checks configuration existence only; it does not represent current server reachability
+- unreadable bootstrap configuration produces a red indicator; unreadable relay or ICE configuration produces amber when bootstrap configuration is known to exist
+
+For the current phase, the renderer reads setup readiness once when the sidebar mounts. Future Setup-page configuration actions will trigger a new read after successful changes.
+
 Connection Status dialog supports:
 - bootstrap list management and ordering
 - relay reservation retry in fast mode
@@ -435,7 +447,7 @@ Connection Status dialog supports:
 
 "Online" status is DHT-reachability focused, not just generic socket presence.
 
-Current beta clients also seed default public bootstrap/relay entries from source constants. Those defaults can be overridden from the UI without rebuilding.
+Default bootstrap, relay, and ICE lists are currently empty. Users must provide infrastructure for the selected mode.
 
 #### 11.4 Tor and anonymous-mode setup
 
@@ -451,7 +463,7 @@ Practical notes:
 
 Current behavior:
 - calls are fast-mode only and use WebRTC media in the renderer
-- default ICE servers are defined in `src/core/network/default-infrastructure.ts`
+- the default ICE list in `src/core/network/default-infrastructure.ts` is currently empty
 - users can add runtime ICE overrides from `Connection status -> Calls` in fast mode
 - supported entry types are `stun`, `turn`, and `turns`
 - TURN entries require username + credential
@@ -464,7 +476,8 @@ Practical self-hosting path:
 
 Notes:
 - the app validates ICE entry format, but it does not probe server health yet
-- if a custom ICE entry list is saved, that runtime list is used instead of the default constant
+- if an ICE entry list is saved, that runtime list is used instead of the empty default constant
+- users may acknowledge the missing-ICE Setup warning if they do not plan to use calls; call setup remains visibly unconfigured
 
 ---
 

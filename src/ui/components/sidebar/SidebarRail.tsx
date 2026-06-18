@@ -2,6 +2,7 @@ import { useState, type FC, type FocusEvent as ReactFocusEvent } from 'react';
 import { CircleHelp, MessageSquare, Network, Settings, Users } from 'lucide-react';
 import { Logo } from '../icons/Logo';
 import { KiyeovoDialog } from './header/KiyeovoDialog';
+import { useSetupReadiness, type SetupSeverity } from '../../hooks/useSetupReadiness';
 
 export type SidebarSection = 'chats' | 'groups' | 'setup' | 'help' | 'settings';
 
@@ -34,22 +35,42 @@ type SidebarRailButtonProps = {
   icon: typeof MessageSquare;
   label: string;
   onClick: () => void;
+  severity?: SetupSeverity;
 };
 
-const SidebarRailButton: FC<SidebarRailButtonProps> = ({ active, expanded, icon: Icon, label, onClick }) => {
+const SidebarRailButton: FC<SidebarRailButtonProps> = ({
+  active,
+  expanded,
+  icon: Icon,
+  label,
+  onClick,
+  severity
+}) => {
+  const statusLabel = !severity ? null
+    : severity === 'blocked' ? 'setup blocked'
+    : 'setup needs attention'
+  const accessibleLabel = statusLabel ? `${label}, ${statusLabel}` : label;
+
   return (
     <button
       type="button"
       onClick={onClick}
-      title={label}
-      aria-label={label}
+      title={accessibleLabel}
+      aria-label={accessibleLabel}
       className={`flex outline-0 h-12 w-full cursor-pointer items-center gap-3 overflow-hidden border px-0 transition-colors ${active
           ? 'border-transparent border-l-primary/40 border-3 bg-primary/15 text-primary shadow-[inset_0_0_0_1px_rgba(0,0,0,0.05)]'
           : 'border-transparent text-muted-foreground hover:border-sidebar-border hover:bg-sidebar-accent hover:text-foreground'
         }`}
     >
-      <span className="flex h-full w-14 shrink-0 items-center justify-center">
+      <span className="relative flex h-full w-14 shrink-0 items-center justify-center">
         <Icon className="h-5 w-5" />
+        {severity && (
+          <span
+            className={`absolute right-3 top-2 h-2 w-2 rounded-full ring-2 ring-sidebar-background ${
+              severity === 'blocked' ? 'bg-destructive' : 'bg-warning'
+            }`}
+          />
+        )}
       </span>
       <span className={`whitespace-nowrap text-sm font-medium transition-opacity duration-150 ${expanded ? 'opacity-100' : 'opacity-0'}`}>
         {label}
@@ -58,9 +79,14 @@ const SidebarRailButton: FC<SidebarRailButtonProps> = ({ active, expanded, icon:
   );
 };
 
-export const SidebarRail: FC<SidebarRailProps> = ({ activeSection, onSelectSection, isTorEnabled }) => {
+export const SidebarRail: FC<SidebarRailProps> = ({
+  activeSection,
+  onSelectSection,
+  isTorEnabled,
+}) => {
   const [kiyeovoDialogOpen, setKiyeovoDialogOpen] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const setupReadiness = useSetupReadiness();
 
   const openKiyeovoDialog = () => {
     setKiyeovoDialogOpen(true);
@@ -101,6 +127,9 @@ export const SidebarRail: FC<SidebarRailProps> = ({ activeSection, onSelectSecti
                 icon={item.icon}
                 label={item.label}
                 onClick={() => onSelectSection(item.section)}
+                severity={item.section === 'setup' && setupReadiness?.severity !== 'ready'
+                  ? setupReadiness?.severity ?? undefined
+                  : undefined}
               />
             ))}
           </div>

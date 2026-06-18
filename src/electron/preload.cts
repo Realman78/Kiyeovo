@@ -107,6 +107,11 @@ const kiyeovoAPI: KiyeovoAPI = {
   reorderRelayNodes: (addresses) => invoke(IPC_CHANNELS.REORDER_RELAY_NODES, addresses),
   getIceServers: () => invoke(IPC_CHANNELS.GET_ICE_SERVERS),
   setIceServers: (servers) => invoke(IPC_CHANNELS.SET_ICE_SERVERS, servers),
+  getMissingIceWarningAcknowledged: () => invoke(IPC_CHANNELS.GET_MISSING_ICE_WARNING_ACKNOWLEDGED),
+  setMissingIceWarningAcknowledged: (acknowledged) => invoke(
+    IPC_CHANNELS.SET_MISSING_ICE_WARNING_ACKNOWLEDGED,
+    acknowledged,
+  ),
 
   getContactAttempts: () => invoke(IPC_CHANNELS.GET_CONTACT_ATTEMPTS),
 
