@@ -3,8 +3,7 @@ import { CircleHelp, MessageSquare, Network, Settings, Users } from 'lucide-reac
 import { Logo } from '../icons/Logo';
 import { KiyeovoDialog } from './header/KiyeovoDialog';
 import { useSetupReadiness, type SetupSeverity } from '../../hooks/useSetupReadiness';
-
-export type SidebarSection = 'chats' | 'groups' | 'setup' | 'help' | 'settings';
+import type { SidebarSection } from './navigation';
 
 type SidebarRailProps = {
   activeSection: SidebarSection;

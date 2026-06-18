@@ -13,14 +13,29 @@ import { PendingKeyExchangeList } from './pending-key-exchange/PendingKeyExchang
 import { GroupInviteList } from './group-invites/GroupInviteList'
 import { setConnected, setPeerId, setRegistered, setUsername } from '../../state/slices/userSlice'
 import { useToast } from '../ui/use-toast'
-import { SidebarRail, type SidebarSection } from './SidebarRail'
+import { SidebarRail } from './SidebarRail'
+import type { NetworkMode } from '../../../core/types'
+import type { SetupSection, SidebarSection } from './navigation'
+import { SetupSidebar } from './setup/SetupSidebar'
 
-export const Sidebar: FC = () => {
+type SidebarProps = {
+  activeSection: SidebarSection;
+  activeSetupSection: SetupSection;
+  onSelectSection: (section: SidebarSection) => void;
+  onSelectSetupSection: (section: SetupSection) => void;
+};
+
+export const Sidebar: FC<SidebarProps> = ({
+  activeSection,
+  activeSetupSection,
+  onSelectSection,
+  onSelectSetupSection,
+}) => {
   const [isLoadingContactAttempts, setIsLoadingContactAttempts] = useState(true);
   const [contactAttemptsError, setContactAttemptsError] = useState<string | null>(null);
   const [isCollapsed, setIsCollapsed] = useState(false);
-  const [activeSection, setActiveSection] = useState<SidebarSection>('chats');
   const [isTorEnabled, setIsTorEnabled] = useState<boolean>(false);
+  const [networkMode, setNetworkMode] = useState<NetworkMode>('fast');
   const networkOnline = useSelector((state: RootState) => state.user.networkOnline);
   const statusSuffix = networkOnline === false ? ' (local)' : isTorEnabled ? ' (tor)' : '';
 
@@ -33,17 +48,23 @@ export const Sidebar: FC = () => {
   };
 
   useEffect(() => {
-    const loadTorSettings = async () => {
+    const loadNetworkSettings = async () => {
       try {
-        const result = await window.kiyeovoAPI.getTorSettings();
-        if (result.success && result.settings) {
-          setIsTorEnabled(result.settings.enabled === 'true');
+        const [torResult, modeResult] = await Promise.all([
+          window.kiyeovoAPI.getTorSettings(),
+          window.kiyeovoAPI.getNetworkMode(),
+        ]);
+        if (torResult.success && torResult.settings) {
+          setIsTorEnabled(torResult.settings.enabled === 'true');
+        }
+        if (modeResult.success) {
+          setNetworkMode(modeResult.mode);
         }
       } catch (error) {
-        console.error('Failed to load Tor settings:', error);
+        console.error('Failed to load network settings:', error);
       }
     };
-    void loadTorSettings();
+    void loadNetworkSettings();
   }, []);
 
   useEffect(() => {
@@ -125,12 +146,22 @@ export const Sidebar: FC = () => {
   );
 
   const renderSectionPane = () => {
-    if (activeSection === 'setup' || activeSection === 'help' || activeSection === 'settings') {
-      return <div className="flex-1 bg-sidebar-background" />;
-    }
-
     if (isCollapsed) {
       return renderCollapsedPane();
+    }
+
+    if (activeSection === 'setup') {
+      return (
+        <SetupSidebar
+          activeSection={activeSetupSection}
+          networkMode={networkMode}
+          onSelectSection={onSelectSetupSection}
+        />
+      );
+    }
+
+    if (activeSection === 'help' || activeSection === 'settings') {
+      return <div className="flex-1 bg-sidebar-background" />;
     }
 
     if (activeSection === 'groups') {
@@ -167,7 +198,7 @@ export const Sidebar: FC = () => {
       <div className="flex h-full">
         <SidebarRail
           activeSection={activeSection}
-          onSelectSection={setActiveSection}
+          onSelectSection={onSelectSection}
           isTorEnabled={isTorEnabled}
         />
         <div

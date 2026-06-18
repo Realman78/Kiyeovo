@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { createContext, useContext } from 'react';
 import type { NetworkMode } from '../../core/types';
 
 export type SetupNodeStatus = 'missing' | 'configured' | 'unknown';
@@ -100,28 +100,30 @@ async function loadSetupReadiness(): Promise<SetupReadiness> {
   };
 }
 
+export async function readSetupReadiness(): Promise<SetupReadiness> {
+  try {
+    return await loadSetupReadiness();
+  } catch (error) {
+    console.warn('[SetupReadiness] Failed to load:', error);
+    return failedReadiness();
+  }
+}
+
+export const SetupReadinessStateContext = createContext<SetupReadiness | null | undefined>(undefined);
+export const SetupReadinessRefreshContext = createContext<(() => Promise<void>) | null>(null);
+
 export function useSetupReadiness() {
-  const [readiness, setReadiness] = useState<SetupReadiness | null>(null);
-
-  useEffect(() => {
-    let disposed = false;
-    void loadSetupReadiness()
-      .then((result) => {
-        if (!disposed) {
-          setReadiness(result);
-        }
-      })
-      .catch((error) => {
-        console.warn('[SetupReadiness] Failed to load:', error);
-        if (!disposed) {
-          setReadiness(failedReadiness());
-        }
-      });
-
-    return () => {
-      disposed = true;
-    };
-  }, []);
-
+  const readiness = useContext(SetupReadinessStateContext);
+  if (readiness === undefined) {
+    throw new Error('useSetupReadiness must be used within SetupReadinessProvider');
+  }
   return readiness;
+}
+
+export function useRefreshSetupReadiness() {
+  const refresh = useContext(SetupReadinessRefreshContext);
+  if (!refresh) {
+    throw new Error('useRefreshSetupReadiness must be used within SetupReadinessProvider');
+  }
+  return refresh;
 }

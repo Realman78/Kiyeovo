@@ -423,9 +423,16 @@ The main window sidebar is now split into:
 Current navigation rollout status:
 - `Chats` shows the legacy mixed sidebar content (direct chats, group chats, and request/invite sections)
 - `Groups` shows group invites plus a groups-only chat list
-- `Setup`, `Help`, and `Settings` can exist as placeholder panes while their dedicated content is being migrated
+- `Setup` shows mode-aware context navigation for bootstrap, relay, and ICE configuration
+- the Bootstrap Setup pane supports listing, adding, removing, ordering, copying, retrying, and viewing the current liveness of configured bootstrap nodes
+- the Relay Setup pane provides the equivalent controls for Fast-mode relay nodes and relay reservation retries
+- a relay retry is reported as failed when none of the attempted relay reservations connect; partial connectivity reports the connected/attempted count
+- the ICE Setup pane remains a placeholder while its functionality is migrated
+- `Help` and `Settings` remain placeholder panes
 - the left rail remains visible while the adjacent sidebar pane can collapse independently
 - the left rail may expand on hover/focus as an overlay to reveal labels without shifting the main layout
+- `Main` owns the active rail section and active Setup subsection so the sidebar context pane and main content area use the same navigation state
+- navigation state is renderer-local UI state; it is not persisted or stored in Redux
 
 Setup readiness is mode-aware:
 - anonymous mode evaluates bootstrap only
@@ -437,7 +444,7 @@ Setup readiness is mode-aware:
 - setup readiness checks configuration existence only; it does not represent current server reachability
 - unreadable bootstrap configuration produces a red indicator; unreadable relay or ICE configuration produces amber when bootstrap configuration is known to exist
 
-For the current phase, the renderer reads setup readiness once when the sidebar mounts. Future Setup-page configuration actions will trigger a new read after successful changes.
+Setup readiness is owned by a provider around the main application. The rail consumes only readiness state, while Setup pages consume a stable refresh action. Successful Bootstrap or Relay Setup add/remove actions trigger a new read so the rail indicator reflects configuration completeness without placing readiness state or invalidation counters in `Main`; ICE refresh wiring will be added with its Setup pane.
 
 Connection Status dialog supports:
 - bootstrap list management and ordering

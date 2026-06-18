@@ -32,6 +32,7 @@ interface ConnectionNodesTabProps {
   onMoveUp?: (index: number) => void;
   onMoveDown?: (index: number) => void;
   moveDisabled?: boolean;
+  nodeListClassName?: string;
 }
 
 export function ConnectionNodesTab({
@@ -57,6 +58,7 @@ export function ConnectionNodesTab({
   onMoveUp,
   onMoveDown,
   moveDisabled = false,
+  nodeListClassName = "max-h-56",
 }: ConnectionNodesTabProps) {
   return (
     <>
@@ -80,7 +82,7 @@ export function ConnectionNodesTab({
             <span className="text-sm text-muted-foreground">{emptyLabel}</span>
           </div>
         ) : (
-          <div className="space-y-2 max-h-56 overflow-y-auto">
+          <div className={`space-y-2 overflow-y-auto ${nodeListClassName}`}>
             {nodes.map((node, index) => (
               <div key={node.key} className="flex items-center gap-4 p-2 rounded-md bg-secondary/50 border border-border">
                 {node.connected === null ? (
