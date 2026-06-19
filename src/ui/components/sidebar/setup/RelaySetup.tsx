@@ -1,14 +1,14 @@
 import { useEffect, useEffectEvent, useRef, useState } from 'react';
+import { useDispatch, useSelector } from 'react-redux';
 import { errStr } from '../../../../core/utils/general-error';
 import { UNEXPECTED_ERROR } from '../../../constants';
 import { useRefreshSetupReadiness } from '../../../hooks/useSetupReadiness';
 import { useToast } from '../../ui/use-toast';
 import { ConnectionNodesTab } from '../header/ConnectionNodesTab';
+import { store, type RootState } from '../../../state/store';
+import { applyLiveness, bumpSetupGeneration, mergeConfiguredNodes, setSetupNodes } from '../../../state/slices/setupNodesSlice';
 
-type RelayNode = {
-  address: string;
-  connected: boolean | null;
-};
+const SECTION = 'relay' as const;
 
 function getUnexpectedErrorMessage(error: unknown): string {
   return errStr(error, UNEXPECTED_ERROR);
@@ -31,11 +31,13 @@ function unwrapIpcResult<T extends { success: boolean; error: string | null }>(
 export function RelaySetup() {
   const { toast } = useToast();
   const refreshSetupReadiness = useRefreshSetupReadiness();
-  const [nodes, setNodes] = useState<RelayNode[]>([]);
+  const dispatch = useDispatch();
+  const nodes = useSelector((state: RootState) => state.setupNodes.relay.nodes);
+  const loadedOnce = useSelector((state: RootState) => state.setupNodes.relay.loadedOnce);
   const [newAddress, setNewAddress] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [copiedAddress, setCopiedAddress] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!loadedOnce);
   const [retrying, setRetrying] = useState(false);
   const [reordering, setReordering] = useState(false);
   const reorderInFlightRef = useRef(false);
@@ -45,29 +47,26 @@ export function RelaySetup() {
 
     try {
       const { statuses } = await window.kiyeovoAPI.getNodesLiveness(addresses);
-      const statusByAddress = new Map(statuses.map((status) => [status.address, status.connected]));
-      setNodes((current) => current.map((node) => (
-        statusByAddress.has(node.address)
-          ? { ...node, connected: statusByAddress.get(node.address)! }
-          : node
-      )));
+      dispatch(applyLiveness({
+        section: SECTION,
+        statuses: statuses.map((status) => ({ address: status.address, connected: status.connected })),
+      }));
     } catch {
       // Preserve the last-known status when a liveness probe fails.
     }
   };
 
   const refreshNodes = async () => {
+    const requestGeneration = store.getState().setupNodes[SECTION].generation;
     const { nodes: configuredNodes } = unwrapIpcResult(
       await window.kiyeovoAPI.getRelayStatus(),
       'Failed to fetch relay nodes',
     );
 
-    setNodes((current) => configuredNodes.map((node) => {
-      const existing = current.find((entry) => entry.address === node.address);
-      return {
-        address: node.address,
-        connected: existing ? existing.connected : node.connected,
-      };
+    dispatch(mergeConfiguredNodes({
+      section: SECTION,
+      configured: configuredNodes.map((node) => ({ address: node.address, connected: node.connected })),
+      requestGeneration,
     }));
     void refreshNodeLiveness(configuredNodes.map((node) => node.address));
   };
@@ -82,7 +81,6 @@ export function RelaySetup() {
 
   useEffect(() => {
     const loadNodes = async () => {
-      setLoading(true);
       setError(null);
 
       try {
@@ -158,6 +156,7 @@ export function RelaySetup() {
         await window.kiyeovoAPI.addRelayNode(normalizedAddress),
         'Failed to add relay node',
       );
+      dispatch(bumpSetupGeneration({ section: SECTION }));
       await refreshNodes();
       setNewAddress('');
       void refreshSetupReadiness();
@@ -175,6 +174,7 @@ export function RelaySetup() {
         await window.kiyeovoAPI.removeRelayNode(address),
         'Failed to remove relay node',
       );
+      dispatch(bumpSetupGeneration({ section: SECTION }));
       await refreshNodes();
       void refreshSetupReadiness();
     } catch (removeError) {
@@ -193,7 +193,7 @@ export function RelaySetup() {
       reorderedNodes[swapIndex]!,
       reorderedNodes[index]!,
     ];
-    setNodes(reorderedNodes);
+    dispatch(setSetupNodes({ section: SECTION, nodes: reorderedNodes }));
     setError(null);
     reorderInFlightRef.current = true;
     setReordering(true);

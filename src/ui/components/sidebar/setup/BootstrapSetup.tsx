@@ -1,15 +1,16 @@
 import { useEffect, useEffectEvent, useRef, useState } from 'react';
+import { useDispatch, useSelector } from 'react-redux';
 import type { BootstrapConnectResult } from '../../../../core/types';
 import { errStr } from '../../../../core/utils/general-error';
 import { UNEXPECTED_ERROR } from '../../../constants';
 import { useRefreshSetupReadiness } from '../../../hooks/useSetupReadiness';
 import { useToast } from '../../ui/use-toast';
-import { ConnectionNodesTab } from '../header/ConnectionNodesTab';
+import { RadioTower } from 'lucide-react';
+import { SetupNodesView } from './SetupNodesView';
+import { store, type RootState } from '../../../state/store';
+import { applyLiveness, bumpSetupGeneration, mergeConfiguredNodes, setSetupNodes } from '../../../state/slices/setupNodesSlice';
 
-type BootstrapNode = {
-  address: string;
-  connected: boolean | null;
-};
+const SECTION = 'bootstrap' as const;
 
 function getUnexpectedErrorMessage(error: unknown): string {
   return errStr(error, UNEXPECTED_ERROR);
@@ -32,11 +33,13 @@ function unwrapIpcResult<T extends { success: boolean; error: string | null }>(
 export function BootstrapSetup() {
   const { toast } = useToast();
   const refreshSetupReadiness = useRefreshSetupReadiness();
-  const [nodes, setNodes] = useState<BootstrapNode[]>([]);
+  const dispatch = useDispatch();
+  const nodes = useSelector((state: RootState) => state.setupNodes.bootstrap.nodes);
+  const loadedOnce = useSelector((state: RootState) => state.setupNodes.bootstrap.loadedOnce);
   const [newAddress, setNewAddress] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [copiedAddress, setCopiedAddress] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!loadedOnce);
   const [retrying, setRetrying] = useState(false);
   const [reordering, setReordering] = useState(false);
   const reorderInFlightRef = useRef(false);
@@ -46,29 +49,26 @@ export function BootstrapSetup() {
 
     try {
       const { statuses } = await window.kiyeovoAPI.getNodesLiveness(addresses);
-      const statusByAddress = new Map(statuses.map((status) => [status.address, status.connected]));
-      setNodes((current) => current.map((node) => (
-        statusByAddress.has(node.address)
-          ? { ...node, connected: statusByAddress.get(node.address)! }
-          : node
-      )));
+      dispatch(applyLiveness({
+        section: SECTION,
+        statuses: statuses.map((status) => ({ address: status.address, connected: status.connected })),
+      }));
     } catch {
       // Preserve the last-known status when a liveness probe fails.
     }
   };
 
   const refreshNodes = async () => {
+    const requestGeneration = store.getState().setupNodes[SECTION].generation;
     const { nodes: configuredNodes } = unwrapIpcResult(
       await window.kiyeovoAPI.getBootstrapNodes(),
       'Failed to fetch bootstrap nodes',
     );
 
-    setNodes((current) => configuredNodes.map((node) => {
-      const existing = current.find((entry) => entry.address === node.address);
-      return {
-        address: node.address,
-        connected: existing ? existing.connected : node.connected,
-      };
+    dispatch(mergeConfiguredNodes({
+      section: SECTION,
+      configured: configuredNodes.map((node) => ({ address: node.address, connected: node.connected })),
+      requestGeneration,
     }));
     void refreshNodeLiveness(configuredNodes.map((node) => node.address));
   };
@@ -83,7 +83,6 @@ export function BootstrapSetup() {
 
   useEffect(() => {
     const loadNodes = async () => {
-      setLoading(true);
       setError(null);
 
       try {
@@ -161,13 +160,13 @@ export function BootstrapSetup() {
     }
   };
 
-  const handleAdd = async () => {
+  const handleAdd = async (): Promise<boolean> => {
     const normalizedAddress = newAddress.trim();
-    if (!normalizedAddress) return;
+    if (!normalizedAddress) return false;
 
     if (nodes.some((node) => node.address === normalizedAddress)) {
-      setError('Bootstrap node already exists');
-      return;
+      toast.error('That bootstrap server is already in your list');
+      return false;
     }
 
     setError(null);
@@ -176,11 +175,14 @@ export function BootstrapSetup() {
         await window.kiyeovoAPI.addBootstrapNode(normalizedAddress),
         'Failed to add bootstrap node',
       );
+      dispatch(bumpSetupGeneration({ section: SECTION }));
       await refreshNodes();
       setNewAddress('');
       void refreshSetupReadiness();
+      return true;
     } catch (addError) {
-      showError(getUnexpectedErrorMessage(addError));
+      toast.error(getUnexpectedErrorMessage(addError));
+      return false;
     }
   };
 
@@ -191,6 +193,7 @@ export function BootstrapSetup() {
         await window.kiyeovoAPI.removeBootstrapNode(address),
         'Failed to remove bootstrap node',
       );
+      dispatch(bumpSetupGeneration({ section: SECTION }));
       await refreshNodes();
       void refreshSetupReadiness();
     } catch (removeError) {
@@ -209,7 +212,7 @@ export function BootstrapSetup() {
       reorderedNodes[swapIndex]!,
       reorderedNodes[index]!,
     ];
-    setNodes(reorderedNodes);
+    dispatch(setSetupNodes({ section: SECTION, nodes: reorderedNodes }));
     setError(null);
     reorderInFlightRef.current = true;
     setReordering(true);
@@ -236,7 +239,6 @@ export function BootstrapSetup() {
     }, 2000);
   };
 
-  const connectedCount = nodes.filter((node) => node.connected).length;
   const entries = nodes.map((node) => ({
     key: node.address,
     address: node.address,
@@ -244,49 +246,35 @@ export function BootstrapSetup() {
   }));
 
   return (
-    <div className="h-full overflow-y-auto bg-sidebar-accent">
-      <div className="mx-auto w-full max-w-4xl px-8 py-10">
-        <header>
-          <h1 className="text-2xl font-semibold text-foreground">Bootstrap servers</h1>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-            Bootstrap servers connect you to the network so you can discover people, groups, and offline messages.
-          </p>
-        </header>
-
-        <div className="mt-8 space-y-6 rounded-lg border border-border bg-card p-6">
-          <ConnectionNodesTab
-            sectionLabel="Bootstrap Nodes"
-            addLabel="Add Bootstrap Node"
-            addPlaceholder="Peer address"
-            retryLabel="Retry Bootstrap Connection"
-            loadingLabel="Loading nodes..."
-            emptyLabel="No bootstrap nodes configured"
-            nodes={entries}
-            loading={loading}
-            error={error}
-            copiedAddress={copiedAddress}
-            newAddress={newAddress}
-            retrying={retrying}
-            retryDisabled={retrying || loading || nodes.length === 0}
-            onNewAddressChange={setNewAddress}
-            onAdd={handleAdd}
-            onRetry={handleRetry}
-            onCopy={handleCopy}
-            onRemove={handleRemove}
-            onMoveUp={(index) => handleMove(index, 'up')}
-            onMoveDown={(index) => handleMove(index, 'down')}
-            moveDisabled={reordering}
-            nodeListClassName="max-h-[calc(100vh-25rem)]"
-          />
-
-          <div className="border-t border-border pt-4">
-            <div className="flex items-center justify-between text-xs font-mono">
-              <span className="text-muted-foreground">Bootstrap Nodes Connected</span>
-              <span className="text-foreground">{connectedCount}/{nodes.length}</span>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
+    <SetupNodesView
+      icon={RadioTower}
+      title="Bootstrap servers"
+      description="Bootstrap servers connect you to the network so you can discover people, participate in groups, receive & send offline messages."
+      nodesTitle="Configured servers"
+      nodeSingular="bootstrap server"
+      emptyTitle="No bootstrap servers configured"
+      emptyDescription="Add at least one bootstrap server before trying to connect to the network."
+      addTitle="Add bootstrap server"
+      addDescription="Enter the complete peer multiaddress provided by the person or organization running the server."
+      addPlaceholder="/ip4/1.2.3.4/tcp/4001/p2p/12D3Koo..."
+      addButtonLabel="Add server"
+      retryLabel="Retry connection"
+      loadingLabel="Loading bootstrap servers..."
+      nodes={entries}
+      loading={loading}
+      error={error}
+      copiedAddress={copiedAddress}
+      newAddress={newAddress}
+      retrying={retrying}
+      reordering={reordering}
+      retryDisabled={retrying || loading || nodes.length === 0}
+      onNewAddressChange={setNewAddress}
+      onAdd={handleAdd}
+      onRetry={handleRetry}
+      onCopy={handleCopy}
+      onRemove={handleRemove}
+      onMoveUp={(index) => handleMove(index, 'up')}
+      onMoveDown={(index) => handleMove(index, 'down')}
+    />
   );
 }
