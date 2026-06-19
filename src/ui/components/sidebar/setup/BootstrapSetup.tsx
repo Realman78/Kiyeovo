@@ -244,7 +244,7 @@ export function BootstrapSetup() {
   }));
 
   return (
-    <div className="h-full overflow-y-auto bg-background">
+    <div className="h-full overflow-y-auto bg-sidebar-accent">
       <div className="mx-auto w-full max-w-4xl px-8 py-10">
         <header>
           <h1 className="text-2xl font-semibold text-foreground">Bootstrap servers</h1>

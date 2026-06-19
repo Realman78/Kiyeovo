@@ -147,6 +147,17 @@ export const Sidebar: FC<SidebarProps> = ({
 
   const renderSectionPane = () => {
     if (isCollapsed) {
+      if (activeSection === 'setup') {
+        return (
+          <SetupSidebar
+            activeSection={activeSetupSection}
+            networkMode={networkMode}
+            onSelectSection={onSelectSetupSection}
+            collapsed
+          />
+        );
+      }
+
       return renderCollapsedPane();
     }
 
@@ -194,7 +205,7 @@ export const Sidebar: FC<SidebarProps> = ({
   };
 
   return (
-    <div className={`relative z-10 h-full overflow-visible border-r border-sidebar-border bg-sidebar-background transition-[width] duration-300 ease-in-out ${isCollapsed ? 'w-30' : 'w-110'}`}>
+    <div className={`relative z-10 h-full overflow-visible ${activeSection === 'setup' ? '' : 'border-r'} border-sidebar-border bg-sidebar-background transition-[width] duration-300 ease-in-out ${isCollapsed ? 'w-30' : 'w-110'}`}>
       <div className="flex h-full">
         <SidebarRail
           activeSection={activeSection}

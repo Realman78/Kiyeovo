@@ -791,7 +791,7 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
         </div>
         {!isChatSection && (
           <div
-            className="absolute inset-0 bg-background"
+            className={`absolute inset-0 ${activeSection === 'setup' ? 'bg-sidebar-accent' : 'bg-background'}`}
             data-setup-section={activeSection === 'setup' ? activeSetupSection : undefined}
           >
             {activeSection === 'setup' && activeSetupSection === 'bootstrap' && (
