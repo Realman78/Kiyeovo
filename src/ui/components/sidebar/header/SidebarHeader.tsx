@@ -1,7 +1,6 @@
 import { useEffect, useState, useRef, type FC } from "react";
 import { Plus, MessageSquarePlus, UserPlus, Users } from "lucide-react";
 import { Button } from "../../ui/Button";
-import ConnectionStatusDialog from "./ConnectionStatusDialog";
 import { useDispatch, useSelector } from "react-redux";
 import { setConnected, setRegistered, setRegistrationInProgress, setUsername } from "../../../state/slices/userSlice";
 import NewConversationDialog from "./NewConversationDialog";
@@ -18,10 +17,14 @@ import { UNEXPECTED_ERROR } from "../../../constants";
 type SidebarHeaderProps = {
     statusSuffix: string;
     collapsed?: boolean;
+    onOpenBootstrapSetup: () => void;
 };
 
-export const SidebarHeader: FC<SidebarHeaderProps> = ({ collapsed = false, statusSuffix }) => {
-    const [dhtDialogOpen, setDhtDialogOpen] = useState(false);
+export const SidebarHeader: FC<SidebarHeaderProps> = ({
+    collapsed = false,
+    statusSuffix,
+    onOpenBootstrapSetup,
+}) => {
     const [isDHTConnected, setIsDHTConnected] = useState<boolean | null>(null);
     const [newConversationDialogOpen, setNewConversationDialogOpen] = useState(false);
     const [importTrustedUserDialogOpen, setImportTrustedUserDialogOpen] = useState(false);
@@ -237,10 +240,6 @@ export const SidebarHeader: FC<SidebarHeaderProps> = ({ collapsed = false, statu
         }
     }, [isConnected]);
 
-    const handleShowDhtDialog = () => {
-        setDhtDialogOpen(true);
-    }
-
     const handleShowNewConversationDialog = () => {
         if (!isRegistered || registrationInProgress) {
             toast.error('Register before starting a new conversation.');
@@ -345,17 +344,19 @@ export const SidebarHeader: FC<SidebarHeaderProps> = ({ collapsed = false, statu
             <div className={collapsed ? "flex flex-col items-center gap-3" : "w-full flex items-center justify-between"}>
                 {collapsed ? (
                     <button
-                        onClick={handleShowDhtDialog}
+                        onClick={onOpenBootstrapSetup}
                         className="flex cursor-pointer items-center justify-center w-8 h-8 rounded-md transition-colors hover:bg-sidebar-accent"
                         title={statusText}
-                        aria-label="DHT status"
+                        aria-label={`${statusText}. Open Bootstrap setup`}
                     >
                         <span className={`w-2.5 h-2.5 rounded-full ${isDHTConnected === null ? "bg-muted-foreground" : isDHTConnected ? "bg-success pulse-online" : "bg-destructive"}`} />
                     </button>
                 ) : (
                     <button
-                        onClick={handleShowDhtDialog}
+                        onClick={onOpenBootstrapSetup}
                         className={`flex cursor-pointer items-center gap-2 px-2 py-1 rounded-md transition-colors hover:bg-sidebar-accent group ${isDHTConnected === null ? "text-muted-foreground" : isDHTConnected ? "text-success" : "text-destructive"}`}
+                        aria-label={`${statusText}. Open Bootstrap setup`}
+                        title="Open setup"
                     >
                         <span className="font-mono text-xs uppercase tracking-wider">
                             {statusText}
@@ -398,7 +399,6 @@ export const SidebarHeader: FC<SidebarHeaderProps> = ({ collapsed = false, statu
                 </DropdownMenu>
             </div>
         </div>
-        <ConnectionStatusDialog open={dhtDialogOpen} onOpenChange={setDhtDialogOpen} isConnected={isDHTConnected} />
         <NewConversationDialog
             open={newConversationDialogOpen}
             onOpenChange={(open) => {
