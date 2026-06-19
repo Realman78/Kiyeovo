@@ -19,6 +19,7 @@ import { ScreenShareSourcePicker } from '../components/call/ScreenShareSourcePic
 import type { SetupSection, SidebarSection } from '../components/sidebar/navigation';
 import { BootstrapSetup } from '../components/sidebar/setup/BootstrapSetup';
 import { RelaySetup } from '../components/sidebar/setup/RelaySetup';
+import { IceSetup } from '../components/sidebar/setup/IceSetup';
 
 type MainProps = {
   wakeRecoveryToken: number | null;
@@ -799,6 +800,9 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
             )}
             {activeSection === 'setup' && activeSetupSection === 'relay' && (
               <RelaySetup />
+            )}
+            {activeSection === 'setup' && activeSetupSection === 'ice' && (
+              <IceSetup />
             )}
           </div>
         )}

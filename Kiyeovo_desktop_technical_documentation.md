@@ -427,7 +427,9 @@ Current navigation rollout status:
 - the Bootstrap Setup pane is a page-native workspace with separate status, configured-server, and add-server sections; it supports listing, adding, removing, ordering, copying, retrying, and viewing current liveness
 - the Relay Setup pane provides the equivalent controls for Fast-mode relay nodes and relay reservation retries
 - a relay retry is reported as failed when none of the attempted relay reservations connect; partial connectivity reports the connected/attempted count
-- the ICE Setup pane remains a placeholder while its functionality is migrated
+- the ICE Setup pane supports adding, editing, removing, ordering, copying, and testing STUN/TURN servers
+- ICE test results are retained in renderer Redux for the current app session and include a test timestamp; editing or removing a server invalidates its previous result
+- ICE tests continue to completion if the user navigates away, while request IDs prevent older overlapping tests from replacing newer results; Test-all batch state is tracked separately so its progress indicator remains active until every test in that batch settles
 - Setup context navigation and content use one continuous background treatment; when the context pane is collapsed, Bootstrap, Relay, and STUN/TURN remain available as icon-only actions
 - the Setup context pane keeps its internal content at the final expanded width while the parent clips the width transition; labels fade out quickly on collapse and fade in after expansion begins, avoiding repeated text wrapping and competing horizontal motion
 - `Help` and `Settings` remain placeholder panes
@@ -446,7 +448,9 @@ Setup readiness is mode-aware:
 - setup readiness checks configuration existence only; it does not represent current server reachability
 - unreadable bootstrap configuration produces a red indicator; unreadable relay or ICE configuration produces amber when bootstrap configuration is known to exist
 
-Setup readiness is owned by a provider around the main application. The rail consumes only readiness state, while Setup pages consume a stable refresh action. Successful Bootstrap or Relay Setup add/remove actions trigger a new read so the rail indicator reflects configuration completeness without placing readiness state or invalidation counters in `Main`; ICE refresh wiring will be added with its Setup pane.
+Setup readiness is owned by a provider around the main application. The rail consumes only readiness state, while Setup pages consume a stable refresh action. Successful Bootstrap, Relay, or ICE Setup add/remove actions trigger a new read so the rail indicator reflects configuration completeness without placing readiness state or invalidation counters in `Main`.
+
+Bootstrap and Relay Setup pages cache their configured-node lists and per-node liveness in Redux (the `setupNodes` slice, keyed by section). The pages still own fetching and the 3-second liveness polling, which runs only while a page is mounted, so no background polling continues for unmounted pages. Redux retains the last-known snapshot, so navigating away and back renders the cached list immediately instead of re-flashing a loading/checking state; only the first load per app session shows a loading state until the initial snapshot is cached. Each section tracks a monotonic generation that every mutation (add, remove, reorder) increments. A configuration read captures the generation when it starts and is discarded on arrival if a newer mutation has occurred, preventing a slow in-flight poll from overwriting a more recent list or order with a stale snapshot that would otherwise persist in the cache.
 
 Connection Status dialog supports:
 - bootstrap list management and ordering
@@ -473,10 +477,10 @@ Practical notes:
 Current behavior:
 - calls are fast-mode only and use WebRTC media in the renderer
 - the default ICE list in `src/core/network/default-infrastructure.ts` is currently empty
-- users can add runtime ICE overrides from `Connection status -> Calls` in fast mode
+- users can add runtime ICE overrides from Setup or `Connection status -> Calls` in fast mode
 - supported entry types are `stun`, `turn`, and `turns`
 - TURN entries require username + credential
-- multiple ICE servers are supported and passed to `RTCPeerConnection` in order
+- multiple ICE servers are supported and passed to `RTCPeerConnection` in configured order; the browser's ICE agent may gather and check candidates in parallel, so this is not a strict first-server-then-next retry order
 
 Practical self-hosting path:
 - run a TURN server such as coturn
@@ -484,7 +488,8 @@ Practical self-hosting path:
 - add matching STUN/TURN URLs in the app UI instead of rebuilding
 
 Notes:
-- the app validates ICE entry format, but it does not probe server health yet
+- Setup can probe each configured server through the renderer's WebRTC engine: STUN requires a server-reflexive candidate, while TURN/TURNS requires a relay candidate and distinguishes invalid credentials when WebRTC reports an authorization failure
+- test results describe the last explicit test rather than continuous health; they remain in memory for the app session and display how long ago the test completed
 - if an ICE entry list is saved, that runtime list is used instead of the empty default constant
 - users may acknowledge the missing-ICE Setup warning if they do not plan to use calls; call setup remains visibly unconfigured
 

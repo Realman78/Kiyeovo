@@ -335,8 +335,8 @@ export function SetupNodesView({
           </div>
 
           {!loading && total > 0 && (
-            <div className="mt-3 w-full flex justify-end">
-              <div className="flex flex-col flex-wrap gap-y-1 px-1 text-[11px] text-muted-foreground">
+            <div className="mt-4 w-full flex justify-end">
+              <div className="flex flex-row flex-wrap gap-5 px-1 text-[11px] text-muted-foreground">
                 <span className="flex items-center gap-1.5">
                   <span className="h-1.75 w-1.75 rounded-full bg-success" aria-hidden />
                   Reachable
@@ -355,7 +355,7 @@ export function SetupNodesView({
         </section>
 
         <section
-          className="mt-8 flex items-center justify-between gap-4 border-t-2 border-x-0 border-border/70 py-4"
+          className="mt-4 flex items-center justify-between gap-4 border-t-2 border-x-0 border-border/70 py-4"
           aria-label={`${title} status`}
         >
           <div className="flex items-center gap-3">

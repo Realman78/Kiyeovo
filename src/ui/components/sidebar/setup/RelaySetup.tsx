@@ -4,7 +4,8 @@ import { errStr } from '../../../../core/utils/general-error';
 import { UNEXPECTED_ERROR } from '../../../constants';
 import { useRefreshSetupReadiness } from '../../../hooks/useSetupReadiness';
 import { useToast } from '../../ui/use-toast';
-import { ConnectionNodesTab } from '../header/ConnectionNodesTab';
+import { Route } from 'lucide-react';
+import { SetupNodesView } from './SetupNodesView';
 import { store, type RootState } from '../../../state/store';
 import { applyLiveness, bumpSetupGeneration, mergeConfiguredNodes, setSetupNodes } from '../../../state/slices/setupNodesSlice';
 
@@ -130,9 +131,11 @@ export function RelaySetup() {
       );
       await refreshAfterRetry();
       if (result.connected === 0) {
-        showError('All relay reservations failed');
+        showError('Could not connect to any relay server');
       } else {
-        toast.success(`Relay retry complete (${result.connected}/${result.attempted})`);
+        toast.success(
+          `Connected to ${result.connected} of ${result.attempted} relay server${result.attempted === 1 ? '' : 's'}`,
+        );
       }
     } catch (retryError) {
       showError(getUnexpectedErrorMessage(retryError));
@@ -220,7 +223,6 @@ export function RelaySetup() {
     }, 2000);
   };
 
-  const connectedCount = nodes.filter((node) => node.connected).length;
   const entries = nodes.map((node) => ({
     key: node.address,
     address: node.address,
@@ -228,49 +230,35 @@ export function RelaySetup() {
   }));
 
   return (
-    <div className="h-full overflow-y-auto bg-sidebar-accent">
-      <div className="mx-auto w-full max-w-4xl px-8 py-10">
-        <header>
-          <h1 className="text-2xl font-semibold text-foreground">Relay servers</h1>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-            Relay servers help messages reach people when a direct peer-to-peer connection is unavailable.
-          </p>
-        </header>
-
-        <div className="mt-8 space-y-6 rounded-lg border border-border bg-card p-6">
-          <ConnectionNodesTab
-            sectionLabel="Relay Nodes"
-            addLabel="Add Relay Node"
-            addPlaceholder="/ip4/1.2.3.4/tcp/4002/p2p/12D3Koo..."
-            retryLabel="Retry Relay Reservations"
-            loadingLabel="Loading relay nodes..."
-            emptyLabel="No relay nodes configured"
-            nodes={entries}
-            loading={loading}
-            error={error}
-            copiedAddress={copiedAddress}
-            newAddress={newAddress}
-            retrying={retrying}
-            retryDisabled={retrying || loading || nodes.length === 0}
-            onNewAddressChange={setNewAddress}
-            onAdd={handleAdd}
-            onRetry={handleRetry}
-            onCopy={handleCopy}
-            onRemove={handleRemove}
-            onMoveUp={(index) => handleMove(index, 'up')}
-            onMoveDown={(index) => handleMove(index, 'down')}
-            moveDisabled={reordering}
-            nodeListClassName="max-h-[calc(100vh-25rem)]"
-          />
-
-          <div className="border-t border-border pt-4">
-            <div className="flex items-center justify-between text-xs font-mono">
-              <span className="text-muted-foreground">Relay Nodes Connected</span>
-              <span className="text-foreground">{connectedCount}/{nodes.length}</span>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
+    <SetupNodesView
+      icon={Route}
+      title="Relay servers"
+      description="Relay servers help your messages reach people when a direct peer-to-peer connection isn't available."
+      nodesTitle="Configured servers"
+      nodeSingular="relay server"
+      emptyTitle="No relay servers configured"
+      emptyDescription="Add a relay server to improve message delivery when direct connections fail."
+      addTitle="Add relay server"
+      addDescription="Enter the complete peer multiaddress provided by the person or organization running the relay."
+      addPlaceholder="/ip4/1.2.3.4/tcp/4002/p2p/12D3Koo..."
+      addButtonLabel="Add server"
+      retryLabel="Retry connection"
+      loadingLabel="Loading relay servers..."
+      nodes={entries}
+      loading={loading}
+      error={error}
+      copiedAddress={copiedAddress}
+      newAddress={newAddress}
+      retrying={retrying}
+      reordering={reordering}
+      retryDisabled={retrying || loading || nodes.length === 0}
+      onNewAddressChange={setNewAddress}
+      onAdd={handleAdd}
+      onRetry={handleRetry}
+      onCopy={handleCopy}
+      onRemove={handleRemove}
+      onMoveUp={(index) => handleMove(index, 'up')}
+      onMoveDown={(index) => handleMove(index, 'down')}
+    />
   );
 }

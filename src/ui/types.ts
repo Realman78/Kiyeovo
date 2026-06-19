@@ -18,6 +18,7 @@ export type CallMediaType = 'audio' | 'video';
 export type CameraLifecycleState = 'off' | 'starting' | 'on' | 'stopping';
 export type ScreenShareLifecycleState = 'idle' | 'starting' | 'sharing' | 'stopping';
 export type ScreenShareStopReason = 'manual' | 'track-ended' | 'call-ended' | 'failed';
+export type IceTestStatus = 'reachable' | 'unreachable' | 'invalid_credentials' | 'indeterminate';
 
 export type IncomingCallSignal = {
   type: 'CALL_OFFER';

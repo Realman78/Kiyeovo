@@ -4,6 +4,7 @@ import userReducer from './slices/userSlice';
 import appConfigReducer from './slices/appConfigSlice';
 import callReducer from './slices/callSlice';
 import setupNodesReducer from './slices/setupNodesSlice';
+import iceSetupReducer from './slices/iceSetupSlice';
 
 export const store = configureStore({
   reducer: {
@@ -12,6 +13,7 @@ export const store = configureStore({
     appConfig: appConfigReducer,
     call: callReducer,
     setupNodes: setupNodesReducer,
+    iceSetup: iceSetupReducer,
   },
 });
 
