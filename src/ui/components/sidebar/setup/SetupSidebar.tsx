@@ -59,10 +59,10 @@ export const SetupSidebar: FC<SetupSidebarProps> = ({
           <Network className="h-5 w-5 text-sidebar-foreground" />
         </span>
         <h2
-          className={`whitespace-nowrap text-base font-semibold text-sidebar-foreground transition-[opacity,transform] duration-150 ${
+          className={`whitespace-nowrap text-base font-semibold text-sidebar-foreground transition-opacity ${
             collapsed
-              ? '-translate-x-2 opacity-0'
-              : 'translate-x-0 opacity-100 delay-150'
+              ? 'opacity-0 duration-75'
+              : 'opacity-100 delay-150 duration-150'
           }`}
         >
           Setup
@@ -90,10 +90,10 @@ export const SetupSidebar: FC<SetupSidebarProps> = ({
                 <Icon className="h-5 w-5" />
               </span>
               <span
-                className={`min-w-0 flex-1 pr-5 transition-[opacity,transform] duration-150 ${
+                className={`min-w-0 flex-1 pr-5 transition-opacity ${
                   collapsed
-                    ? '-translate-x-2 opacity-0'
-                    : 'translate-x-0 opacity-100 delay-150'
+                    ? 'opacity-0 duration-75'
+                    : 'opacity-100 delay-150 duration-150'
                 }`}
               >
                 <span className="block whitespace-nowrap text-sm font-medium">{item.title}</span>

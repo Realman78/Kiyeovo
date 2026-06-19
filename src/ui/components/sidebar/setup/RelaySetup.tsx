@@ -143,13 +143,13 @@ export function RelaySetup() {
     }
   };
 
-  const handleAdd = async () => {
+  const handleAdd = async (): Promise<boolean> => {
     const normalizedAddress = newAddress.trim();
-    if (!normalizedAddress) return;
+    if (!normalizedAddress) return false;
 
     if (nodes.some((node) => node.address === normalizedAddress)) {
-      setError('Relay node already exists');
-      return;
+      toast.error('That relay server is already in your list');
+      return false;
     }
 
     setError(null);
@@ -161,8 +161,10 @@ export function RelaySetup() {
       await refreshNodes();
       setNewAddress('');
       void refreshSetupReadiness();
+      return true;
     } catch (addError) {
-      showError(getUnexpectedErrorMessage(addError));
+      toast.error(getUnexpectedErrorMessage(addError));
+      return false;
     }
   };
 

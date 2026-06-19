@@ -119,6 +119,8 @@ The first Setup content migration copies the Bootstrap functionality into a dedi
 - users can explicitly retry the bootstrap connection
 - successful add/remove actions use the Setup readiness provider's refresh action to update the rail indicator
 
+The Bootstrap page was subsequently redesigned as a page-native workspace. It no longer uses the dialog-style outer card or full-width retry footer. Status and retry controls appear together at the top, configured servers use full-width divided rows, and adding a server is a separate section with a labeled action. Presentation lives in `SetupNodesView.tsx` so Relay can adopt the same workspace without changing the legacy dialog component.
+
 The provider exposes separate state and action contexts. `SidebarRail` consumes readiness state, while Bootstrap Setup consumes only the stable refresh action. This avoids revision counters and prop drilling through `Main` and `Sidebar`, and readiness updates do not make `Main` a context consumer.
 
 `ConnectionStatusDialog` remains unchanged and fully functional during this staged migration. The STUN/TURN Setup pane remains empty until its migration step. The status button still opens the existing dialog; it will be rerouted only after all three sections have been copied.
@@ -143,7 +145,7 @@ The Bootstrap page now uses the same polling guard while reordering, shows actio
 - Bootstrap, Relay, and the empty STUN/TURN pane share the selected Setup navigation background so the context pane and content read as one workspace.
 - Setup navigation uses `RadioTower` for Bootstrap, `Route` for Relay, and `PhoneCall` for STUN/TURN.
 - Collapsing the context pane keeps Setup navigation visible as icon-only actions with titles and accessible labels instead of falling back to the chat header/footer.
-- The Setup navigation is always laid out at its final `w-96` width. Its parent clips that fixed layout while animating between collapsed and expanded widths, and labels use opacity/transform transitions instead of being reflowed on every width-animation frame.
+- The Setup navigation is always laid out at its final `w-96` width. Its parent clips that fixed layout while animating between collapsed and expanded widths. Labels use an immediate short opacity fade on collapse and a delayed fade on expansion, without translation or per-frame text reflow.
 
 ## Verification
 

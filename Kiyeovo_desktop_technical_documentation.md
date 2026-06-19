@@ -424,12 +424,12 @@ Current navigation rollout status:
 - `Chats` shows the legacy mixed sidebar content (direct chats, group chats, and request/invite sections)
 - `Groups` shows group invites plus a groups-only chat list
 - `Setup` shows mode-aware context navigation for bootstrap, relay, and ICE configuration
-- the Bootstrap Setup pane supports listing, adding, removing, ordering, copying, retrying, and viewing the current liveness of configured bootstrap nodes
+- the Bootstrap Setup pane is a page-native workspace with separate status, configured-server, and add-server sections; it supports listing, adding, removing, ordering, copying, retrying, and viewing current liveness
 - the Relay Setup pane provides the equivalent controls for Fast-mode relay nodes and relay reservation retries
 - a relay retry is reported as failed when none of the attempted relay reservations connect; partial connectivity reports the connected/attempted count
 - the ICE Setup pane remains a placeholder while its functionality is migrated
 - Setup context navigation and content use one continuous background treatment; when the context pane is collapsed, Bootstrap, Relay, and STUN/TURN remain available as icon-only actions
-- the Setup context pane keeps its internal content at the final expanded width while the parent clips the width transition; labels fade in after expansion begins, avoiding repeated text wrapping during the animation
+- the Setup context pane keeps its internal content at the final expanded width while the parent clips the width transition; labels fade out quickly on collapse and fade in after expansion begins, avoiding repeated text wrapping and competing horizontal motion
 - `Help` and `Settings` remain placeholder panes
 - the left rail remains visible while the adjacent sidebar pane can collapse independently
 - the left rail may expand on hover/focus as an overlay to reveal labels without shifting the main layout
