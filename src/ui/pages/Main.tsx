@@ -20,6 +20,7 @@ import type { SetupSection, SidebarSection } from '../components/sidebar/navigat
 import { BootstrapSetup } from '../components/sidebar/setup/BootstrapSetup';
 import { RelaySetup } from '../components/sidebar/setup/RelaySetup';
 import { IceSetup } from '../components/sidebar/setup/IceSetup';
+import { SettingsPage } from '../components/sidebar/settings/SettingsPage';
 
 type MainProps = {
   wakeRecoveryToken: number | null;
@@ -803,6 +804,9 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
             )}
             {activeSection === 'setup' && activeSetupSection === 'ice' && (
               <IceSetup />
+            )}
+            {activeSection === 'settings' && (
+              <SettingsPage />
             )}
           </div>
         )}

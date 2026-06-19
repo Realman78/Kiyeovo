@@ -309,9 +309,9 @@ Behavior highlights:
 - screen sharing replaces the main video surface while active; the camera is not kept as a second primary tile in the current phase
 - only one side may screen-share at a time; local sharing wins if a remote started signal arrives during local sharing
 - ICE servers fall back to `DEFAULT_WEBRTC_ICE_SERVERS` in `src/core/network/default-infrastructure.ts`; the current default list is empty
-- fast mode has a runtime ICE editor in `Connection status -> Calls`
+- fast mode has a runtime ICE editor in `Setup -> STUN/TURN servers`
 - runtime overrides are stored in the settings table and loaded by renderer `CallService` when a call starts or is accepted
-- validation is format-based only; there is no built-in health check for STUN/TURN reachability
+- saved entries are format-validated, and the STUN/TURN Setup pane also provides explicit point-in-time reachability tests
 
 Camera and screen-share implementation notes:
 - calls pre-negotiate a shared video transceiver so screen sharing can start without mid-call SDP renegotiation
@@ -432,7 +432,8 @@ Current navigation rollout status:
 - ICE tests continue to completion if the user navigates away, while request IDs prevent older overlapping tests from replacing newer results; Test-all batch state is tracked separately so its progress indicator remains active until every test in that batch settles
 - Setup context navigation and content use one continuous background treatment; when the context pane is collapsed, Bootstrap, Relay, and STUN/TURN remain available as icon-only actions
 - the Setup context pane keeps its internal content at the final expanded width while the parent clips the width transition; labels fade out quickly on collapse and fade in after expansion begins, avoiding repeated text wrapping and competing horizontal motion
-- `Help` and `Settings` remain placeholder panes
+- `Settings` is a rail-only page with page-native action rows; the initial rollout includes About and the persisted global Notifications & Sounds preference
+- `Help` remains a placeholder pane
 - the left rail remains visible while the adjacent sidebar pane can collapse independently
 - the left rail may expand on hover/focus as an overlay to reveal labels without shifting the main layout
 - `Main` owns the active rail section and active Setup subsection so the sidebar context pane and main content area use the same navigation state
@@ -452,11 +453,10 @@ Setup readiness is owned by a provider around the main application. The rail con
 
 Bootstrap and Relay Setup pages cache their configured-node lists and per-node liveness in Redux (the `setupNodes` slice, keyed by section). The pages still own fetching and the 3-second liveness polling, which runs only while a page is mounted, so no background polling continues for unmounted pages. Redux retains the last-known snapshot, so navigating away and back renders the cached list immediately instead of re-flashing a loading/checking state; only the first load per app session shows a loading state until the initial snapshot is cached. Each section tracks a monotonic generation that every mutation (add, remove, reorder) increments. A configuration read captures the generation when it starts and is discarded on arrival if a newer mutation has occurred, preventing a slow in-flight poll from overwriting a more recent list or order with a stale snapshot that would otherwise persist in the cache.
 
-Connection Status dialog supports:
-- bootstrap list management and ordering
-- relay reservation retry in fast mode
-- explicit bootstrap retry
-- mode-sensitive tabs and counters
+The legacy Connection Status dialog and its dialog-specific tab components have
+been removed. Bootstrap, relay, and ICE configuration now live exclusively in
+their Setup panes. The sidebar connection-status button routes directly to
+`Setup -> Bootstrap`.
 
 "Online" status is DHT-reachability focused, not just generic socket presence.
 
@@ -477,7 +477,7 @@ Practical notes:
 Current behavior:
 - calls are fast-mode only and use WebRTC media in the renderer
 - the default ICE list in `src/core/network/default-infrastructure.ts` is currently empty
-- users can add runtime ICE overrides from Setup or `Connection status -> Calls` in fast mode
+- users can add runtime ICE overrides from Setup in fast mode
 - supported entry types are `stun`, `turn`, and `turns`
 - TURN entries require username + credential
 - multiple ICE servers are supported and passed to `RTCPeerConnection` in configured order; the browser's ICE agent may gather and check candidates in parallel, so this is not a strict first-server-then-next retry order
@@ -611,7 +611,7 @@ Current resilience layers:
 - Group control delivery is ACK/republish based (not strict real-time consensus).
 - Direct 1:1 calls are currently fast-mode only.
 - Screen sharing currently sends display video only; system/window audio sharing is intentionally out of scope for the current phase.
-- STUN/TURN validation is format-only; there is no live health-check/testing UI yet.
+- STUN/TURN reachability tests are manual point-in-time snapshots; there is no continuous ICE health monitoring.
 - On some Linux environments, sandboxed unpackaged Electron runs may still require host-specific sandbox-helper setup during development.
 - Unpackaged restart uses an explicit relaunch path for Linux development robustness; packaged releases still target the standard Electron relaunch behavior.
 

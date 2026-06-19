@@ -38,6 +38,7 @@ export const Sidebar: FC<SidebarProps> = ({
   const [networkMode, setNetworkMode] = useState<NetworkMode>('fast');
   const networkOnline = useSelector((state: RootState) => state.user.networkOnline);
   const statusSuffix = networkOnline === false ? ' (local)' : isTorEnabled ? ' (tor)' : '';
+  const isRailOnly = activeSection === 'settings';
 
   const contactAttempts = useSelector((state: RootState) => state.chat.contactAttempts)
   const { toast } = useToast();
@@ -45,6 +46,11 @@ export const Sidebar: FC<SidebarProps> = ({
 
   const handleContactAttemptExpired = (peerId: string) => {
     dispatch(removeContactAttempt(peerId))
+  };
+
+  const handleOpenBootstrapSetup = () => {
+    onSelectSetupSection('bootstrap');
+    onSelectSection('setup');
   };
 
   useEffect(() => {
@@ -139,7 +145,11 @@ export const Sidebar: FC<SidebarProps> = ({
 
   const renderCollapsedPane = () => (
     <>
-      <SidebarHeader statusSuffix={statusSuffix} collapsed />
+      <SidebarHeader
+        statusSuffix={statusSuffix}
+        onOpenBootstrapSetup={handleOpenBootstrapSetup}
+        collapsed
+      />
       <div className="flex-1" />
       <SidebarFooter collapsed />
     </>
@@ -171,14 +181,17 @@ export const Sidebar: FC<SidebarProps> = ({
       );
     }
 
-    if (activeSection === 'help' || activeSection === 'settings') {
+    if (activeSection === 'help') {
       return <div className="flex-1 bg-sidebar-background" />;
     }
 
     if (activeSection === 'groups') {
       return (
         <>
-          <SidebarHeader statusSuffix={statusSuffix} />
+          <SidebarHeader
+            statusSuffix={statusSuffix}
+            onOpenBootstrapSetup={handleOpenBootstrapSetup}
+          />
           <GroupInviteList />
           <ChatList scope="groups" />
           <SidebarFooter />
@@ -188,7 +201,10 @@ export const Sidebar: FC<SidebarProps> = ({
 
     return (
       <>
-        <SidebarHeader statusSuffix={statusSuffix} />
+        <SidebarHeader
+          statusSuffix={statusSuffix}
+          onOpenBootstrapSetup={handleOpenBootstrapSetup}
+        />
         {contactAttempts.length > 0 && (
           <ContactAttemptList
             isLoadingContactAttempts={isLoadingContactAttempts}
@@ -205,28 +221,34 @@ export const Sidebar: FC<SidebarProps> = ({
   };
 
   return (
-    <div className={`relative z-10 h-full overflow-visible ${activeSection === 'setup' ? '' : 'border-r'} border-sidebar-border bg-sidebar-background transition-[width] duration-300 ease-in-out ${isCollapsed ? 'w-30' : 'w-110'}`}>
+    <div className={`relative z-10 h-full overflow-visible ${activeSection === 'setup' || isRailOnly ? '' : 'border-r'} border-sidebar-border bg-sidebar-background transition-[width] duration-300 ease-in-out ${
+      isRailOnly ? 'w-14' : isCollapsed ? 'w-30' : 'w-110'
+    }`}>
       <div className="flex h-full">
         <SidebarRail
           activeSection={activeSection}
           onSelectSection={onSelectSection}
           isTorEnabled={isTorEnabled}
         />
-        <div
-          className={`relative z-0 flex min-w-0 flex-col overflow-hidden border-l border-sidebar-border transition-[width] duration-300 ease-in-out ${isCollapsed ? 'w-16' : 'flex-1'
-            }`}
-        >
-          {renderSectionPane()}
-        </div>
+        {!isRailOnly && (
+          <div
+            className={`relative z-0 flex min-w-0 flex-col overflow-hidden border-l border-sidebar-border transition-[width] duration-300 ease-in-out ${isCollapsed ? 'w-16' : 'flex-1'
+              }`}
+          >
+            {renderSectionPane()}
+          </div>
+        )}
       </div>
-      <button
-        type="button"
-        onClick={() => setIsCollapsed((prev) => !prev)}
-        className="absolute right-0 top-1/2 z-40 flex h-6 w-6 translate-x-1/2 -translate-y-1/2 cursor-pointer items-center justify-center rounded-full border border-sidebar-border bg-sidebar-accent/70 text-primary/80 transition-colors duration-200 hover:bg-sidebar-accent hover:text-primary"
-        aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-      >
-        {isCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
-      </button>
+      {!isRailOnly && (
+        <button
+          type="button"
+          onClick={() => setIsCollapsed((prev) => !prev)}
+          className="absolute right-0 top-1/2 z-40 flex h-6 w-6 translate-x-1/2 -translate-y-1/2 cursor-pointer items-center justify-center rounded-full border border-sidebar-border bg-sidebar-accent/70 text-primary/80 transition-colors duration-200 hover:bg-sidebar-accent hover:text-primary"
+          aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+        >
+          {isCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
+        </button>
+      )}
     </div>
   )
 }
