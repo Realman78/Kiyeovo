@@ -7,7 +7,7 @@ import { NETWORK_MODES } from '../../../core/constants';
 import type { NetworkMode } from '../../../core/types';
 import { RecoveryPhraseDisplayDialog } from './RecoveryPhraseDisplayDialog';
 import { RecoveryPhraseLoginDialog } from './RecoveryPhraseLoginDialog';
-import { NetworkModeSwitchDialog } from './NetworkModeSwitchDialog';
+import { NetworkModeSwitchDialog } from '../NetworkModeSwitchDialog';
 
 export interface PasswordValidationResult {
   valid: boolean;

@@ -59,7 +59,7 @@ function getItemStatus(
 ): SetupItemStatus | null {
   if (!readiness) return null;
 
-  const status = readiness[section === 'ice' ? 'ice' : section];
+  const status = readiness[section];
   if (status === 'missing') {
     return {
       label: 'Not configured',
