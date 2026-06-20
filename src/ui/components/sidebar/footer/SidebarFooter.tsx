@@ -2,11 +2,9 @@ import { useEffect, useState, type FC } from "react";
 import { RegisterButton } from "./RegisterButton";
 import type { RootState } from "../../../state/store";
 import { useDispatch, useSelector } from "react-redux";
-import { Check, Copy, Settings, User } from "lucide-react";
-import { Button } from "../../ui/Button";
+import { Check, Copy, User } from "lucide-react";
 import UserDialog from "./UserDialog";
 import { setRegistered, setRegistrationInProgress, setUsername } from "../../../state/slices/userSlice";
-import { SettingsDialog } from "./SettingsDialog";
 import RegisterDialog from "./RegisterDialog";
 import { errStr } from '../../../../core/utils/general-error';
 import { UNEXPECTED_ERROR } from "../../../constants";
@@ -22,7 +20,6 @@ export const SidebarFooter: FC<SidebarFooterProps> = ({ collapsed = false }) => 
   const pendingRegistrationUsername = useSelector((state: RootState) => state.user.pendingRegisterUsername || "");
   const [isCopied, setIsCopied] = useState(false);
   const [userDialogOpen, setUserDialogOpen] = useState(false);
-  const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [registerDialogOpen, setRegisterDialogOpen] = useState(false);
   const [isUpdatingUsername, setIsUpdatingUsername] = useState(false);
   const [updateUsernameError, setUpdateUsernameError] = useState<string | undefined>(undefined);
@@ -41,10 +38,6 @@ export const SidebarFooter: FC<SidebarFooterProps> = ({ collapsed = false }) => 
     setRegisterDialogOpen(false);
     setRegisterIdentityError(undefined);
   }, [registerDialogOpen, user.registered]);
-
-  const handleSettings = () => {
-    setSettingsDialogOpen(true);
-  }
 
   const handleCopyPeerId = () => {
     setIsCopied(true);
@@ -111,8 +104,8 @@ export const SidebarFooter: FC<SidebarFooterProps> = ({ collapsed = false }) => 
     }
   };
 
-  return <div className={`flex border-t border-sidebar-border bg-sidebar-accent/50 ${collapsed ? "h-24 p-2" : "h-20 p-3"}`}>
-    <div className={`flex w-full ${collapsed ? "flex-col items-center justify-between" : "items-center gap-3"}`}>
+  return <div className={`flex border-t border-sidebar-border bg-sidebar-accent/50 ${collapsed ? "h-14 p-2" : "h-20 p-3"}`}>
+    <div className={`flex w-full ${collapsed ? "items-center justify-center" : "items-center gap-3"}`}>
       {collapsed ? (
         <>
           {user.registered ? (
@@ -130,14 +123,6 @@ export const SidebarFooter: FC<SidebarFooterProps> = ({ collapsed = false }) => 
               collapsed
             />
           )}
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={handleSettings}
-            className="text-muted-foreground hover:text-foreground"
-          >
-            <Settings className="w-4 h-4" />
-          </Button>
         </>
       ) : (
         <>
@@ -172,14 +157,6 @@ export const SidebarFooter: FC<SidebarFooterProps> = ({ collapsed = false }) => 
               pendingUsername={effectivePendingUsername}
             />
           )}
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={handleSettings}
-            className="text-muted-foreground hover:text-foreground"
-          >
-            <Settings className="w-4 h-4" />
-          </Button>
         </>
       )}
     </div>
@@ -198,6 +175,5 @@ export const SidebarFooter: FC<SidebarFooterProps> = ({ collapsed = false }) => 
       isRegistering={effectiveIsRegistering}
       initialUsername={effectivePendingUsername}
     />
-    <SettingsDialog open={settingsDialogOpen} onOpenChange={setSettingsDialogOpen} />
   </div>
 };

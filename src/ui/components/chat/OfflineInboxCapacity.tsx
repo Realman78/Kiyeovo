@@ -115,10 +115,10 @@ const GroupDetails = ({ snapshot }: { snapshot: GroupOfflineInboxCapacitySnapsho
   return (
     <div className="w-80 space-y-3">
       <div className="text-[10px] leading-4 text-muted-foreground">
-        Your group messages backup for offline users
+        Your group messages backup for offline users. Only messages for current group version are shown. Group version is changed on user join/kick/leave.
       </div>
       <DetailBar
-        label={`Current epoch (v${snapshot.currentKeyVersion})`}
+        label={`Current group version (v${snapshot.currentKeyVersion})`}
         caption="Message count usage for the active sender bucket"
         used={snapshot.mainUsed}
         limit={snapshot.mainLimit}
@@ -126,7 +126,7 @@ const GroupDetails = ({ snapshot }: { snapshot: GroupOfflineInboxCapacitySnapsho
       />
       <DetailBar
         label="Compressed store size"
-        caption="The DHT record size limit for the active sender bucket"
+        caption="The size limit for the active sender bucket"
         used={snapshot.mainCompressedBytesUsed}
         limit={snapshot.mainCompressedBytesLimit}
         ratio={snapshot.mainCompressedBytesLimit > 0 ? snapshot.mainCompressedBytesUsed / snapshot.mainCompressedBytesLimit : 0}
@@ -206,7 +206,7 @@ export const OfflineInboxCapacity = ({
       ratio: snapshot.mainRatio,
       used: snapshot.mainUsed,
       limit: snapshot.mainLimit,
-      label: `Current epoch (v${snapshot.currentKeyVersion})`,
+      label: `Current group version (v${snapshot.currentKeyVersion})`,
     };
   }, [snapshot]);
 

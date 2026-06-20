@@ -682,7 +682,7 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
                         placeholder={isBlocked ? "Cannot send messages to blocked users" : groupBlockedReason ?? "Type a message..."}
                         value={inputQuery}
                         disabled={isDisabled}
-                        className="flex w-full resize-none overflow-hidden rounded-md border border-border bg-input px-4 py-2 text-sm font-mono leading-6 placeholder:text-muted-foreground/60 transition-[height,border-color,box-shadow] duration-150 ease-out focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/50 disabled:cursor-not-allowed disabled:opacity-50"
+                        className="flex w-full resize-none overflow-hidden rounded-md border border-border bg-input px-4 py-2 text-sm font-mono leading-6 placeholder:text-muted-foreground/60 transition-[height,border-color,box-shadow] duration-150 ease-out focus:outline-none focus-visible:border-primary focus-visible:ring-1 focus-visible:ring-primary/50 disabled:cursor-not-allowed disabled:opacity-50"
                         onChange={(e) => {
                             if (!activeChat) return;
                             setDraftForChat(activeChat.id, e.target.value);

@@ -7,7 +7,13 @@ import type { RootState } from "../../../state/store";
 import { setActiveChat, setOfflineFetchStatus, markOfflineFetched, markOfflineFetchFailed, type Chat } from "../../../state/slices/chatSlice";
 import { EmptyChatList } from "./EmptyChatList";
 
-export const ChatList: FC = () => {
+export type ChatListScope = 'all' | 'direct' | 'groups';
+
+type ChatListProps = {
+    scope?: ChatListScope;
+};
+
+export const ChatList: FC<ChatListProps> = ({ scope = 'all' }) => {
     const [searchQuery, setSearchQuery] = useState("");
     const [matchingChatIds, setMatchingChatIds] = useState<Set<number> | null>(null);
     const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -23,6 +29,12 @@ export const ChatList: FC = () => {
 
     const shouldFetchOfflineForChat = (chat: Chat): boolean => {
         return !chat.fetchedOffline && !chat.isFetchingOffline && !chat.blocked;
+    };
+
+    const matchesScope = (chat: Chat): boolean => {
+        if (scope === 'direct') return chat.type === 'direct';
+        if (scope === 'groups') return chat.type === 'group';
+        return true;
     };
 
     const fetchDirectOfflineForChat = async (chat: Chat): Promise<void> => {
@@ -114,20 +126,26 @@ export const ChatList: FC = () => {
     const activeChats = chats.filter((chat) => {
         if (chat.status !== 'pending') return true;
         return chat.type === 'group' && chat.groupStatus === 'awaiting_activation';
-    });
+    }).filter(matchesScope);
 
     const filteredChats = matchingChatIds !== null
         ? activeChats.filter((chat) => matchingChatIds.has(chat.id))
         : activeChats;
 
-    const hasNoConversations = activeChats.length === 0 && contactAttempts.length === 0;
+    const hasNoConversations = (scope === 'direct' || scope === 'all')
+        ? activeChats.length === 0 && contactAttempts.length === 0
+        : activeChats.length === 0;
+
+    const searchPlaceholder = scope === 'groups'
+        ? 'Search groups...'
+        : 'Search conversations...';
 
     return (
         <div className="flex flex-col flex-1 overflow-y-auto">
             {!hasNoConversations && (
                 <div className="p-4 pt-0 border-b border-sidebar-border">
                     <Input
-                        placeholder="Search conversations..."
+                        placeholder={searchPlaceholder}
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
                         icon={<Search className="w-4 h-4" />}
@@ -137,7 +155,12 @@ export const ChatList: FC = () => {
             )}
             <div className="flex flex-col flex-1 overflow-y-auto">
                 {hasNoConversations ? (
-                    <EmptyChatList />
+                    <EmptyChatList
+                        title={scope === 'groups' ? 'No groups yet' : 'No conversations yet'}
+                        description={scope === 'groups'
+                            ? 'Create a group or accept a group invite to get started'
+                            : 'Start a new conversation by sending a message to a peer'}
+                    />
                 ) : (
                     filteredChats.map((chat) => (
                         <ChatPreview key={chat.id} chat={chat} onSelectChat={onSelectChat} selectedChatId={selectedChatId?.id ?? null} />

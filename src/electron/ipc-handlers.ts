@@ -17,7 +17,7 @@ import {
   type IceServerType,
   type IceServersResponse,
 } from '../core/index.js';
-import { CHATS_TO_CHECK_FOR_OFFLINE_MESSAGES, DEFAULT_NETWORK_MODE, DOWNLOADS_DIR, FAST_RELAY_MULTIADDRS_SETTING_KEY, FILE_OFFER_RATE_LIMIT, KEY_EXCHANGE_RATE_LIMIT_DEFAULT, MAX_FILE_SIZE, MAX_PENDING_FILES_PER_PEER, MAX_PENDING_FILES_TOTAL, NETWORK_MODE_ONBOARDED_SETTING_KEY, OFFLINE_MESSAGE_LIMIT, SILENT_REJECTION_THRESHOLD_GLOBAL, SILENT_REJECTION_THRESHOLD_PER_PEER, NETWORK_MODES, WEBRTC_ICE_SERVERS_SETTING_KEY, getTorConfig, isNetworkMode } from '../core/constants.js';
+import { CHATS_TO_CHECK_FOR_OFFLINE_MESSAGES, DEFAULT_NETWORK_MODE, DOWNLOADS_DIR, FAST_MISSING_ICE_WARNING_ACKNOWLEDGED_SETTING_KEY, FAST_RELAY_MULTIADDRS_SETTING_KEY, FILE_OFFER_RATE_LIMIT, KEY_EXCHANGE_RATE_LIMIT_DEFAULT, MAX_FILE_SIZE, MAX_PENDING_FILES_PER_PEER, MAX_PENDING_FILES_TOTAL, NETWORK_MODE_ONBOARDED_SETTING_KEY, OFFLINE_MESSAGE_LIMIT, SILENT_REJECTION_THRESHOLD_GLOBAL, SILENT_REJECTION_THRESHOLD_PER_PEER, NETWORK_MODES, WEBRTC_ICE_SERVERS_SETTING_KEY, getTorConfig, isNetworkMode } from '../core/constants.js';
 import { validateMessageLength, validateUsername } from '../core/utils/validators.js';
 import { peerIdFromString } from '@libp2p/peer-id';
 import { multiaddr } from '@multiformats/multiaddr';
@@ -959,7 +959,12 @@ function setupBootstrapHandlers(
         return { success: false, error: 'Relay address cannot be empty' };
       }
 
-      const ma = multiaddr(normalized);
+      let ma: ReturnType<typeof multiaddr>;
+      try {
+        ma = multiaddr(normalized);
+      } catch {
+        return { success: false, error: 'Enter a valid multiaddress, e.g. /ip4/1.2.3.4/tcp/4002/p2p/12D3Koo…' };
+      }
       if (!ma.getPeerId()) {
         return { success: false, error: 'Relay multiaddr must include /p2p/<peerId>' };
       }
@@ -1052,8 +1057,23 @@ function setupBootstrapHandlers(
         return { success: false, error: 'P2P core not initialized' };
       }
 
-      log(`[IPC] Adding bootstrap node: ${address}`);
-      p2pCore.database.addBootstrapNode(address);
+      const normalized = address.trim();
+      if (!normalized) {
+        return { success: false, error: 'Bootstrap address cannot be empty' };
+      }
+
+      let ma: ReturnType<typeof multiaddr>;
+      try {
+        ma = multiaddr(normalized);
+      } catch {
+        return { success: false, error: 'Enter a valid multiaddress, e.g. /ip4/1.2.3.4/tcp/4001/p2p/12D3Koo…' };
+      }
+      if (!ma.getPeerId()) {
+        return { success: false, error: 'Bootstrap multiaddr must include /p2p/<peerId>' };
+      }
+
+      log(`[IPC] Adding bootstrap node: ${normalized}`);
+      p2pCore.database.addBootstrapNode(normalized);
       log('[IPC] Bootstrap node added');
 
       return { success: true, error: null };
@@ -2029,6 +2049,47 @@ function setupChatSettingsHandlers(
       return { success: false, error: errStr(error, 'Failed to save ICE servers') };
     }
   });
+
+  ipcMain.handle(IPC_CHANNELS.GET_MISSING_ICE_WARNING_ACKNOWLEDGED, async () => {
+    try {
+      const acknowledged = withSettingsDatabase(
+        getP2PCore,
+        (db) => db.getSetting(FAST_MISSING_ICE_WARNING_ACKNOWLEDGED_SETTING_KEY) === 'true',
+      );
+      return { success: true, acknowledged, error: null };
+    } catch (error) {
+      console.error('[IPC] Failed to get missing ICE warning acknowledgement:', error);
+      return {
+        success: false,
+        acknowledged: false,
+        error: errStr(error, 'Failed to get call setup warning preference'),
+      };
+    }
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.SET_MISSING_ICE_WARNING_ACKNOWLEDGED,
+    async (_event, acknowledged: boolean) => {
+      try {
+        if (typeof acknowledged !== 'boolean') {
+          return { success: false, error: 'Invalid call setup warning preference' };
+        }
+        withSettingsDatabase(getP2PCore, (db) => {
+          db.setSetting(
+            FAST_MISSING_ICE_WARNING_ACKNOWLEDGED_SETTING_KEY,
+            acknowledged ? 'true' : 'false',
+          );
+        });
+        return { success: true, error: null };
+      } catch (error) {
+        console.error('[IPC] Failed to set missing ICE warning acknowledgement:', error);
+        return {
+          success: false,
+          error: errStr(error, 'Failed to save call setup warning preference'),
+        };
+      }
+    },
+  );
 
   ipcMain.handle(IPC_CHANNELS.GET_APP_CONFIG, async () => {
     try {

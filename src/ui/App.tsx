@@ -8,6 +8,7 @@ import { useReconnectOnNetworkReturn } from './hooks/useReconnectOnNetworkReturn
 import { setPeerId, setTorEnabled, setNetworkOnline } from './state/slices/userSlice';
 import { fetchAppConfig } from './state/slices/appConfigSlice';
 import { useAppDispatch } from './state/hooks';
+import { SetupReadinessProvider } from './providers/SetupReadinessProvider';
 
 type WakeRecoveryState = {
   token: number;
@@ -152,7 +153,14 @@ function App() {
   return <div className='w-full h-full'>
     <OfflineBanner wakeRecovery={wakeRecovery ? { deadlineAt: wakeRecovery.deadlineAt } : null} />
     {isInitialized
-      ? <Main wakeRecoveryToken={wakeRecovery?.token ?? null} onWakeRecoveryOfflineSyncSettled={handleWakeRecoveryOfflineSyncSettled} />
+      ? (
+        <SetupReadinessProvider>
+          <Main
+            wakeRecoveryToken={wakeRecovery?.token ?? null}
+            onWakeRecoveryOfflineSyncSettled={handleWakeRecoveryOfflineSyncSettled}
+          />
+        </SetupReadinessProvider>
+      )
       : <Login initStatus={initStatus} />}
   </div>
 }

@@ -156,6 +156,8 @@ export const IPC_CHANNELS = {
   SET_APP_CONFIG: 'settings:setAppConfig',
   GET_ICE_SERVERS: 'settings:getIceServers',
   SET_ICE_SERVERS: 'settings:setIceServers',
+  GET_MISSING_ICE_WARNING_ACKNOWLEDGED: 'settings:getMissingIceWarningAcknowledged',
+  SET_MISSING_ICE_WARNING_ACKNOWLEDGED: 'settings:setMissingIceWarningAcknowledged',
   RESTART_APP: 'app:restart',
   QUIT_APP: 'app:quit',
   DELETE_ACCOUNT_AND_DATA: 'app:deleteAccountAndData',

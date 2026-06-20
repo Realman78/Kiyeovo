@@ -167,6 +167,17 @@
     @apply border-border;
   }
 
+  /* Kill the platform (orange on Linux) UA outline everywhere... */
+  :focus {
+    outline: none;
+  }
+
+  /* ...and show a themed ring only for keyboard navigation. */
+  :focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+  }
+
   body {
     @apply bg-background text-foreground antialiased;
     font-family: 'Inter', sans-serif;

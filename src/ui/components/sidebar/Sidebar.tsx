@@ -1,4 +1,4 @@
-import { type FC, useState, useEffect, useCallback } from 'react'
+import { type FC, useState, useEffect } from 'react'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { SidebarHeader } from './header/SidebarHeader'
 import { ChatList } from './chats/ChatList'
@@ -13,17 +13,64 @@ import { PendingKeyExchangeList } from './pending-key-exchange/PendingKeyExchang
 import { GroupInviteList } from './group-invites/GroupInviteList'
 import { setConnected, setPeerId, setRegistered, setUsername } from '../../state/slices/userSlice'
 import { useToast } from '../ui/use-toast'
+import { SidebarRail } from './SidebarRail'
+import type { NetworkMode } from '../../../core/types'
+import type { SetupSection, SidebarSection } from './navigation'
+import { SetupSidebar } from './setup/SetupSidebar'
 
-export const Sidebar: FC = () => {
+type SidebarProps = {
+  activeSection: SidebarSection;
+  activeSetupSection: SetupSection;
+  onSelectSection: (section: SidebarSection) => void;
+  onSelectSetupSection: (section: SetupSection) => void;
+};
+
+export const Sidebar: FC<SidebarProps> = ({
+  activeSection,
+  activeSetupSection,
+  onSelectSection,
+  onSelectSetupSection,
+}) => {
   const [isLoadingContactAttempts, setIsLoadingContactAttempts] = useState(true);
   const [contactAttemptsError, setContactAttemptsError] = useState<string | null>(null);
   const [isCollapsed, setIsCollapsed] = useState(false);
+  const [isTorEnabled, setIsTorEnabled] = useState<boolean>(false);
+  const [networkMode, setNetworkMode] = useState<NetworkMode>('fast');
+  const networkOnline = useSelector((state: RootState) => state.user.networkOnline);
+  const statusSuffix = networkOnline === false ? ' (local)' : isTorEnabled ? ' (tor)' : '';
+  const isRailOnly = activeSection === 'settings';
+
   const contactAttempts = useSelector((state: RootState) => state.chat.contactAttempts)
   const { toast } = useToast();
   const dispatch = useDispatch();
 
-  const handleContactAttemptExpired = useCallback((peerId: string) => {
+  const handleContactAttemptExpired = (peerId: string) => {
     dispatch(removeContactAttempt(peerId))
+  };
+
+  const handleOpenBootstrapSetup = () => {
+    onSelectSetupSection('bootstrap');
+    onSelectSection('setup');
+  };
+
+  useEffect(() => {
+    const loadNetworkSettings = async () => {
+      try {
+        const [torResult, modeResult] = await Promise.all([
+          window.kiyeovoAPI.getTorSettings(),
+          window.kiyeovoAPI.getNetworkMode(),
+        ]);
+        if (torResult.success && torResult.settings) {
+          setIsTorEnabled(torResult.settings.enabled === 'true');
+        }
+        if (modeResult.success) {
+          setNetworkMode(modeResult.mode);
+        }
+      } catch (error) {
+        console.error('Failed to load network settings:', error);
+      }
+    };
+    void loadNetworkSettings();
   }, []);
 
   useEffect(() => {
@@ -44,8 +91,8 @@ export const Sidebar: FC = () => {
         setIsLoadingContactAttempts(false);
       }
     };
-    fetchContactAttempts();
-  }, []);
+    void fetchContactAttempts();
+  }, [dispatch]);
 
   useEffect(() => {
     // Pull current user state on mount (solves race condition)
@@ -60,7 +107,7 @@ export const Sidebar: FC = () => {
         dispatch(setConnected(true));
       }
     };
-    checkUserState();
+    void checkUserState();
 
     // Also listen for future username restoration events
     const unsubscribe = window.kiyeovoAPI.onContactRequestReceived((data) => {
@@ -94,32 +141,114 @@ export const Sidebar: FC = () => {
       unsubscribeCancelled();
       restoreUnsubscribe();
     };
-  }, []);
+  }, [dispatch, toast]);
+
+  const renderCollapsedPane = () => (
+    <>
+      <SidebarHeader
+        statusSuffix={statusSuffix}
+        onOpenBootstrapSetup={handleOpenBootstrapSetup}
+        collapsed
+      />
+      <div className="flex-1" />
+      <SidebarFooter collapsed />
+    </>
+  );
+
+  const renderSectionPane = () => {
+    if (isCollapsed) {
+      if (activeSection === 'setup') {
+        return (
+          <SetupSidebar
+            activeSection={activeSetupSection}
+            networkMode={networkMode}
+            onSelectSection={onSelectSetupSection}
+            collapsed
+          />
+        );
+      }
+
+      return renderCollapsedPane();
+    }
+
+    if (activeSection === 'setup') {
+      return (
+        <SetupSidebar
+          activeSection={activeSetupSection}
+          networkMode={networkMode}
+          onSelectSection={onSelectSetupSection}
+        />
+      );
+    }
+
+    if (activeSection === 'help') {
+      return <div className="flex-1 bg-sidebar-background" />;
+    }
+
+    if (activeSection === 'groups') {
+      return (
+        <>
+          <SidebarHeader
+            statusSuffix={statusSuffix}
+            onOpenBootstrapSetup={handleOpenBootstrapSetup}
+          />
+          <GroupInviteList />
+          <ChatList scope="groups" />
+          <SidebarFooter />
+        </>
+      );
+    }
+
+    return (
+      <>
+        <SidebarHeader
+          statusSuffix={statusSuffix}
+          onOpenBootstrapSetup={handleOpenBootstrapSetup}
+        />
+        {contactAttempts.length > 0 && (
+          <ContactAttemptList
+            isLoadingContactAttempts={isLoadingContactAttempts}
+            contactAttemptsError={contactAttemptsError}
+            handleContactAttemptExpired={handleContactAttemptExpired}
+          />
+        )}
+        <GroupInviteList />
+        <PendingKeyExchangeList />
+        <ChatList scope="all" />
+        <SidebarFooter />
+      </>
+    );
+  };
 
   return (
-    <div className={`relative h-full bg-sidebar border-r border-sidebar-border flex flex-col transition-[width] duration-300 ease-in-out ${isCollapsed ? 'w-16' : 'w-96'}`}>
-      <SidebarHeader collapsed={isCollapsed} />
-
-      {!isCollapsed && contactAttempts.length > 0 && (
-        <ContactAttemptList
-          isLoadingContactAttempts={isLoadingContactAttempts}
-          contactAttemptsError={contactAttemptsError}
-          handleContactAttemptExpired={handleContactAttemptExpired}
+    <div className={`relative z-10 h-full overflow-visible ${activeSection === 'setup' || isRailOnly ? '' : 'border-r'} border-sidebar-border bg-sidebar-background transition-[width] duration-300 ease-in-out ${
+      isRailOnly ? 'w-14' : isCollapsed ? 'w-30' : 'w-110'
+    }`}>
+      <div className="flex h-full">
+        <SidebarRail
+          activeSection={activeSection}
+          onSelectSection={onSelectSection}
+          isTorEnabled={isTorEnabled}
         />
+        {!isRailOnly && (
+          <div
+            className={`relative z-0 flex min-w-0 flex-col overflow-hidden border-l border-sidebar-border transition-[width] duration-300 ease-in-out ${isCollapsed ? 'w-16' : 'flex-1'
+              }`}
+          >
+            {renderSectionPane()}
+          </div>
+        )}
+      </div>
+      {!isRailOnly && (
+        <button
+          type="button"
+          onClick={() => setIsCollapsed((prev) => !prev)}
+          className="absolute right-0 top-1/2 z-40 flex h-6 w-6 translate-x-1/2 -translate-y-1/2 cursor-pointer items-center justify-center rounded-full border border-sidebar-border bg-sidebar-accent/70 text-primary/80 transition-colors duration-200 hover:bg-sidebar-accent hover:text-primary"
+          aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+        >
+          {isCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
+        </button>
       )}
-      {!isCollapsed && <GroupInviteList />}
-      {!isCollapsed && <PendingKeyExchangeList />}
-      {!isCollapsed && <ChatList />}
-      {isCollapsed && <div className="flex-1" />}
-      <SidebarFooter collapsed={isCollapsed} />
-      <button
-        type="button"
-        onClick={() => setIsCollapsed((prev) => !prev)}
-        className="absolute cursor-pointer top-1/2 right-0 -translate-y-1/2 translate-x-1/2 w-6 h-6 rounded-full border border-sidebar-border bg-sidebar-accent/70 hover:bg-sidebar-accent text-primary/80 hover:text-primary flex items-center justify-center transition-colors duration-200"
-        aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-      >
-        {isCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
-      </button>
     </div>
   )
 }

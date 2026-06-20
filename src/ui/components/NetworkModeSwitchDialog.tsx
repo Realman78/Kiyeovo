@@ -1,6 +1,6 @@
 import { ArrowLeftRight, Loader2 } from 'lucide-react';
-import type { NetworkMode } from '../../../core/types';
-import { Button } from '../ui/Button';
+import type { NetworkMode } from '../../core/types';
+import { Button } from './ui/Button';
 import {
   Dialog,
   DialogBody,
@@ -9,7 +9,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from '../ui/Dialog';
+} from './ui/Dialog';
 
 type NetworkModeSwitchDialogProps = {
   open: boolean;

@@ -1,4 +1,4 @@
-import { useEffect, useEffectEvent } from 'react';
+import { useEffect, useEffectEvent, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import Sidebar from '../components/sidebar/Sidebar';
 import ChatWrapper from '../components/chat/ChatWrapper';
@@ -16,6 +16,11 @@ import { IncomingCallCard } from '../components/call/IncomingCallCard';
 import { CallManagerCard } from '../components/call/CallManagerCard';
 import { GroupCallManagerCard } from '../components/call/GroupCallManagerCard';
 import { ScreenShareSourcePicker } from '../components/call/ScreenShareSourcePicker';
+import type { SetupSection, SidebarSection } from '../components/sidebar/navigation';
+import { BootstrapSetup } from '../components/sidebar/setup/BootstrapSetup';
+import { RelaySetup } from '../components/sidebar/setup/RelaySetup';
+import { IceSetup } from '../components/sidebar/setup/IceSetup';
+import { SettingsPage } from '../components/sidebar/settings/SettingsPage';
 
 type MainProps = {
   wakeRecoveryToken: number | null;
@@ -23,6 +28,8 @@ type MainProps = {
 };
 
 export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: MainProps) => {
+  const [activeSection, setActiveSection] = useState<SidebarSection>('chats');
+  const [activeSetupSection, setActiveSetupSection] = useState<SetupSection>('bootstrap');
   const dispatch = useDispatch();
   const { toast } = useToast();
   const isConnected = useSelector((state: RootState) => state.user.connected);
@@ -767,11 +774,42 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
     void syncRecentOfflineMessages(wakeRecoveryToken !== null && canFetchOffline ? wakeRecoveryToken : null);
   }, [canFetchOffline, isConnected, networkOnline, wakeRecoveryToken]);
 
+  const isChatSection = activeSection === 'chats' || activeSection === 'groups';
+
   return (
     <div className='h-screen w-screen flex overflow-hidden'>
-      <Sidebar />
-      <div className='min-w-12 flex-1'>
-        <ChatWrapper />
+      <Sidebar
+        activeSection={activeSection}
+        activeSetupSection={activeSetupSection}
+        onSelectSection={setActiveSection}
+        onSelectSetupSection={setActiveSetupSection}
+      />
+      <div className='relative min-w-12 flex-1'>
+        <div
+          className={`absolute inset-0 flex ${isChatSection ? 'visible pointer-events-auto' : 'invisible pointer-events-none'}`}
+          aria-hidden={!isChatSection}
+        >
+          <ChatWrapper />
+        </div>
+        {!isChatSection && (
+          <div
+            className={`absolute inset-0 ${activeSection === 'setup' ? 'bg-sidebar-accent' : 'bg-background'}`}
+            data-setup-section={activeSection === 'setup' ? activeSetupSection : undefined}
+          >
+            {activeSection === 'setup' && activeSetupSection === 'bootstrap' && (
+              <BootstrapSetup />
+            )}
+            {activeSection === 'setup' && activeSetupSection === 'relay' && (
+              <RelaySetup />
+            )}
+            {activeSection === 'setup' && activeSetupSection === 'ice' && (
+              <IceSetup />
+            )}
+            {activeSection === 'settings' && (
+              <SettingsPage />
+            )}
+          </div>
+        )}
       </div>
       <IncomingCallCard />
       <CallManagerCard />

@@ -212,6 +212,15 @@ export interface KiyeovoAPI {
   reorderRelayNodes: (addresses: string[]) => Promise<{ success: boolean; error: string | null }>;
   getIceServers: () => Promise<IceServersResponse>;
   setIceServers: (servers: IceServerConfig[]) => Promise<{ success: boolean; error: string | null }>;
+  getMissingIceWarningAcknowledged: () => Promise<{
+    success: boolean;
+    acknowledged: boolean;
+    error: string | null;
+  }>;
+  setMissingIceWarningAcknowledged: (acknowledged: boolean) => Promise<{
+    success: boolean;
+    error: string | null;
+  }>;
 
   getContactAttempts: () => Promise<{
     success: boolean;

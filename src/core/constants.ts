@@ -15,6 +15,7 @@ export const NETWORK_MODE_ONBOARDED_SETTING_KEY = 'network_mode_onboarded';
 export const FAST_RELAY_MULTIADDRS_SETTING_KEY = 'fast_relay_multiaddrs';
 export const FAST_RELAY_MULTIADDRS_INITIALIZED_SETTING_KEY = 'fast_relay_multiaddrs_initialized';
 export const WEBRTC_ICE_SERVERS_SETTING_KEY = 'webrtc_ice_servers';
+export const FAST_MISSING_ICE_WARNING_ACKNOWLEDGED_SETTING_KEY = 'setup_missing_ice_warning_acknowledged_fast';
 
 export type ModeNamespaceKind =
   | 'offline'
