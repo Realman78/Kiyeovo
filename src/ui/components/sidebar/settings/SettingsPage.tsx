@@ -1,5 +1,16 @@
 import { useEffect, useState, type FC, type ReactNode } from 'react';
-import { Bell, BellOff, FolderOpen, Info, RefreshCw, Settings, SlidersHorizontal } from 'lucide-react';
+import {
+  Bell,
+  BellOff,
+  Database,
+  FolderOpen,
+  Info,
+  Power,
+  RefreshCw,
+  Settings,
+  SlidersHorizontal,
+  Trash2,
+} from 'lucide-react';
 import { NETWORK_MODES } from '../../../../core/constants';
 import type { NetworkMode } from '../../../../core/types';
 import { errStr } from '../../../../core/utils/general-error';
@@ -7,7 +18,9 @@ import { NetworkModeSwitchDialog } from '../../NetworkModeSwitchDialog';
 import { Button } from '../../ui/Button';
 import { useToast } from '../../ui/use-toast';
 import { ConfigurationDialog } from '../footer/ConfigurationDialog';
+import { DeleteAccountDialog } from '../footer/DeleteAccountDialog';
 import { KiyeovoDialog } from '../header/KiyeovoDialog';
+import { QuitAppDialog } from './QuitAppDialog';
 
 type SettingsActionRowProps = {
   icon: ReactNode;
@@ -46,6 +59,11 @@ export const SettingsPage: FC = () => {
   const [isSwitchingNetworkMode, setIsSwitchingNetworkMode] = useState(false);
   const [pendingRestartMode, setPendingRestartMode] = useState<NetworkMode | null>(null);
   const [configurationOpen, setConfigurationOpen] = useState(false);
+  const [backingUpDatabase, setBackingUpDatabase] = useState(false);
+  const [deleteAccountOpen, setDeleteAccountOpen] = useState(false);
+  const [deletingAccount, setDeletingAccount] = useState(false);
+  const [quitAppOpen, setQuitAppOpen] = useState(false);
+  const [quittingApp, setQuittingApp] = useState(false);
 
   useEffect(() => {
     let disposed = false;
@@ -220,6 +238,72 @@ export const SettingsPage: FC = () => {
     }
   };
 
+  const handleBackupDatabase = async () => {
+    if (backingUpDatabase) return;
+
+    setBackingUpDatabase(true);
+    try {
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+      const result = await window.kiyeovoAPI.showSaveDialog({
+        title: 'Save Database Backup',
+        defaultPath: `kiyeovo-backup-${timestamp}.db`,
+        filters: [
+          { name: 'Database Files', extensions: ['db'] },
+          { name: 'All Files', extensions: ['*'] },
+        ],
+      });
+      if (result.canceled || !result.filePath) return;
+
+      const backupResult = await window.kiyeovoAPI.backupDatabase(result.filePath);
+      if (!backupResult.success) {
+        toast.error(backupResult.error || 'Failed to back up database');
+        return;
+      }
+      toast.success('Database backup saved');
+    } catch (error) {
+      console.error('Failed to back up database:', error);
+      toast.error(errStr(error, 'Failed to back up database'));
+    } finally {
+      setBackingUpDatabase(false);
+    }
+  };
+
+  const handleDeleteAccount = async () => {
+    if (deletingAccount) return;
+
+    setDeletingAccount(true);
+    try {
+      const result = await window.kiyeovoAPI.deleteAccountAndData();
+      if (!result.success) {
+        toast.error(result.error || 'Failed to delete account');
+        setDeletingAccount(false);
+      }
+    } catch (error) {
+      console.error('Failed to delete account:', error);
+      toast.error(errStr(error, 'Failed to delete account'));
+      setDeletingAccount(false);
+    }
+  };
+
+  const handleQuitApp = async () => {
+    if (quittingApp) return;
+
+    setQuittingApp(true);
+    try {
+      const result = await window.kiyeovoAPI.quitApp();
+      if (!result.success) {
+        toast.error(result.error || 'Failed to quit app');
+        setQuittingApp(false);
+        setQuitAppOpen(false);
+      }
+    } catch (error) {
+      console.error('Failed to quit app:', error);
+      toast.error(errStr(error, 'Failed to quit app'));
+      setQuittingApp(false);
+      setQuitAppOpen(false);
+    }
+  };
+
   return (
     <>
       <div className="h-full overflow-y-auto bg-background py-8">
@@ -341,6 +425,56 @@ export const SettingsPage: FC = () => {
                 </Button>
               )}
             />
+
+            <SettingsActionRow
+              icon={<Database className="h-5 w-5 shrink-0 text-primary" />}
+              title="Backup Database"
+              description="Save a copy of all your data"
+              action={(
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => { void handleBackupDatabase(); }}
+                  disabled={backingUpDatabase}
+                >
+                  {backingUpDatabase ? 'Backing up...' : 'Backup'}
+                </Button>
+              )}
+            />
+
+            <SettingsActionRow
+              icon={<Trash2 className="h-5 w-5 shrink-0 text-destructive" />}
+              title="Delete Account"
+              description={deletingAccount
+                ? 'Deleting all account data and restarting...'
+                : 'Permanently delete all data'}
+              action={(
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={() => setDeleteAccountOpen(true)}
+                  disabled={deletingAccount}
+                >
+                  {deletingAccount ? 'Deleting...' : 'Delete'}
+                </Button>
+              )}
+            />
+
+            <SettingsActionRow
+              icon={<Power className="h-5 w-5 shrink-0 text-primary" />}
+              title="Quit App"
+              description="Close Kiyeovo completely"
+              action={(
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setQuitAppOpen(true)}
+                  disabled={quittingApp}
+                >
+                  {quittingApp ? 'Quitting...' : 'Quit'}
+                </Button>
+              )}
+            />
           </div>
         </div>
       </div>
@@ -349,6 +483,21 @@ export const SettingsPage: FC = () => {
       <ConfigurationDialog
         open={configurationOpen}
         onOpenChange={setConfigurationOpen}
+      />
+      <DeleteAccountDialog
+        open={deleteAccountOpen}
+        onOpenChange={(open) => {
+          if (!deletingAccount) {
+            setDeleteAccountOpen(open);
+          }
+        }}
+        onConfirm={() => { void handleDeleteAccount(); }}
+      />
+      <QuitAppDialog
+        open={quitAppOpen}
+        onOpenChange={setQuitAppOpen}
+        onConfirm={() => { void handleQuitApp(); }}
+        quitting={quittingApp}
       />
       <NetworkModeSwitchDialog
         open={modeSwitchOpen}
