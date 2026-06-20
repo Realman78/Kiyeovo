@@ -138,7 +138,7 @@ export function SetupNodesView({
   if (loading) {
     status = { tone: 'muted', title: 'Checking…', detail: '' };
   } else if (total === 0) {
-    status = { tone: 'warning', title: 'No servers configured', detail: `Add a ${nodeSingular} below to get started.` };
+    status = { tone: title.includes("Bootstrap") ? 'destructive' : 'warning', title: 'No servers configured', detail: `Add a ${nodeSingular} to get started.` };
   } else if (checking && connectedCount === 0) {
     status = { tone: 'muted', title: 'Checking reachability…', detail: `${total} server${plural} configured` };
   } else if (connectedCount > 0) {

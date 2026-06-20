@@ -1,5 +1,5 @@
 import { useState, type FC, type FocusEvent as ReactFocusEvent } from 'react';
-import { CircleHelp, MessageSquare, Network, Settings, Users } from 'lucide-react';
+import { MessageSquare, Network, Settings, Users } from 'lucide-react';
 import { Logo } from '../icons/Logo';
 import { KiyeovoDialog } from './header/KiyeovoDialog';
 import { useSetupReadiness, type SetupSeverity } from '../../hooks/useSetupReadiness';
@@ -24,7 +24,7 @@ const PRIMARY_ITEMS: RailItem[] = [
 ];
 
 const SECONDARY_ITEMS: RailItem[] = [
-  { section: 'help', label: 'Help', icon: CircleHelp },
+  // { section: 'help', label: 'Help', icon: CircleHelp },
   { section: 'settings', label: 'Settings', icon: Settings },
 ];
 
