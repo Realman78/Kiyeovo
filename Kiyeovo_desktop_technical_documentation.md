@@ -432,8 +432,10 @@ Current navigation rollout status:
 - ICE tests continue to completion if the user navigates away, while request IDs prevent older overlapping tests from replacing newer results; Test-all batch state is tracked separately so its progress indicator remains active until every test in that batch settles
 - Setup context navigation and content use one continuous background treatment; when the context pane is collapsed, Bootstrap, Relay, and STUN/TURN remain available as icon-only actions
 - the Setup context pane keeps its internal content at the final expanded width while the parent clips the width transition; labels fade out quickly on collapse and fade in after expansion begins, avoiding repeated text wrapping and competing horizontal motion
-- `Settings` is a rail-only page with page-native action rows; the current rollout includes About, the persisted global Notifications & Sounds preference, the downloads directory, and network-mode switching
+- `Settings` is a rail-only page with page-native action rows for About, Notifications & Sounds, downloads, network-mode switching, application configuration, database backup, account deletion, and quitting the app
 - changing network mode requires confirmation and an app restart; if the mode is saved but automatic restart fails, the Settings page keeps the running mode distinct from the pending saved mode and tells the user that a manual restart is required
+- database backup uses a native save dialog and leaves the user on Settings after completion; account deletion requires a typed confirmation before wiping local data and restarting, and closing the confirmation dialog always clears the typed phrase
+- quitting from Settings requires confirmation and then uses Electron's existing graceful shutdown path, which closes network services and the database before process exit
 - `Help` remains a placeholder pane
 - the left rail remains visible while the adjacent sidebar pane can collapse independently
 - the left rail may expand on hover/focus as an overlay to reveal labels without shifting the main layout

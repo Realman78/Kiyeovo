@@ -60,7 +60,7 @@ export function RecoveryPhraseLoginDialog({
               Recovery Phrase
             </label>
             <textarea
-              className="w-full min-h-[120px] px-3 py-2 text-sm bg-input border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent resize-none font-mono"
+              className="w-full min-h-[120px] px-3 py-2 text-sm bg-input border border-border rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:border-transparent resize-none font-mono"
               placeholder="Enter your 24-word recovery phrase separated by spaces"
               value={recoveryPhraseInput}
               onChange={(e) => setRecoveryPhraseInput(e.target.value)}
