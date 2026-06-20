@@ -15,12 +15,15 @@ import { NETWORK_MODES } from '../../../../core/constants';
 import type { NetworkMode } from '../../../../core/types';
 import { errStr } from '../../../../core/utils/general-error';
 import { NetworkModeSwitchDialog } from '../../NetworkModeSwitchDialog';
+import { TOR_CONFIG } from '../../../constants';
 import { Button } from '../../ui/Button';
 import { useToast } from '../../ui/use-toast';
 import { ConfigurationDialog } from '../footer/ConfigurationDialog';
 import { DeleteAccountDialog } from '../footer/DeleteAccountDialog';
 import { KiyeovoDialog } from '../header/KiyeovoDialog';
 import { QuitAppDialog } from './QuitAppDialog';
+import { TorRestartDialog } from './TorRestartDialog';
+import { TorSettingsSection, type TorSettings } from './TorSettingsSection';
 
 type SettingsActionRowProps = {
   icon: ReactNode;
@@ -47,6 +50,16 @@ const SettingsActionRow: FC<SettingsActionRowProps> = ({
   </div>
 );
 
+const DEFAULT_TOR_SETTINGS: TorSettings = {
+  socksHost: TOR_CONFIG.DEFAULT_SOCKS_HOST,
+  socksPort: TOR_CONFIG.DEFAULT_SOCKS_PORT,
+  connectionTimeout: TOR_CONFIG.DEFAULT_CONNECTION_TIMEOUT,
+  circuitTimeout: TOR_CONFIG.DEFAULT_CIRCUIT_TIMEOUT,
+  maxRetries: TOR_CONFIG.DEFAULT_MAX_RETRIES,
+  healthCheckInterval: TOR_CONFIG.DEFAULT_HEALTH_CHECK_INTERVAL,
+  dnsResolution: TOR_CONFIG.DNS_RESOLUTION_TOR as TorSettings['dnsResolution'],
+};
+
 export const SettingsPage: FC = () => {
   const { toast } = useToast();
   const [aboutOpen, setAboutOpen] = useState(false);
@@ -58,6 +71,12 @@ export const SettingsPage: FC = () => {
   const [modeSwitchOpen, setModeSwitchOpen] = useState(false);
   const [isSwitchingNetworkMode, setIsSwitchingNetworkMode] = useState(false);
   const [pendingRestartMode, setPendingRestartMode] = useState<NetworkMode | null>(null);
+  const [torSettings, setTorSettings] = useState<TorSettings>(DEFAULT_TOR_SETTINGS);
+  const [originalTorSettings, setOriginalTorSettings] = useState<TorSettings>(DEFAULT_TOR_SETTINGS);
+  const [pendingTorSettings, setPendingTorSettings] = useState<TorSettings>(DEFAULT_TOR_SETTINGS);
+  const [torConfirmOpen, setTorConfirmOpen] = useState(false);
+  const [applyingTorSettings, setApplyingTorSettings] = useState(false);
+  const [torRestartRequired, setTorRestartRequired] = useState(false);
   const [configurationOpen, setConfigurationOpen] = useState(false);
   const [backingUpDatabase, setBackingUpDatabase] = useState(false);
   const [deleteAccountOpen, setDeleteAccountOpen] = useState(false);
@@ -75,10 +94,11 @@ export const SettingsPage: FC = () => {
     });
 
     const loadSettings = async () => {
-      const [notificationsResult, downloadsResult, modeResult] = await Promise.allSettled([
+      const [notificationsResult, downloadsResult, modeResult, torResult] = await Promise.allSettled([
         window.kiyeovoAPI.getNotificationsEnabled(),
         window.kiyeovoAPI.getDownloadsDir(),
         window.kiyeovoAPI.getNetworkMode(),
+        window.kiyeovoAPI.getTorSettings(),
       ]);
       if (disposed) return;
 
@@ -107,6 +127,43 @@ export const SettingsPage: FC = () => {
           ? modeResult.value.error
           : errStr(modeResult.reason);
         toast.error(message || 'Failed to load network mode');
+      }
+
+      if (
+        torResult.status === 'fulfilled'
+        && torResult.value.success
+        && torResult.value.settings
+      ) {
+        const settings = torResult.value.settings;
+        const loadedSettings: TorSettings = {
+          socksHost: settings.socksHost || TOR_CONFIG.DEFAULT_SOCKS_HOST,
+          socksPort: settings.socksPort
+            ? Number.parseInt(settings.socksPort, 10)
+            : TOR_CONFIG.DEFAULT_SOCKS_PORT,
+          connectionTimeout: settings.connectionTimeout
+            ? Number.parseInt(settings.connectionTimeout, 10)
+            : TOR_CONFIG.DEFAULT_CONNECTION_TIMEOUT,
+          circuitTimeout: settings.circuitTimeout
+            ? Number.parseInt(settings.circuitTimeout, 10)
+            : TOR_CONFIG.DEFAULT_CIRCUIT_TIMEOUT,
+          maxRetries: settings.maxRetries
+            ? Number.parseInt(settings.maxRetries, 10)
+            : TOR_CONFIG.DEFAULT_MAX_RETRIES,
+          healthCheckInterval: settings.healthCheckInterval
+            ? Number.parseInt(settings.healthCheckInterval, 10)
+            : TOR_CONFIG.DEFAULT_HEALTH_CHECK_INTERVAL,
+          dnsResolution: settings.dnsResolution === TOR_CONFIG.DNS_RESOLUTION_SYSTEM
+            ? 'system'
+            : 'tor',
+        };
+        setTorSettings(loadedSettings);
+        setOriginalTorSettings(loadedSettings);
+        setPendingTorSettings(loadedSettings);
+      } else {
+        const message = torResult.status === 'fulfilled'
+          ? torResult.value.error
+          : errStr(torResult.reason);
+        toast.error(message || 'Failed to load Tor settings');
       }
     };
 
@@ -236,6 +293,72 @@ export const SettingsPage: FC = () => {
     } finally {
       setIsSwitchingNetworkMode(false);
     }
+  };
+
+  const handleConfirmTorRestart = (updatedSettings: TorSettings) => {
+    setPendingTorSettings(updatedSettings);
+    setTorConfirmOpen(true);
+  };
+
+  const handleApplyTorSettings = async () => {
+    if (applyingTorSettings) return;
+
+    setApplyingTorSettings(true);
+    let settingsSaved = false;
+    try {
+      const result = await window.kiyeovoAPI.setTorSettings(pendingTorSettings);
+      if (!result.success) {
+        toast.error(result.error || 'Failed to update Tor settings');
+        return;
+      }
+
+      settingsSaved = true;
+      setTorSettings(pendingTorSettings);
+      setOriginalTorSettings(pendingTorSettings);
+      setTorConfirmOpen(false);
+
+      const restartResult = await window.kiyeovoAPI.restartApp();
+      if (!restartResult.success) {
+        setTorRestartRequired(true);
+        toast.error(
+          `${restartResult.error || 'Failed to restart the app'}. Tor settings were saved; restart Kiyeovo manually to apply them.`,
+        );
+      }
+    } catch (error) {
+      const message = errStr(error, 'Failed to apply Tor settings');
+      if (settingsSaved) {
+        setTorRestartRequired(true);
+        setTorConfirmOpen(false);
+        toast.error(`${message}. Tor settings were saved; restart Kiyeovo manually to apply them.`);
+      } else {
+        toast.error(message);
+      }
+    } finally {
+      setApplyingTorSettings(false);
+    }
+  };
+
+  const handleRestartForTorSettings = async () => {
+    if (applyingTorSettings) return;
+
+    setApplyingTorSettings(true);
+    try {
+      const result = await window.kiyeovoAPI.restartApp();
+      if (!result.success) {
+        toast.error(result.error || 'Failed to restart the app');
+      }
+    } catch (error) {
+      toast.error(errStr(error, 'Failed to restart the app'));
+    } finally {
+      setApplyingTorSettings(false);
+    }
+  };
+
+  const handleCancelTorRestart = () => {
+    if (applyingTorSettings) return;
+    setTorSettings(originalTorSettings);
+    setPendingTorSettings(originalTorSettings);
+    setTorConfirmOpen(false);
   };
 
   const handleBackupDatabase = async () => {
@@ -411,6 +534,18 @@ export const SettingsPage: FC = () => {
               )}
             />
 
+            {networkMode === NETWORK_MODES.ANONYMOUS && (
+              <TorSettingsSection
+                torSettings={torSettings}
+                setTorSettings={setTorSettings}
+                originalTorSettings={originalTorSettings}
+                onConfirmRestart={handleConfirmTorRestart}
+                restartRequired={torRestartRequired}
+                restarting={applyingTorSettings}
+                onRestart={() => { void handleRestartForTorSettings(); }}
+              />
+            )}
+
             <SettingsActionRow
               icon={<SlidersHorizontal className="h-5 w-5 shrink-0 text-primary" />}
               title="Configuration"
@@ -510,6 +645,17 @@ export const SettingsPage: FC = () => {
         targetModeLabel={targetModeLabel}
         onConfirm={handleSwitchNetworkMode}
         isSwitchingNetworkMode={isSwitchingNetworkMode}
+      />
+      <TorRestartDialog
+        open={torConfirmOpen}
+        onOpenChange={(open) => {
+          if (!applyingTorSettings) {
+            setTorConfirmOpen(open);
+          }
+        }}
+        onCancel={handleCancelTorRestart}
+        onConfirm={() => { void handleApplyTorSettings(); }}
+        applying={applyingTorSettings}
       />
     </>
   );
