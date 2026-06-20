@@ -1,11 +1,12 @@
 import { useEffect, useState, type FC, type ReactNode } from 'react';
-import { Bell, BellOff, FolderOpen, Info, RefreshCw, Settings } from 'lucide-react';
+import { Bell, BellOff, FolderOpen, Info, RefreshCw, Settings, SlidersHorizontal } from 'lucide-react';
 import { NETWORK_MODES } from '../../../../core/constants';
 import type { NetworkMode } from '../../../../core/types';
 import { errStr } from '../../../../core/utils/general-error';
 import { NetworkModeSwitchDialog } from '../../NetworkModeSwitchDialog';
 import { Button } from '../../ui/Button';
 import { useToast } from '../../ui/use-toast';
+import { ConfigurationDialog } from '../footer/ConfigurationDialog';
 import { KiyeovoDialog } from '../header/KiyeovoDialog';
 
 type SettingsActionRowProps = {
@@ -44,6 +45,7 @@ export const SettingsPage: FC = () => {
   const [modeSwitchOpen, setModeSwitchOpen] = useState(false);
   const [isSwitchingNetworkMode, setIsSwitchingNetworkMode] = useState(false);
   const [pendingRestartMode, setPendingRestartMode] = useState<NetworkMode | null>(null);
+  const [configurationOpen, setConfigurationOpen] = useState(false);
 
   useEffect(() => {
     let disposed = false;
@@ -324,11 +326,30 @@ export const SettingsPage: FC = () => {
                 </Button>
               )}
             />
+
+            <SettingsActionRow
+              icon={<SlidersHorizontal className="h-5 w-5 shrink-0 text-primary" />}
+              title="Configuration"
+              description="Performance and behavior settings"
+              action={(
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setConfigurationOpen(true)}
+                >
+                  Open
+                </Button>
+              )}
+            />
           </div>
         </div>
       </div>
 
       <KiyeovoDialog open={aboutOpen} onOpenChange={setAboutOpen} />
+      <ConfigurationDialog
+        open={configurationOpen}
+        onOpenChange={setConfigurationOpen}
+      />
       <NetworkModeSwitchDialog
         open={modeSwitchOpen}
         onOpenChange={(open) => {
