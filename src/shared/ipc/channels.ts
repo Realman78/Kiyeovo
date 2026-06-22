@@ -147,6 +147,8 @@ export const IPC_CHANNELS = {
   SET_NOTIFICATIONS_ENABLED: 'settings:setNotificationsEnabled',
   GET_NETWORK_MODE: 'settings:getNetworkMode',
   SET_NETWORK_MODE: 'settings:setNetworkMode',
+  GET_INITIAL_SETUP_STATUS: 'settings:getInitialSetupStatus',
+  SET_INITIAL_SETUP_STATUS: 'settings:setInitialSetupStatus',
   NOTIFICATIONS_ENABLED_CHANGED: 'settings:notificationsEnabledChanged',
   GET_DOWNLOADS_DIR: 'settings:getDownloadsDir',
   SET_DOWNLOADS_DIR: 'settings:setDownloadsDir',

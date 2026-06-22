@@ -17,7 +17,7 @@ import {
   type IceServerType,
   type IceServersResponse,
 } from '../core/index.js';
-import { CHATS_TO_CHECK_FOR_OFFLINE_MESSAGES, DEFAULT_NETWORK_MODE, DOWNLOADS_DIR, FAST_MISSING_ICE_WARNING_ACKNOWLEDGED_SETTING_KEY, FAST_RELAY_MULTIADDRS_SETTING_KEY, FILE_OFFER_RATE_LIMIT, KEY_EXCHANGE_RATE_LIMIT_DEFAULT, MAX_FILE_SIZE, MAX_PENDING_FILES_PER_PEER, MAX_PENDING_FILES_TOTAL, NETWORK_MODE_ONBOARDED_SETTING_KEY, OFFLINE_MESSAGE_LIMIT, SILENT_REJECTION_THRESHOLD_GLOBAL, SILENT_REJECTION_THRESHOLD_PER_PEER, NETWORK_MODES, WEBRTC_ICE_SERVERS_SETTING_KEY, getTorConfig, isNetworkMode } from '../core/constants.js';
+import { CHATS_TO_CHECK_FOR_OFFLINE_MESSAGES, DEFAULT_NETWORK_MODE, DOWNLOADS_DIR, FAST_MISSING_ICE_WARNING_ACKNOWLEDGED_SETTING_KEY, FAST_RELAY_MULTIADDRS_SETTING_KEY, FILE_OFFER_RATE_LIMIT, INITIAL_SETUP_STATUS_SETTING_KEY, KEY_EXCHANGE_RATE_LIMIT_DEFAULT, MAX_FILE_SIZE, MAX_PENDING_FILES_PER_PEER, MAX_PENDING_FILES_TOTAL, NETWORK_MODE_ONBOARDED_SETTING_KEY, OFFLINE_MESSAGE_LIMIT, SILENT_REJECTION_THRESHOLD_GLOBAL, SILENT_REJECTION_THRESHOLD_PER_PEER, NETWORK_MODES, WEBRTC_ICE_SERVERS_SETTING_KEY, getTorConfig, isNetworkMode } from '../core/constants.js';
 import { validateMessageLength, validateUsername } from '../core/utils/validators.js';
 import { peerIdFromString } from '@libp2p/peer-id';
 import { multiaddr } from '@multiformats/multiaddr';
@@ -42,6 +42,7 @@ import { ChatDatabase } from '../core/db/database.js';
 import { isNetworkConnected } from './network-connectivity.js';
 import { scheduleAppRelaunch } from './relaunch.js';
 import { createTrustedIpcMainHandle, type IpcMainHandleRegistrar } from './trusted-ipc.js';
+import type { InitialSetupStatus } from '../shared/kiyeovo-api.js';
 
 function requestAppRestart(): void {
   scheduleAppRelaunch();
@@ -75,6 +76,12 @@ function normalizeAddressList(addresses: string[]): string[] {
 }
 
 const ICE_SERVER_TYPES: IceServerType[] = ['stun', 'turn', 'turns'];
+const INITIAL_SETUP_STATUSES: InitialSetupStatus[] = [
+  'not_started',
+  'in_progress',
+  'completed',
+  'skipped',
+];
 const SCREEN_SHARE_UNSUPPORTED_MESSAGE = 'Screen sharing is not supported yet';
 
 function isScreenShareSupported(): boolean {
@@ -83,6 +90,11 @@ function isScreenShareSupported(): boolean {
 
 function isIceServerType(value: string): value is IceServerType {
   return ICE_SERVER_TYPES.includes(value as IceServerType);
+}
+
+function isInitialSetupStatus(value: unknown): value is InitialSetupStatus {
+  return typeof value === 'string'
+    && INITIAL_SETUP_STATUSES.includes(value as InitialSetupStatus);
 }
 
 function inferIceServerType(url: string): IceServerType | null {
@@ -1874,6 +1886,43 @@ function setupChatSettingsHandlers(
       return { success: false, error: errStr(error, 'Failed to set network mode') };
     }
   });
+
+  ipcMain.handle(IPC_CHANNELS.GET_INITIAL_SETUP_STATUS, async () => {
+    try {
+      const storedStatus = withSettingsDatabase(
+        getP2PCore,
+        (db) => db.getSetting(INITIAL_SETUP_STATUS_SETTING_KEY),
+      );
+      const status = isInitialSetupStatus(storedStatus) ? storedStatus : 'not_started';
+      return { success: true, status, error: null };
+    } catch (error) {
+      console.error('[IPC] Failed to get initial setup status:', error);
+      return {
+        success: false,
+        status: 'not_started' as InitialSetupStatus,
+        error: errStr(error, 'Failed to get initial setup status'),
+      };
+    }
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.SET_INITIAL_SETUP_STATUS,
+    async (_event, status: InitialSetupStatus) => {
+      try {
+        if (!isInitialSetupStatus(status)) {
+          return { success: false, error: 'Invalid initial setup status' };
+        }
+        withSettingsDatabase(
+          getP2PCore,
+          (db) => db.setSetting(INITIAL_SETUP_STATUS_SETTING_KEY, status),
+        );
+        return { success: true, error: null };
+      } catch (error) {
+        console.error('[IPC] Failed to set initial setup status:', error);
+        return { success: false, error: errStr(error, 'Failed to set initial setup status') };
+      }
+    },
+  );
 
   ipcMain.handle(IPC_CHANNELS.GET_NOTIFICATIONS_ENABLED, async (_event) => {
     try {

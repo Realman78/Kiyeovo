@@ -47,6 +47,8 @@ const kiyeovoAPI: KiyeovoAPI = {
   getNodesLiveness: (addresses) => invoke(IPC_CHANNELS.GET_NODES_LIVENESS, addresses),
   getNetworkMode: () => invoke(IPC_CHANNELS.GET_NETWORK_MODE),
   setNetworkMode: (mode) => invoke(IPC_CHANNELS.SET_NETWORK_MODE, mode),
+  getInitialSetupStatus: () => invoke(IPC_CHANNELS.GET_INITIAL_SETUP_STATUS),
+  setInitialSetupStatus: (status) => invoke(IPC_CHANNELS.SET_INITIAL_SETUP_STATUS, status),
 
   register: (username, rememberMe) => invoke(IPC_CHANNELS.REGISTER_REQUEST, username, rememberMe),
   getUserState: () => invoke(IPC_CHANNELS.GET_USER_STATE),

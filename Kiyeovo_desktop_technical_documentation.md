@@ -442,6 +442,13 @@ Current navigation rollout status:
 - the left rail may expand on hover/focus as an overlay to reveal labels without shifting the main layout
 - `Main` owns the active rail section and active Setup subsection so the sidebar context pane and main content area use the same navigation state
 - navigation state is renderer-local UI state; it is not persisted or stored in Redux
+- initial infrastructure onboarding has a persisted status boundary with `not_started`, `in_progress`, `completed`, and `skipped` values; absent or invalid persisted values read as `not_started`
+- `not_started` opens a dedicated full-window welcome page; `Start setup` enters a full-window mode-aware guide around the real Setup pages, while `Skip for now` opens Chats
+- fast-mode guidance progresses through Bootstrap, Relay, and optional STUN/TURN configuration; anonymous-mode guidance contains only Bootstrap
+- the guide's numbered step indicators are clickable, so users may configure sections in any order without skipping the entire guide
+- Bootstrap and Relay must still contain configuration before the Ready state can be reached; STUN/TURN may be skipped, and the Ready summary does not describe an unconfigured or warning-acknowledged ICE list as configured
+- skipping or finishing dismisses the guide for the current renderer session, after which Setup returns to its normal unrestricted navigation
+- during the current testing phase, welcome, skip, and completion actions do not write onboarding status, so restarting the app shows the welcome page again; persisted status transitions will be enabled later
 
 Setup readiness is mode-aware:
 - anonymous mode evaluates bootstrap only

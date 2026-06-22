@@ -21,6 +21,11 @@ import { BootstrapSetup } from '../components/sidebar/setup/BootstrapSetup';
 import { RelaySetup } from '../components/sidebar/setup/RelaySetup';
 import { IceSetup } from '../components/sidebar/setup/IceSetup';
 import { SettingsPage } from '../components/sidebar/settings/SettingsPage';
+import { InitialSetupWelcome } from '../components/sidebar/setup/InitialSetupWelcome';
+import { InitialSetupWizard } from '../components/sidebar/setup/InitialSetupWizard';
+import type { InitialSetupStatus } from '../../shared/kiyeovo-api';
+
+type InitialSetupSessionPhase = 'welcome' | 'guided' | 'dismissed';
 
 type MainProps = {
   wakeRecoveryToken: number | null;
@@ -30,6 +35,8 @@ type MainProps = {
 export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: MainProps) => {
   const [activeSection, setActiveSection] = useState<SidebarSection>('chats');
   const [activeSetupSection, setActiveSetupSection] = useState<SetupSection>('bootstrap');
+  const [initialSetupSessionPhase, setInitialSetupSessionPhase] =
+    useState<InitialSetupSessionPhase | null>(null);
   const dispatch = useDispatch();
   const { toast } = useToast();
   const isConnected = useSelector((state: RootState) => state.user.connected);
@@ -41,6 +48,41 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
 
   useNotifications();
   useCallRingtone();
+
+  useEffect(() => {
+    let disposed = false;
+
+    const loadInitialSetupStatus = async () => {
+      try {
+        const result = await window.kiyeovoAPI.getInitialSetupStatus();
+        if (disposed) return;
+        if (!result.success) {
+          console.error('Failed to load initial setup status:', result.error);
+        }
+
+        const status: InitialSetupStatus = result.success ? result.status : 'not_started';
+        if (status === 'not_started' || status === 'in_progress') {
+          setInitialSetupSessionPhase(status === 'in_progress' ? 'guided' : 'welcome');
+          setActiveSetupSection('bootstrap');
+          setActiveSection('setup');
+        } else {
+          setInitialSetupSessionPhase('dismissed');
+        }
+      } catch (error) {
+        if (!disposed) {
+          console.error('Failed to load initial setup status:', error);
+          setInitialSetupSessionPhase('welcome');
+          setActiveSetupSection('bootstrap');
+          setActiveSection('setup');
+        }
+      }
+    };
+
+    void loadInitialSetupStatus();
+    return () => {
+      disposed = true;
+    };
+  }, []);
 
   const resolvePeerName = (peerId: string): string => {
     const state = store.getState();
@@ -774,43 +816,105 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
     void syncRecentOfflineMessages(wakeRecoveryToken !== null && canFetchOffline ? wakeRecoveryToken : null);
   }, [canFetchOffline, isConnected, networkOnline, wakeRecoveryToken]);
 
-  const isChatSection = activeSection === 'chats' || activeSection === 'groups';
+  const navigationReady = initialSetupSessionPhase !== null;
+  const isChatSection = navigationReady
+    && (activeSection === 'chats' || activeSection === 'groups');
+  const showInitialSetupWelcome = initialSetupSessionPhase === 'welcome';
+  const showInitialSetupWizard = initialSetupSessionPhase === 'guided';
+  const onboardingActive = showInitialSetupWelcome || showInitialSetupWizard;
+
+  const handleStartInitialSetup = () => {
+    setInitialSetupSessionPhase('guided');
+    setActiveSetupSection('bootstrap');
+    setActiveSection('setup');
+  };
+
+  const handleSkipInitialSetup = () => {
+    setInitialSetupSessionPhase('dismissed');
+    setActiveSection('chats');
+  };
+
+  const handleFinishInitialSetup = () => {
+    setInitialSetupSessionPhase('dismissed');
+    setActiveSection('chats');
+  };
 
   return (
     <div className='h-screen w-screen flex overflow-hidden'>
-      <Sidebar
-        activeSection={activeSection}
-        activeSetupSection={activeSetupSection}
-        onSelectSection={setActiveSection}
-        onSelectSetupSection={setActiveSetupSection}
-      />
-      <div className='relative min-w-12 flex-1'>
-        <div
-          className={`absolute inset-0 flex ${isChatSection ? 'visible pointer-events-auto' : 'invisible pointer-events-none'}`}
-          aria-hidden={!isChatSection}
-        >
-          <ChatWrapper />
-        </div>
-        {!isChatSection && (
+      {/*
+        Base app region. While first-run onboarding is active it is marked inert +
+        aria-hidden so keyboard focus and screen readers can't reach the covered
+        rail/sidebar/content. Call cards and portaled dialogs live outside this
+        wrapper so they stay reachable above the onboarding surface.
+      */}
+      <div
+        className='flex min-w-0 flex-1'
+        inert={onboardingActive}
+        aria-hidden={onboardingActive || undefined}
+      >
+        <Sidebar
+          activeSection={activeSection}
+          activeSetupSection={activeSetupSection}
+          onSelectSection={setActiveSection}
+          onSelectSetupSection={setActiveSetupSection}
+        />
+        <div className='relative min-w-12 flex-1'>
           <div
-            className={`absolute inset-0 ${activeSection === 'setup' ? 'bg-sidebar-accent' : 'bg-background'}`}
-            data-setup-section={activeSection === 'setup' ? activeSetupSection : undefined}
+            className={`absolute inset-0 flex ${isChatSection ? 'visible pointer-events-auto' : 'invisible pointer-events-none'}`}
+            aria-hidden={!isChatSection}
           >
-            {activeSection === 'setup' && activeSetupSection === 'bootstrap' && (
-              <BootstrapSetup />
-            )}
-            {activeSection === 'setup' && activeSetupSection === 'relay' && (
-              <RelaySetup />
-            )}
-            {activeSection === 'setup' && activeSetupSection === 'ice' && (
-              <IceSetup />
-            )}
-            {activeSection === 'settings' && (
-              <SettingsPage />
-            )}
+            <ChatWrapper />
           </div>
-        )}
+          {!isChatSection && (
+            <div
+              className={`absolute inset-0 ${activeSection === 'setup' ? 'bg-sidebar-accent' : 'bg-background'}`}
+              data-setup-section={activeSection === 'setup' ? activeSetupSection : undefined}
+            >
+              {activeSection === 'setup' && initialSetupSessionPhase === 'dismissed' && activeSetupSection === 'bootstrap' && (
+                <BootstrapSetup />
+              )}
+              {activeSection === 'setup' && initialSetupSessionPhase === 'dismissed' && activeSetupSection === 'relay' && (
+                <RelaySetup />
+              )}
+              {activeSection === 'setup' && initialSetupSessionPhase === 'dismissed' && activeSetupSection === 'ice' && (
+                <IceSetup />
+              )}
+              {activeSection === 'settings' && (
+                <SettingsPage />
+              )}
+            </div>
+          )}
+        </div>
       </div>
+
+      {/*
+        First-run onboarding: a dedicated full-window surface over the rail + sidebar.
+        z-[80] sits above the rail (z-50) but below call surfaces (expanded video
+        z-90, call cards z-100) and dialogs/toasts, so those still surface on top.
+      */}
+      {showInitialSetupWelcome && (
+        <div className='fixed inset-0 z-[80]'>
+          <InitialSetupWelcome
+            onStart={handleStartInitialSetup}
+            onSkip={handleSkipInitialSetup}
+          />
+        </div>
+      )}
+      {showInitialSetupWizard && (
+        <div className='fixed inset-0 z-[80]'>
+          <InitialSetupWizard
+            activeSection={activeSetupSection}
+            onSelectSection={setActiveSetupSection}
+            onSkip={handleSkipInitialSetup}
+            onFinish={handleFinishInitialSetup}
+          >
+            {activeSetupSection === 'bootstrap' && <BootstrapSetup />}
+            {activeSetupSection === 'relay' && <RelaySetup />}
+            {activeSetupSection === 'ice' && <IceSetup />}
+          </InitialSetupWizard>
+        </div>
+      )}
+
       <IncomingCallCard />
       <CallManagerCard />
       <GroupCallManagerCard />

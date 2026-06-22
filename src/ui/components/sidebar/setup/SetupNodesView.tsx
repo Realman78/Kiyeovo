@@ -201,11 +201,15 @@ export function SetupNodesView({
             ) : (
               <>
                 {total === 0 && !isAdding && (
-                  <div className="px-4 py-8 text-center">
+                  <div className="flex flex-col items-center px-4 py-10 text-center">
                     <p className="text-sm font-medium text-foreground">{emptyTitle}</p>
                     <p className="mx-auto mt-1 max-w-md text-sm leading-6 text-muted-foreground">
                       {emptyDescription}
                     </p>
+                    <Button className="mt-5" onClick={() => setIsAdding(true)}>
+                      <Plus />
+                      {addTitle}
+                    </Button>
                   </div>
                 )}
 
@@ -320,7 +324,7 @@ export function SetupNodesView({
                       </Button>
                     </div>
                   </div>
-                ) : (
+                ) : total > 0 ? (
                   <button
                     type="button"
                     onClick={() => setIsAdding(true)}
@@ -329,7 +333,7 @@ export function SetupNodesView({
                     <Plus className="h-4 w-4" />
                     {addTitle}
                   </button>
-                )}
+                ) : null}
               </>
             )}
           </div>

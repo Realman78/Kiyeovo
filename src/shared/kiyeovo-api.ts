@@ -41,6 +41,7 @@ import type {
 import type { Chat, Message } from '../core/db/database.js';
 
 export type Unsubscribe = () => void;
+export type InitialSetupStatus = 'not_started' | 'in_progress' | 'completed' | 'skipped';
 
 export type KiyeovoChatListItem = Chat & {
   group_creator_username?: string;
@@ -132,6 +133,15 @@ export interface KiyeovoAPI {
   getNodesLiveness: (addresses: string[]) => Promise<NodesLivenessResponse>;
   getNetworkMode: () => Promise<{ success: boolean; mode: NetworkMode; error: string | null }>;
   setNetworkMode: (mode: NetworkMode) => Promise<{ success: boolean; error: string | null }>;
+  getInitialSetupStatus: () => Promise<{
+    success: boolean;
+    status: InitialSetupStatus;
+    error: string | null;
+  }>;
+  setInitialSetupStatus: (status: InitialSetupStatus) => Promise<{
+    success: boolean;
+    error: string | null;
+  }>;
 
   register: (username: string, rememberMe: boolean) => Promise<{ success: boolean; error?: string }>;
   getUserState: () => Promise<{ peerId: string | null; username: string | null; isRegistered: boolean }>;
