@@ -9,6 +9,7 @@ import RegisterDialog from "./RegisterDialog";
 import { errStr } from '../../../../core/utils/general-error';
 import { UNEXPECTED_ERROR } from "../../../constants";
 import { useToast } from "../../ui/use-toast";
+import { OPEN_REGISTER_DIALOG_EVENT } from "../../../utils/uiSignals";
 
 type SidebarFooterProps = {
   collapsed?: boolean;
@@ -38,6 +39,13 @@ export const SidebarFooter: FC<SidebarFooterProps> = ({ collapsed = false }) => 
     setRegisterDialogOpen(false);
     setRegisterIdentityError(undefined);
   }, [registerDialogOpen, user.registered]);
+
+  // Let other parts of the tree (e.g. the empty chat area) open registration.
+  useEffect(() => {
+    const handler = () => setRegisterDialogOpen(true);
+    window.addEventListener(OPEN_REGISTER_DIALOG_EVENT, handler);
+    return () => window.removeEventListener(OPEN_REGISTER_DIALOG_EVENT, handler);
+  }, []);
 
   const handleCopyPeerId = () => {
     setIsCopied(true);

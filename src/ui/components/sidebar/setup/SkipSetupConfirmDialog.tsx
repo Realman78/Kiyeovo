@@ -11,16 +11,25 @@ import {
 type SkipSetupConfirmDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onConfirm: () => void;
+  onConfirm: () => Promise<void>;
+  saving: boolean;
 };
 
 export function SkipSetupConfirmDialog({
   open,
   onOpenChange,
   onConfirm,
+  saving,
 }: SkipSetupConfirmDialogProps) {
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!saving) {
+          onOpenChange(nextOpen);
+        }
+      }}
+    >
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Skip setup?</DialogTitle>
@@ -32,14 +41,15 @@ export function SkipSetupConfirmDialog({
         <DialogFooter>
           <Button
             variant="ghost"
-            onClick={() => {
-              onOpenChange(false);
-              onConfirm();
-            }}
+            onClick={() => { void onConfirm(); }}
+            disabled={saving}
           >
-            Skip anyway
+            {saving ? 'Saving...' : 'Skip anyway'}
           </Button>
-          <Button onClick={() => onOpenChange(false)}>
+          <Button
+            onClick={() => onOpenChange(false)}
+            disabled={saving}
+          >
             Keep setting up
           </Button>
         </DialogFooter>

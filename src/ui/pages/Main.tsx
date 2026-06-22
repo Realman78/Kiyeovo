@@ -1,5 +1,6 @@
-import { useEffect, useEffectEvent, useState } from 'react';
+import { useEffect, useEffectEvent, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
+import { Loader2 } from 'lucide-react';
 import Sidebar from '../components/sidebar/Sidebar';
 import ChatWrapper from '../components/chat/ChatWrapper';
 import { setChats, addChat, removePendingKeyExchange, setActiveChat, markOfflineFetched, markOfflineFetchFailed, updateFileTransferProgress, updateFileTransferStatus, updateFileTransferError, setPendingFileStatus, updateChat, setActivePendingKeyExchange, setOfflineFetchStatus } from '../state/slices/chatSlice';
@@ -23,7 +24,9 @@ import { IceSetup } from '../components/sidebar/setup/IceSetup';
 import { SettingsPage } from '../components/sidebar/settings/SettingsPage';
 import { InitialSetupWelcome } from '../components/sidebar/setup/InitialSetupWelcome';
 import { InitialSetupWizard } from '../components/sidebar/setup/InitialSetupWizard';
+import { OPEN_SETUP_EVENT } from '../utils/uiSignals';
 import type { InitialSetupStatus } from '../../shared/kiyeovo-api';
+import { useSetupReadiness } from '../hooks/useSetupReadiness';
 
 type InitialSetupSessionPhase = 'welcome' | 'guided' | 'dismissed';
 
@@ -37,8 +40,13 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
   const [activeSetupSection, setActiveSetupSection] = useState<SetupSection>('bootstrap');
   const [initialSetupSessionPhase, setInitialSetupSessionPhase] =
     useState<InitialSetupSessionPhase | null>(null);
+  const [persistedInitialSetupStatus, setPersistedInitialSetupStatus] =
+    useState<InitialSetupStatus | null>(null);
+  const [initialSetupSaving, setInitialSetupSaving] = useState(false);
+  const initialSetupTransitionInFlightRef = useRef(false);
   const dispatch = useDispatch();
   const { toast } = useToast();
+  const setupReadiness = useSetupReadiness();
   const isConnected = useSelector((state: RootState) => state.user.connected);
   const networkOnline = useSelector((state: RootState) => state.user.networkOnline);
   const canFetchOffline = !!isConnected && networkOnline;
@@ -60,20 +68,11 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
           console.error('Failed to load initial setup status:', result.error);
         }
 
-        const status: InitialSetupStatus = result.success ? result.status : 'not_started';
-        if (status === 'not_started' || status === 'in_progress') {
-          setInitialSetupSessionPhase(status === 'in_progress' ? 'guided' : 'welcome');
-          setActiveSetupSection('bootstrap');
-          setActiveSection('setup');
-        } else {
-          setInitialSetupSessionPhase('dismissed');
-        }
+        setPersistedInitialSetupStatus(result.success ? result.status : 'not_started');
       } catch (error) {
         if (!disposed) {
           console.error('Failed to load initial setup status:', error);
-          setInitialSetupSessionPhase('welcome');
-          setActiveSetupSection('bootstrap');
-          setActiveSection('setup');
+          setPersistedInitialSetupStatus('not_started');
         }
       }
     };
@@ -82,6 +81,46 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
     return () => {
       disposed = true;
     };
+  }, []);
+
+  useEffect(() => {
+    if (initialSetupSessionPhase !== null || persistedInitialSetupStatus === null) return;
+
+    if (persistedInitialSetupStatus === 'completed' || persistedInitialSetupStatus === 'skipped') {
+      setInitialSetupSessionPhase('dismissed');
+      return;
+    }
+
+    if (persistedInitialSetupStatus === 'not_started') {
+      setActiveSetupSection('bootstrap');
+      setActiveSection('setup');
+      setInitialSetupSessionPhase('welcome');
+      return;
+    }
+
+    if (!setupReadiness) return;
+
+    const resumeSection: SetupSection = setupReadiness.bootstrap !== 'configured'
+      ? 'bootstrap'
+      : setupReadiness.mode === 'fast' && setupReadiness.relay !== 'configured'
+        ? 'relay'
+        : setupReadiness.mode === 'fast'
+          ? 'ice'
+          : 'bootstrap';
+
+    setActiveSetupSection(resumeSection);
+    setActiveSection('setup');
+    setInitialSetupSessionPhase('guided');
+  }, [initialSetupSessionPhase, persistedInitialSetupStatus, setupReadiness]);
+
+  // Let other parts of the tree (e.g. the empty chat area) jump to setup.
+  useEffect(() => {
+    const handler = () => {
+      setActiveSetupSection('bootstrap');
+      setActiveSection('setup');
+    };
+    window.addEventListener(OPEN_SETUP_EVENT, handler);
+    return () => window.removeEventListener(OPEN_SETUP_EVENT, handler);
   }, []);
 
   const resolvePeerName = (peerId: string): string => {
@@ -816,37 +855,61 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
     void syncRecentOfflineMessages(wakeRecoveryToken !== null && canFetchOffline ? wakeRecoveryToken : null);
   }, [canFetchOffline, isConnected, networkOnline, wakeRecoveryToken]);
 
-  const navigationReady = initialSetupSessionPhase !== null;
+  const onboardingLoading = initialSetupSessionPhase === null;
+  const navigationReady = !onboardingLoading;
   const isChatSection = navigationReady
     && (activeSection === 'chats' || activeSection === 'groups');
   const showInitialSetupWelcome = initialSetupSessionPhase === 'welcome';
   const showInitialSetupWizard = initialSetupSessionPhase === 'guided';
-  const onboardingActive = showInitialSetupWelcome || showInitialSetupWizard;
+  const onboardingActive =
+    onboardingLoading || showInitialSetupWelcome || showInitialSetupWizard;
 
-  const handleStartInitialSetup = () => {
+  const persistInitialSetupStatus = async (status: InitialSetupStatus): Promise<boolean> => {
+    if (initialSetupTransitionInFlightRef.current) return false;
+
+    initialSetupTransitionInFlightRef.current = true;
+    setInitialSetupSaving(true);
+    try {
+      const result = await window.kiyeovoAPI.setInitialSetupStatus(status);
+      if (!result.success) {
+        toast.error(result.error || 'Failed to save setup progress');
+        return false;
+      }
+      return true;
+    } catch (error) {
+      console.error('Failed to save initial setup status:', error);
+      toast.error('Failed to save setup progress');
+      return false;
+    } finally {
+      initialSetupTransitionInFlightRef.current = false;
+      setInitialSetupSaving(false);
+    }
+  };
+
+  const handleStartInitialSetup = async (): Promise<void> => {
+    if (!(await persistInitialSetupStatus('in_progress'))) return;
+
     setInitialSetupSessionPhase('guided');
     setActiveSetupSection('bootstrap');
     setActiveSection('setup');
   };
 
-  const handleSkipInitialSetup = () => {
+  const handleSkipInitialSetup = async (): Promise<void> => {
+    if (!(await persistInitialSetupStatus('skipped'))) return;
+
     setInitialSetupSessionPhase('dismissed');
     setActiveSection('chats');
   };
 
-  const handleFinishInitialSetup = () => {
+  const handleFinishInitialSetup = async (): Promise<void> => {
+    if (!(await persistInitialSetupStatus('completed'))) return;
+
     setInitialSetupSessionPhase('dismissed');
     setActiveSection('chats');
   };
 
   return (
     <div className='h-screen w-screen flex overflow-hidden'>
-      {/*
-        Base app region. While first-run onboarding is active it is marked inert +
-        aria-hidden so keyboard focus and screen readers can't reach the covered
-        rail/sidebar/content. Call cards and portaled dialogs live outside this
-        wrapper so they stay reachable above the onboarding surface.
-      */}
       <div
         className='flex min-w-0 flex-1'
         inert={onboardingActive}
@@ -888,25 +951,33 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
       </div>
 
       {/*
-        First-run onboarding: a dedicated full-window surface over the rail + sidebar.
-        z-[80] sits above the rail (z-50) but below call surfaces (expanded video
-        z-90, call cards z-100) and dialogs/toasts, so those still surface on top.
+        First-run onboarding
       */}
+      {onboardingLoading && (
+        <div className='fixed inset-0 z-80 flex items-center justify-center bg-sidebar-accent'>
+          <div className='flex items-center gap-3 text-sm text-muted-foreground'>
+            <Loader2 className='h-4 w-4 animate-spin' />
+            Loading...
+          </div>
+        </div>
+      )}
       {showInitialSetupWelcome && (
-        <div className='fixed inset-0 z-[80]'>
+        <div className='fixed inset-0 z-80'>
           <InitialSetupWelcome
             onStart={handleStartInitialSetup}
             onSkip={handleSkipInitialSetup}
+            saving={initialSetupSaving}
           />
         </div>
       )}
       {showInitialSetupWizard && (
-        <div className='fixed inset-0 z-[80]'>
+        <div className='fixed inset-0 z-80'>
           <InitialSetupWizard
             activeSection={activeSetupSection}
             onSelectSection={setActiveSetupSection}
             onSkip={handleSkipInitialSetup}
             onFinish={handleFinishInitialSetup}
+            saving={initialSetupSaving}
           >
             {activeSetupSection === 'bootstrap' && <BootstrapSetup />}
             {activeSetupSection === 'relay' && <RelaySetup />}

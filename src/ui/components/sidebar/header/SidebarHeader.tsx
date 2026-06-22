@@ -13,6 +13,7 @@ import { useToast } from "../../ui/use-toast";
 import { useOfflineSendWarning } from "../../../hooks/useOfflineSendWarning";
 import { errStr } from '../../../../core/utils/general-error';
 import { UNEXPECTED_ERROR } from "../../../constants";
+import { OPEN_SIDEBAR_ACTION_EVENT, type SidebarAction } from "../../../utils/uiSignals";
 
 type SidebarHeaderProps = {
     statusSuffix: string;
@@ -261,6 +262,27 @@ export const SidebarHeader: FC<SidebarHeaderProps> = ({
         setNewGroupDialogOpen(true);
         setDropdownOpen(false);
     }
+
+    // Allow these actions to be triggered from elsewhere in the tree
+    useEffect(() => {
+        const handler = (event: Event) => {
+            const action = (event as CustomEvent<SidebarAction>).detail;
+            if (action === 'new-conversation') {
+                if (!isRegisteredRef.current || registrationInProgressRef.current) {
+                    toast.error('Register before starting a new conversation.');
+                    return;
+                }
+                setError(undefined);
+                setNewConversationDialogOpen(true);
+            } else if (action === 'new-group') {
+                setNewGroupDialogOpen(true);
+            } else if (action === 'import-trusted-user') {
+                setImportTrustedUserDialogOpen(true);
+            }
+        };
+        window.addEventListener(OPEN_SIDEBAR_ACTION_EVENT, handler);
+        return () => window.removeEventListener(OPEN_SIDEBAR_ACTION_EVENT, handler);
+    }, [toast]);
 
     const handleGroupCreated = async (groupId: string, chatId: number, inviteDeliveries: GroupInviteDeliveryView[]) => {
         try {

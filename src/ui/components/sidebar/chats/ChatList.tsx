@@ -1,11 +1,14 @@
 import { useState, useEffect, useRef, type FC } from "react";
 import { Input } from "../../ui/Input";
-import { Search } from "lucide-react";
+import { Search, MessageSquarePlus, Network, UserPlus, Users } from "lucide-react";
 import { ChatPreview } from "./ChatPreview";
 import { useDispatch, useSelector } from "react-redux";
 import type { RootState } from "../../../state/store";
 import { setActiveChat, setOfflineFetchStatus, markOfflineFetched, markOfflineFetchFailed, type Chat } from "../../../state/slices/chatSlice";
 import { EmptyChatList } from "./EmptyChatList";
+import { Button } from "../../ui/Button";
+import { useSetupReadiness } from "../../../hooks/useSetupReadiness";
+import { requestOpenRegisterDialog, requestOpenSetup, requestSidebarAction } from "../../../utils/uiSignals";
 
 export type ChatListScope = 'all' | 'direct' | 'groups';
 
@@ -22,6 +25,8 @@ export const ChatList: FC<ChatListProps> = ({ scope = 'all' }) => {
     const contactAttempts = useSelector((state: RootState) => state.chat.contactAttempts);
     const selectedChatId = useSelector((state: RootState) => state.chat.activeChat);
     const isConnected = useSelector((state: RootState) => state.user.connected);
+    const isRegistered = useSelector((state: RootState) => state.user.registered);
+    const readiness = useSetupReadiness();
     // Gate on OFFLINE to avoid futile fetches while offline.
     const networkOnline = useSelector((state: RootState) => state.user.networkOnline);
     const canFetchOffline = !!isConnected && networkOnline;
@@ -160,6 +165,27 @@ export const ChatList: FC<ChatListProps> = ({ scope = 'all' }) => {
                         description={scope === 'groups'
                             ? 'Create a group or accept a group invite to get started'
                             : 'Start a new conversation by sending a message to a peer'}
+                        action={scope === 'groups' ? (
+                            <Button size="sm" onClick={() => requestSidebarAction('new-group')}>
+                                <Users />
+                                New group
+                            </Button>
+                        ) : isRegistered ? (
+                            <Button size="sm" onClick={() => requestSidebarAction('new-conversation')}>
+                                <MessageSquarePlus />
+                                Start a conversation
+                            </Button>
+                        ) : readiness?.severity === 'blocked' ? (
+                            <Button size="sm" onClick={requestOpenSetup}>
+                                <Network />
+                                Finish setup
+                            </Button>
+                        ) : (
+                            <Button size="sm" onClick={requestOpenRegisterDialog}>
+                                <UserPlus />
+                                Choose a username
+                            </Button>
+                        )}
                     />
                 ) : (
                     filteredChats.map((chat) => (

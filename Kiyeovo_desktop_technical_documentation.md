@@ -442,13 +442,14 @@ Current navigation rollout status:
 - the left rail may expand on hover/focus as an overlay to reveal labels without shifting the main layout
 - `Main` owns the active rail section and active Setup subsection so the sidebar context pane and main content area use the same navigation state
 - navigation state is renderer-local UI state; it is not persisted or stored in Redux
-- initial infrastructure onboarding has a persisted status boundary with `not_started`, `in_progress`, `completed`, and `skipped` values; absent or invalid persisted values read as `not_started`
+- initial infrastructure onboarding persists `not_started`, `in_progress`, `completed`, or `skipped` independently for fast and anonymous mode; Electron derives the active-mode settings key rather than accepting a mode from the renderer, and absent or invalid values read as `not_started`
 - `not_started` opens a dedicated full-window welcome page; `Start setup` enters a full-window mode-aware guide around the real Setup pages, while `Skip for now` opens Chats
 - fast-mode guidance progresses through Bootstrap, Relay, and optional STUN/TURN configuration; anonymous-mode guidance contains only Bootstrap
 - the guide's numbered step indicators are clickable, so users may configure sections in any order without skipping the entire guide
 - Bootstrap and Relay must still contain configuration before the Ready state can be reached; STUN/TURN may be skipped, and the Ready summary does not describe an unconfigured or warning-acknowledged ICE list as configured
-- skipping or finishing dismisses the guide for the current renderer session, after which Setup returns to its normal unrestricted navigation
-- during the current testing phase, welcome, skip, and completion actions do not write onboarding status, so restarting the app shows the welcome page again; persisted status transitions will be enabled later
+- starting, skipping, and completing the guide persist `in_progress`, `skipped`, and `completed` respectively before changing the UI; failed writes leave the current onboarding surface open
+- restarting an `in_progress` guide keeps the app behind an opaque loading surface until both persisted status and Setup readiness are available, then opens the first missing required section, or Calls in fast mode when Bootstrap and Relay are already configured; the resume decision is applied once so later readiness refreshes do not move the active step
+- switching network modes preserves each mode's independent onboarding history; removing configuration later shows normal Setup warnings without reopening a completed or skipped guide
 
 Setup readiness is mode-aware:
 - anonymous mode evaluates bootstrap only

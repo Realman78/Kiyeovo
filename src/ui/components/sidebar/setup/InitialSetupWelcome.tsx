@@ -67,13 +67,15 @@ function WelcomeCard({ item }: { item: WelcomeItem }) {
 }
 
 type InitialSetupWelcomeProps = {
-  onStart: () => void;
-  onSkip: () => void;
+  onStart: () => Promise<void>;
+  onSkip: () => Promise<void>;
+  saving: boolean;
 };
 
 export function InitialSetupWelcome({
   onStart,
   onSkip,
+  saving,
 }: InitialSetupWelcomeProps) {
   const readiness = useSetupReadiness();
   const items = readiness?.mode === 'anonymous' ? ANONYMOUS_ITEMS : FAST_ITEMS;
@@ -105,10 +107,11 @@ export function InitialSetupWelcome({
             <div className="mt-8 flex flex-wrap items-center gap-3">
               <Button
                 size="lg"
-                onClick={onStart}
+                onClick={() => { void onStart(); }}
+                disabled={saving}
               >
                 <ArrowRight />
-                Start setup
+                {saving ? 'Saving...' : 'Start setup'}
               </Button>
             </div>
             <p className="mt-4 text-xs leading-5 text-muted-foreground">
@@ -116,7 +119,8 @@ export function InitialSetupWelcome({
               <button
                 type="button"
                 onClick={() => setShowSkipConfirm(true)}
-                className="cursor-pointer font-medium text-muted-foreground underline underline-offset-2 transition-colors hover:text-foreground focus:outline-none focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                disabled={saving}
+                className="cursor-pointer font-medium text-muted-foreground underline underline-offset-2 transition-colors hover:text-foreground focus:outline-none focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 skip this guide
               </button>
@@ -142,6 +146,7 @@ export function InitialSetupWelcome({
         open={showSkipConfirm}
         onOpenChange={setShowSkipConfirm}
         onConfirm={onSkip}
+        saving={saving}
       />
     </div>
   );

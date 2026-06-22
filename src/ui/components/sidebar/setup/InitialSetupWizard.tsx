@@ -42,8 +42,9 @@ function requiredSetupComplete(readiness: SetupReadiness): boolean {
 type InitialSetupWizardProps = {
   activeSection: SetupSection;
   onSelectSection: (section: SetupSection) => void;
-  onSkip: () => void;
-  onFinish: () => void;
+  onSkip: () => Promise<void>;
+  onFinish: () => Promise<void>;
+  saving: boolean;
   children: ReactNode;
 };
 
@@ -52,6 +53,7 @@ export function InitialSetupWizard({
   onSelectSection,
   onSkip,
   onFinish,
+  saving,
   children,
 }: InitialSetupWizardProps) {
   const readiness = useSetupReadiness();
@@ -138,13 +140,13 @@ export function InitialSetupWizard({
           </div>
 
           <div className="mt-8 flex items-center justify-center gap-3">
-            <Button variant="outline" onClick={handleBack}>
+            <Button variant="outline" onClick={handleBack} disabled={saving}>
               <ArrowLeft />
               Back
             </Button>
-            <Button onClick={onFinish}>
+            <Button onClick={() => { void onFinish(); }} disabled={saving}>
               <MessageSquare />
-              Start chatting
+              {saving ? 'Saving...' : 'Start chatting'}
             </Button>
           </div>
         </div>
@@ -198,9 +200,10 @@ export function InitialSetupWizard({
                     <button
                       type="button"
                       onClick={() => onSelectSection(step.section)}
+                      disabled={saving}
                       aria-current={active ? 'step' : undefined}
                       aria-label={`${step.title} setup${step.optional ? ', optional' : ''}${configured ? ', configured' : ''}`}
-                      className="group flex min-w-0 cursor-pointer items-center gap-2 rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                      className="group flex min-w-0 cursor-pointer items-center gap-2 rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-60"
                     >
                       <span
                         className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-xs ${
@@ -235,17 +238,18 @@ export function InitialSetupWizard({
             <button
               type="button"
               onClick={() => setShowSkipConfirm(true)}
-              className="mr-1 cursor-pointer text-xs text-muted-foreground underline-offset-2 transition-colors hover:text-foreground hover:underline focus:outline-none focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              disabled={saving}
+              className="mr-1 cursor-pointer text-xs text-muted-foreground underline-offset-2 transition-colors hover:text-foreground hover:underline focus:outline-none focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
             >
               Skip setup
             </button>
             {activeStepIndex > 0 && (
-              <Button variant="ghost" size="sm" onClick={handleBack}>
+              <Button variant="ghost" size="sm" onClick={handleBack} disabled={saving}>
                 <ArrowLeft />
                 Back
               </Button>
             )}
-            <Button size="sm" onClick={handleContinue} disabled={!canContinue}>
+            <Button size="sm" onClick={handleContinue} disabled={!canContinue || saving}>
               {continueLabel}
               <ArrowRight />
             </Button>
@@ -258,6 +262,7 @@ export function InitialSetupWizard({
         open={showSkipConfirm}
         onOpenChange={setShowSkipConfirm}
         onConfirm={onSkip}
+        saving={saving}
       />
     </div>
   );
