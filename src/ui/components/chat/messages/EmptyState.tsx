@@ -4,7 +4,6 @@ import {
   MessageSquare,
   MessageSquarePlus,
   Network,
-  UserCheck,
   UserPlus,
   Users,
   type LucideIcon,
@@ -51,6 +50,18 @@ export const EmptyState = () => {
   const hasChats = useSelector((state: RootState) => state.chat.chats.length > 0);
   const readiness = useSetupReadiness();
 
+  // Niche, prerequisite-bound path (needs a profile file a contact exported and
+  // sent you), so it's always a quiet text link rather than a competing CTA.
+  const addUserFromFileLink = (
+    <button
+      type="button"
+      onClick={() => requestSidebarAction('import-trusted-user')}
+      className="text-sm text-muted-foreground underline underline-offset-2 transition-colors hover:text-foreground focus:outline-none focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+    >
+      Have a profile file from a contact? Add them
+    </button>
+  );
+
   // Returning user who simply deselected a conversation.
   if (hasChats) {
     return (
@@ -82,16 +93,13 @@ export const EmptyState = () => {
           </Button>
         }
         secondary={
-          <div className="flex items-center justify-center gap-2">
+          <>
             <Button variant="ghost" size="sm" onClick={() => requestSidebarAction('new-group')}>
               <Users />
               New group
             </Button>
-            <Button variant="ghost" size="sm" onClick={() => requestSidebarAction('import-trusted-user')}>
-              <UserCheck />
-              Import trusted user
-            </Button>
-          </div>
+            {addUserFromFileLink}
+          </>
         }
       />
     );
@@ -105,15 +113,6 @@ export const EmptyState = () => {
       </div>
     );
   }
-
-  // Importing a trusted profile needs neither registration nor a connection,
-  // so it's offered as a secondary path regardless of setup state.
-  const importTrustedUser = (
-    <Button variant="ghost" size="sm" onClick={() => requestSidebarAction('import-trusted-user')}>
-      <UserCheck />
-      Import trusted user
-    </Button>
-  );
 
   // Unregistered + no bootstrap configured: registration would dead-end (it needs
   // a live connection), so route to setup first.
@@ -129,7 +128,7 @@ export const EmptyState = () => {
             Finish setup
           </Button>
         }
-        secondary={importTrustedUser}
+        secondary={addUserFromFileLink}
       />
     );
   }
@@ -146,7 +145,7 @@ export const EmptyState = () => {
           Choose a username
         </Button>
       }
-      secondary={importTrustedUser}
+      secondary={addUserFromFileLink}
     />
   );
 };

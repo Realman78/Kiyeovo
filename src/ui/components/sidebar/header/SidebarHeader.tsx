@@ -410,7 +410,7 @@ export const SidebarHeader: FC<SidebarHeaderProps> = ({
                         icon={<UserPlus className="w-4 h-4" />}
                         onClick={handleShowImportTrustedUserDialog}
                     >
-                        Import Trusted User
+                        Add user from file
                     </DropdownMenuItem>
                     <DropdownMenuItem
                         icon={<Users className="w-4 h-4" />}
