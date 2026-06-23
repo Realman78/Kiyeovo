@@ -437,7 +437,7 @@ function setupMessagingHandlers(
   ipcMain: IpcMainHandleRegistrar,
   getP2PCore: () => P2PCore | null
 ): void {
-  ipcMain.handle(IPC_CHANNELS.SEND_MESSAGE_REQUEST, async (_event, identifier: string, message: string) => {
+  ipcMain.handle(IPC_CHANNELS.SEND_MESSAGE_REQUEST, async (_event, identifier: string, message: string, replyToCid?: string) => {
     try {
       const p2pCore = getP2PCore();
       if (!p2pCore) {
@@ -466,7 +466,7 @@ function setupMessagingHandlers(
 
       log(`[IPC] Sending message to ${identifier}: ${message}`);
 
-      const response = await p2pCore.messageHandler.sendMessage(identifier, message);
+      const response = await p2pCore.messageHandler.sendMessage(identifier, message, replyToCid);
       log(`[IPC] Message sent response: ${JSON.stringify(response)}`);
 
       if (response.success) {
@@ -1458,6 +1458,20 @@ function setupMessageHandlers(
     } catch (error) {
       console.error('[IPC] Failed to get messages:', error);
       return { success: false, messages: [], error: errStr(error, 'Failed to get messages') };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.GET_MESSAGE_PREVIEW_BY_CID, async (_event, chatId: number, clientMsgId: string) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { success: false, preview: null, error: 'P2P core not initialized' };
+      }
+      const preview = p2pCore.database.getMessagePreviewByClientMsgId(chatId, clientMsgId);
+      return { success: true, preview, error: null };
+    } catch (error) {
+      console.error('[IPC] Failed to get message preview by cid:', error);
+      return { success: false, preview: null, error: errStr(error, 'Failed to get message preview') };
     }
   });
 }

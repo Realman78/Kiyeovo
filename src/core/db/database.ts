@@ -90,6 +90,10 @@ export interface Message {
     timestamp: Date
     event_timestamp?: Date | null
     created_at: Date
+    // same value on both sender and recipient
+    client_msg_id?: string | undefined
+    // The `client_msg_id` (cid) this message replies to, if any.
+    reply_to_client_id?: string | null
     file_name?: string
     file_size?: number
     file_path?: string
@@ -728,6 +732,7 @@ export class ChatDatabase {
       CREATE UNIQUE INDEX IF NOT EXISTS idx_encrypted_identities_unique_mode_kind ON encrypted_user_identities(network_mode, identity_kind);
       CREATE INDEX IF NOT EXISTS idx_participants_peer ON chat_participants(peer_id);
       CREATE INDEX IF NOT EXISTS idx_messages_conv_created ON messages(chat_id, created_at);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_chat_client_msg ON messages(chat_id, client_msg_id);
       CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON notifications(created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_notifications_mode_created_at ON notifications(network_mode, created_at DESC);
 
@@ -819,6 +824,11 @@ export class ChatDatabase {
         this.ensureColumnExists('messages', 'local_send_state', 'TEXT');
         this.ensureColumnExists('messages', 'failed_reason', 'TEXT');
         this.ensureColumnExists('messages', 'retry_after_ts', 'INTEGER');
+        // Reply feature: cross-peer stable id + reply reference. Backfill existing
+        // rows so client_msg_id is always populated (file rows already have id=fileId).
+        this.ensureColumnExists('messages', 'client_msg_id', 'TEXT');
+        this.ensureColumnExists('messages', 'reply_to_client_id', 'TEXT');
+        this.db.prepare(`UPDATE messages SET client_msg_id = id WHERE client_msg_id IS NULL`).run();
         this.db.prepare(`UPDATE bootstrap_nodes SET network_mode = ? WHERE address LIKE '%/onion%'`).run(NETWORK_MODES.ANONYMOUS);
         this.db.prepare(`UPDATE bootstrap_nodes SET network_mode = ? WHERE address NOT LIKE '%/onion%'`).run(NETWORK_MODES.FAST);
     }
@@ -2074,64 +2084,83 @@ export class ChatDatabase {
         return !!row;
     }
 
+    /**
+     * Authoritative insert. A (chat_id, client_msg_id) collision is an invariant
+     * violation here — outbound sends mint fresh cids, and other callers default
+     * client_msg_id to the unique row id — so we DON'T swallow conflicts: a plain
+     * INSERT throws (and the caller's transaction, if any, rolls back). For the
+     * inbound path where the same logical message can legitimately arrive twice
+     * (online + offline), use `tryCreateMessage` instead.
+     */
     async createMessage(message: Omit<Message, 'created_at'>): Promise<string> {
         return this.retryOperation(() => {
-            const stmt = this.db.prepare(`
-                INSERT INTO messages (
-                    id,
-                    chat_id,
-                    sender_peer_id,
-                    content,
-                    message_type,
-                    timestamp,
-                    file_name,
-                    file_size,
-                    file_path,
-                    transfer_status,
-                    transfer_progress,
-                    transfer_error,
-                    local_send_state,
-                    failed_reason,
-                    retry_after_ts,
-                    event_timestamp
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `);
-
-            stmt.run(
-                message.id,
-                message.chat_id,
-                message.sender_peer_id,
-                message.content,
-                message.message_type,
-                message.timestamp instanceof Date ? message.timestamp.toISOString() : message.timestamp,
-                message.file_name ?? null,
-                message.file_size ?? null,
-                message.file_path ?? null,
-                message.transfer_status ?? null,
-                message.transfer_progress ?? null,
-                message.transfer_error ?? null,
-                message.local_send_state ?? null,
-                message.failed_reason ?? null,
-                message.retry_after_ts ?? null,
-                message.event_timestamp
-                    ? (message.event_timestamp instanceof Date
-                        ? message.event_timestamp.toISOString()
-                        : message.event_timestamp)
-                    : null
-            );
-
-            // Update the chat's updated_at to match the message timestamp
-            const updateChatStmt = this.db.prepare(`
-                UPDATE chats SET updated_at = ? WHERE id = ?
-            `);
-            updateChatStmt.run(
-                message.timestamp instanceof Date ? message.timestamp.toISOString() : message.timestamp,
-                message.chat_id
-            );
-
+            this.insertMessageRow(message, false);
             return message.id;
         });
+    }
+
+    /**
+     * Inbound dedup insert. The `(chat_id, client_msg_id)` UNIQUE index +
+     * `ON CONFLICT DO NOTHING` drops a duplicate delivery (same logical message
+     * arriving twice) and reports `inserted: false`, so callers can skip emitting a
+     * phantom "message received" event. The chat's `updated_at` is only bumped when
+     * a row was genuinely added.
+     */
+    async tryCreateMessage(message: Omit<Message, 'created_at'>): Promise<{ id: string; inserted: boolean }> {
+        return this.retryOperation(() => {
+            const inserted = this.insertMessageRow(message, true);
+            return { id: message.id, inserted };
+        });
+    }
+
+    /**
+     * Shared message INSERT. `dedupeOnConflict` decides whether a duplicate
+     * (chat_id, client_msg_id) is silently dropped (inbound) or throws (outbound).
+     * Bumps the chat's updated_at only when a row was actually inserted. Returns
+     * whether a row was inserted.
+     */
+    private insertMessageRow(message: Omit<Message, 'created_at'>, dedupeOnConflict: boolean): boolean {
+        const ts = message.timestamp instanceof Date ? message.timestamp.toISOString() : message.timestamp;
+        const info = this.db.prepare(`
+            INSERT INTO messages (
+                id, chat_id, sender_peer_id, content, message_type, timestamp,
+                file_name, file_size, file_path, transfer_status, transfer_progress,
+                transfer_error, local_send_state, failed_reason, retry_after_ts, event_timestamp,
+                client_msg_id, reply_to_client_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ${dedupeOnConflict ? 'ON CONFLICT(chat_id, client_msg_id) DO NOTHING' : ''}
+        `).run(
+            message.id,
+            message.chat_id,
+            message.sender_peer_id,
+            message.content,
+            message.message_type,
+            ts,
+            message.file_name ?? null,
+            message.file_size ?? null,
+            message.file_path ?? null,
+            message.transfer_status ?? null,
+            message.transfer_progress ?? null,
+            message.transfer_error ?? null,
+            message.local_send_state ?? null,
+            message.failed_reason ?? null,
+            message.retry_after_ts ?? null,
+            message.event_timestamp
+                ? (message.event_timestamp instanceof Date
+                    ? message.event_timestamp.toISOString()
+                    : message.event_timestamp)
+                : null,
+            // cid defaults to the row id (file rows: id = fileId) so it is never null
+            message.client_msg_id ?? message.id,
+            message.reply_to_client_id ?? null,
+        );
+
+        const inserted = info.changes > 0;
+        if (inserted) {
+            this.db.prepare(`UPDATE chats SET updated_at = ? WHERE id = ?`).run(ts, message.chat_id);
+        }
+        return inserted;
     }
 
     /**
@@ -2167,16 +2196,21 @@ export class ChatDatabase {
                 INSERT INTO messages (
                     id, chat_id, sender_peer_id, content, message_type, timestamp,
                     file_name, file_size, file_path, transfer_status, transfer_progress,
-                    transfer_error, local_send_state, failed_reason, retry_after_ts, event_timestamp
+                    transfer_error, local_send_state, failed_reason, retry_after_ts, event_timestamp,
+                    client_msg_id, reply_to_client_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `).run(
+                // Outbound own-send: a cid collision is an invariant violation, so a
+                // plain INSERT throws and the surrounding transaction rolls back
+                // (no orphaned pending-queue row).
                 message.id, message.chat_id, message.sender_peer_id, message.content,
                 message.message_type, ts,
                 message.file_name ?? null, message.file_size ?? null, message.file_path ?? null,
                 message.transfer_status ?? null, message.transfer_progress ?? null, message.transfer_error ?? null,
                 message.local_send_state ?? null, message.failed_reason ?? null, message.retry_after_ts ?? null,
                 null,
+                message.client_msg_id ?? message.id, message.reply_to_client_id ?? null,
             );
             this.db.prepare(`UPDATE chats SET updated_at = ? WHERE id = ?`).run(ts, message.chat_id);
             this.db.prepare(`
@@ -2311,6 +2345,32 @@ export class ChatDatabase {
             created_at: new Date(row.created_at),
             sender_username: row.sender_username || undefined
         }));
+    }
+
+    getMessagePreviewByClientMsgId(chatId: number, clientMsgId: string): {
+        senderPeerId: string;
+        senderUsername: string | undefined;
+        content: string;
+        messageType: 'text' | 'file' | 'image' | 'system';
+        fileName: string | undefined;
+    } | null {
+        const stmt = this.db.prepare(`
+            SELECT m.sender_peer_id, m.content, m.message_type, m.file_name, u.username AS sender_username
+            FROM messages m
+            JOIN chats c ON c.id = m.chat_id
+            LEFT JOIN users u ON m.sender_peer_id = u.peer_id AND u.network_mode = c.network_mode
+            WHERE m.chat_id = ? AND m.client_msg_id = ?
+            LIMIT 1
+        `);
+        const row = stmt.get(chatId, clientMsgId) as any;
+        if (!row) return null;
+        return {
+            senderPeerId: row.sender_peer_id,
+            senderUsername: row.sender_username || undefined,
+            content: row.content,
+            messageType: row.message_type,
+            fileName: row.file_name || undefined,
+        };
     }
 
     getLatestMessageForChat(chatId: number): Message | null {

@@ -1092,6 +1092,7 @@ export class FileHandler {
   async #persistOutgoingPendingTransferMessage(chatId: number, fileId: string, metadata: FileMetadata): Promise<void> {
     await this.database.createMessage({
       id: fileId,
+      client_msg_id: fileId,
       chat_id: chatId,
       sender_peer_id: this.node.peerId.toString(),
       content: `${metadata.filename} (${metadata.size} bytes)`,
@@ -1403,6 +1404,7 @@ export class FileHandler {
     // Persist pending offer as a message (single row per file)
     await this.database.createMessage({
       id: offerMsg.fileId,
+      client_msg_id: offerMsg.fileId,
       chat_id: chat.id,
       sender_peer_id: senderPeerId,
       content: `${offerMsg.filename} (${offerMsg.size} bytes)`,

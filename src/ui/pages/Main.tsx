@@ -280,6 +280,8 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
         messageType: data.messageType || 'text',
         messageSentStatus: data.messageSentStatus,
         currentUserPeerId: currentPeerId,
+        clientMsgId: data.clientMsgId,
+        replyToClientId: data.replyToClientId,
         // File transfer fields (if present)
         fileName: data.fileName,
         fileSize: data.fileSize,
@@ -516,6 +518,7 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
         messageType: 'file',
         messageSentStatus: 'online',
         currentUserPeerId: currentPeerId,
+        clientMsgId: data.fileId,
         fileName: data.filename,
         fileSize: data.size,
         transferStatus: 'incoming_pending_user',

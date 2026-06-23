@@ -65,7 +65,7 @@ export function ConnectivityGuidanceProvider({ children }: { children: ReactNode
     });
   }, [readiness]);
 
-  const canShowGuidance = useCallback((
+  const consumeGuidanceSlot = useCallback((
     kind: MessageConnectivityFailure | 'call_connection_failed',
   ): boolean => {
     const now = Date.now();
@@ -80,7 +80,7 @@ export function ConnectivityGuidanceProvider({ children }: { children: ReactNode
   const showCallConnectionFailure = useCallback((): boolean => {
     const iceMissing = readiness?.mode === 'fast'
       && (readiness.ice === 'missing' || readiness.ice === 'missing_acknowledged');
-    if (!iceMissing || !canShowGuidance('call_connection_failed')) {
+    if (!iceMissing || !consumeGuidanceSlot('call_connection_failed')) {
       return false;
     }
 
@@ -91,13 +91,13 @@ export function ConnectivityGuidanceProvider({ children }: { children: ReactNode
       'Call connection failed',
     );
     return true;
-  }, [canShowGuidance, readiness, toast]);
+  }, [consumeGuidanceSlot, readiness, toast]);
 
   const showMessageFailureGuidance = useCallback((
     reason: MessageConnectivityFailure,
   ): boolean => {
     if (reason === 'bootstrap_unavailable' && readiness?.bootstrap === 'missing') {
-      if (!canShowGuidance(reason)) return false;
+      if (!consumeGuidanceSlot(reason)) return false;
       toast.warningAction(
         'The message could not reach the network because no bootstrap server is configured.',
         'Open bootstrap setup',
@@ -112,7 +112,7 @@ export function ConnectivityGuidanceProvider({ children }: { children: ReactNode
       && readiness?.mode === 'fast'
       && readiness.relay === 'missing'
     ) {
-      if (!canShowGuidance(reason)) return false;
+      if (!consumeGuidanceSlot(reason)) return false;
       toast.warningAction(
         'This contact could not be reached. Adding a relay may improve messaging reliability.',
         'Open relay setup',
@@ -123,7 +123,7 @@ export function ConnectivityGuidanceProvider({ children }: { children: ReactNode
     }
 
     return false;
-  }, [canShowGuidance, readiness, toast]);
+  }, [consumeGuidanceSlot, readiness, toast]);
 
   const value = useMemo<ConnectivityGuidanceContextValue>(() => ({
     confirmCallAttempt,

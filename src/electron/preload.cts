@@ -59,7 +59,7 @@ const kiyeovoAPI: KiyeovoAPI = {
   onRestoreUsername: (callback) => subscribe(IPC_CHANNELS.RESTORE_USERNAME, callback),
   unregister: () => invoke(IPC_CHANNELS.UNREGISTER_REQUEST),
 
-  sendMessage: (identifier, message) => invoke(IPC_CHANNELS.SEND_MESSAGE_REQUEST, identifier, message),
+  sendMessage: (identifier, message, replyToCid) => invoke(IPC_CHANNELS.SEND_MESSAGE_REQUEST, identifier, message, replyToCid),
   checkOfflineCapacity: (peerId, additional) => invoke(IPC_CHANNELS.CHECK_OFFLINE_CAPACITY, peerId, additional),
   requestOfflineInboxRecovery: (peerId) => invoke(IPC_CHANNELS.REQUEST_OFFLINE_INBOX_RECOVERY, peerId),
   getOfflineInboxCapacity: (chatId) => invoke(IPC_CHANNELS.GET_OFFLINE_INBOX_CAPACITY, chatId),
@@ -125,6 +125,7 @@ const kiyeovoAPI: KiyeovoAPI = {
   getChatById: (chatId) => invoke(IPC_CHANNELS.GET_CHAT, chatId),
 
   getMessages: (chatId, limit, offset) => invoke(IPC_CHANNELS.GET_MESSAGES, chatId, limit, offset),
+  getMessagePreviewByCid: (chatId, clientMsgId) => invoke(IPC_CHANNELS.GET_MESSAGE_PREVIEW_BY_CID, chatId, clientMsgId),
   onMessageReceived: (callback) => subscribe(IPC_CHANNELS.MESSAGE_RECEIVED, callback),
   onMessageSendStateChanged: (callback) => subscribe(IPC_CHANNELS.MESSAGE_SEND_STATE_CHANGED, callback),
   onOfflineInboxCapacityChanged: (callback) => subscribe(IPC_CHANNELS.OFFLINE_INBOX_CAPACITY_CHANGED, callback),

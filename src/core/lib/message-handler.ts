@@ -71,6 +71,7 @@ import {
 import { triggerFastRelayRefresh } from '../network/relay-keepalive.js';
 import { SessionManager } from '../direct/session-manager.js';
 import { MessageEncryption } from '../direct/message-encryption.js';
+import { encodeEnvelope, decodeEnvelope, isValidCid } from '../direct/message-envelope.js';
 import { PeerConnectionHandler } from '../direct/peer-connection-handler.js';
 import { StreamHandler } from '../transport/stream-handler.js';
 import { KeyExchange } from '../direct/key-exchange.js';
@@ -84,7 +85,10 @@ import { PeerId } from '@libp2p/interface';
 import { GroupMessageType } from '../group/types.js';
 import { GroupCreator } from '../group/control/group-creator.js';
 import { GroupResponder } from '../group/control/group-responder.js';
-import { GroupMessaging } from '../group/runtime/group-messaging.js';
+import {
+  GROUP_OFFLINE_BACKUP_FAILED_MARKER,
+  GroupMessaging,
+} from '../group/runtime/group-messaging.js';
 import { GroupOfflineManager } from '../group/runtime/group-offline-manager.js';
 import type { GroupOfflineCheckOptions } from '../group/runtime/group-offline-manager.js';
 import { GroupAckRepublisher } from '../group/control/group-ack-republisher.js';
@@ -102,6 +106,8 @@ type OfflineReadBucketInfo = ReturnType<ChatDatabase['getOfflineReadBucketInfo']
 type OfflineReadBucketInfoForChats = ReturnType<ChatDatabase['getOfflineReadBucketInfoForChats']>[number];
 type OfflineReadBucketInfoAny = OfflineReadBucketInfo | OfflineReadBucketInfoForChats;
 type OfflineCheckResult = { checkedChatIds: number[]; unreadFromChats: Map<number, number> };
+const OFFLINE_DHT_UNAVAILABLE_MARKER = 'no DHT connection';
+const OFFLINE_DHT_UNAVAILABLE_MARKER_LOWER = OFFLINE_DHT_UNAVAILABLE_MARKER.toLowerCase();
 
 function hasChatId(info: OfflineReadBucketInfoAny): info is OfflineReadBucketInfoForChats {
   return 'chat_id' in info;
@@ -803,6 +809,10 @@ export class MessageHandler {
           return;
         }
         const decryptedContent = MessageEncryption.decryptMessage(message, session);
+        // Reply feature: the body may be a versioned envelope carrying the shared
+        // cid + reply ref. decodeEnvelope falls back to plain text (no cid) for
+        // anything that isn't a well-formed envelope.
+        const envelope = decodeEnvelope(decryptedContent);
         this.reactivateRetiredPendingAcksForPeer(remoteId);
 
         // Process ACK if included - clear acknowledged messages from our bucket
@@ -823,30 +833,44 @@ export class MessageHandler {
             throw new Error('Chat not found');
           }
           const messageId = crypto.randomUUID();
-          await this.database.createMessage({
+          // Persist the sender's shared cid (mint a local one only if the body
+          // wasn't an envelope), the reply ref, and the plain body text.
+          const clientMsgId = envelope.cid ?? crypto.randomUUID();
+          const { inserted } = await this.database.tryCreateMessage({
             id: messageId,
             chat_id: chat.id,
             sender_peer_id: remoteId,
-            content: decryptedContent,
+            content: envelope.text,
             message_type: 'text',
-            timestamp: new Date()
+            timestamp: new Date(),
+            client_msg_id: clientMsgId,
+            reply_to_client_id: envelope.replyToCid ?? null,
           });
-          log(`Saved message with ID: ${messageId}`);
 
-          // Get sender username for the event
-          const sender = this.database.getUserByPeerId(remoteId);
-          const senderUsername = sender?.username || 'Unknown';
+          // Duplicate delivery (same cid already stored, e.g. online + offline
+          // overlap): the row exists — do not emit a phantom event.
+          if (!inserted) {
+            log(`Skipped duplicate message cid=${clientMsgId.slice(0, 8)} from ${remoteId.slice(-8)}`);
+          } else {
+            log(`Saved message with ID: ${messageId}`);
 
-          // Fire message received event
-          this.onMessageReceived({
-            chatId: chat.id,
-            messageId: messageId,
-            content: decryptedContent,
-            senderPeerId: remoteId,
-            senderUsername: senderUsername,
-            timestamp: Date.now(),
-            messageSentStatus: 'online'
-          });
+            // Get sender username for the event
+            const sender = this.database.getUserByPeerId(remoteId);
+            const senderUsername = sender?.username || 'Unknown';
+
+            // Fire message received event
+            this.onMessageReceived({
+              chatId: chat.id,
+              messageId: messageId,
+              content: envelope.text,
+              senderPeerId: remoteId,
+              senderUsername: senderUsername,
+              timestamp: Date.now(),
+              messageSentStatus: 'online',
+              clientMsgId,
+              replyToClientId: envelope.replyToCid,
+            });
+          }
         } catch (error: unknown) {
           generalErrorHandler(error, `Error saving message to database`);
         }
@@ -2411,10 +2435,10 @@ export class MessageHandler {
     const bootstrapMissing = this.database.getBootstrapNodes().length === 0;
     const noNetworkConnections = this.node.getConnections().length === 0;
     const peerReachabilityFailure = this.shouldFallbackOfflineSend(primaryErrorText);
-    const dhtUnavailable = fallbackErrorText.includes('no dht connection')
-      || primaryErrorText.includes('no dht connection');
+    const dhtUnavailable = fallbackErrorText.includes(OFFLINE_DHT_UNAVAILABLE_MARKER_LOWER)
+      || primaryErrorText.includes(OFFLINE_DHT_UNAVAILABLE_MARKER_LOWER);
     const groupNetworkFailure = primaryErrorText.includes(
-      'no online peers and offline backup failed',
+      GROUP_OFFLINE_BACKUP_FAILED_MARKER,
     );
 
     if (
@@ -2463,11 +2487,12 @@ export class MessageHandler {
     targetUsernameOrPeerId: string,
     message: string,
     user: User | null,
+    outbound: { cid: string; replyToCid: string | undefined; transportBody: string },
   ): Promise<SendMessageResponse> {
     log(`Trying to send offline message to ${targetUsernameOrPeerId}`);
 
     if (this.node.getConnections().length === 0) {
-      throw new Error('Offline delivery unavailable: no DHT connection');
+      throw new Error(`Offline delivery unavailable: ${OFFLINE_DHT_UNAVAILABLE_MARKER}`);
     }
 
     const fallbackUser = user ?? this.database.getUserByPeerIdThenUsername(targetUsernameOrPeerId) ?? null;
@@ -2487,7 +2512,7 @@ export class MessageHandler {
     }
 
     const writeBucketKey = this.keyExchange.constructWriteBucketKey(bucketSecret);
-    const strippedMessage = await this.storeOfflineMessageDB(fallbackUser, writeBucketKey, message);
+    const strippedMessage = await this.storeOfflineMessageDB(fallbackUser, writeBucketKey, message, outbound);
     log(`Peer likely offline; stored message for ${targetUsernameOrPeerId} as offline.`);
     return { success: true, messageSentStatus: 'offline', message: strippedMessage, error: null };
   }
@@ -2497,12 +2522,13 @@ export class MessageHandler {
     message: string,
     user: User | null,
     error: unknown,
+    outbound: { cid: string; replyToCid: string | undefined; transportBody: string },
   ): Promise<SendMessageResponse> {
     const errorText = this.getSendMessageErrorText(error);
     log('sendMessage errorText:', errorText);
 
     if (this.shouldFallbackOfflineSend(errorText)) {
-      return this.storeOfflineMessageFallback(targetUsernameOrPeerId, message, user);
+      return this.storeOfflineMessageFallback(targetUsernameOrPeerId, message, user, outbound);
     }
 
     if (errorText.includes("username not found")) {
@@ -2578,7 +2604,12 @@ export class MessageHandler {
    * fall back to the batched offline queue. (Connected peers and new contacts use
    * the synchronous sendMessage path.)
    */
-  private startNonBlockingOfflineSend(user: User, message: string, bucketSecret: string): SendMessageResponse {
+  private startNonBlockingOfflineSend(
+    user: User,
+    message: string,
+    bucketSecret: string,
+    outbound: { cid: string; replyToCid: string | undefined; transportBody: string },
+  ): SendMessageResponse {
     const writeBucketKey = this.keyExchange.constructWriteBucketKey(bucketSecret);
     const chat = this.database.getChatByPeerId(user.peer_id);
     if (!chat) {
@@ -2588,6 +2619,8 @@ export class MessageHandler {
     const now = Date.now();
     // Atomic gate: capacity check + both inserts in one transaction. Returns false
     // (and writes nothing) when the bucket is full — no concurrent overfill.
+    // The DB row keeps the plain body + shared cid; the queued payload is the
+    // envelope, so the flush encrypts what the recipient will decode.
     const inserted = this.database.createMessageWithPendingOfflineSend(
       {
         id: messageId,
@@ -2597,8 +2630,10 @@ export class MessageHandler {
         message_type: 'text',
         timestamp: new Date(now),
         local_send_state: 'sending',
+        client_msg_id: outbound.cid,
+        reply_to_client_id: outbound.replyToCid ?? null,
       },
-      { peerId: user.peer_id, bucketKey: writeBucketKey, content: message, createdAt: now },
+      { peerId: user.peer_id, bucketKey: writeBucketKey, content: outbound.transportBody, createdAt: now },
       this.offlineSendQueue.capacityLimit(),
     );
     if (!inserted) {
@@ -2616,8 +2651,10 @@ export class MessageHandler {
       content: message,
       timestamp: now,
       messageType: 'text',
+      clientMsgId: outbound.cid,
+      replyToClientId: outbound.replyToCid,
     };
-    void this.deliverNotConnectedInBackground(user, message, messageId, chat.id, writeBucketKey);
+    void this.deliverNotConnectedInBackground(user, message, messageId, chat.id, writeBucketKey, outbound.transportBody);
     return { success: true, messageSentStatus: null, error: null, message: strippedMessage, localSendState: 'sending' };
   }
 
@@ -2665,6 +2702,7 @@ export class MessageHandler {
     messageId: string,
     chatId: number,
     writeBucketKey: string,
+    transportBody: string,
   ): Promise<void> {
     // Phase 1: attempt realtime delivery. ONLY failures here mean "peer offline →
     // queue it". Bookkeeping after a successful send is deliberately outside this
@@ -2683,7 +2721,10 @@ export class MessageHandler {
         setTimeout(() => { reject(new Error('Message timeout')); }, MESSAGE_TIMEOUT)
       );
       await Promise.race([
-        this.writeMessageOnline(targetPeerId, message, session, shouldSendAck ? lastRead : undefined),
+        // Online attempt ships the envelope (so a recipient who happens to be
+        // reachable persists the same cid); ensureUserSession above still uses the
+        // plain text for session/relink resolution, mirroring the online path.
+        this.writeMessageOnline(targetPeerId, transportBody, session, shouldSendAck ? lastRead : undefined),
         timeoutPromise,
       ]);
       online = { targetPeerId, keyExchangeOccurred, ackTimestamp: shouldSendAck ? lastRead : undefined };
@@ -2712,8 +2753,17 @@ export class MessageHandler {
     }
   }
 
-  async sendMessage(targetUsernameOrPeerId: string, message: string): Promise<SendMessageResponse> {
+  async sendMessage(targetUsernameOrPeerId: string, message: string, replyToCid?: string): Promise<SendMessageResponse> {
     let user: User | null = null;
+    // Reply feature: mint the cross-peer cid + build the transport envelope ONCE so
+    // every delivery path (online, non-blocking offline queue, synchronous offline
+    // fallback) ships the same cid; the recipient persists it as client_msg_id. We
+    // store only the plain body locally. Declared before the try so the offline
+    // fallback in `catch` can reuse the same cid.
+    const cid = crypto.randomUUID();
+    const normalizedReplyToCid = isValidCid(replyToCid) ? replyToCid : undefined;
+    const transportBody = encodeEnvelope({ cid, text: message, replyToCid: normalizedReplyToCid });
+    const outbound = { cid, replyToCid: normalizedReplyToCid, transportBody };
     try {
       const dbUser = this.database.getUserByPeerIdThenUsername(targetUsernameOrPeerId);
       const initialUser = dbUser && this.database.getChatByPeerId(dbUser.peer_id) ? dbUser : null;
@@ -2728,7 +2778,7 @@ export class MessageHandler {
         const connected = this.node.getConnections().some(conn => conn.remotePeer.toString() === initialUser.peer_id);
         const bucketSecret = this.database.getOfflineBucketSecretByPeerId(initialUser.peer_id);
         if (!connected && bucketSecret) {
-          return this.startNonBlockingOfflineSend(initialUser, message, bucketSecret);
+          return this.startNonBlockingOfflineSend(initialUser, message, bucketSecret, outbound);
         }
       }
 
@@ -2759,12 +2809,12 @@ export class MessageHandler {
 
       const res = await Promise.race([
         this.writeMessageOnline(
-          targetPeerId, message, session, shouldSendAck ? lastReadTimestamp : undefined,
+          targetPeerId, transportBody, session, shouldSendAck ? lastReadTimestamp : undefined,
         ).then(() => true),
         timeoutPromise,
       ]);
       if (res) {
-        const strippedMessage = await this.saveMessageToDatabase(targetPeerId.toString(), message, 'online');
+        const strippedMessage = await this.saveMessageToDatabase(targetPeerId.toString(), message, 'online', { cid, replyToCid: normalizedReplyToCid });
         // Update ACK sent timestamp if we included an ACK
         if (shouldSendAck) {
           this.database.updateOfflineLastAckSentByPeerId(targetPeerId.toString(), lastReadTimestamp);
@@ -2790,7 +2840,7 @@ export class MessageHandler {
 
       console.error(`Failed to send message to ${targetUsernameOrPeerId}: ${errStr(err)}`);
       try {
-        return await this.handleSendMessageFailure(targetUsernameOrPeerId, message, user, err);
+        return await this.handleSendMessageFailure(targetUsernameOrPeerId, message, user, err, outbound);
       } catch (offlineErr: unknown) {
         generalErrorHandler(offlineErr, `Failed to send message`);
         const connectivityFailure = this.classifyMessageConnectivityFailure(err, offlineErr);
@@ -3078,7 +3128,12 @@ export class MessageHandler {
     );
   }
 
-  private async storeOfflineMessageDB(user: User, writeBucketKey: string, message: string): Promise<StrippedMessage> {
+  private async storeOfflineMessageDB(
+    user: User,
+    writeBucketKey: string,
+    message: string,
+    outbound: { cid: string; replyToCid: string | undefined; transportBody: string },
+  ): Promise<StrippedMessage> {
     try {
       const userIdentity = this.usernameRegistry.getUserIdentity();
       if (!userIdentity) throw new Error('User identity not available');
@@ -3093,10 +3148,11 @@ export class MessageHandler {
       const lastAckSent = this.database.getOfflineLastAckSentByPeerId(user.peer_id);
       const shouldSendAck = lastReadTimestamp > lastAckSent;
 
+      // The DHT payload is the envelope (recipient decodes cid + reply ref).
       const offlineMessage = OfflineMessageManager.createOfflineMessage(
         this.node.peerId.toString(),
         myUsername,
-        message,
+        outbound.transportBody,
         Buffer.from(user.offline_public_key, 'base64').toString(),
         userIdentity.signingPrivateKey,
         writeBucketKey,
@@ -3119,7 +3175,7 @@ export class MessageHandler {
         this.database.updateOfflineLastAckSentByPeerId(user.peer_id, lastReadTimestamp);
       }
 
-      const strippedMessage = await this.saveMessageToDatabase(user.peer_id, message, 'offline');
+      const strippedMessage = await this.saveMessageToDatabase(user.peer_id, message, 'offline', { cid: outbound.cid, replyToCid: outbound.replyToCid });
       this.notifyOfflineInboxCapacityChanged(strippedMessage.chatId);
       log(`Saved offline message to sender's database`);
       return strippedMessage;
@@ -3132,7 +3188,11 @@ export class MessageHandler {
   private async saveMessageToDatabase(
     peerId: string,
     message: string,
-    messageSentStatus: MessageSentStatus
+    messageSentStatus: MessageSentStatus,
+    // Reply feature: the shared cross-peer id and reply ref for this outbound copy.
+    // Omitted by paths that don't carry an envelope yet (offline) — then
+    // `client_msg_id` defaults to the row id (see database.createMessage).
+    meta?: { cid?: string | undefined; replyToCid?: string | undefined },
   ): Promise<StrippedMessage> {
     const chat = this.database.getChatByPeerId(peerId);
     if (!chat) {
@@ -3141,15 +3201,22 @@ export class MessageHandler {
     }
 
     const timestamp = new Date();
+    const rowId = crypto.randomUUID();
     const messageId = await this.database.createMessage({
-      id: crypto.randomUUID(),
+      id: rowId,
       chat_id: chat.id,
       sender_peer_id: this.node.peerId.toString(),
       content: message,
       message_type: 'text',
-      timestamp
+      timestamp,
+      client_msg_id: meta?.cid,
+      reply_to_client_id: meta?.replyToCid ?? null,
     });
     log(`Saved message with ID: ${messageId}`);
+
+    // The shared cid: explicit when provided (online), else the row id (which is
+    // what createMessage stored as client_msg_id by default).
+    const clientMsgId = meta?.cid ?? rowId;
 
     const myPeerId = this.node.peerId.toString();
     const myUser = this.database.getUserByPeerId(myPeerId);
@@ -3162,10 +3229,20 @@ export class MessageHandler {
       senderUsername: myUsername,
       content: message,
       timestamp: timestamp.getTime(),
-      messageSentStatus
+      messageSentStatus,
+      clientMsgId,
+      replyToClientId: meta?.replyToCid,
     });
 
-    return { chatId: chat.id, messageId, content: message, timestamp: timestamp.getTime(), messageType: 'text' };
+    return {
+      chatId: chat.id,
+      messageId,
+      content: message,
+      timestamp: timestamp.getTime(),
+      messageType: 'text',
+      clientMsgId,
+      replyToClientId: meta?.replyToCid,
+    };
   }
 
   // Check offline messages (direct)
@@ -3384,10 +3461,12 @@ export class MessageHandler {
           continue;
         }
         // eslint-disable-next-line no-await-in-loop
-        const msgChatId = await this.saveOfflineMessageToDatabase(msg, senderInfo, decryptedContent);
-        const unreadCount = unreadFromChats.get(msgChatId) ?? 0;
-        unreadFromChats.set(msgChatId, unreadCount + 1);
-        processedCount++;
+        const { chatId: msgChatId, inserted } = await this.saveOfflineMessageToDatabase(msg, senderInfo, decryptedContent);
+        if (inserted) {
+          const unreadCount = unreadFromChats.get(msgChatId) ?? 0;
+          unreadFromChats.set(msgChatId, unreadCount + 1);
+          processedCount++;
+        }
 
         // Track max timestamp for this peer
         const currentMax = maxTimestampPerPeer.get(bucketInfo.peerId) ?? 0;
@@ -3396,7 +3475,7 @@ export class MessageHandler {
         }
 
         log(
-          `[OFFLINE][MSG][TEXT] run=${runId} msgId=${msg.id} from=${senderInfo.peer_id.slice(-8)} delivered=true`,
+          `[OFFLINE][MSG][TEXT] run=${runId} msgId=${msg.id} from=${senderInfo.peer_id.slice(-8)} result=${inserted ? 'inserted' : 'duplicate'}`,
         );
       } catch (error: unknown) {
         generalErrorHandler(error, `Failed to process offline message`);
@@ -3699,7 +3778,7 @@ export class MessageHandler {
     msg: OfflineMessage,
     senderInfo: OfflineSenderInfo,
     decryptedContent: string,
-  ): Promise<number> {
+  ): Promise<{ chatId: number; inserted: boolean }> {
     log(`Processing offline message from ${senderInfo.username} (${senderInfo.peer_id})`);
 
     const chat = this.database.getChatByPeerId(senderInfo.peer_id);
@@ -3707,27 +3786,43 @@ export class MessageHandler {
       throw new Error('Chat not found');
     }
 
-    const messageId = await this.database.createMessage({
+    // The body may be a versioned envelope carrying the shared cid + reply ref;
+    // decodeEnvelope falls back to plain text (mint a local cid) otherwise.
+    const envelope = decodeEnvelope(decryptedContent);
+    const clientMsgId = envelope.cid ?? crypto.randomUUID();
+
+    const { inserted } = await this.database.tryCreateMessage({
       id: msg.id,
       chat_id: chat.id,
       sender_peer_id: senderInfo.peer_id,
-      content: decryptedContent,
+      content: envelope.text,
       message_type: 'text',
-      timestamp: new Date(msg.timestamp)
+      timestamp: new Date(msg.timestamp),
+      client_msg_id: clientMsgId,
+      reply_to_client_id: envelope.replyToCid ?? null,
     });
-    log(`Saved offline message with ID: ${messageId}`);
+
+    // Duplicate of a message already stored (e.g. same logical message delivered
+    // online and via the offline bucket): row exists — no phantom event.
+    if (!inserted) {
+      log(`Skipped duplicate offline message cid=${clientMsgId.slice(0, 8)} from ${senderInfo.peer_id.slice(-8)}`);
+      return { chatId: chat.id, inserted: false };
+    }
+    log(`Saved offline message with ID: ${msg.id}`);
 
     this.onMessageReceived({
       chatId: chat.id,
-      messageId: messageId,
-      content: decryptedContent,
+      messageId: msg.id,
+      content: envelope.text,
       senderPeerId: senderInfo.peer_id,
       senderUsername: senderInfo.username,
       timestamp: msg.timestamp,
-      messageSentStatus: 'offline'
+      messageSentStatus: 'offline',
+      clientMsgId,
+      replyToClientId: envelope.replyToCid,
     });
 
-    return chat.id;
+    return { chatId: chat.id, inserted: true };
   }
 
   private async endActiveCallForShutdown(): Promise<void> {

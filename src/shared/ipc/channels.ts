@@ -113,6 +113,7 @@ export const IPC_CHANNELS = {
 
   // Messages
   GET_MESSAGES: 'messages:get',
+  GET_MESSAGE_PREVIEW_BY_CID: 'messages:getPreviewByCid',
 
   // Offline messages
   CHECK_OFFLINE_MESSAGES: 'offlineMessages:check',
