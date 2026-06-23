@@ -12,6 +12,7 @@ import { useToast } from "../../ui/use-toast";
 import { useOfflineSendWarning } from "../../../hooks/useOfflineSendWarning";
 import type { Message } from "../../../../core/db/database";
 import { errStr } from '../../../../core/utils/general-error';
+import { useConnectivityGuidance } from "../../../hooks/useConnectivityGuidance";
 
 type MessagesContainerProps = {
   messages: ChatMessage[];
@@ -90,6 +91,7 @@ export const MessagesContainer = ({
   const activePendingKeyExchange = useSelector((state: RootState) => state.chat.activePendingKeyExchange);
   const dispatch = useDispatch();
   const { toast } = useToast();
+  const { showMessageFailureGuidance } = useConnectivityGuidance();
   const warnOfflineSend = useOfflineSendWarning();
 
   const [error, setError] = useState<string | null>(null);
@@ -406,7 +408,14 @@ export const MessagesContainer = ({
         return;
       }
 
-      const { success, error, message: sentMessage, messageSentStatus, localSendState } = await window.kiyeovoAPI.sendMessage(activeChat.peerId, message.content);
+      const {
+        success,
+        error,
+        message: sentMessage,
+        messageSentStatus,
+        localSendState,
+        connectivityFailure,
+      } = await window.kiyeovoAPI.sendMessage(activeChat.peerId, message.content);
       if (!success) {
         dispatch(updateLocalMessageSendState({ messageId: message.id, state: 'failed' }));
         if (error === 'OFFLINE_BUCKET_FULL') {
@@ -415,7 +424,9 @@ export const MessagesContainer = ({
             void window.kiyeovoAPI.requestOfflineInboxRecovery(activeChat.peerId).catch(() => undefined);
           }
         }
-        toast.error(error || 'Failed to resend message');
+        if (!connectivityFailure || !showMessageFailureGuidance(connectivityFailure)) {
+          toast.error(error || 'Failed to resend message');
+        }
       } else if (sentMessage?.messageId) {
         const stillSending = localSendState === 'sending';
         if (!stillSending) warnOfflineSend();
@@ -437,7 +448,14 @@ export const MessagesContainer = ({
       dispatch(updateLocalMessageSendState({ messageId: message.id, state: 'failed' }));
       toast.error(errStr(err, 'Unexpected resend error'));
     }
-  }, [activeChat, dispatch, toast]);
+  }, [
+    activeChat,
+    dispatch,
+    onOfflineInboxRelevant,
+    showMessageFailureGuidance,
+    toast,
+    warnOfflineSend,
+  ]);
 
   const handleRetryOfflineFetch = useCallback(async () => {
     if (!activeChat?.id) return;

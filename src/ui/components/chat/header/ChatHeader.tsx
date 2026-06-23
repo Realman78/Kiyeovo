@@ -25,6 +25,7 @@ import { ChatHeaderCallControls } from "./ChatHeaderCallControls";
 import { ChatHeaderMenu } from "./ChatHeaderMenu";
 import { errStr } from '../../../../core/utils/general-error';
 import { Button } from "../../ui/Button";
+import { useConnectivityGuidance } from "../../../hooks/useConnectivityGuidance";
 
 type ChatHeaderProps = {
   username: string;
@@ -41,6 +42,7 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
   const activeCall = useSelector((state: RootState) => state.call.activeCall);
   const dispatch = useDispatch();
   const { toast } = useToast();
+  const { confirmCallAttempt } = useConnectivityGuidance();
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [isBlocked, setIsBlocked] = useState(false);
   const [aboutModalOpen, setAboutModalOpen] = useState(false);
@@ -605,6 +607,10 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
       return;
     }
 
+    if (!(await confirmCallAttempt())) {
+      return;
+    }
+
     const freshChat = await syncGroupCallEvidence(chatId);
     const latestKnownCallId = freshChat?.last_known_active_call_id ?? null;
 
@@ -692,6 +698,9 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
       if (!hangup.success) {
         toast.error(hangup.error || 'Failed to end call');
       }
+      return;
+    }
+    if (!(await confirmCallAttempt())) {
       return;
     }
     const start = await callService.startOutgoingCall(peerId);

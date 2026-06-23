@@ -123,7 +123,7 @@ export const EmptyState = () => {
         title="Finish setting up to connect"
         body="Kiyeovo needs at least one bootstrap server before you can register or reach anyone."
         primary={
-          <Button size="lg" onClick={requestOpenSetup}>
+          <Button size="lg" onClick={() => requestOpenSetup()}>
             <Network />
             Finish setup
           </Button>

@@ -6,10 +6,12 @@ import { useAppDispatch, useAppSelector } from '../../state/hooks';
 import { clearIncomingCall } from '../../state/slices/callSlice';
 import { callService } from '../../lib/call/callService';
 import { useCallCardAnchor } from './useCallCardAnchor';
+import { useConnectivityGuidance } from '../../hooks/useConnectivityGuidance';
 
 export const IncomingCallCard = () => {
   const dispatch = useAppDispatch();
   const { toast } = useToast();
+  const { confirmCallAttempt } = useConnectivityGuidance();
   const incomingCall = useAppSelector((state) => state.call.incomingCall);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isDraggingAnchor, setIsDraggingAnchor] = useState(false);
@@ -21,6 +23,9 @@ export const IncomingCallCard = () => {
     if (isSubmitting) return;
     setIsSubmitting(true);
     try {
+      if (!(await confirmCallAttempt())) {
+        return;
+      }
       const result = await callService.acceptIncomingCall({
         callId: incomingCall.callId,
         peerId: incomingCall.peerId,

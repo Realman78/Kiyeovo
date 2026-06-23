@@ -15,6 +15,7 @@ import type {
   KeyExchangeFailedEvent,
   MessageReceivedEvent,
   MessageSendStateChangedEvent,
+  MessageConnectivityFailure,
   OfflineInboxCapacityChangedEvent,
   OfflineInboxCapacitySnapshot,
   SendMessageResponse,
@@ -2382,6 +2383,40 @@ export class MessageHandler {
     return errStr(error).toLowerCase();
   }
 
+  private classifyMessageConnectivityFailure(
+    primaryError: unknown,
+    fallbackError?: unknown,
+  ): MessageConnectivityFailure | undefined {
+    const primaryErrorText = this.getSendMessageErrorText(primaryError);
+    const fallbackErrorText = fallbackError
+      ? this.getSendMessageErrorText(fallbackError)
+      : '';
+    const bootstrapMissing = this.database.getBootstrapNodes().length === 0;
+    const noNetworkConnections = this.node.getConnections().length === 0;
+    const peerReachabilityFailure = this.shouldFallbackOfflineSend(primaryErrorText);
+    const dhtUnavailable = fallbackErrorText.includes('no dht connection')
+      || primaryErrorText.includes('no dht connection');
+    const groupNetworkFailure = primaryErrorText.includes(
+      'no online peers and offline backup failed',
+    );
+
+    if (
+      bootstrapMissing
+      && (
+        dhtUnavailable
+        || (noNetworkConnections && (peerReachabilityFailure || groupNetworkFailure))
+      )
+    ) {
+      return 'bootstrap_unavailable';
+    }
+
+    if (peerReachabilityFailure) {
+      return 'peer_unreachable';
+    }
+
+    return undefined;
+  }
+
   private shouldFallbackOfflineSend(errorText: string): boolean {
     return MessageHandler.OFFLINE_FALLBACK_REGEX.test(errorText);
   }
@@ -2741,9 +2776,11 @@ export class MessageHandler {
         return await this.handleSendMessageFailure(targetUsernameOrPeerId, message, user, err);
       } catch (offlineErr: unknown) {
         generalErrorHandler(offlineErr, `Failed to send message`);
+        const connectivityFailure = this.classifyMessageConnectivityFailure(err, offlineErr);
         return {
           success: false, messageSentStatus: null, error: 'Failed to send message: ' + (
-            errStr(offlineErr))
+            errStr(offlineErr)),
+          ...(connectivityFailure ? { connectivityFailure } : {}),
         };
       }
     }
@@ -2768,7 +2805,13 @@ export class MessageHandler {
     try {
       return await this.groupMessaging.sendGroupMessage(chat.group_id, message, options);
     } catch (error: unknown) {
-      return { success: false, messageSentStatus: null, error: errStr(error) };
+      const connectivityFailure = this.classifyMessageConnectivityFailure(error);
+      return {
+        success: false,
+        messageSentStatus: null,
+        error: errStr(error),
+        ...(connectivityFailure ? { connectivityFailure } : {}),
+      };
     }
   }
 

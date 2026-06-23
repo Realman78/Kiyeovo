@@ -144,6 +144,10 @@ export class OfflineSendQueue {
           // Loop: pick up anything that arrived during the PUT (trailing coalesce).
         } catch (error: unknown) {
           const reason = errStr(error);
+          const connectivityFailure = this.deps.database.getBootstrapNodes().length === 0
+            && this.deps.node.getConnections().length === 0
+            ? 'bootstrap_unavailable' as const
+            : undefined;
           // Atomic: mark queue rows + chat rows failed together (crash-safe).
           this.deps.database.settlePendingOfflineSendsFailed(ids, reason);
           const changedChatIds = new Set<number>();
@@ -153,6 +157,7 @@ export class OfflineSendQueue {
               chatId: r.chat_id,
               outcome: 'failed',
               failedReason: 'other',
+              ...(connectivityFailure ? { connectivityFailure } : {}),
             });
             changedChatIds.add(r.chat_id);
           }

@@ -9,6 +9,7 @@ import { setPeerId, setTorEnabled, setNetworkOnline } from './state/slices/userS
 import { fetchAppConfig } from './state/slices/appConfigSlice';
 import { useAppDispatch } from './state/hooks';
 import { SetupReadinessProvider } from './providers/SetupReadinessProvider';
+import { ConnectivityGuidanceProvider } from './providers/ConnectivityGuidanceProvider';
 
 type WakeRecoveryState = {
   token: number;
@@ -155,10 +156,12 @@ function App() {
     {isInitialized
       ? (
         <SetupReadinessProvider>
-          <Main
-            wakeRecoveryToken={wakeRecovery?.token ?? null}
-            onWakeRecoveryOfflineSyncSettled={handleWakeRecoveryOfflineSyncSettled}
-          />
+          <ConnectivityGuidanceProvider>
+            <Main
+              wakeRecoveryToken={wakeRecovery?.token ?? null}
+              onWakeRecoveryOfflineSyncSettled={handleWakeRecoveryOfflineSyncSettled}
+            />
+          </ConnectivityGuidanceProvider>
         </SetupReadinessProvider>
       )
       : <Login initStatus={initStatus} />}

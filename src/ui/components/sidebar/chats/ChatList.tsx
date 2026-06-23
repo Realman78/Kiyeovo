@@ -176,7 +176,7 @@ export const ChatList: FC<ChatListProps> = ({ scope = 'all' }) => {
                                 Start a conversation
                             </Button>
                         ) : readiness?.severity === 'blocked' ? (
-                            <Button size="sm" onClick={requestOpenSetup}>
+                            <Button size="sm" onClick={() => requestOpenSetup()}>
                                 <Network />
                                 Finish setup
                             </Button>

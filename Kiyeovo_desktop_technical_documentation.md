@@ -461,6 +461,17 @@ Setup readiness is mode-aware:
 - setup readiness checks configuration existence only; it does not represent current server reachability
 - unreadable bootstrap configuration produces a red indicator; unreadable relay or ICE configuration produces amber when bootstrap configuration is known to exist
 - the Setup context navigation mirrors readiness per subsection: missing Bootstrap is marked red, missing Relay or ICE is marked amber, and read failures are labeled as status unavailable rather than not configured; these dots remain visible in the collapsed icon-only pane
+- renderer Setup navigation signals may target Bootstrap, Relay, or STUN/TURN directly; `Main` remains the owner that applies the requested rail section and Setup subsection
+
+Contextual infrastructure guidance is owned by `ConnectivityGuidanceProvider`, which consumes Setup readiness but does not redefine it:
+- starting or accepting a direct or group call with no configured ICE servers opens one confirmation per renderer session; the user may open STUN/TURN Setup or try anyway
+- acknowledging the passive missing-ICE reminder does not suppress this action-triggered confirmation
+- calls are not disabled solely because ICE is missing, because host candidates may still work on a local network
+- a direct WebRTC connection failure or a group-call participant connection timeout shows a cooldown-limited warning with a STUN/TURN Setup action only while ICE is known to be missing; the wording covers both initial connection and a failed active media path, while rejection, ringing timeout, signaling errors, and media-permission failures do not claim an ICE problem
+- message send responses and background send-state events carry typed `bootstrap_unavailable` or `peer_unreachable` connectivity reasons from the core/IPC boundary; renderer components do not parse human-readable errors to choose infrastructure guidance
+- `bootstrap_unavailable` links to Bootstrap Setup only when the readiness snapshot also confirms that no bootstrap server is configured
+- `peer_unreachable` links to Relay Setup only in fast mode when no relay is configured, and the wording says a relay may improve reliability rather than claiming it caused the failure
+- successful online sends and successful offline DHT delivery remain silent; guidance appears only for terminal send failures and is cooldown-limited to avoid repeated popups
 
 Setup readiness is owned by a provider around the main application. The rail consumes only readiness state, while Setup pages consume a stable refresh action. Successful Bootstrap, Relay, or ICE Setup add/remove actions trigger a new read so the rail indicator reflects configuration completeness without placing readiness state or invalidation counters in `Main`.
 
