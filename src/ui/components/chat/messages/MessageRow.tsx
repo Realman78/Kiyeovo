@@ -219,6 +219,7 @@ export const MessageRow = memo(({
           </div>
         )}
         <div
+          data-message-bubble
           className={`max-w-[70%] rounded-lg px-4 py-2.5 ${isOwnMessage ? "order-2 bg-message-sent text-message-sent-foreground rounded-br-sm" : "order-1 bg-message-received text-message-received-foreground rounded-bl-sm"}`}
           style={{ wordBreak: "break-word" }}
         >

@@ -23,6 +23,7 @@ Its goal is to provide complete context quickly in new AI conversations without 
   - key exchange (X25519 + Ed25519 signatures)
   - session symmetric keys (HKDF)
   - online sending + offline fallback into DHT buckets
+  - replies (quote + jump-to) anchored to a cross-peer stable id carried in a versioned encrypted envelope (§5.4)
 - Group chat uses:
   - mode-scoped GossipSub for realtime content
   - control messages over pairwise offline buckets
@@ -190,6 +191,20 @@ Offline send is **non-blocking and batched**:
 - a **standalone offline ACK** (online or DHT-queued, capacity-reserved, ping-pong-guarded) clears the sender's bucket even when the recipient reads but never replies; on-connect refetch nudges and an ACK-side best-effort return nudge speed it up
 - if a direct bucket is full and the user tries to send, the sender runs a bounded recovery: fetch ACKs locally, request an immediate reconnect, send one direct refetch nudge with a dedicated dial path, then fetch once more; this is single-flight and cooldown-limited per peer
 - direct `DIRECT_OFFLINE_REFETCH` nudges schedule a short `500 ms` fetch delay; generic peer-activity fallback checks keep the longer debounce window
+
+#### 5.4 Reply to a message (quote + jump-to)
+
+Replies quote a specific earlier message and let the reader jump back to the original. **Direct 1:1 only** (groups out of scope for now).
+
+Cross-peer identity:
+- message row IDs are minted independently per peer, so replies anchor to a **`client_msg_id` (cid)** — a stable id that is the *same value on both sides* of a message. The sender mints it; it rides inside the encrypted body and the recipient persists the same value. File/image rows reuse the shared `fileId` as their cid (so files are reply-/jump-able too).
+- a reply stores only `reply_to_client_id` (the target cid). **No quoted-content snapshot is kept** — the quote is resolved by live lookup, so deleting the original leaves no recoverable copy (the quote then renders *"Message deleted."*).
+
+Wire format — the plaintext that gets encrypted is a small versioned **envelope** rather than a bare string: `{ v, cid, text, reply_to? }`. This keeps the cid + reply linkage private on the transport **and** in the offline DHT-at-rest payload. The recipient decodes and validates it (bounded cid shape/length, clamped text) and falls back to plain text for any non-envelope body. The envelope + cid are built **once per send** and reused across every delivery route (online, non-blocking offline queue, synchronous offline fallback), so the same cid arrives regardless of path.
+
+Dedup: a `UNIQUE(chat_id, client_msg_id)` index makes the same logical message delivered over two channels (online + offline) collapse to one row. Inbound inserts (`tryCreateMessage`) use `ON CONFLICT DO NOTHING` and skip the "received" event when no row was inserted; outbound inserts use a plain insert that **throws** on a cid collision (an invariant violation, never expected). This complements the pre-existing offline-message-UUID dedup.
+
+UI: a hover **Reply** action (hidden in groups, and on un-settled/failed sends, and on files until transfer completes) opens a composer reply bar that survives chat switches (`Esc`/✕ cancels). The quote renders above the bubble; clicking it scrolls to the original with a brief accent **highlight pulse**, paging older history in until the target loads (graceful toast if it is truly unavailable).
 
 ---
 
@@ -381,6 +396,8 @@ Core tables include:
 - `file_transfers`
 - `bootstrap_nodes`
 
+Reply feature adds two columns to `messages`: `client_msg_id` (cross-peer stable id / cid, defaults to the row id; file rows use `fileId`) and `reply_to_client_id` (the cid a reply points at). A `UNIQUE(chat_id, client_msg_id)` index backs cross-channel (online + offline) dedup. Migrations follow the repo's `ensureColumnExists` + `CREATE INDEX IF NOT EXISTS` pattern (no formal migration framework).
+
 Practical rule: relationship/context (`chats`, participants, statuses) is authoritative for UI behavior, not `users` cache alone.
 
 ---
@@ -544,6 +561,7 @@ Composer behavior:
 - drafts auto-expand up to five visible lines, then switch to internal scrolling
 - pasted line breaks are preserved in both the draft and rendered text messages
 - rendered text message bubbles expose an inline hover/focus copy affordance that copies only the message text content to the clipboard
+- messages can be **replied to**: a hover reply affordance quotes a specific message; the composer shows a cancelable reply bar (survives chat switches, `Esc`/✕ to cancel); the quote renders above the reply bubble (resolved by live lookup, shows *"Message deleted."* if the original is gone), and clicking it jumps to the original with a brief highlight pulse, paging older history in if needed. Reply is hidden in groups and on un-settled/failed sends. See §5.4.
 - inbound message notifications are batched over a short renderer-side window so offline/startup bursts produce one sound and one summary desktop notification instead of one per message
 
 UI is event-driven while core remains authoritative.

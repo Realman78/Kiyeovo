@@ -81,6 +81,9 @@ export const MessagesContainer = ({
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const skipNextAutoScrollRef = useRef(false);
+  // Jump-to-message: suppress the bottom auto-scroll while we page back to a quote
+  const isJumpingRef = useRef(false);
+  const pulseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isLoadingMoreRef = useRef(false);
   const activeChatIdRef = useRef<number | null>(null);
   const loadTokenRef = useRef(0);
@@ -292,6 +295,7 @@ export const MessagesContainer = ({
   }, [activeChat?.justCreated, activeChat?.id, messages.length, dispatch]);
 
   useEffect(() => {
+    if (isJumpingRef.current) return;
     if (skipNextAutoScrollRef.current) {
       skipNextAutoScrollRef.current = false;
       return;
@@ -302,19 +306,57 @@ export const MessagesContainer = ({
     }
   }, [messages, suppressTopLoadTemporarily]);
 
+  useEffect(() => () => {
+    if (pulseTimeoutRef.current) clearTimeout(pulseTimeoutRef.current);
+  }, []);
+
   const isTrustedOutOfBand = activeChat?.trusted_out_of_band;
   let previousSenderPeerId: string | null = null;
   let senderStreak = 0;
 
-  // TODO remove comment: Jump to a quoted message. 
-  // Step-4 scope: scroll to it if it's in the loaded
-  // window. Load-until-found + the background-pulse highlight land in step 7.
-  const handleJumpToMessage = useCallback((clientMsgId: string) => {
+  // Briefly tint the target bubble so the eye lands on it after a jump.
+  const pulseRow = useCallback((rowEl: HTMLElement) => {
+    const bubble = rowEl.querySelector<HTMLElement>('[data-message-bubble]') ?? rowEl;
+    bubble.classList.remove('reply-pulse-highlight');
+    void bubble.offsetWidth; // force reflow so the animation restarts on a repeat jump
+    bubble.classList.add('reply-pulse-highlight');
+    if (pulseTimeoutRef.current) clearTimeout(pulseTimeoutRef.current);
+    pulseTimeoutRef.current = setTimeout(() => {
+      bubble.classList.remove('reply-pulse-highlight');
+      pulseTimeoutRef.current = null;
+    }, 1600);
+  }, []);
+
+  const handleJumpToMessage = useCallback(async (clientMsgId: string) => {
     const container = scrollContainerRef.current;
     if (!container) return;
-    const el = container.querySelector(`[data-cid="${CSS.escape(clientMsgId)}"]`);
-    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  }, []);
+    const findRow = () => container.querySelector<HTMLElement>(`[data-cid="${CSS.escape(clientMsgId)}"]`);
+
+    isJumpingRef.current = true;
+    try {
+      let row = findRow();
+      const MAX_PAGES = 200;
+      let pages = 0;
+      while (!row && pages < MAX_PAGES) {
+        const beforeOffset = offsetRef.current;
+        // eslint-disable-next-line no-await-in-loop
+        await loadMore();
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        if (offsetRef.current === beforeOffset) break; // nothing more loaded (exhausted / no-op)
+        row = findRow();
+        pages++;
+      }
+      if (row) {
+        row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        pulseRow(row);
+      } else {
+        toast.info('Original message is no longer available');
+      }
+    } finally {
+      isJumpingRef.current = false;
+    }
+  }, [loadMore, pulseRow, toast]);
 
   const handleRetryFailedMessage = useCallback(async (message: ChatMessage) => {
     if (!activeChat) return;
