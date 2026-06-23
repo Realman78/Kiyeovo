@@ -67,6 +67,14 @@ export interface Chat {
   lastKnownActiveCallSeenAt?: number | null;
 }
 
+// Reply feature: the message currently being replied to in the composer.
+// `sender`/`excerpt` are display-only (for the compose bar); only `cid` is sent.
+export interface ReplyTarget {
+  cid: string;
+  sender: string;
+  excerpt: string;
+}
+
 interface ChatState {
   chats: Chat[];
   contactAttempts: ContactAttempt[];
@@ -77,6 +85,8 @@ interface ChatState {
   messages: ChatMessage[];
   sendingMessages: ChatMessage[];
   loading: boolean;
+  // Keyed by chatId so a half-composed reply survives switching chats.
+  replyTargetByChatId: Record<number, ReplyTarget>;
 }
 
 const initialState: ChatState = {
@@ -89,6 +99,7 @@ const initialState: ChatState = {
   messages: [],
   sendingMessages: [],
   loading: false,
+  replyTargetByChatId: {},
 };
 
 const compareMessageOrder = (a: ChatMessage, b: ChatMessage): number => {
@@ -331,6 +342,12 @@ const chatSlice = createSlice({
     removeSendingMessage: (state, action: PayloadAction<string>) => {
       state.sendingMessages = state.sendingMessages.filter((m) => m.id !== action.payload);
     },
+    setReplyTarget: (state, action: PayloadAction<{ chatId: number; target: ReplyTarget }>) => {
+      state.replyTargetByChatId[action.payload.chatId] = action.payload.target;
+    },
+    clearReplyTarget: (state, action: PayloadAction<number>) => {
+      delete state.replyTargetByChatId[action.payload];
+    },
     finalizeSendingMessage: (state, action: PayloadAction<{ localMessageId: string; finalMessage: ChatMessage }>) => {
       state.sendingMessages = state.sendingMessages.filter((m) => m.id !== action.payload.localMessageId);
       const isDuplicate = state.messages.some((m) => m.id === action.payload.finalMessage.id);
@@ -541,6 +558,8 @@ export const {
   addSendingMessage,
   removeSendingMessage,
   finalizeSendingMessage,
+  setReplyTarget,
+  clearReplyTarget,
   setPendingKeyExchanges,
   addPendingKeyExchange,
   removePendingKeyExchange,
