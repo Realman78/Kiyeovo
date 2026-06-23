@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { finalizeSendingMessage, markOfflineFetched, markOfflineFetchFailed, prependMessages, resolveMessageSendOutcome, setMessages, setOfflineFetchStatus, updateChat, updateLocalMessageSendState, type ChatMessage } from "../../../state/slices/chatSlice";
 import type { RootState } from "../../../state/store";
 import { useDispatch, useSelector } from "react-redux";
@@ -13,6 +13,7 @@ import { useOfflineSendWarning } from "../../../hooks/useOfflineSendWarning";
 import type { Message } from "../../../../core/db/database";
 import { errStr } from '../../../../core/utils/general-error';
 import { useConnectivityGuidance } from "../../../hooks/useConnectivityGuidance";
+import { ChevronDown } from "lucide-react";
 
 type MessagesContainerProps = {
   messages: ChatMessage[];
@@ -20,6 +21,8 @@ type MessagesContainerProps = {
   onOfflineInboxRelevant?: () => void;
   bottomOverlayClearancePx?: number;
 }
+
+type LoadMoreResult = 'loaded' | 'exhausted' | 'cancelled' | 'error';
 
 function mapDbMessage(msg: Message & { sender_username?: string }): ChatMessage {
   let fileName = msg.file_name;
@@ -80,11 +83,25 @@ export const MessagesContainer = ({
 }: MessagesContainerProps) => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  // Inner content wrapper observed for height changes (stick-to-bottom on async growth).
+  const contentRef = useRef<HTMLDivElement>(null);
+  const isAtBottomRef = useRef(true);
+  // Current vs. last-observed message count, to tell a real new/removed message
+  // (count change → handled by the smooth auto-scroll / loadMore) apart from async
+  // content growth at a stable count (e.g. a reply quote resolving late).
+  const messagesLengthRef = useRef(0);
+  const observerSeenLengthRef = useRef(0);
   const skipNextAutoScrollRef = useRef(false);
   // Jump-to-message: suppress the bottom auto-scroll while we page back to a quote
   const isJumpingRef = useRef(false);
+  const jumpGenerationRef = useRef(0);
   const pulseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isLoadingMoreRef = useRef(false);
+  const loadMoreInFlightRef = useRef<{
+    chatId: number;
+    requestId: symbol;
+    promise: Promise<LoadMoreResult>;
+  } | null>(null);
   const activeChatIdRef = useRef<number | null>(null);
   const loadTokenRef = useRef(0);
   const topZoneActiveRef = useRef(false);
@@ -103,9 +120,13 @@ export const MessagesContainer = ({
   const [hasMore, setHasMore] = useState(true);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [isScrollable, setIsScrollable] = useState(true);
+  const [isAtBottom, setIsAtBottom] = useState(true);
   const offsetRef = useRef(0);
   const latestDisplayedMessagesRef = useRef(messages);
   const showEmptyState = !isPending && messages.length === 0;
+  // Kept current synchronously (during render) so the ResizeObserver callback,
+  // which runs before paint, reads an up-to-date count.
+  messagesLengthRef.current = messages.length;
 
   const getMembershipInfoTooltip = (message: ChatMessage): string | null => {
     if (message.messageType !== 'system' || !message.eventTimestamp) {
@@ -146,15 +167,51 @@ export const MessagesContainer = ({
     hasUserInteractedRef.current = true;
   }, []);
 
+  const updateBottomState = useCallback((container: HTMLElement) => {
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    const atBottom = distanceFromBottom <= 64;
+    isAtBottomRef.current = atBottom;
+    setIsAtBottom(atBottom);
+  }, []);
+
+  // Stick to the bottom when content grows underneath the viewport at a *stable*
+  // message count — e.g. a reply quote resolving async after the initial scroll has
+  // already landed — so the latest message stays fully visible. New/removed messages
+  // (count change) are left to the smooth auto-scroll effect and loadMore's restore.
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    const content = contentRef.current;
+    if (!container || !content || typeof ResizeObserver === 'undefined') return;
+    observerSeenLengthRef.current = messagesLengthRef.current;
+    const observer = new ResizeObserver(() => {
+      const len = messagesLengthRef.current;
+      const countChanged = len !== observerSeenLengthRef.current;
+      observerSeenLengthRef.current = len;
+      if (countChanged) return;
+      if (isJumpingRef.current || isLoadingMoreRef.current || !isAtBottomRef.current) return;
+      container.scrollTop = container.scrollHeight;
+      setIsAtBottom(true);
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [activeChat?.id]);
+
   useEffect(() => {
     latestDisplayedMessagesRef.current = messages;
   }, [messages]);
 
+  useLayoutEffect(() => {
+    jumpGenerationRef.current += 1;
+    isJumpingRef.current = false;
+    skipNextAutoScrollRef.current = false;
+    loadMoreInFlightRef.current = null;
+    activeChatIdRef.current = activeChat?.id ?? null;
+    loadTokenRef.current += 1;
+  }, [activeChat?.id]);
+
   // Initial fetch
   useEffect(() => {
     const chatId = activeChat?.id ?? null;
-    activeChatIdRef.current = chatId;
-    loadTokenRef.current += 1;
     const requestToken = loadTokenRef.current;
     setError(null);
     setHasMore(true);
@@ -194,22 +251,34 @@ export const MessagesContainer = ({
   }, [activeChat?.id, dispatch]);
 
   // Load more on scroll to top
-  const loadMore = useCallback(async () => {
+  const loadMore = useCallback((): Promise<LoadMoreResult> => {
     const chatId = activeChat?.id;
-    if (!chatId || isLoadingMoreRef.current || !hasMore) return;
+    if (!chatId) return Promise.resolve('cancelled');
+
+    const inFlight = loadMoreInFlightRef.current;
+    if (inFlight?.chatId === chatId) {
+      return inFlight.promise;
+    }
+    if (!hasMore) return Promise.resolve('exhausted');
 
     isLoadingMoreRef.current = true;
     setIsLoadingMore(true);
     const requestToken = loadTokenRef.current;
+    const requestId = Symbol('load-more');
     const container = scrollContainerRef.current;
     const prevScrollHeight = container?.scrollHeight ?? 0;
 
-    try {
-      const result = await window.kiyeovoAPI.getMessages(chatId, LOAD_MORE_MESSAGES_LIMIT, offsetRef.current);
-      if (loadTokenRef.current !== requestToken || activeChatIdRef.current !== chatId) {
-        return;
-      }
-      if (result.success) {
+    const promise = (async (): Promise<LoadMoreResult> => {
+      try {
+        const result = await window.kiyeovoAPI.getMessages(chatId, LOAD_MORE_MESSAGES_LIMIT, offsetRef.current);
+        if (loadTokenRef.current !== requestToken || activeChatIdRef.current !== chatId) {
+          return 'cancelled';
+        }
+        if (!result.success) {
+          console.error('[MessagesContainer] Failed to load more messages:', result.error);
+          return 'error';
+        }
+
         const mapped = result.messages.map(mapDbMessage);
         if (mapped.length > 0) {
           skipNextAutoScrollRef.current = true;
@@ -218,23 +287,39 @@ export const MessagesContainer = ({
 
           // Restore scroll position after DOM update
           requestAnimationFrame(() => {
-            if (container) {
-              suppressTopLoadTemporarily();
-              const newScrollHeight = container.scrollHeight;
-              container.scrollTop = newScrollHeight - prevScrollHeight;
-            }
+            if (
+              !container
+              || loadTokenRef.current !== requestToken
+              || activeChatIdRef.current !== chatId
+              || scrollContainerRef.current !== container
+            ) return;
+
+            suppressTopLoadTemporarily();
+            const newScrollHeight = container.scrollHeight;
+            container.scrollTop = newScrollHeight - prevScrollHeight;
           });
         }
-        if (mapped.length < LOAD_MORE_MESSAGES_LIMIT) {
+        const exhausted = mapped.length < LOAD_MORE_MESSAGES_LIMIT;
+        if (exhausted) {
           setHasMore(false);
         }
+        return exhausted ? 'exhausted' : 'loaded';
+      } catch (err) {
+        console.error('[MessagesContainer] Failed to load more messages:', err);
+        return 'error';
+      } finally {
+        if (loadMoreInFlightRef.current?.requestId === requestId) {
+          loadMoreInFlightRef.current = null;
+        }
+        if (loadTokenRef.current === requestToken && activeChatIdRef.current === chatId) {
+          isLoadingMoreRef.current = false;
+          setIsLoadingMore(false);
+        }
       }
-    } catch (err) {
-      console.error('[MessagesContainer] Failed to load more messages:', err);
-    } finally {
-      isLoadingMoreRef.current = false;
-      setIsLoadingMore(false);
-    }
+    })();
+
+    loadMoreInFlightRef.current = { chatId, requestId, promise };
+    return promise;
   }, [activeChat?.id, hasMore, dispatch, suppressTopLoadTemporarily]);
 
   useEffect(() => {
@@ -247,6 +332,7 @@ export const MessagesContainer = ({
     let frameId: number | null = null;
     const updateScrollable = () => {
       setIsScrollable(container.scrollHeight > container.clientHeight + 1);
+      updateBottomState(container);
     };
 
     frameId = requestAnimationFrame(updateScrollable);
@@ -259,7 +345,7 @@ export const MessagesContainer = ({
       }
       window.removeEventListener('resize', onResize);
     };
-  }, [activeChat?.id, messages.length, isLoadingMore, hasMore, showEmptyState]);
+  }, [activeChat?.id, messages.length, isLoadingMore, hasMore, showEmptyState, updateBottomState]);
 
   const handleScroll = useCallback(() => {
     const container = scrollContainerRef.current;
@@ -269,6 +355,7 @@ export const MessagesContainer = ({
     const inTopZone = container.scrollTop <= thresholdPx;
     const wasInTopZone = topZoneActiveRef.current;
     topZoneActiveRef.current = inTopZone;
+    updateBottomState(container);
 
     if (suppressTopLoadRef.current || !hasUserInteractedRef.current) {
       return;
@@ -277,7 +364,12 @@ export const MessagesContainer = ({
     if (!wasInTopZone && inTopZone && hasMore && !isLoadingMoreRef.current) {
       void loadMore();
     }
-  }, [hasMore, loadMore]);
+  }, [hasMore, loadMore, updateBottomState]);
+
+  const scrollToBottom = useCallback(() => {
+    suppressTopLoadTemporarily();
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [suppressTopLoadTemporarily]);
 
   useEffect(() => {
     if (activeChat?.justCreated && messages.length === 0) {
@@ -307,6 +399,9 @@ export const MessagesContainer = ({
   }, [messages, suppressTopLoadTemporarily]);
 
   useEffect(() => () => {
+    jumpGenerationRef.current += 1;
+    isJumpingRef.current = false;
+    skipNextAutoScrollRef.current = false;
     if (pulseTimeoutRef.current) clearTimeout(pulseTimeoutRef.current);
   }, []);
 
@@ -324,39 +419,109 @@ export const MessagesContainer = ({
     pulseTimeoutRef.current = setTimeout(() => {
       bubble.classList.remove('reply-pulse-highlight');
       pulseTimeoutRef.current = null;
-    }, 1600);
+    }, 2600);
   }, []);
 
+  const waitForJumpTarget = useCallback((
+    rowEl: HTMLElement,
+    container: HTMLElement,
+    isCurrentJump: () => boolean,
+  ): Promise<boolean> => new Promise((resolve) => {
+    const startedAt = performance.now();
+    let previousScrollTop = container.scrollTop;
+    let stableFrames = 0;
+
+    const checkVisibility = () => {
+      if (!isCurrentJump() || !rowEl.isConnected) {
+        resolve(false);
+        return;
+      }
+
+      const rowRect = rowEl.getBoundingClientRect();
+      const containerRect = container.getBoundingClientRect();
+      const isVisible = rowRect.bottom > containerRect.top && rowRect.top < containerRect.bottom;
+      const currentScrollTop = container.scrollTop;
+
+      stableFrames = isVisible && Math.abs(currentScrollTop - previousScrollTop) < 0.5
+        ? stableFrames + 1
+        : 0;
+      previousScrollTop = currentScrollTop;
+
+      if (stableFrames >= 2) {
+        resolve(true);
+        return;
+      }
+      if (performance.now() - startedAt >= 5000) {
+        resolve(isVisible);
+        return;
+      }
+
+      requestAnimationFrame(checkVisibility);
+    };
+
+    requestAnimationFrame(checkVisibility);
+  }), []);
+
   const handleJumpToMessage = useCallback(async (clientMsgId: string) => {
+    const chatId = activeChat?.id;
     const container = scrollContainerRef.current;
-    if (!container) return;
+    if (!chatId || !container) return;
+    const requestToken = loadTokenRef.current;
+    const jumpGeneration = ++jumpGenerationRef.current;
     const findRow = () => container.querySelector<HTMLElement>(`[data-cid="${CSS.escape(clientMsgId)}"]`);
+    const isCurrentJump = () =>
+      jumpGenerationRef.current === jumpGeneration
+      && activeChatIdRef.current === chatId
+      && loadTokenRef.current === requestToken
+      && scrollContainerRef.current === container;
 
     isJumpingRef.current = true;
     try {
       let row = findRow();
       const MAX_PAGES = 200;
       let pages = 0;
+      let exhausted = false;
       while (!row && pages < MAX_PAGES) {
-        const beforeOffset = offsetRef.current;
-        // eslint-disable-next-line no-await-in-loop
-        await loadMore();
-        // eslint-disable-next-line no-await-in-loop
+        const result = await loadMore();
+        if (!isCurrentJump()) return;
+
         await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-        if (offsetRef.current === beforeOffset) break; // nothing more loaded (exhausted / no-op)
+        if (!isCurrentJump()) return;
+
         row = findRow();
-        pages++;
+        if (row) break;
+        if (result === 'loaded') {
+          pages++;
+          continue;
+        }
+        if (result === 'exhausted') {
+          exhausted = true;
+          break;
+        }
+        if (result === 'error') {
+          toast.error('Could not load older messages');
+        }
+        return;
       }
+
+      if (!isCurrentJump()) return;
       if (row) {
         row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const isVisible = await waitForJumpTarget(row, container, isCurrentJump);
+        if (!isVisible || !isCurrentJump()) return;
         pulseRow(row);
-      } else {
+      } else if (exhausted) {
         toast.info('Original message is no longer available');
+      } else {
+        toast.info('Could not search the full message history');
       }
     } finally {
-      isJumpingRef.current = false;
+      if (jumpGenerationRef.current === jumpGeneration) {
+        isJumpingRef.current = false;
+        skipNextAutoScrollRef.current = false;
+      }
     }
-  }, [loadMore, pulseRow, toast]);
+  }, [activeChat?.id, loadMore, pulseRow, toast, waitForJumpTarget]);
 
   const handleRetryFailedMessage = useCallback(async (message: ChatMessage) => {
     if (!activeChat) return;
@@ -568,15 +733,17 @@ export const MessagesContainer = ({
     }
   }, [activeChat, dispatch, toast]);
 
-  return <div
-    ref={scrollContainerRef}
-    onScroll={handleScroll}
-    onWheel={markUserInteraction}
-    onTouchStart={markUserInteraction}
-    onPointerDown={markUserInteraction}
-    className={`flex-1 overflow-y-auto p-6 space-y-2`}
-    style={{ paddingBottom: `${bottomOverlayClearancePx}px` }}
-  >
+  return <div className="relative min-h-0 flex-1">
+    <div
+      ref={scrollContainerRef}
+      onScroll={handleScroll}
+      onWheel={markUserInteraction}
+      onTouchStart={markUserInteraction}
+      onPointerDown={markUserInteraction}
+      className="h-full overflow-y-auto p-6"
+      style={{ paddingBottom: `${bottomOverlayClearancePx}px` }}
+    >
+    <div ref={contentRef} className="min-h-full space-y-2">
     {activeChat?.offlineFetchNeedsSync && !activeChat.blocked && (
       <div className="sticky top-2 z-20 mb-2 flex items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
         <span>Failed to fetch offline messages.</span>
@@ -687,6 +854,20 @@ export const MessagesContainer = ({
         />
       );
     })}
-    <div ref={messagesEndRef} />
+      <div ref={messagesEndRef} />
+    </div>
+    </div>
+    {!isAtBottom && !showEmptyState && (
+      <button
+        type="button"
+        onClick={scrollToBottom}
+        className="absolute cursor-pointer left-1/2 -translate-x-1/2 z-30 inline-flex h-9 w-9 items-center justify-center rounded-full border border-border bg-background/95 text-muted-foreground shadow-lg backdrop-blur-sm transition-colors hover:border-primary/50 hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
+        style={{ bottom: `${bottomOverlayClearancePx + 16}px` }}
+        aria-label="Scroll to bottom"
+        title="Scroll to bottom"
+      >
+        <ChevronDown className="h-5 w-5" />
+      </button>
+    )}
   </div>
 }

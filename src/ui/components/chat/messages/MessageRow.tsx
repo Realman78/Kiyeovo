@@ -27,6 +27,14 @@ function quoteExcerpt(m: { messageType: string; content: string; fileName?: stri
   return m.content;
 }
 
+type FetchedQuote = {
+  senderPeerId: string;
+  senderUsername?: string;
+  messageType: string;
+  content: string;
+  fileName?: string;
+};
+
 export const MessageRow = memo(({
   message,
   myPeerId,
@@ -58,30 +66,38 @@ export const MessageRow = memo(({
       ? s.chat.messages.find((m) => m.chatId === message.chatId && m.clientMsgId === replyToCid)
       : undefined,
   );
-  const [fetchedQuote, setFetchedQuote] = useState<
-    | { senderPeerId: string; senderUsername?: string; messageType: string; content: string; fileName?: string }
-    | 'deleted'
-    | null
-  >(null);
+  const quoteKey = replyToCid ? `${message.chatId}:${replyToCid}` : null;
+  const [fetchedQuoteState, setFetchedQuoteState] = useState<{
+    key: string;
+    value: FetchedQuote | 'deleted';
+  } | null>(null);
+  const fetchedQuote = quoteKey && fetchedQuoteState?.key === quoteKey
+    ? fetchedQuoteState.value
+    : null;
 
   useEffect(() => {
     if (!replyToCid || loadedOriginal) {
-      setFetchedQuote(null);
       return;
     }
+    const requestKey = `${message.chatId}:${replyToCid}`;
     let cancelled = false;
     window.kiyeovoAPI
       .getMessagePreviewByCid(message.chatId, replyToCid)
       .then((res) => {
         if (cancelled) return;
-        setFetchedQuote(
-          res.success && res.preview
-            ? { ...res.preview, senderUsername: res.preview.senderUsername ?? undefined, fileName: res.preview.fileName ?? undefined }
-            : 'deleted',
-        );
+        const value: FetchedQuote | 'deleted' = res.success && res.preview
+          ? {
+              ...res.preview,
+              senderUsername: res.preview.senderUsername ?? undefined,
+              fileName: res.preview.fileName ?? undefined,
+            }
+          : 'deleted';
+        setFetchedQuoteState({ key: requestKey, value });
       })
       .catch(() => {
-        if (!cancelled) setFetchedQuote('deleted');
+        if (!cancelled) {
+          setFetchedQuoteState({ key: requestKey, value: 'deleted' });
+        }
       });
     return () => {
       cancelled = true;

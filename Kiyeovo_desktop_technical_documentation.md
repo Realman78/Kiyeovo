@@ -204,7 +204,7 @@ Wire format — the plaintext that gets encrypted is a small versioned **envelop
 
 Dedup: a `UNIQUE(chat_id, client_msg_id)` index makes the same logical message delivered over two channels (online + offline) collapse to one row. Inbound inserts (`tryCreateMessage`) use `ON CONFLICT DO NOTHING` and skip the "received" event when no row was inserted; outbound inserts use a plain insert that **throws** on a cid collision (an invariant violation, never expected). This complements the pre-existing offline-message-UUID dedup.
 
-UI: a hover **Reply** action (hidden in groups, and on un-settled/failed sends, and on files until transfer completes) opens a composer reply bar that survives chat switches (`Esc`/✕ cancels). The quote renders above the bubble; clicking it scrolls to the original with a brief accent **highlight pulse**, paging older history in until the target loads (graceful toast if it is truly unavailable).
+UI: a hover **Reply** action (hidden in groups, and on un-settled/failed sends, and on files until transfer completes) opens a composer reply bar, transfers focus to the composer, and survives chat switches (`Esc`/✕ cancels). The quote renders above the bubble; clicking it scrolls to the original, waits until the target is visible and scrolling has settled, then starts a 2.5-second accent **highlight pulse**, paging older history in until the target loads. Jump pagination is owned by the active chat and a request generation, so chat switches or newer jumps cancel stale work; only confirmed history exhaustion reports that the original is unavailable.
 
 ---
 
@@ -561,7 +561,7 @@ Composer behavior:
 - drafts auto-expand up to five visible lines, then switch to internal scrolling
 - pasted line breaks are preserved in both the draft and rendered text messages
 - rendered text message bubbles expose an inline hover/focus copy affordance that copies only the message text content to the clipboard
-- messages can be **replied to**: a hover reply affordance quotes a specific message; the composer shows a cancelable reply bar (survives chat switches, `Esc`/✕ to cancel); the quote renders above the reply bubble (resolved by live lookup, shows *"Message deleted."* if the original is gone), and clicking it jumps to the original with a brief highlight pulse, paging older history in if needed. Reply is hidden in groups and on un-settled/failed sends. See §5.4.
+- messages can be **replied to**: a hover reply affordance quotes a specific message and focuses the composer; the composer shows a cancelable reply bar (survives chat switches, `Esc`/✕ to cancel); the quote renders above the reply bubble (resolved by live lookup, shows *"Message deleted."* if the original is gone), and clicking it jumps to the original before starting a 2.5-second highlight pulse once the target is visible, paging older history in if needed. Reply is hidden in groups and on un-settled/failed sends. When the viewport is away from the latest message, a floating down-chevron returns it to the bottom. See §5.4.
 - inbound message notifications are batched over a short renderer-side window so offline/startup bursts produce one sound and one summary desktop notification instead of one per message
 
 UI is event-driven while core remains authoritative.

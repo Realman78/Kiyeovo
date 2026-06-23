@@ -54,6 +54,8 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
     const messages = useSelector((state: RootState) => state.chat.messages);
     const replyTarget = useSelector((state: RootState) =>
         activeChat ? state.chat.replyTargetByChatId[activeChat.id] : undefined);
+    const activeChatId = activeChat?.id;
+    const activeChatType = activeChat?.type;
     const isBlocked = activeChat?.blocked || false;
     const [groupHasOtherMembers, setGroupHasOtherMembers] = useState(true);
 
@@ -62,12 +64,12 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
         let unsubscribe: (() => void) | undefined;
 
         const refreshGroupMemberState = async () => {
-            if (!activeChat || activeChat.type !== 'group') {
+            if (!activeChatId || activeChatType !== 'group') {
                 if (isMounted) setGroupHasOtherMembers(true);
                 return;
             }
             try {
-                const result = await window.kiyeovoAPI.getGroupMembers(activeChat.id);
+                const result = await window.kiyeovoAPI.getGroupMembers(activeChatId);
                 if (!isMounted || !result.success) return;
                 const hasOtherMembers = result.members.some((member) => member.peerId !== myPeerId && member.status !== 'pending');
                 setGroupHasOtherMembers(hasOtherMembers);
@@ -78,9 +80,9 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
 
         void refreshGroupMemberState();
 
-        if (activeChat?.type === 'group') {
+        if (activeChatType === 'group') {
             unsubscribe = window.kiyeovoAPI.onGroupMembersUpdated((event) => {
-                if (event.chatId === activeChat.id) {
+                if (event.chatId === activeChatId) {
                     void refreshGroupMemberState();
                 }
             });
@@ -90,7 +92,7 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
             isMounted = false;
             unsubscribe?.();
         };
-    }, [activeChat?.id, activeChat?.type, myPeerId]);
+    }, [activeChatId, activeChatType, myPeerId]);
 
     const groupBlockedReason = activeChat?.type === 'group' && activeChat?.groupStatus !== 'active'
         ? (getGroupStatusMessage(activeChat?.groupStatus) ?? 'Group is not active yet')
@@ -121,10 +123,26 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
 
     // Auto-focus input when chat changes
     useEffect(() => {
-        if (activeChat && !isDisabled) {
+        if (activeChatId && !isDisabled) {
             inputRef.current?.focus();
         }
-    }, [activeChat?.id, isDisabled]);
+    }, [activeChatId, isDisabled]);
+
+    // Selecting Reply happens in the message list, but the composer owns focus.
+    useEffect(() => {
+        if (!replyTarget || isDisabled) return;
+
+        const frameId = requestAnimationFrame(() => {
+            const input = inputRef.current;
+            if (!input) return;
+            const cursorPosition = input.value.length;
+            input.focus();
+            input.setSelectionRange(cursorPosition, cursorPosition);
+            selectionRef.current = { start: cursorPosition, end: cursorPosition };
+        });
+
+        return () => cancelAnimationFrame(frameId);
+    }, [replyTarget, isDisabled]);
 
     useEffect(() => {
         return () => {
@@ -175,7 +193,6 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
         };
     }, [emojiPickerOpen]);
 
-    const activeChatId = activeChat?.id;
     const inputQuery = activeChatId ? (draftByChatId[activeChatId] ?? "") : "";
 
     const resizeComposer = (target?: HTMLTextAreaElement | null) => {
