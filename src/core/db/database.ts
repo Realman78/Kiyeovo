@@ -91,7 +91,7 @@ export interface Message {
     event_timestamp?: Date | null
     created_at: Date
     // same value on both sender and recipient
-    client_msg_id?: string
+    client_msg_id?: string | undefined
     // The `client_msg_id` (cid) this message replies to, if any.
     reply_to_client_id?: string | null
     file_name?: string
@@ -2085,6 +2085,20 @@ export class ChatDatabase {
     }
 
     async createMessage(message: Omit<Message, 'created_at'>): Promise<string> {
+        const { id } = await this.tryCreateMessage(message);
+        return id;
+    }
+
+    /**
+     * Like createMessage, but reports whether a row was actually inserted.
+     * The `(chat_id, client_msg_id)` UNIQUE index + `ON CONFLICT DO NOTHING`
+     * means a duplicate delivery (same logical message arriving twice, e.g.
+     * online + offline) is silently dropped — callers must use `inserted` to
+     * decide whether to emit a "message received" event, or they would surface a
+     * phantom Redux row not backed by SQLite. The chat's `updated_at` is only
+     * bumped when a row was genuinely added.
+     */
+    async tryCreateMessage(message: Omit<Message, 'created_at'>): Promise<{ id: string; inserted: boolean }> {
         return this.retryOperation(() => {
             const stmt = this.db.prepare(`
                 INSERT INTO messages (
@@ -2108,9 +2122,10 @@ export class ChatDatabase {
                     reply_to_client_id
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chat_id, client_msg_id) DO NOTHING
             `);
 
-            stmt.run(
+            const info = stmt.run(
                 message.id,
                 message.chat_id,
                 message.sender_peer_id,
@@ -2136,16 +2151,21 @@ export class ChatDatabase {
                 message.reply_to_client_id ?? null
             );
 
-            // Update the chat's updated_at to match the message timestamp
-            const updateChatStmt = this.db.prepare(`
-                UPDATE chats SET updated_at = ? WHERE id = ?
-            `);
-            updateChatStmt.run(
-                message.timestamp instanceof Date ? message.timestamp.toISOString() : message.timestamp,
-                message.chat_id
-            );
+            const inserted = info.changes > 0;
 
-            return message.id;
+            // Only bump the chat's updated_at when a row was actually added, so a
+            // duplicate delivery doesn't churn chat ordering/metadata.
+            if (inserted) {
+                const updateChatStmt = this.db.prepare(`
+                    UPDATE chats SET updated_at = ? WHERE id = ?
+                `);
+                updateChatStmt.run(
+                    message.timestamp instanceof Date ? message.timestamp.toISOString() : message.timestamp,
+                    message.chat_id
+                );
+            }
+
+            return { id: message.id, inserted };
         });
     }
 
@@ -2186,6 +2206,7 @@ export class ChatDatabase {
                     client_msg_id, reply_to_client_id
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chat_id, client_msg_id) DO NOTHING
             `).run(
                 message.id, message.chat_id, message.sender_peer_id, message.content,
                 message.message_type, ts,

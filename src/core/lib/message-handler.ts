@@ -71,6 +71,7 @@ import {
 import { triggerFastRelayRefresh } from '../network/relay-keepalive.js';
 import { SessionManager } from '../direct/session-manager.js';
 import { MessageEncryption } from '../direct/message-encryption.js';
+import { encodeEnvelope, decodeEnvelope, isValidCid } from '../direct/message-envelope.js';
 import { PeerConnectionHandler } from '../direct/peer-connection-handler.js';
 import { StreamHandler } from '../transport/stream-handler.js';
 import { KeyExchange } from '../direct/key-exchange.js';
@@ -808,6 +809,10 @@ export class MessageHandler {
           return;
         }
         const decryptedContent = MessageEncryption.decryptMessage(message, session);
+        // Reply feature: the body may be a versioned envelope carrying the shared
+        // cid + reply ref. decodeEnvelope falls back to plain text (no cid) for
+        // anything that isn't a well-formed envelope.
+        const envelope = decodeEnvelope(decryptedContent);
         this.reactivateRetiredPendingAcksForPeer(remoteId);
 
         // Process ACK if included - clear acknowledged messages from our bucket
@@ -828,30 +833,44 @@ export class MessageHandler {
             throw new Error('Chat not found');
           }
           const messageId = crypto.randomUUID();
-          await this.database.createMessage({
+          // Persist the sender's shared cid (mint a local one only if the body
+          // wasn't an envelope), the reply ref, and the plain body text.
+          const clientMsgId = envelope.cid ?? crypto.randomUUID();
+          const { inserted } = await this.database.tryCreateMessage({
             id: messageId,
             chat_id: chat.id,
             sender_peer_id: remoteId,
-            content: decryptedContent,
+            content: envelope.text,
             message_type: 'text',
-            timestamp: new Date()
+            timestamp: new Date(),
+            client_msg_id: clientMsgId,
+            reply_to_client_id: envelope.replyToCid ?? null,
           });
-          log(`Saved message with ID: ${messageId}`);
 
-          // Get sender username for the event
-          const sender = this.database.getUserByPeerId(remoteId);
-          const senderUsername = sender?.username || 'Unknown';
+          // Duplicate delivery (same cid already stored, e.g. online + offline
+          // overlap): the row exists — do not emit a phantom event.
+          if (!inserted) {
+            log(`Skipped duplicate message cid=${clientMsgId.slice(0, 8)} from ${remoteId.slice(-8)}`);
+          } else {
+            log(`Saved message with ID: ${messageId}`);
 
-          // Fire message received event
-          this.onMessageReceived({
-            chatId: chat.id,
-            messageId: messageId,
-            content: decryptedContent,
-            senderPeerId: remoteId,
-            senderUsername: senderUsername,
-            timestamp: Date.now(),
-            messageSentStatus: 'online'
-          });
+            // Get sender username for the event
+            const sender = this.database.getUserByPeerId(remoteId);
+            const senderUsername = sender?.username || 'Unknown';
+
+            // Fire message received event
+            this.onMessageReceived({
+              chatId: chat.id,
+              messageId: messageId,
+              content: envelope.text,
+              senderPeerId: remoteId,
+              senderUsername: senderUsername,
+              timestamp: Date.now(),
+              messageSentStatus: 'online',
+              clientMsgId,
+              replyToClientId: envelope.replyToCid,
+            });
+          }
         } catch (error: unknown) {
           generalErrorHandler(error, `Error saving message to database`);
         }
@@ -2717,7 +2736,7 @@ export class MessageHandler {
     }
   }
 
-  async sendMessage(targetUsernameOrPeerId: string, message: string): Promise<SendMessageResponse> {
+  async sendMessage(targetUsernameOrPeerId: string, message: string, replyToCid?: string): Promise<SendMessageResponse> {
     let user: User | null = null;
     try {
       const dbUser = this.database.getUserByPeerIdThenUsername(targetUsernameOrPeerId);
@@ -2762,14 +2781,23 @@ export class MessageHandler {
         setTimeout(() => { reject(new Error('Message timeout')); }, MESSAGE_TIMEOUT)
       );
 
+      // Reply feature: the cross-peer stable id (cid) we mint here is what BOTH
+      // peers persist as `client_msg_id`. We transmit a versioned envelope
+      // (cid + body + optional reply ref) but store only the plain body locally.
+      // Normalize the reply ref once so the wire and our local row never disagree
+      // about whether this is a reply.
+      const cid = crypto.randomUUID();
+      const normalizedReplyToCid = isValidCid(replyToCid) ? replyToCid : undefined;
+      const transportBody = encodeEnvelope({ cid, text: message, replyToCid: normalizedReplyToCid });
+
       const res = await Promise.race([
         this.writeMessageOnline(
-          targetPeerId, message, session, shouldSendAck ? lastReadTimestamp : undefined,
+          targetPeerId, transportBody, session, shouldSendAck ? lastReadTimestamp : undefined,
         ).then(() => true),
         timeoutPromise,
       ]);
       if (res) {
-        const strippedMessage = await this.saveMessageToDatabase(targetPeerId.toString(), message, 'online');
+        const strippedMessage = await this.saveMessageToDatabase(targetPeerId.toString(), message, 'online', { cid, replyToCid: normalizedReplyToCid });
         // Update ACK sent timestamp if we included an ACK
         if (shouldSendAck) {
           this.database.updateOfflineLastAckSentByPeerId(targetPeerId.toString(), lastReadTimestamp);
@@ -3137,7 +3165,11 @@ export class MessageHandler {
   private async saveMessageToDatabase(
     peerId: string,
     message: string,
-    messageSentStatus: MessageSentStatus
+    messageSentStatus: MessageSentStatus,
+    // Reply feature: the shared cross-peer id and reply ref for this outbound copy.
+    // Omitted by paths that don't carry an envelope yet (offline) — then
+    // `client_msg_id` defaults to the row id (see database.createMessage).
+    meta?: { cid?: string | undefined; replyToCid?: string | undefined },
   ): Promise<StrippedMessage> {
     const chat = this.database.getChatByPeerId(peerId);
     if (!chat) {
@@ -3146,15 +3178,22 @@ export class MessageHandler {
     }
 
     const timestamp = new Date();
+    const rowId = crypto.randomUUID();
     const messageId = await this.database.createMessage({
-      id: crypto.randomUUID(),
+      id: rowId,
       chat_id: chat.id,
       sender_peer_id: this.node.peerId.toString(),
       content: message,
       message_type: 'text',
-      timestamp
+      timestamp,
+      client_msg_id: meta?.cid,
+      reply_to_client_id: meta?.replyToCid ?? null,
     });
     log(`Saved message with ID: ${messageId}`);
+
+    // The shared cid: explicit when provided (online), else the row id (which is
+    // what createMessage stored as client_msg_id by default).
+    const clientMsgId = meta?.cid ?? rowId;
 
     const myPeerId = this.node.peerId.toString();
     const myUser = this.database.getUserByPeerId(myPeerId);
@@ -3167,10 +3206,20 @@ export class MessageHandler {
       senderUsername: myUsername,
       content: message,
       timestamp: timestamp.getTime(),
-      messageSentStatus
+      messageSentStatus,
+      clientMsgId,
+      replyToClientId: meta?.replyToCid,
     });
 
-    return { chatId: chat.id, messageId, content: message, timestamp: timestamp.getTime(), messageType: 'text' };
+    return {
+      chatId: chat.id,
+      messageId,
+      content: message,
+      timestamp: timestamp.getTime(),
+      messageType: 'text',
+      clientMsgId,
+      replyToClientId: meta?.replyToCid,
+    };
   }
 
   // Check offline messages (direct)

@@ -153,7 +153,7 @@ export interface KiyeovoAPI {
   onRestoreUsername: (callback: (username: string) => void) => Unsubscribe;
   unregister: () => Promise<{ usernameUnregistered: boolean; peerIdUnregistered: boolean }>;
 
-  sendMessage: (identifier: string, message: string) => Promise<SendMessageResponse>;
+  sendMessage: (identifier: string, message: string, replyToCid?: string) => Promise<SendMessageResponse>;
   checkOfflineCapacity: (peerId: string, additional?: number) => Promise<{ hasRoom: boolean }>;
   requestOfflineInboxRecovery: (peerId: string) => Promise<{ started: boolean }>;
   getOfflineInboxCapacity: (chatId: number) => Promise<{

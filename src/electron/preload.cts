@@ -59,7 +59,7 @@ const kiyeovoAPI: KiyeovoAPI = {
   onRestoreUsername: (callback) => subscribe(IPC_CHANNELS.RESTORE_USERNAME, callback),
   unregister: () => invoke(IPC_CHANNELS.UNREGISTER_REQUEST),
 
-  sendMessage: (identifier, message) => invoke(IPC_CHANNELS.SEND_MESSAGE_REQUEST, identifier, message),
+  sendMessage: (identifier, message, replyToCid) => invoke(IPC_CHANNELS.SEND_MESSAGE_REQUEST, identifier, message, replyToCid),
   checkOfflineCapacity: (peerId, additional) => invoke(IPC_CHANNELS.CHECK_OFFLINE_CAPACITY, peerId, additional),
   requestOfflineInboxRecovery: (peerId) => invoke(IPC_CHANNELS.REQUEST_OFFLINE_INBOX_RECOVERY, peerId),
   getOfflineInboxCapacity: (chatId) => invoke(IPC_CHANNELS.GET_OFFLINE_INBOX_CAPACITY, chatId),

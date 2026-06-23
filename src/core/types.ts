@@ -53,8 +53,8 @@ export interface StrippedMessage {
   timestamp: number;
   messageType: 'text' | 'file' | 'image' | 'system';
   // Cross-peer stable id (cid) + reply reference for the reply feature.
-  clientMsgId?: string;
-  replyToClientId?: string;
+  clientMsgId?: string | undefined;
+  replyToClientId?: string | undefined;
 }
 
 // Stream handler context
@@ -624,8 +624,8 @@ export interface MessageReceivedEvent {
   eventTimestamp?: number;
   messageSentStatus: MessageSentStatus;
   messageType?: 'text' | 'file' | 'image' | 'system';
-  clientMsgId?: string;
-  replyToClientId?: string;
+  clientMsgId?: string | undefined;
+  replyToClientId?: string | undefined;
   fileName?: string;
   fileSize?: number;
   filePath?: string;

@@ -437,7 +437,7 @@ function setupMessagingHandlers(
   ipcMain: IpcMainHandleRegistrar,
   getP2PCore: () => P2PCore | null
 ): void {
-  ipcMain.handle(IPC_CHANNELS.SEND_MESSAGE_REQUEST, async (_event, identifier: string, message: string) => {
+  ipcMain.handle(IPC_CHANNELS.SEND_MESSAGE_REQUEST, async (_event, identifier: string, message: string, replyToCid?: string) => {
     try {
       const p2pCore = getP2PCore();
       if (!p2pCore) {
@@ -466,7 +466,7 @@ function setupMessagingHandlers(
 
       log(`[IPC] Sending message to ${identifier}: ${message}`);
 
-      const response = await p2pCore.messageHandler.sendMessage(identifier, message);
+      const response = await p2pCore.messageHandler.sendMessage(identifier, message, replyToCid);
       log(`[IPC] Message sent response: ${JSON.stringify(response)}`);
 
       if (response.success) {

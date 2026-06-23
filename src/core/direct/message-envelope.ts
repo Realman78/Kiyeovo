@@ -29,7 +29,7 @@ export function isValidCid(value: unknown): value is string {
 export function encodeEnvelope(params: {
   cid: string;
   text: string;
-  replyToCid?: string | null;
+  replyToCid?: string | null | undefined;
 }): string {
   if (!isValidCid(params.cid)) {
     throw new Error(`encodeEnvelope: invalid cid ${JSON.stringify(params.cid)}`);
