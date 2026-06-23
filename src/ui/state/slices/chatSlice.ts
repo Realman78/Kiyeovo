@@ -21,6 +21,9 @@ export interface ChatMessage {
   eventTimestamp?: number;
   messageType: 'text' | 'file' | 'image' | 'system';
   messageSentStatus: MessageSentStatus;
+  // Cross-peer stable id (cid) and reply reference for the reply feature.
+  clientMsgId?: string;
+  replyToClientId?: string;
   currentUserPeerId?: string; // For determining if message is from current user
   // File transfer fields
   fileName?: string;

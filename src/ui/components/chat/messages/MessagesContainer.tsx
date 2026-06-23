@@ -54,6 +54,8 @@ function mapDbMessage(msg: Message & { sender_username?: string }): ChatMessage 
     eventTimestamp: msg.event_timestamp ? msg.event_timestamp.getTime() : undefined,
     messageType: msg.message_type as 'text' | 'file' | 'image' | 'system',
     messageSentStatus: 'online' as MessageSentStatus,
+    clientMsgId: msg.client_msg_id,
+    replyToClientId: msg.reply_to_client_id ?? undefined,
     fileName,
     fileSize,
     filePath: msg.file_path,

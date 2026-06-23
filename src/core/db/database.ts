@@ -90,6 +90,10 @@ export interface Message {
     timestamp: Date
     event_timestamp?: Date | null
     created_at: Date
+    // same value on both sender and recipient
+    client_msg_id?: string
+    // The `client_msg_id` (cid) this message replies to, if any.
+    reply_to_client_id?: string | null
     file_name?: string
     file_size?: number
     file_path?: string
@@ -728,6 +732,7 @@ export class ChatDatabase {
       CREATE UNIQUE INDEX IF NOT EXISTS idx_encrypted_identities_unique_mode_kind ON encrypted_user_identities(network_mode, identity_kind);
       CREATE INDEX IF NOT EXISTS idx_participants_peer ON chat_participants(peer_id);
       CREATE INDEX IF NOT EXISTS idx_messages_conv_created ON messages(chat_id, created_at);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_chat_client_msg ON messages(chat_id, client_msg_id);
       CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON notifications(created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_notifications_mode_created_at ON notifications(network_mode, created_at DESC);
 
@@ -819,6 +824,11 @@ export class ChatDatabase {
         this.ensureColumnExists('messages', 'local_send_state', 'TEXT');
         this.ensureColumnExists('messages', 'failed_reason', 'TEXT');
         this.ensureColumnExists('messages', 'retry_after_ts', 'INTEGER');
+        // Reply feature: cross-peer stable id + reply reference. Backfill existing
+        // rows so client_msg_id is always populated (file rows already have id=fileId).
+        this.ensureColumnExists('messages', 'client_msg_id', 'TEXT');
+        this.ensureColumnExists('messages', 'reply_to_client_id', 'TEXT');
+        this.db.prepare(`UPDATE messages SET client_msg_id = id WHERE client_msg_id IS NULL`).run();
         this.db.prepare(`UPDATE bootstrap_nodes SET network_mode = ? WHERE address LIKE '%/onion%'`).run(NETWORK_MODES.ANONYMOUS);
         this.db.prepare(`UPDATE bootstrap_nodes SET network_mode = ? WHERE address NOT LIKE '%/onion%'`).run(NETWORK_MODES.FAST);
     }
@@ -2093,9 +2103,11 @@ export class ChatDatabase {
                     local_send_state,
                     failed_reason,
                     retry_after_ts,
-                    event_timestamp
+                    event_timestamp,
+                    client_msg_id,
+                    reply_to_client_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `);
 
             stmt.run(
@@ -2118,7 +2130,10 @@ export class ChatDatabase {
                     ? (message.event_timestamp instanceof Date
                         ? message.event_timestamp.toISOString()
                         : message.event_timestamp)
-                    : null
+                    : null,
+                // cid defaults to the row id (file rows: id = fileId) so it is never null
+                message.client_msg_id ?? message.id,
+                message.reply_to_client_id ?? null
             );
 
             // Update the chat's updated_at to match the message timestamp
@@ -2167,9 +2182,10 @@ export class ChatDatabase {
                 INSERT INTO messages (
                     id, chat_id, sender_peer_id, content, message_type, timestamp,
                     file_name, file_size, file_path, transfer_status, transfer_progress,
-                    transfer_error, local_send_state, failed_reason, retry_after_ts, event_timestamp
+                    transfer_error, local_send_state, failed_reason, retry_after_ts, event_timestamp,
+                    client_msg_id, reply_to_client_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `).run(
                 message.id, message.chat_id, message.sender_peer_id, message.content,
                 message.message_type, ts,
@@ -2177,6 +2193,7 @@ export class ChatDatabase {
                 message.transfer_status ?? null, message.transfer_progress ?? null, message.transfer_error ?? null,
                 message.local_send_state ?? null, message.failed_reason ?? null, message.retry_after_ts ?? null,
                 null,
+                message.client_msg_id ?? message.id, message.reply_to_client_id ?? null,
             );
             this.db.prepare(`UPDATE chats SET updated_at = ? WHERE id = ?`).run(ts, message.chat_id);
             this.db.prepare(`

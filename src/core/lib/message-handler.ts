@@ -84,7 +84,10 @@ import { PeerId } from '@libp2p/interface';
 import { GroupMessageType } from '../group/types.js';
 import { GroupCreator } from '../group/control/group-creator.js';
 import { GroupResponder } from '../group/control/group-responder.js';
-import { GroupMessaging } from '../group/runtime/group-messaging.js';
+import {
+  GROUP_OFFLINE_BACKUP_FAILED_MARKER,
+  GroupMessaging,
+} from '../group/runtime/group-messaging.js';
 import { GroupOfflineManager } from '../group/runtime/group-offline-manager.js';
 import type { GroupOfflineCheckOptions } from '../group/runtime/group-offline-manager.js';
 import { GroupAckRepublisher } from '../group/control/group-ack-republisher.js';
@@ -102,6 +105,8 @@ type OfflineReadBucketInfo = ReturnType<ChatDatabase['getOfflineReadBucketInfo']
 type OfflineReadBucketInfoForChats = ReturnType<ChatDatabase['getOfflineReadBucketInfoForChats']>[number];
 type OfflineReadBucketInfoAny = OfflineReadBucketInfo | OfflineReadBucketInfoForChats;
 type OfflineCheckResult = { checkedChatIds: number[]; unreadFromChats: Map<number, number> };
+const OFFLINE_DHT_UNAVAILABLE_MARKER = 'no DHT connection';
+const OFFLINE_DHT_UNAVAILABLE_MARKER_LOWER = OFFLINE_DHT_UNAVAILABLE_MARKER.toLowerCase();
 
 function hasChatId(info: OfflineReadBucketInfoAny): info is OfflineReadBucketInfoForChats {
   return 'chat_id' in info;
@@ -2411,10 +2416,10 @@ export class MessageHandler {
     const bootstrapMissing = this.database.getBootstrapNodes().length === 0;
     const noNetworkConnections = this.node.getConnections().length === 0;
     const peerReachabilityFailure = this.shouldFallbackOfflineSend(primaryErrorText);
-    const dhtUnavailable = fallbackErrorText.includes('no dht connection')
-      || primaryErrorText.includes('no dht connection');
+    const dhtUnavailable = fallbackErrorText.includes(OFFLINE_DHT_UNAVAILABLE_MARKER_LOWER)
+      || primaryErrorText.includes(OFFLINE_DHT_UNAVAILABLE_MARKER_LOWER);
     const groupNetworkFailure = primaryErrorText.includes(
-      'no online peers and offline backup failed',
+      GROUP_OFFLINE_BACKUP_FAILED_MARKER,
     );
 
     if (
@@ -2467,7 +2472,7 @@ export class MessageHandler {
     log(`Trying to send offline message to ${targetUsernameOrPeerId}`);
 
     if (this.node.getConnections().length === 0) {
-      throw new Error('Offline delivery unavailable: no DHT connection');
+      throw new Error(`Offline delivery unavailable: ${OFFLINE_DHT_UNAVAILABLE_MARKER}`);
     }
 
     const fallbackUser = user ?? this.database.getUserByPeerIdThenUsername(targetUsernameOrPeerId) ?? null;

@@ -28,6 +28,8 @@ import { errStr, generalErrorHandler } from '../../utils/general-error.js';
 import { GroupOfflineManager } from './group-offline-manager.js';
 import { log } from '../../../shared/logger.js';
 
+export const GROUP_OFFLINE_BACKUP_FAILED_MARKER = 'no online peers and offline backup failed';
+
 interface GroupMessagingDeps {
   node: ChatNode;
   database: ChatDatabase;
@@ -309,7 +311,7 @@ export class GroupMessaging {
     } catch (error: unknown) {
       const errorText = errStr(error);
       if (!published) {
-        throw new Error(`Failed to deliver group message: no online peers and offline backup failed: ${errorText}`);
+        throw new Error(`Failed to deliver group message: ${GROUP_OFFLINE_BACKUP_FAILED_MARKER}: ${errorText}`);
       }
       warning = `Message delivered online, but offline group backup failed: ${errorText}`;
       offlineBackupRetry = { chatId: ctx.chatId, messageId: signedMessage.messageId };
