@@ -49,6 +49,7 @@ type GroupCallServiceEvent =
   | {
     type: 'error';
     message: string;
+    reason?: 'connection_failed';
   };
 
 type GroupCallServiceState = GroupCallSnapshot['state'];
@@ -123,8 +124,8 @@ class GroupCallService {
     this.listeners.forEach((listener) => listener(event));
   }
 
-  private emitError(message: string): void {
-    this.emit({ type: 'error', message });
+  private emitError(message: string, reason?: 'connection_failed'): void {
+    this.emit({ type: 'error', message, reason });
   }
 
   private connectedPeerCount(): number {
@@ -326,7 +327,7 @@ class GroupCallService {
         void this.fallbackWriterRecovery(this.session.chatId);
         return;
       }
-      this.emitError('Could not connect to any group call participants');
+      this.emitError('Could not connect to any group call participants', 'connection_failed');
     }, context === 'writer_recover' ? 10_000 : JOIN_AUDIO_CONNECT_TIMEOUT_MS);
   }
 

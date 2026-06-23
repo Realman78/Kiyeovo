@@ -27,6 +27,7 @@ import { InitialSetupWizard } from '../components/sidebar/setup/InitialSetupWiza
 import { OPEN_SETUP_EVENT } from '../utils/uiSignals';
 import type { InitialSetupStatus } from '../../shared/kiyeovo-api';
 import { useSetupReadiness } from '../hooks/useSetupReadiness';
+import { useConnectivityGuidance } from '../hooks/useConnectivityGuidance';
 
 type InitialSetupSessionPhase = 'welcome' | 'guided' | 'dismissed';
 
@@ -47,6 +48,10 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
   const dispatch = useDispatch();
   const { toast } = useToast();
   const setupReadiness = useSetupReadiness();
+  const {
+    showCallConnectionFailure,
+    showMessageFailureGuidance,
+  } = useConnectivityGuidance();
   const isConnected = useSelector((state: RootState) => state.user.connected);
   const networkOnline = useSelector((state: RootState) => state.user.networkOnline);
   const canFetchOffline = !!isConnected && networkOnline;
@@ -56,6 +61,16 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
 
   useNotifications();
   useCallRingtone();
+
+  const guideCallConnectionFailure = useEffectEvent(() => {
+    return showCallConnectionFailure();
+  });
+
+  const guideMessageFailure = useEffectEvent((
+    reason: Parameters<typeof showMessageFailureGuidance>[0],
+  ) => {
+    showMessageFailureGuidance(reason);
+  });
 
   useEffect(() => {
     let disposed = false;
@@ -115,8 +130,12 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
 
   // Let other parts of the tree (e.g. the empty chat area) jump to setup.
   useEffect(() => {
-    const handler = () => {
-      setActiveSetupSection('bootstrap');
+    const handler = (event: Event) => {
+      const requestedSection = event instanceof CustomEvent
+        && (event.detail === 'bootstrap' || event.detail === 'relay' || event.detail === 'ice')
+        ? event.detail
+        : 'bootstrap';
+      setActiveSetupSection(requestedSection);
       setActiveSection('setup');
     };
     window.addEventListener(OPEN_SETUP_EVENT, handler);
@@ -280,6 +299,9 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
         failedReason: data.failedReason,
         retryAfterTs: data.retryAfterTs,
       }));
+      if (data.outcome === 'failed' && data.connectivityFailure) {
+        guideMessageFailure(data.connectivityFailure);
+      }
     });
 
     // Group chat activated — receiver processed GROUP_WELCOME, update Redux so chat appears in sidebar
@@ -633,6 +655,11 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
           state: event.state,
           reason: event.reason,
         }));
+        if (event.state === 'ended' && event.reason === 'failed') {
+          if (!guideCallConnectionFailure()) {
+            toast.error('Call connection failed');
+          }
+        }
         return;
       }
 
@@ -658,7 +685,12 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
 
     const unsubGroupCallService = groupCallService.subscribe((event) => {
       if (event.type === 'error') {
-        toast.error(event.message);
+        if (
+          event.reason !== 'connection_failed'
+          || !guideCallConnectionFailure()
+        ) {
+          toast.error(event.message);
+        }
         return;
       }
       if (event.type !== 'state') {

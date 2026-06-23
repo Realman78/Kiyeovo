@@ -14,6 +14,7 @@ import { useOfflineSendWarning } from "../../../hooks/useOfflineSendWarning";
 import { errStr } from '../../../../core/utils/general-error';
 import { UNEXPECTED_ERROR } from "../../../constants";
 import { OPEN_SIDEBAR_ACTION_EVENT, type SidebarAction } from "../../../utils/uiSignals";
+import { useConnectivityGuidance } from "../../../hooks/useConnectivityGuidance";
 
 type SidebarHeaderProps = {
     statusSuffix: string;
@@ -45,6 +46,7 @@ export const SidebarHeader: FC<SidebarHeaderProps> = ({
     const dispatch = useDispatch();
     const { toast } = useToast();
     const warnOfflineSend = useOfflineSendWarning();
+    const { showMessageFailureGuidance } = useConnectivityGuidance();
 
     // Ref to track latest newConversationDialogOpen value without recreating listeners
     const newConversationDialogOpenRef = useRef(newConversationDialogOpen);
@@ -97,7 +99,12 @@ export const SidebarHeader: FC<SidebarHeaderProps> = ({
                 setNewConversationDialogOpen(false);
                 dispatch(setActivePendingKeyExchange(null));
             } else {
-                setError(result.error || 'Failed to send message');
+                const guidanceShown = result.connectivityFailure
+                    ? showMessageFailureGuidance(result.connectivityFailure)
+                    : false;
+                if (!guidanceShown) {
+                    setError(result.error || 'Failed to send message');
+                }
             }
         } catch (err) {
             console.error('Failed to send message:', err);

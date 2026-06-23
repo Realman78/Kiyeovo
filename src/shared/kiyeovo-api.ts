@@ -2,6 +2,7 @@ import type {
   AppConfig,
   BootstrapRetryResponse,
   CallErrorEvent,
+  CallActionResponse,
   CallIncomingEvent,
   CallSignalOutgoingInput,
   CallSignalReceivedEvent,
@@ -172,19 +173,19 @@ export interface KiyeovoAPI {
     peerId: string,
     callId: string,
     offerSdp: string,
-  ) => Promise<{ success: boolean; error: string | null }>;
-  acceptCall: (peerId: string, callId: string, answerSdp: string) => Promise<{ success: boolean; error: string | null }>;
+  ) => Promise<CallActionResponse>;
+  acceptCall: (peerId: string, callId: string, answerSdp: string) => Promise<CallActionResponse>;
   rejectCall: (
     peerId: string,
     callId: string,
     reason?: 'rejected' | 'timeout' | 'offline' | 'policy',
-  ) => Promise<{ success: boolean; error: string | null }>;
+  ) => Promise<CallActionResponse>;
   hangupCall: (
     peerId: string,
     callId: string,
     reason?: 'hangup' | 'disconnect' | 'failed',
-  ) => Promise<{ success: boolean; error: string | null }>;
-  sendCallSignal: (signal: CallSignalOutgoingInput) => Promise<{ success: boolean; error: string | null }>;
+  ) => Promise<CallActionResponse>;
+  sendCallSignal: (signal: CallSignalOutgoingInput) => Promise<CallActionResponse>;
   startGroupCall: (chatId: number) => Promise<GroupCallActionResult>;
   joinGroupCall: (chatId: number) => Promise<GroupCallActionResult>;
   leaveGroupCall: (chatId: number) => Promise<GroupCallActionResult>;

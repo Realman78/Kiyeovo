@@ -19,6 +19,7 @@ export interface ChatNode extends Libp2p {
 }
 
 export type NetworkMode = 'fast' | 'anonymous';
+export type MessageConnectivityFailure = 'bootstrap_unavailable' | 'peer_unreachable';
 
 // Chat message structure
 export interface ChatMessage {
@@ -41,6 +42,7 @@ export interface SendMessageResponse {
   // path): the row stays on the spinner until a MESSAGE_SEND_STATE_CHANGED event
   // settles it. Without this the renderer would finalize the row as delivered.
   localSendState?: 'sending';
+  connectivityFailure?: MessageConnectivityFailure;
 }
 
 // We dont have to send sender info because we have it in the chat state
@@ -635,6 +637,7 @@ export interface MessageSendStateChangedEvent {
   outcome: 'sending' | 'delivered' | 'failed';
   messageSentStatus?: MessageSentStatus;
   failedReason?: 'group_rekeying' | 'other';
+  connectivityFailure?: MessageConnectivityFailure;
   retryAfterTs?: number;
 }
 
@@ -911,6 +914,14 @@ export interface CallStateChangedEvent {
   mediaType?: CallMediaType;
   reason?: string;
   timestamp: number;
+}
+
+export type CallActionFailureReason = 'peer_unreachable';
+
+export interface CallActionResponse {
+  success: boolean;
+  error: string | null;
+  failureReason?: CallActionFailureReason;
 }
 
 export interface CallErrorEvent {

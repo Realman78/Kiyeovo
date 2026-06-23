@@ -11,6 +11,7 @@ import { EMOJI_CATEGORIES, MAX_MESSAGE_CONTENT_LENGTH, UNEXPECTED_ERROR } from "
 import { getGroupStatusMessage } from "../../../utils/groupStatusMessages";
 import { errStr } from '../../../../core/utils/general-error';
 import EmojiPicker, { EmojiStyle, Theme, type EmojiClickData } from "emoji-picker-react";
+import { useConnectivityGuidance } from "../../../hooks/useConnectivityGuidance";
 
 type PendingSendJob =
     | { type: 'direct'; chatId: number; peerId: string; content: string; localMessageId: string }
@@ -39,6 +40,7 @@ type ChatInputProps = {
 
 export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
     const { toast } = useToast();
+    const { showMessageFailureGuidance } = useConnectivityGuidance();
     const warnOfflineSend = useOfflineSendWarning();
     const dispatch = useDispatch();
     const [draftByChatId, setDraftByChatId] = useState<Record<number, string>>({});
@@ -292,7 +294,14 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
 
     const performSendMessage = async (peerIdOrUsername: string, messageContent: string): Promise<SendResult> => {
         try {
-            const { success, error, message, messageSentStatus, localSendState } = await window.kiyeovoAPI.sendMessage(peerIdOrUsername, messageContent);
+            const {
+                success,
+                error,
+                message,
+                messageSentStatus,
+                localSendState,
+                connectivityFailure,
+            } = await window.kiyeovoAPI.sendMessage(peerIdOrUsername, messageContent);
 
             if (!success) {
                 if (error === 'OFFLINE_BUCKET_FULL') {
@@ -301,11 +310,16 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
                         void window.kiyeovoAPI.requestOfflineInboxRecovery(activeChat.peerId).catch(() => undefined);
                     }
                 }
-                toast.error(
-                    error === 'OFFLINE_BUCKET_FULL'
-                        ? `${activeChat?.name || 'This contact'}'s offline inbox is full — wait until they come online.`
-                        : (error || 'Failed to send message'),
-                );
+                const guidanceShown = connectivityFailure
+                    ? showMessageFailureGuidance(connectivityFailure)
+                    : false;
+                if (!guidanceShown) {
+                    toast.error(
+                        error === 'OFFLINE_BUCKET_FULL'
+                            ? `${activeChat?.name || 'This contact'}'s offline inbox is full — wait until they come online.`
+                            : (error || 'Failed to send message'),
+                    );
+                }
                 return { success: false, error: error ?? undefined };
             }
             // Don't warn yet for a still-in-flight offline send — we don't know the outcome.
@@ -337,7 +351,15 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
         options?: { rekeyRetryHint?: boolean }
     ): Promise<SendResult> => {
         try {
-            const { success, error, warning, offlineBackupRetry, message, messageSentStatus } = await window.kiyeovoAPI.sendGroupMessage(chatId, messageContent, options);
+            const {
+                success,
+                error,
+                warning,
+                offlineBackupRetry,
+                message,
+                messageSentStatus,
+                connectivityFailure,
+            } = await window.kiyeovoAPI.sendGroupMessage(chatId, messageContent, options);
             if (!success) {
                 const errorText = error || 'Failed to send group message';
                 let failedReason: 'group_rekeying' | 'other' = 'other';
@@ -347,7 +369,9 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
                         failedReason = 'group_rekeying';
                     }
                 }
-                toast.error(errorText);
+                if (!connectivityFailure || !showMessageFailureGuidance(connectivityFailure)) {
+                    toast.error(errorText);
+                }
                 return { success: false, error: errorText, failedReason };
             } else if (warning && offlineBackupRetry) {
                 toast.warning(warning);

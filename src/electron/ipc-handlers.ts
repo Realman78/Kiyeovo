@@ -478,7 +478,14 @@ function setupMessagingHandlers(
           localSendState: response.localSendState,
         };
       }
-      return { success: false, messageSentStatus: null, error: response.error ?? 'Failed to send message' };
+      return {
+        success: false,
+        messageSentStatus: null,
+        error: response.error ?? 'Failed to send message',
+        ...(response.connectivityFailure
+          ? { connectivityFailure: response.connectivityFailure }
+          : {}),
+      };
     } catch (error) {
       console.error('[IPC] Failed to send message:', error);
       return { success: false, messageSentStatus: null, error: errStr(error, "Failed to send message") };
@@ -587,7 +594,14 @@ function setupMessagingHandlers(
           offlineBackupRetry: response.offlineBackupRetry ?? null,
         };
       }
-      return { success: false, messageSentStatus: null, error: response.error ?? 'Failed to send group message' };
+      return {
+        success: false,
+        messageSentStatus: null,
+        error: response.error ?? 'Failed to send group message',
+        ...(response.connectivityFailure
+          ? { connectivityFailure: response.connectivityFailure }
+          : {}),
+      };
     } catch (error) {
       log(`[IPC][TIMING][GROUP-SEND] failed chatId=${chatId} took=${Date.now() - startedAt}ms`);
       console.error('[IPC] Failed to send group message:', error);
