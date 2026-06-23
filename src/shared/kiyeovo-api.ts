@@ -266,6 +266,17 @@ export interface KiyeovoAPI {
     messages: KiyeovoMessage[];
     error: string | null;
   }>;
+  getMessagePreviewByCid: (chatId: number, clientMsgId: string) => Promise<{
+    success: boolean;
+    preview: {
+      senderPeerId: string;
+      senderUsername: string | undefined;
+      content: string;
+      messageType: 'text' | 'file' | 'image' | 'system';
+      fileName: string | undefined;
+    } | null;
+    error: string | null;
+  }>;
   onMessageReceived: (callback: (data: MessageReceivedEvent) => void) => Unsubscribe;
   onMessageSendStateChanged: (callback: (data: MessageSendStateChangedEvent) => void) => Unsubscribe;
   onOfflineInboxCapacityChanged: (callback: (data: OfflineInboxCapacityChangedEvent) => void) => Unsubscribe;

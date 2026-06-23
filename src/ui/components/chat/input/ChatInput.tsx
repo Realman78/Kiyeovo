@@ -1,12 +1,12 @@
 import { useState, useEffect, useLayoutEffect, useRef, type FC } from "react";
 import { Button } from "../../ui/Button";
-import { Paperclip, Send, Smile } from "lucide-react";
+import { Paperclip, Reply, Send, Smile, X } from "lucide-react";
 import { useToast } from "../../ui/use-toast";
 import { useOfflineSendWarning } from "../../../hooks/useOfflineSendWarning";
 import { useDispatch, useSelector } from "react-redux";
 import type { RootState } from "../../../state/store";
 import { SendFileDialog } from "./SendFileDialog";
-import { addMessage, addSendingMessage, finalizeSendingMessage, removeMessageById, updateChat, updateFileTransferStatus, updateLocalMessageSendState } from "../../../state/slices/chatSlice";
+import { addMessage, addSendingMessage, clearReplyTarget, finalizeSendingMessage, removeMessageById, updateChat, updateFileTransferStatus, updateLocalMessageSendState } from "../../../state/slices/chatSlice";
 import { EMOJI_CATEGORIES, MAX_MESSAGE_CONTENT_LENGTH, UNEXPECTED_ERROR } from "../../../constants";
 import { getGroupStatusMessage } from "../../../utils/groupStatusMessages";
 import { errStr } from '../../../../core/utils/general-error';
@@ -14,7 +14,7 @@ import EmojiPicker, { EmojiStyle, Theme, type EmojiClickData } from "emoji-picke
 import { useConnectivityGuidance } from "../../../hooks/useConnectivityGuidance";
 
 type PendingSendJob =
-    | { type: 'direct'; chatId: number; peerId: string; content: string; localMessageId: string }
+    | { type: 'direct'; chatId: number; peerId: string; content: string; localMessageId: string; replyToCid?: string }
     | { type: 'group'; chatId: number; content: string; localMessageId: string };
 
 type SendResult = {
@@ -30,6 +30,7 @@ type SendResult = {
     // Group message delivered online but the DHT backup failed → show the
     // "Retry offline backup" affordance (re-store only, not re-send).
     backupFailed?: boolean;
+    clientMsgId?: string;
 };
 
 const MAX_COMPOSER_LINES = 5;
@@ -51,6 +52,8 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
     const myUsername = useSelector((state: RootState) => state.user.username);
     const isTorActive = useSelector((state: RootState) => state.user.torEnabled);
     const messages = useSelector((state: RootState) => state.chat.messages);
+    const replyTarget = useSelector((state: RootState) =>
+        activeChat ? state.chat.replyTargetByChatId[activeChat.id] : undefined);
     const isBlocked = activeChat?.blocked || false;
     const [groupHasOtherMembers, setGroupHasOtherMembers] = useState(true);
 
@@ -292,7 +295,7 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
         });
     };
 
-    const performSendMessage = async (peerIdOrUsername: string, messageContent: string): Promise<SendResult> => {
+    const performSendMessage = async (peerIdOrUsername: string, messageContent: string, replyToCid?: string): Promise<SendResult> => {
         try {
             const {
                 success,
@@ -301,7 +304,7 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
                 messageSentStatus,
                 localSendState,
                 connectivityFailure,
-            } = await window.kiyeovoAPI.sendMessage(peerIdOrUsername, messageContent);
+            } = await window.kiyeovoAPI.sendMessage(peerIdOrUsername, messageContent, replyToCid);
 
             if (!success) {
                 if (error === 'OFFLINE_BUCKET_FULL') {
@@ -335,6 +338,7 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
                 timestamp: message?.timestamp,
                 messageSentStatus: messageSentStatus ?? undefined,
                 localSendState,
+                clientMsgId: message?.clientMsgId,
             };
             // Note: Message will be added to Redux via onMessageReceived event in Main.tsx
             // This ensures single source of truth and correct sender information
@@ -405,7 +409,7 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
                 if (next.type === 'group') {
                     result = await performSendGroupMessage(next.chatId, next.content);
                 } else {
-                    result = await performSendMessage(next.peerId, next.content);
+                    result = await performSendMessage(next.peerId, next.content, next.replyToCid);
                 }
 
                 if (!result.success) {
@@ -434,11 +438,11 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
                             messageSentStatus: stillSending ? null : (result.messageSentStatus ?? 'online'),
                             localSendState: stillSending ? 'sending' : undefined,
                             currentUserPeerId: myPeerId ?? undefined,
+                            clientMsgId: result.clientMsgId,
+                            replyToClientId: next.type === 'direct' ? next.replyToCid : undefined,
                         },
                     }));
-                    // Delivered online but DHT backup failed → mark the row for the
-                    // "Retry offline backup" affordance (by backend id, robust to the
-                    // finalize/onMessageReceived dedupe).
+                    // Delivered online but DHT backup failed
                     if (result.backupFailed) {
                         dispatch(updateLocalMessageSendState({
                             messageId: result.messageId,
@@ -493,10 +497,7 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
         const chatId = activeChat.id;
 
         // Capacity pre-check (direct chats): a full offline mailbox must not even
-        // create an optimistic row — keep the draft, toast, and stop. Online peers
-        // and new contacts report room, so the common path is unaffected. We pass
-        // our own in-flight burst (queued + processing, not yet counted by the core)
-        // so a fast burst doesn't all pass a stale snapshot.
+        // create an optimistic row — keep the draft, toast, and stop
         if (activeChat.type === 'direct' && activeChat.peerId) {
             const inFlight = (sendQueueRef.current[chatId]?.length ?? 0)
                 + (processingQueueRef.current[chatId] ? 1 : 0);
@@ -524,6 +525,9 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
             messageSentStatus: null,
             currentUserPeerId: myPeerId,
             localSendState: 'queued',
+            // Keep the reply ref on the optimistic row so a retry before backend
+            // finalization still sends it as a reply (see retry path).
+            replyToClientId: replyTarget?.cid,
         }));
 
         if (activeChat.type === 'group') {
@@ -534,11 +538,12 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
                 dispatch(updateLocalMessageSendState({ messageId: localMessageId, state: 'failed' }));
                 return;
             }
-            enqueueSendJob({ type: 'direct', chatId, peerId: activeChat.peerId, content: messageContent, localMessageId });
+            enqueueSendJob({ type: 'direct', chatId, peerId: activeChat.peerId, content: messageContent, localMessageId, replyToCid: replyTarget?.cid });
         }
         setDraftForChat(chatId, '');
         selectionRef.current = { start: 0, end: 0 };
         setEmojiPickerOpen(false);
+        if (replyTarget) dispatch(clearReplyTarget(chatId));
     };
 
     const handleSubmit = async (e: React.FormEvent) => {
@@ -550,6 +555,11 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
         if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
             event.preventDefault();
             void sendCurrentDraft();
+            return;
+        }
+        if (event.key === 'Escape' && replyTarget && activeChat) {
+            event.preventDefault();
+            dispatch(clearReplyTarget(activeChat.id));
         }
     };
 
@@ -576,6 +586,7 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
                 messageType: 'file',
                 messageSentStatus: 'online',
                 currentUserPeerId: myPeerId,
+                clientMsgId: pendingMessageId,
                 fileName: fileName,
                 fileSize: fileSize,
                 transferStatus: 'connecting',
@@ -650,9 +661,27 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
 
     return <>
         <div className="relative">
+            {replyTarget && (
+                <div className="flex items-center gap-2 border-t border-border bg-muted/30 px-4 py-2">
+                    <Reply className="h-4 w-4 shrink-0 text-muted-foreground" />
+                    <div className="min-w-0 flex-1">
+                        <p className="text-xs font-medium text-foreground/80">Replying to {replyTarget.sender}</p>
+                        <p className="truncate text-xs text-muted-foreground">{replyTarget.excerpt}</p>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={() => { if (activeChat) dispatch(clearReplyTarget(activeChat.id)); }}
+                        className="shrink-0 rounded-full p-1 text-muted-foreground hover:bg-background/40 hover:text-foreground focus:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        aria-label="Cancel reply"
+                        title="Cancel reply"
+                    >
+                        <X className="h-4 w-4" />
+                    </button>
+                </div>
+            )}
             <form
                 onSubmit={handleSubmit}
-                className="flex min-h-20 items-end justify-between gap-4 border-t border-border px-4 py-3"
+                className={`flex min-h-20 items-end justify-between gap-4 px-4 py-3 ${replyTarget ? '' : 'border-t border-border'}`}
             >
                 <div ref={emojiPickerRef} className="relative flex shrink-0 items-center gap-2 self-end">
                     {activeChat?.type !== 'group' && <Button

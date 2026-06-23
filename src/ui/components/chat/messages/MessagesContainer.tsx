@@ -306,6 +306,16 @@ export const MessagesContainer = ({
   let previousSenderPeerId: string | null = null;
   let senderStreak = 0;
 
+  // TODO remove comment: Jump to a quoted message. 
+  // Step-4 scope: scroll to it if it's in the loaded
+  // window. Load-until-found + the background-pulse highlight land in step 7.
+  const handleJumpToMessage = useCallback((clientMsgId: string) => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const el = container.querySelector(`[data-cid="${CSS.escape(clientMsgId)}"]`);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, []);
+
   const handleRetryFailedMessage = useCallback(async (message: ChatMessage) => {
     if (!activeChat) return;
     const retryBlockedByRekeyCooldown =
@@ -417,7 +427,7 @@ export const MessagesContainer = ({
         messageSentStatus,
         localSendState,
         connectivityFailure,
-      } = await window.kiyeovoAPI.sendMessage(activeChat.peerId, message.content);
+      } = await window.kiyeovoAPI.sendMessage(activeChat.peerId, message.content, message.replyToClientId);
       if (!success) {
         dispatch(updateLocalMessageSendState({ messageId: message.id, state: 'failed' }));
         if (error === 'OFFLINE_BUCKET_FULL') {
@@ -443,6 +453,9 @@ export const MessagesContainer = ({
             timestamp: sentMessage.timestamp ?? Date.now(),
             messageSentStatus: stillSending ? null : (messageSentStatus ?? 'online'),
             localSendState: stillSending ? 'sending' : undefined,
+            // Adopt the cid the backend minted on this (re)send; the spread above
+            // would otherwise keep the optimistic row's stale/empty clientMsgId.
+            clientMsgId: sentMessage.clientMsgId,
           },
         }));
       }
@@ -627,6 +640,8 @@ export const MessagesContainer = ({
           showTimestamp={showTimestamp}
           membershipInfoTooltip={getMembershipInfoTooltip(message)}
           onRetry={handleRetryFailedMessage}
+          onJumpToMessage={handleJumpToMessage}
+          canReply={activeChat?.type !== 'group'}
         />
       );
     })}

@@ -1460,6 +1460,20 @@ function setupMessageHandlers(
       return { success: false, messages: [], error: errStr(error, 'Failed to get messages') };
     }
   });
+
+  ipcMain.handle(IPC_CHANNELS.GET_MESSAGE_PREVIEW_BY_CID, async (_event, chatId: number, clientMsgId: string) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { success: false, preview: null, error: 'P2P core not initialized' };
+      }
+      const preview = p2pCore.database.getMessagePreviewByClientMsgId(chatId, clientMsgId);
+      return { success: true, preview, error: null };
+    } catch (error) {
+      console.error('[IPC] Failed to get message preview by cid:', error);
+      return { success: false, preview: null, error: errStr(error, 'Failed to get message preview') };
+    }
+  });
 }
 
 /**

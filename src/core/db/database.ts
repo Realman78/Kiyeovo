@@ -2351,6 +2351,32 @@ export class ChatDatabase {
         }));
     }
 
+    getMessagePreviewByClientMsgId(chatId: number, clientMsgId: string): {
+        senderPeerId: string;
+        senderUsername: string | undefined;
+        content: string;
+        messageType: 'text' | 'file' | 'image' | 'system';
+        fileName: string | undefined;
+    } | null {
+        const stmt = this.db.prepare(`
+            SELECT m.sender_peer_id, m.content, m.message_type, m.file_name, u.username AS sender_username
+            FROM messages m
+            JOIN chats c ON c.id = m.chat_id
+            LEFT JOIN users u ON m.sender_peer_id = u.peer_id AND u.network_mode = c.network_mode
+            WHERE m.chat_id = ? AND m.client_msg_id = ?
+            LIMIT 1
+        `);
+        const row = stmt.get(chatId, clientMsgId) as any;
+        if (!row) return null;
+        return {
+            senderPeerId: row.sender_peer_id,
+            senderUsername: row.sender_username || undefined,
+            content: row.content,
+            messageType: row.message_type,
+            fileName: row.file_name || undefined,
+        };
+    }
+
     getLatestMessageForChat(chatId: number): Message | null {
         const stmt = this.db.prepare(`
             SELECT * FROM messages 

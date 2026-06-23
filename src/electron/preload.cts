@@ -125,6 +125,7 @@ const kiyeovoAPI: KiyeovoAPI = {
   getChatById: (chatId) => invoke(IPC_CHANNELS.GET_CHAT, chatId),
 
   getMessages: (chatId, limit, offset) => invoke(IPC_CHANNELS.GET_MESSAGES, chatId, limit, offset),
+  getMessagePreviewByCid: (chatId, clientMsgId) => invoke(IPC_CHANNELS.GET_MESSAGE_PREVIEW_BY_CID, chatId, clientMsgId),
   onMessageReceived: (callback) => subscribe(IPC_CHANNELS.MESSAGE_RECEIVED, callback),
   onMessageSendStateChanged: (callback) => subscribe(IPC_CHANNELS.MESSAGE_SEND_STATE_CHANGED, callback),
   onOfflineInboxCapacityChanged: (callback) => subscribe(IPC_CHANNELS.OFFLINE_INBOX_CAPACITY_CHANGED, callback),
