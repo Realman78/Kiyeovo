@@ -71,7 +71,7 @@ import {
 import { triggerFastRelayRefresh } from '../network/relay-keepalive.js';
 import { SessionManager } from '../direct/session-manager.js';
 import { MessageEncryption } from '../direct/message-encryption.js';
-import { encodeEnvelope, decodeEnvelope, isValidCid } from '../direct/message-envelope.js';
+import { encodeEnvelope, decodeEnvelope, isValidCid } from '../protocol/message-envelope.js';
 import { PeerConnectionHandler } from '../direct/peer-connection-handler.js';
 import { StreamHandler } from '../transport/stream-handler.js';
 import { KeyExchange } from '../direct/key-exchange.js';
