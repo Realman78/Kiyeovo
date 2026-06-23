@@ -401,11 +401,15 @@ export function IceSetup() {
             ) : (
               <>
                 {servers.length === 0 && !isFormOpen && (
-                  <div className="px-4 py-8 text-center">
+                  <div className="flex flex-col items-center px-4 py-10 text-center">
                     <p className="text-sm font-medium text-foreground">No STUN/TURN servers configured</p>
                     <p className="mx-auto mt-1 max-w-md text-sm leading-6 text-muted-foreground">
                       Add a STUN or TURN server to enable audio and video calls.
                     </p>
+                    <Button className="mt-5" onClick={handleOpenAdd}>
+                      <Plus />
+                      Add STUN/TURN server
+                    </Button>
                   </div>
                 )}
 
@@ -568,7 +572,7 @@ export function IceSetup() {
                       </Button>
                     </div>
                   </div>
-                ) : (
+                ) : servers.length > 0 ? (
                   <button
                     type="button"
                     onClick={handleOpenAdd}
@@ -577,7 +581,7 @@ export function IceSetup() {
                     <Plus className="h-4 w-4" />
                     Add STUN/TURN server
                   </button>
-                )}
+                ) : null}
               </>
             )}
           </div>

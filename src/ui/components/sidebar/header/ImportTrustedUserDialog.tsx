@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useId } from "react";
 import { UserPlus, AlertCircle, FileUp, Lock, AtSign, Copy, CheckCircle, ChevronDown } from "lucide-react";
 import {
   Dialog,
@@ -21,6 +21,7 @@ interface ImportTrustedUserDialogProps {
 }
 
 const ImportTrustedUserDialog = ({ open, onOpenChange, onSuccess }: ImportTrustedUserDialogProps) => {
+  const helpContentId = useId();
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
   const [password, setPassword] = useState("");
   const [customName, setCustomName] = useState("");
@@ -183,6 +184,7 @@ const ImportTrustedUserDialog = ({ open, onOpenChange, onSuccess }: ImportTruste
                   type="button"
                   onClick={() => setIsHelpExpanded(!isHelpExpanded)}
                   aria-expanded={isHelpExpanded}
+                  aria-controls={helpContentId}
                   className="flex w-full items-center justify-between px-3 py-2 text-left text-sm font-medium text-foreground"
                 >
                   How does this work?
@@ -191,14 +193,17 @@ const ImportTrustedUserDialog = ({ open, onOpenChange, onSuccess }: ImportTruste
                   />
                 </button>
                 <div
+                  id={helpContentId}
+                  aria-hidden={!isHelpExpanded}
                   className={`overflow-hidden transition-all duration-300 ease-in-out ${isHelpExpanded ? 'max-h-80' : 'max-h-0'}`}
                 >
                   <p className="px-3 pb-3 text-xs leading-5 text-muted-foreground">
                     Ask your contact to{' '}
-                    <span className="font-medium text-foreground">export their profile</span> by registering
-                    & selecting the "Export profile" option in the profile tab; they&apos;ll get an encrypted file and a password to send
-                    you through a channel you trust (in person, a call, etc.). Select that file here
-                    and enter the password. After importing, you&apos;ll{' '}
+                    <span className="font-medium text-foreground">export their profile</span>{' '}
+                    by opening their profile dialog and choosing "Export Profile." They should send
+                    you the encrypted file, then share its password separately through another
+                    trusted channel, such as in person or during a call. Select the file here and
+                    enter the password. After importing, you&apos;ll{' '}
                     <span className="font-medium text-foreground">verify a fingerprint</span>{' '}
                     together to confirm it&apos;s really them.
                   </p>
