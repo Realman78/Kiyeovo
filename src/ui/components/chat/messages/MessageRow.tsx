@@ -169,7 +169,10 @@ export const MessageRow = memo(({
     </button>
   ) : null;
 
-  const replyButton = (canReply && message.clientMsgId) ? (
+  const isFileLike = message.messageType === 'file' || message.messageType === 'image';
+  const fileReplyAllowed = !isFileLike || message.transferStatus === 'completed';
+  const isReplyable = canReply && !!message.clientMsgId && !message.localSendState && fileReplyAllowed;
+  const replyButton = isReplyable ? (
     <button
       type="button"
       onClick={handleReply}
