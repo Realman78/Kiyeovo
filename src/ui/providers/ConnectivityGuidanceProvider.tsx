@@ -85,7 +85,7 @@ export function ConnectivityGuidanceProvider({ children }: { children: ReactNode
     }
 
     toast.warningAction(
-      'The call could not establish or maintain a media connection. Adding STUN/TURN servers may help across different networks.',
+      'The call could not establish. Add STUN/TURN server(s) to help across different networks.',
       'Open call setup',
       () => requestOpenSetup('ice'),
       'Call connection failed',

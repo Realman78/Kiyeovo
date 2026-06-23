@@ -916,6 +916,14 @@ export interface CallStateChangedEvent {
   timestamp: number;
 }
 
+export type CallActionFailureReason = 'peer_unreachable';
+
+export interface CallActionResponse {
+  success: boolean;
+  error: string | null;
+  failureReason?: CallActionFailureReason;
+}
+
 export interface CallErrorEvent {
   error: string;
   peerId?: string;

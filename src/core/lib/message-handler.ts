@@ -32,6 +32,8 @@ import type {
   CallIncomingEvent,
   CallSignalReceivedEvent,
   CallStateChangedEvent,
+  CallActionFailureReason,
+  CallActionResponse,
   CallErrorEvent,
   CallSignalOutgoingInput,
   CallSignalMessage,
@@ -1359,6 +1361,13 @@ export class MessageHandler {
     }
   }
 
+  private classifyCallSendFailure(error: unknown): CallActionFailureReason | undefined {
+    const errorText = errStr(error).toLowerCase();
+    return MessageHandler.OFFLINE_FALLBACK_REGEX.test(errorText)
+      ? 'peer_unreachable'
+      : undefined;
+  }
+
   private verifyIncomingCallSignal(remoteId: string, signal: CallSignalMessage): { valid: boolean; error?: string } {
     try {
       this.ensureFastModeForCalls();
@@ -1565,15 +1574,19 @@ export class MessageHandler {
     }
   }
 
-  async sendCallSignal(input: CallSignalOutgoingInput): Promise<{ success: boolean; error: string | null }> {
+  async sendCallSignal(input: CallSignalOutgoingInput): Promise<CallActionResponse> {
     try {
       const signedSignal = this.buildSignedCallSignal(input);
       await this.sendSignedCallSignal(signedSignal);
       return { success: true, error: null };
     } catch (error: unknown) {
       const message = errStr(error);
-      this.emitCallError(message, { peerId: input.toPeerId, callId: input.callId, code: 'CALL_SEND_FAILED' });
-      return { success: false, error: message };
+      const failureReason = this.classifyCallSendFailure(error);
+      return {
+        success: false,
+        error: message,
+        ...(failureReason ? { failureReason } : {}),
+      };
     }
   }
 
@@ -1581,7 +1594,7 @@ export class MessageHandler {
     peerId: string,
     callId: string,
     offerSdp: string,
-  ): Promise<{ success: boolean; error: string | null }> {
+  ): Promise<CallActionResponse> {
     try {
       this.ensureFastModeForCalls();
       this.ensureDirectCallContact(peerId);
@@ -1599,7 +1612,11 @@ export class MessageHandler {
     }
 
     if (!this.hasActiveConnectionToPeer(peerId)) {
-      return { success: false, error: 'Peer appears offline/unreachable right now' };
+      return {
+        success: false,
+        error: 'Peer appears offline/unreachable right now',
+        failureReason: 'peer_unreachable',
+      };
     }
 
     const sent = await this.sendCallSignal({
@@ -1625,7 +1642,7 @@ export class MessageHandler {
     peerId: string,
     callId: string,
     answerSdp: string,
-  ): Promise<{ success: boolean; error: string | null }> {
+  ): Promise<CallActionResponse> {
     const sent = await this.sendCallSignal({
       type: 'CALL_ANSWER',
       callId,
@@ -1648,7 +1665,7 @@ export class MessageHandler {
     peerId: string,
     callId: string,
     reason: 'rejected' | 'timeout' | 'offline' | 'policy' = 'rejected',
-  ): Promise<{ success: boolean; error: string | null }> {
+  ): Promise<CallActionResponse> {
     if (this.isActiveCallMatch(peerId, callId)) {
       this.clearActiveCall(reason);
     }
@@ -1666,7 +1683,7 @@ export class MessageHandler {
     peerId: string,
     callId: string,
     reason: 'hangup' | 'disconnect' | 'failed' = 'hangup',
-  ): Promise<{ success: boolean; error: string | null }> {
+  ): Promise<CallActionResponse> {
     if (this.isActiveCallMatch(peerId, callId)) {
       this.clearActiveCall(reason);
     }

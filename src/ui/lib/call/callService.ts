@@ -6,7 +6,11 @@ import type {
   ScreenShareLifecycleState,
   ScreenShareStopReason,
 } from '../../types';
-import type { IceServerConfig } from '../../../core/types';
+import type {
+  CallActionResponse,
+  CallSignalOutgoingInput,
+  IceServerConfig,
+} from '../../../core/types';
 import { DEFAULT_WEBRTC_ICE_SERVERS } from '../../../core/network/default-infrastructure';
 import { errStr } from '../../../core/utils/general-error';
 import { SCREEN_SHARE_UNSUPPORTED_MESSAGE } from '../../constants';
@@ -75,6 +79,8 @@ class CallService {
   private muted = false;
   private deafened = false;
   private pendingRemoteIce: RTCIceCandidateInit[] = [];
+  private pendingLocalIce: Extract<CallSignalOutgoingInput, { type: 'CALL_ICE' }>[] = [];
+  private initialSignalSentCallId: string | null = null;
   private disconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private ringTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
   private sentDisconnectHangupCallId: string | null = null;
@@ -339,6 +345,72 @@ class CallService {
     }));
   }
 
+  private sendLocalIceBestEffort(
+    signal: Extract<CallSignalOutgoingInput, { type: 'CALL_ICE' }>,
+  ): void {
+    void window.kiyeovoAPI.sendCallSignal(signal)
+      .then((response) => {
+        if (!response.success) {
+          console.warn('[CallService] Failed to send ICE candidate:', response.error);
+        }
+      })
+      .catch((error: unknown) => {
+        console.warn('[CallService] Failed to send ICE candidate:', error);
+      });
+  }
+
+  private queueOrSendLocalIce(
+    context: CurrentCall,
+    candidate: RTCIceCandidate,
+  ): void {
+    if (
+      this.currentCall?.callId !== context.callId
+      || this.currentCall.peerId !== context.peerId
+    ) {
+      return;
+    }
+
+    const signal: Extract<CallSignalOutgoingInput, { type: 'CALL_ICE' }> = {
+      type: 'CALL_ICE',
+      callId: context.callId,
+      toPeerId: context.peerId,
+      candidate: candidate.candidate,
+      sdpMid: candidate.sdpMid ?? null,
+      sdpMLineIndex: candidate.sdpMLineIndex ?? null,
+      usernameFragment: candidate.usernameFragment ?? null,
+    };
+
+    if (this.initialSignalSentCallId === context.callId) {
+      this.sendLocalIceBestEffort(signal);
+      return;
+    }
+    this.pendingLocalIce.push(signal);
+  }
+
+  private flushPendingLocalIce(context: CurrentCall): void {
+    if (
+      this.currentCall?.callId !== context.callId
+      || this.currentCall.peerId !== context.peerId
+    ) {
+      return;
+    }
+
+    this.initialSignalSentCallId = context.callId;
+    const queued = this.pendingLocalIce;
+    this.pendingLocalIce = [];
+    queued.forEach((signal) => this.sendLocalIceBestEffort(signal));
+  }
+
+  private getCallActionError(
+    response: CallActionResponse,
+    fallback: string,
+  ): string {
+    if (response.failureReason === 'peer_unreachable') {
+      return "Couldn't reach this contact. They may be offline or unavailable through a relay.";
+    }
+    return response.error || fallback;
+  }
+
   private createPeerConnection(context: CurrentCall): RTCPeerConnection {
     const pc = new RTCPeerConnection({
       iceServers: this.getIceServers(),
@@ -347,15 +419,7 @@ class CallService {
 
     pc.onicecandidate = (event) => {
       if (!event.candidate) return;
-      void window.kiyeovoAPI.sendCallSignal({
-        type: 'CALL_ICE',
-        callId: context.callId,
-        toPeerId: context.peerId,
-        candidate: event.candidate.candidate,
-        sdpMid: event.candidate.sdpMid ?? null,
-        sdpMLineIndex: event.candidate.sdpMLineIndex ?? null,
-        usernameFragment: event.candidate.usernameFragment ?? null,
-      });
+      this.queueOrSendLocalIce(context, event.candidate);
     };
 
     pc.ontrack = (event) => {
@@ -633,6 +697,8 @@ class CallService {
   private closePeerConnection(): void {
     if (!this.peerConnection) {
       this.pendingRemoteIce = [];
+      this.pendingLocalIce = [];
+      this.initialSignalSentCallId = null;
       return;
     }
     try {
@@ -644,6 +710,8 @@ class CallService {
     this.sharedVideoTransceiver = null;
     this.sharedVideoSender = null;
     this.pendingRemoteIce = [];
+    this.pendingLocalIce = [];
+    this.initialSignalSentCallId = null;
   }
 
   private async endCallInternal(
@@ -726,8 +794,9 @@ class CallService {
 
       const response = await window.kiyeovoAPI.startCall(peerId, callId, offerSdp);
       if (!response.success) {
-        throw new Error(response.error || 'Failed to start call');
+        throw new Error(this.getCallActionError(response, 'Failed to start call'));
       }
+      this.flushPendingLocalIce(context);
       this.scheduleOutgoingRingTimeout(context);
       return { success: true, callId };
     } catch (error: unknown) {
@@ -787,8 +856,9 @@ class CallService {
 
       const response = await window.kiyeovoAPI.acceptCall(params.peerId, params.callId, answerSdp);
       if (!response.success) {
-        throw new Error(response.error || 'Failed to accept call');
+        throw new Error(this.getCallActionError(response, 'Failed to accept call'));
       }
+      this.flushPendingLocalIce(context);
       this.emit({
         type: 'state',
         callId: context.callId,

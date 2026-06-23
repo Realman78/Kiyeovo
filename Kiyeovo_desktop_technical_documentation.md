@@ -468,10 +468,14 @@ Contextual infrastructure guidance is owned by `ConnectivityGuidanceProvider`, w
 - acknowledging the passive missing-ICE reminder does not suppress this action-triggered confirmation
 - calls are not disabled solely because ICE is missing, because host candidates may still work on a local network
 - a direct WebRTC connection failure or a group-call participant connection timeout shows a cooldown-limited warning with a STUN/TURN Setup action only while ICE is known to be missing; the wording covers both initial connection and a failed active media path, while rejection, ringing timeout, signaling errors, and media-permission failures do not claim an ICE problem
+- local direct-call ICE candidates are buffered until the initial offer or answer has been delivered; this prevents candidate signaling from racing the initial SDP dial, and later ICE-send failures are logged without producing duplicate user-facing errors
+- outbound call signaling failures are returned to the initiating renderer action instead of also being emitted as global call errors; unreachable-peer failures are typed and shown once with user-friendly wording, while unsolicited inbound validation errors remain global events
 - message send responses and background send-state events carry typed `bootstrap_unavailable` or `peer_unreachable` connectivity reasons from the core/IPC boundary; renderer components do not parse human-readable errors to choose infrastructure guidance
 - `bootstrap_unavailable` links to Bootstrap Setup only when the readiness snapshot also confirms that no bootstrap server is configured
 - `peer_unreachable` links to Relay Setup only in fast mode when no relay is configured, and the wording says a relay may improve reliability rather than claiming it caused the failure
 - successful online sends and successful offline DHT delivery remain silent; guidance appears only for terminal send failures and is cooldown-limited to avoid repeated popups
+- action-bearing warning toasts use a wider desktop layout than ordinary toasts so guidance text and its Setup action remain readable without widening short notifications
+- toast auto-dismiss timing is owned by the Radix toast lifecycle, so all toast variants pause dismissal while hovered, focused, or while the window is blurred
 
 Setup readiness is owned by a provider around the main application. The rail consumes only readiness state, while Setup pages consume a stable refresh action. Successful Bootstrap, Relay, or ICE Setup add/remove actions trigger a new read so the rail indicator reflects configuration completeness without placing readiness state or invalidation counters in `Main`.
 
