@@ -3062,6 +3062,10 @@ export class MessageHandler {
     }
   }
 
+  discardDeletedMessageRetryState(messageIds: string[]): void {
+    this.groupMessaging.discardDeletedMessageRetryState(messageIds);
+  }
+
   async checkGroupOfflineMessages(chatIds?: number[], options?: GroupOfflineCheckOptions): Promise<{
     checkedChatIds: number[];
     failedChatIds: number[];

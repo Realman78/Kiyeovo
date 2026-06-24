@@ -1496,6 +1496,7 @@ function setupMessageHandlers(
       }
 
       const result = p2pCore.database.deleteMessagesForMe(chatId, messageIds);
+      p2pCore.messageHandler.discardDeletedMessageRetryState(messageIds);
       log(`[IPC] Deleted ${result.deletedCount} local message row(s) from chat ${chatId}`);
       return {
         success: true,

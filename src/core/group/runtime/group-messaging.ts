@@ -457,6 +457,12 @@ export class GroupMessaging {
     this.deps.database.updateMessageSendState(messageId, null);
   }
 
+  discardDeletedMessageRetryState(messageIds: string[]): void {
+    for (const messageId of messageIds) {
+      this.pendingOfflineBackups.delete(messageId);
+    }
+  }
+
   /**
    * On startup, rehydrate persisted offline backups (published online but the DHT
    * backup failed before app-close) into the in-memory map, so `retryOfflineBackup`

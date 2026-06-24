@@ -35,6 +35,12 @@ export type MessageHistoryRefreshRequest = {
 };
 
 type LoadMoreResult = 'loaded' | 'exhausted' | 'cancelled' | 'error';
+const TERMINAL_FILE_TRANSFER_STATUSES = new Set<FileTransferStatus>([
+  'completed',
+  'failed',
+  'expired',
+  'rejected',
+]);
 
 function mapDbMessage(msg: Message & { sender_username?: string }): ChatMessage {
   let fileName = msg.file_name;
@@ -149,11 +155,16 @@ export const MessagesContainer = ({
   messagesLengthRef.current = messages.length;
 
   const isMessageSelectable = useCallback((message: ChatMessage): boolean => {
-    if (message.messageType === 'system' || message.localSendState) {
+    if (
+      message.messageType === 'system'
+      || message.localSendState === 'queued'
+      || message.localSendState === 'sending'
+    ) {
       return false;
     }
     if (message.messageType === 'file' || message.messageType === 'image') {
-      return message.transferStatus === 'completed';
+      return message.transferStatus !== undefined
+        && TERMINAL_FILE_TRANSFER_STATUSES.has(message.transferStatus);
     }
     return true;
   }, []);

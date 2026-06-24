@@ -15,7 +15,7 @@ import { getGroupCreatorLinkState, type GroupCreatorLinkState } from "../../util
 import { OfflineInboxCapacity } from "./OfflineInboxCapacity";
 import { MessageSelectionBar } from "./MessageSelectionBar";
 import { DeleteSelectedMessagesDialog } from "./DeleteSelectedMessagesDialog";
-import { removeMessagesByIds } from "../../state/slices/chatSlice";
+import { removeMessagesByIds, removeSendingMessagesByIds } from "../../state/slices/chatSlice";
 import { useToast } from "../ui/use-toast";
 
 const OFFLINE_INBOX_COLLAPSED_CLEARANCE_PX = 44;
@@ -102,6 +102,14 @@ const ChatWrapper = () => {
     });
   }, [activeChat]);
 
+  const startSelectionMode = useCallback(() => {
+    if (!activeChat) return;
+    setMessageSelection({
+      chatId: activeChat.id,
+      messageIds: new Set(),
+    });
+  }, [activeChat]);
+
   const exitSelectionMode = useCallback(() => {
     setDeleteConfirmOpen(false);
     setMessageSelection(null);
@@ -164,27 +172,54 @@ const ChatWrapper = () => {
 
     const chatId = selection.chatId;
     const messageIds = Array.from(selection.messageIds);
+    const persistedMessageIds = messageIds.filter((messageId) =>
+      messages.some((message) => message.chatId === chatId && message.id === messageId)
+    );
+    const rendererOnlyFailedIds = messageIds.filter((messageId) =>
+      sendingMessages.some(
+        (message) =>
+          message.chatId === chatId
+          && message.id === messageId
+          && message.localSendState === 'failed'
+      )
+    );
+    if (persistedMessageIds.length + rendererOnlyFailedIds.length !== messageIds.length) {
+      toast.error('One or more selected messages changed. Review the selection and try again.');
+      return;
+    }
+
     const visibleCount = messages.filter((message) => message.chatId === chatId).length;
     setIsDeletingMessages(true);
 
     try {
-      const result = await window.kiyeovoAPI.deleteMessagesForMe(chatId, messageIds);
-      if (!result.success) {
-        toast.error(result.error || 'Failed to delete selected messages');
-        return;
+      let latestRemaining = null;
+      if (persistedMessageIds.length > 0) {
+        const result = await window.kiyeovoAPI.deleteMessagesForMe(chatId, persistedMessageIds);
+        if (!result.success) {
+          toast.error(result.error || 'Failed to delete selected messages');
+          return;
+        }
+        latestRemaining = result.latestRemaining;
       }
 
-      const refreshRequest: MessageHistoryRefreshRequest = {
-        requestId: ++nextHistoryRefreshRequestIdRef.current,
-        chatId,
-        visibleCount,
-      };
-      setHistoryRefreshRequest(refreshRequest);
-      dispatch(removeMessagesByIds({
-        chatId,
-        messageIds,
-        latestRemaining: result.latestRemaining,
-      }));
+      if (persistedMessageIds.length > 0) {
+        const refreshRequest: MessageHistoryRefreshRequest = {
+          requestId: ++nextHistoryRefreshRequestIdRef.current,
+          chatId,
+          visibleCount,
+        };
+        setHistoryRefreshRequest(refreshRequest);
+        dispatch(removeMessagesByIds({
+          chatId,
+          messageIds,
+          latestRemaining,
+        }));
+      } else {
+        dispatch(removeSendingMessagesByIds({
+          chatId,
+          messageIds: rendererOnlyFailedIds,
+        }));
+      }
       setDeleteConfirmOpen(false);
       setMessageSelection(null);
       toast.success(messageIds.length === 1 ? 'Message deleted' : `${messageIds.length} messages deleted`);
@@ -194,7 +229,7 @@ const ChatWrapper = () => {
     } finally {
       setIsDeletingMessages(false);
     }
-  }, [activeMessageSelection, dispatch, isDeletingMessages, messages, toast]);
+  }, [activeMessageSelection, dispatch, isDeletingMessages, messages, sendingMessages, toast]);
 
   const handleHistoryRefreshHandled = useCallback((requestId: number) => {
     setHistoryRefreshRequest((current) =>
@@ -250,6 +285,7 @@ const ChatWrapper = () => {
             chatType={activeChat?.type}
             groupStatus={activeChat?.groupStatus}
             chatId={activeChat?.id}
+            onSelectMessages={activeChat ? startSelectionMode : undefined}
           />
           {groupCreatorLinkState.broken && (
             <div className="mx-6 mb-2 mt-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">

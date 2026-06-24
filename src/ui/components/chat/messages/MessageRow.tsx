@@ -295,7 +295,7 @@ export const MessageRow = memo(({
       onClickCapture={handleSelectionClickCapture}
       onKeyDown={handleSelectionKeyDown}
       className={`relative -mx-2 flex flex-col rounded-lg px-2 animate-fade-in transition-colors ${isOwnMessage ? "items-end" : "items-start"} ${
-        selectionMode && isSelectable ? "cursor-pointer hover:bg-primary/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/60" : ""
+        selectionMode && isSelectable ? "cursor-pointer py-px hover:bg-primary/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/60" : ""
       } ${isSelected ? "bg-primary/10 ring-1 ring-inset ring-primary/50" : ""}`}
     >
       {isSelected && (

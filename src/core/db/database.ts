@@ -2534,14 +2534,30 @@ export class ChatDatabase {
 
             const hasIneligibleRow = selectedRows.some((row) =>
                 row.message_type === 'system'
-                || row.local_send_state !== null
+                || (
+                    row.local_send_state !== null
+                    && row.local_send_state !== 'failed'
+                )
                 || (
                     (row.message_type === 'file' || row.message_type === 'image')
-                    && row.transfer_status !== 'completed'
+                    && !['completed', 'failed', 'expired', 'rejected'].includes(row.transfer_status ?? '')
                 )
             );
             if (hasIneligibleRow) {
                 throw new Error('One or more selected messages cannot be deleted');
+            }
+
+            for (let start = 0; start < messageIds.length; start += chunkSize) {
+                const ids = messageIds.slice(start, start + chunkSize);
+                const placeholders = ids.map(() => '?').join(',');
+                this.db.prepare(`
+                    DELETE FROM pending_offline_sends
+                    WHERE message_id IN (${placeholders})
+                `).run(...ids);
+                this.db.prepare(`
+                    DELETE FROM pending_group_offline_backups
+                    WHERE message_id IN (${placeholders})
+                `).run(...ids);
             }
 
             let deletedCount = 0;

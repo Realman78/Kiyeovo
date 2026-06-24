@@ -423,6 +423,17 @@ const chatSlice = createSlice({
         state.chats.sort((a, b) => b.lastMessageTimestamp - a.lastMessageTimestamp);
       }
     },
+    removeSendingMessagesByIds: (
+      state,
+      action: PayloadAction<{ chatId: number; messageIds: string[] }>
+    ) => {
+      const removedIds = new Set(action.payload.messageIds);
+      state.sendingMessages = state.sendingMessages.filter(
+        (message) =>
+          message.chatId !== action.payload.chatId
+          || !removedIds.has(message.id)
+      );
+    },
     addSendingMessage: (state, action: PayloadAction<ChatMessage>) => {
       if (!state.sendingMessages.some((m) => m.id === action.payload.id)) {
         state.sendingMessages.push(action.payload);
@@ -663,6 +674,7 @@ export const {
   prependMessages,
   replaceMessagesForChat,
   removeMessagesByIds,
+  removeSendingMessagesByIds,
   addSendingMessage,
   removeSendingMessage,
   finalizeSendingMessage,

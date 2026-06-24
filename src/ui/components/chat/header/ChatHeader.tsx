@@ -33,6 +33,7 @@ type ChatHeaderProps = {
   chatType?: 'direct' | 'group';
   groupStatus?: string;
   chatId?: number;
+  onSelectMessages?: () => void;
 }
 
 export const ChatHeader = ({
@@ -41,6 +42,7 @@ export const ChatHeader = ({
   chatType,
   groupStatus,
   chatId,
+  onSelectMessages,
 }: ChatHeaderProps) => {
   const activeChat = useSelector((state: RootState) => state.chat.activeChat);
   const chats = useSelector((state: RootState) => state.chat.chats);
@@ -324,6 +326,11 @@ export const ChatHeader = ({
 
   const handleDeleteChatAndUser = () => {
     setDeleteChatAndUserConfirmOpen(true);
+    setDropdownOpen(false);
+  };
+
+  const handleSelectMessages = () => {
+    onSelectMessages?.();
     setDropdownOpen(false);
   };
 
@@ -1164,6 +1171,7 @@ export const ChatHeader = ({
         kickableMembersCount={kickableMembers.length}
         canShowLeaveOrDisband={canShowLeaveOrDisband}
         canDeleteGroupChat={canDeleteGroupChat}
+        canSelectMessages={!!activeChat && !!onSelectMessages}
         onAboutGroup={handleAboutGroup}
         onAboutUser={handleAboutUser}
         onEditUsername={handleEditUsername}
@@ -1176,6 +1184,7 @@ export const ChatHeader = ({
         onLeaveGroup={handleLeaveGroup}
         onDeleteGroupChat={handleDeleteGroupChat}
         onToggleBlock={handleToggleBlock}
+        onSelectMessages={handleSelectMessages}
         onDeleteAllMessages={handleDeleteAllMessages}
         onDeleteChatAndUser={handleDeleteChatAndUser}
       />

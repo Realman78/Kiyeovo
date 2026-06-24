@@ -38,8 +38,8 @@ export const DeleteSelectedMessagesDialog = ({
           <DialogTitle>Delete for me?</DialogTitle>
           <DialogDescription>
             {selectedCount === 1
-              ? 'This message will be removed only from this device.'
-              : `These ${selectedCount} messages will be removed only from this device.`}
+              ? 'This message will be removed only for you. Recipient will still be able to read it.'
+              : `These ${selectedCount} messages will be removed only for you. Recipient will still be able to read them.`}
             {' '}Other participants will keep their copies.
           </DialogDescription>
         </DialogHeader>
