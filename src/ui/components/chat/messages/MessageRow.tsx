@@ -218,7 +218,7 @@ export const MessageRow = memo(({
             : "border-primary/60 bg-muted/40 text-muted-foreground hover:bg-muted/70 cursor-pointer"}`}
         >
           {replyQuote === 'deleted' ? (
-            <span>Message deleted.</span>
+            <span>Original message unavailable.</span>
           ) : (
             <>
               <span className="font-medium text-foreground/80">{replyQuote.sender}</span>

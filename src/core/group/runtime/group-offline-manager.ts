@@ -27,6 +27,7 @@ import {
   GroupMessageType,
 } from '../types.js';
 import { isGroupCallHintSystemPayload } from '../../lib/group-call-signaling.js';
+import { decodeEnvelope, isValidCid } from '../../protocol/message-envelope.js';
 import { toBase64Url } from '../../utils/miscellaneous.js';
 import { errStr, generalErrorHandler } from '../../utils/general-error.js';
 import { log } from '../../../shared/logger.js';
@@ -455,8 +456,7 @@ export class GroupOfflineManager {
       return existing;
     }
 
-    let checkPromise!: Promise<GroupChatCheckResult>;
-    checkPromise = this.checkGroupChat(chat, mode)
+    const checkPromise = this.checkGroupChat(chat, mode)
       .finally(() => {
         if (this.groupCheckInFlight.get(inFlightKey) === checkPromise) {
           this.groupCheckInFlight.delete(inFlightKey);
@@ -525,8 +525,6 @@ export class GroupOfflineManager {
         store: await this.getLatestStore(desc.bucketKey),
       })));
 
-      let epochMessagesDelivered = 0;
-
       for (const { senderPeerId, sender, store } of senderStores) {
         if (!store || store.messages.length === 0) continue;
 
@@ -547,6 +545,15 @@ export class GroupOfflineManager {
 
         for (const msg of orderedMessages) {
           const messageId = msg.messageId;
+          // Offline parse gate (this path doesn't go through isGroupChatMessage):
+          // messageId becomes the indexed client_msg_id / row PK / dedup key, so a
+          // malformed one is dropped — it can't be substituted.
+          if (!isValidCid(messageId)) {
+            console.warn(
+              `[GROUP-OFFLINE][DROP] chat=${chat.id} epoch=${epoch.key_version} sender=${senderPeerId.slice(-8)} reason=invalid_message_id`,
+            );
+            continue;
+          }
           if (msg.groupId !== chat.group_id || msg.keyVersion !== epoch.key_version) continue;
           if (!Number.isFinite(msg.timestamp) || msg.timestamp <= 0) {
             console.warn(
@@ -579,7 +586,7 @@ export class GroupOfflineManager {
             continue;
           }
 
-          const alreadyPersisted = this.deps.database.messageExists(messageId);
+          const alreadyPersisted = this.deps.database.messageExistsInChat(chat.id, messageId);
 
           if (msg.seq <= highestSeenSeq) {
             if (alreadyPersisted) {
@@ -603,29 +610,45 @@ export class GroupOfflineManager {
                 repairedLate++;
                 continue;
               }
-              await this.deps.database.createMessage({
+              // Text bodies are versioned envelopes (cid + body + reply ref); decode
+              // to the plain body and reply ref. System bodies stay raw.
+              const isText = msg.messageType !== 'system';
+              let bodyText = content;
+              let replyToClientId: string | undefined;
+              if (isText) {
+                const envelope = decodeEnvelope(content);
+                bodyText = envelope.text;
+                replyToClientId = envelope.replyToCid;
+              }
+              const { inserted } = await this.deps.database.tryCreateMessage({
                 id: messageId,
                 chat_id: chat.id,
                 sender_peer_id: senderPeerId,
-                content,
-                message_type: 'text',
+                content: bodyText,
+                message_type: isText ? 'text' : 'system',
                 timestamp: new Date(msg.timestamp),
-              });
+                client_msg_id: messageId,
+                reply_to_client_id: replyToClientId ?? null,
+              }, { dedupe: 'any' });
+              // Cursor advances regardless; counters/event only when a row was added.
               ({ lastReadTs, lastReadMessageId } = this.advanceCursor(lastReadTs, lastReadMessageId, msg));
-              unreadAdded++;
-              deliveredForSender++;
-              epochMessagesDelivered++;
-              repairedLate++;
-              this.deps.onMessageReceived({
-                chatId: chat.id,
-                messageId,
-                content,
-                senderPeerId,
-                senderUsername: sender.username,
-                timestamp: msg.timestamp,
-                messageSentStatus: 'offline',
-                messageType: 'text',
-              });
+              if (inserted) {
+                unreadAdded++;
+                deliveredForSender++;
+                repairedLate++;
+                this.deps.onMessageReceived({
+                  chatId: chat.id,
+                  messageId,
+                  content: bodyText,
+                  senderPeerId,
+                  senderUsername: sender.username,
+                  timestamp: msg.timestamp,
+                  messageSentStatus: 'offline',
+                  messageType: isText ? 'text' : 'system',
+                  clientMsgId: messageId,
+                  replyToClientId,
+                });
+              }
             } catch (error: unknown) {
               console.warn(
                 `[GROUP-OFFLINE][ANOMALY][CHAT:${chat.id}] epoch=${epoch.key_version} sender=${senderPeerId.slice(-8)} ` +
@@ -671,29 +694,45 @@ export class GroupOfflineManager {
                 ({ lastReadTs, lastReadMessageId } = this.advanceCursor(lastReadTs, lastReadMessageId, msg));
                 continue;
               }
-              await this.deps.database.createMessage({
+              // Text bodies are versioned envelopes; decode to the plain body + reply
+              // ref. System bodies stay raw.
+              const isText = msg.messageType !== 'system';
+              let bodyText = content;
+              let replyToClientId: string | undefined;
+              if (isText) {
+                const envelope = decodeEnvelope(content);
+                bodyText = envelope.text;
+                replyToClientId = envelope.replyToCid;
+              }
+              const { inserted } = await this.deps.database.tryCreateMessage({
                 id: messageId,
                 chat_id: chat.id,
                 sender_peer_id: senderPeerId,
-                content,
-                message_type: 'text',
+                content: bodyText,
+                message_type: isText ? 'text' : 'system',
                 timestamp: new Date(msg.timestamp),
-              });
+                client_msg_id: messageId,
+                reply_to_client_id: replyToClientId ?? null,
+              }, { dedupe: 'any' });
 
-              unreadAdded++;
-              deliveredForSender++;
-              epochMessagesDelivered++;
-
-              this.deps.onMessageReceived({
-                chatId: chat.id,
-                messageId,
-                content,
-                senderPeerId,
-                senderUsername: sender.username,
-                timestamp: msg.timestamp,
-                messageSentStatus: 'offline',
-                messageType: 'text',
-              });
+              // Counters/event only when a row was actually added (a concurrent gossip
+              // delivery may have inserted it first); seq/cursor advance below regardless.
+              if (inserted) {
+                unreadAdded++;
+                deliveredForSender++;
+                this.deps.onMessageReceived({
+                  chatId: chat.id,
+                  messageId,
+                  content: bodyText,
+                  senderPeerId,
+                  senderUsername: sender.username,
+                  timestamp: msg.timestamp,
+                  messageSentStatus: 'offline',
+                  messageType: isText ? 'text' : 'system',
+                  clientMsgId: messageId,
+                  replyToClientId,
+                });
+              }
             }
 
             highestSeenSeq = msg.seq;

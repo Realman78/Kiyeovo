@@ -2085,6 +2085,18 @@ export class ChatDatabase {
     }
 
     /**
+     * Chat-scoped existence check. The global `messageExists` would treat a
+     * cross-chat id collision as a duplicate; group offline catch-up needs to know
+     * whether the message is already persisted *in this chat* specifically.
+     */
+    messageExistsInChat(chatId: number, messageId: string): boolean {
+        const row = this.db
+            .prepare(`SELECT 1 FROM messages WHERE chat_id = ? AND id = ? LIMIT 1`)
+            .get(chatId, messageId);
+        return !!row;
+    }
+
+    /**
      * Authoritative insert. A (chat_id, client_msg_id) collision is an invariant
      * violation here — outbound sends mint fresh cids, and other callers default
      * client_msg_id to the unique row id — so we DON'T swallow conflicts: a plain
@@ -2094,32 +2106,71 @@ export class ChatDatabase {
      */
     async createMessage(message: Omit<Message, 'created_at'>): Promise<string> {
         return this.retryOperation(() => {
-            this.insertMessageRow(message, false);
+            this.insertMessageRow(message, 'throw');
             return message.id;
         });
     }
 
     /**
-     * Inbound dedup insert. The `(chat_id, client_msg_id)` UNIQUE index +
-     * `ON CONFLICT DO NOTHING` drops a duplicate delivery (same logical message
-     * arriving twice) and reports `inserted: false`, so callers can skip emitting a
-     * phantom "message received" event. The chat's `updated_at` is only bumped when
-     * a row was genuinely added.
+     * Inbound dedup insert; reports whether a row was actually inserted so callers
+     * can skip emitting a phantom "message received" event on a duplicate.
+     * - `dedupe: 'cid'` (default) — direct inbound: the row `id` is a freshly minted
+     *   per-receive UUID (never collides), only `(chat_id, client_msg_id)` can, so a
+     *   cid-targeted `ON CONFLICT` is right (and a PK collision still throws — an anomaly).
+     * - `dedupe: 'any'` — group inbound: `id == messageId == client_msg_id`, so a
+     *   duplicate collides on the **PK `id`** too; a *targetless* `ON CONFLICT DO NOTHING`
+     *   covers both. (Not `INSERT OR IGNORE`, which would also swallow NOT NULL/CHECK/FK.)
      */
-    async tryCreateMessage(message: Omit<Message, 'created_at'>): Promise<{ id: string; inserted: boolean }> {
+    async tryCreateMessage(
+        message: Omit<Message, 'created_at'>,
+        opts?: { dedupe?: 'cid' | 'any' },
+    ): Promise<{ id: string; inserted: boolean }> {
+        const strategy = opts?.dedupe === 'any' ? 'ignoreAny' : 'ignoreCid';
         return this.retryOperation(() => {
-            const inserted = this.insertMessageRow(message, true);
+            const inserted = this.insertMessageRow(message, strategy);
+            // Targetless DO NOTHING swallows *any* uniqueness conflict, so a skipped
+            // 'any' insert is only a valid duplicate if a row matching ALL of
+            // (id, chat_id, client_msg_id) exists. Otherwise the conflict came from a
+            // *different* row (cross-chat PK reuse, or a cid collision with a different
+            // id) — throw so the caller does NOT advance sequence/cursor for a message
+            // it never actually persisted.
+            if (!inserted && strategy === 'ignoreAny') {
+                this.assertIgnoredInsertIsExactDuplicate(message);
+            }
             return { id: message.id, inserted };
         });
     }
 
+    /** Throws unless a skipped insert corresponds to an exact-matching existing row. */
+    private assertIgnoredInsertIsExactDuplicate(message: Omit<Message, 'created_at'>): void {
+        const expectedCid = message.client_msg_id ?? message.id;
+        const exact = this.db
+            .prepare('SELECT 1 FROM messages WHERE id = ? AND chat_id = ? AND client_msg_id = ? LIMIT 1')
+            .get(message.id, message.chat_id, expectedCid);
+        if (!exact) {
+            throw new Error(
+                `Message insert skipped on conflict but no exact-matching row exists ` +
+                `(id=${message.id} chat=${message.chat_id} cid=${expectedCid}) — uniqueness collision with a different row`,
+            );
+        }
+    }
+
     /**
-     * Shared message INSERT. `dedupeOnConflict` decides whether a duplicate
-     * (chat_id, client_msg_id) is silently dropped (inbound) or throws (outbound).
+     * Shared message INSERT. The conflict strategy decides duplicate handling:
+     * `'throw'` (outbound/authoritative — surfaces an invariant violation),
+     * `'ignoreCid'` (cid-targeted DO NOTHING, direct inbound), or
+     * `'ignoreAny'` (targetless DO NOTHING, group inbound where id == cid).
      * Bumps the chat's updated_at only when a row was actually inserted. Returns
      * whether a row was inserted.
      */
-    private insertMessageRow(message: Omit<Message, 'created_at'>, dedupeOnConflict: boolean): boolean {
+    private insertMessageRow(
+        message: Omit<Message, 'created_at'>,
+        conflict: 'throw' | 'ignoreCid' | 'ignoreAny',
+    ): boolean {
+        const conflictClause =
+            conflict === 'ignoreCid' ? 'ON CONFLICT(chat_id, client_msg_id) DO NOTHING'
+                : conflict === 'ignoreAny' ? 'ON CONFLICT DO NOTHING'
+                    : '';
         const ts = message.timestamp instanceof Date ? message.timestamp.toISOString() : message.timestamp;
         const info = this.db.prepare(`
             INSERT INTO messages (
@@ -2129,7 +2180,7 @@ export class ChatDatabase {
                 client_msg_id, reply_to_client_id
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ${dedupeOnConflict ? 'ON CONFLICT(chat_id, client_msg_id) DO NOTHING' : ''}
+            ${conflictClause}
         `).run(
             message.id,
             message.chat_id,
@@ -2637,7 +2688,7 @@ export class ChatDatabase {
     private reconnect(): void {
         try {
             this.db.close();
-        } catch (error) {
+        } catch {
             // Ignore close errors
         }
         try {

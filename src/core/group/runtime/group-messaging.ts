@@ -23,6 +23,7 @@ import {
   type GroupHeartbeatMessage,
 } from '../types.js';
 import { isGroupCallHintSystemPayload } from '../../lib/group-call-signaling.js';
+import { encodeEnvelope, decodeEnvelope, isValidCid } from '../../protocol/message-envelope.js';
 import { toBase64Url } from '../../utils/miscellaneous.js';
 import { errStr, generalErrorHandler } from '../../utils/general-error.js';
 import { GroupOfflineManager } from './group-offline-manager.js';
@@ -242,7 +243,7 @@ export class GroupMessaging {
   async sendGroupMessage(
     groupId: string,
     content: string,
-    options?: { rekeyRetryHint?: boolean }
+    options?: { rekeyRetryHint?: boolean; replyToCid?: string }
   ): Promise<SendMessageResponse> {
     const ctx = this.resolveActiveGroupContext(groupId);
 
@@ -262,8 +263,14 @@ export class GroupMessaging {
       `connectedPeers=${connectedPeers.map((p) => p.slice(-8)).join(',') || 'none'}`
     );
 
+    // group messageId is already shared across all members, doubles as the cross-peer cid
+    const messageId = randomUUID();
+    const replyToCidInput = options?.replyToCid;
+    const replyToCid = isValidCid(replyToCidInput) ? replyToCidInput : undefined;
+    const envelopeBody = encodeEnvelope({ cid: messageId, text: content, replyToCid });
+
     const nonce = randomBytes(24);
-    const encryptedContent = this.encryptContent(content, ctx.groupKey, nonce);
+    const encryptedContent = this.encryptContent(envelopeBody, ctx.groupKey, nonce);
 
     const seq = this.deps.database.getNextSeqAndIncrement(groupId, ctx.keyVersion);
     const timestamp = Date.now();
@@ -273,7 +280,7 @@ export class GroupMessaging {
       groupId,
       keyVersion: ctx.keyVersion,
       senderPeerId: this.deps.myPeerId,
-      messageId: randomUUID(),
+      messageId,
       seq,
       encryptedContent,
       nonce: Buffer.from(nonce).toString('base64'),
@@ -334,6 +341,8 @@ export class GroupMessaging {
         content,
         message_type: 'text',
         timestamp: new Date(timestamp),
+        client_msg_id: messageId,
+        reply_to_client_id: replyToCid ?? null,
       });
       this.deps.database.updateMemberSeq(groupId, ctx.keyVersion, this.deps.myPeerId, seq);
 
@@ -346,6 +355,8 @@ export class GroupMessaging {
         timestamp,
         messageSentStatus: published ? 'online' : 'offline',
         messageType: 'text',
+        clientMsgId: messageId,
+        replyToClientId: replyToCid,
       });
     }
 
@@ -362,6 +373,8 @@ export class GroupMessaging {
       content,
       timestamp,
       messageType: 'text',
+      clientMsgId: messageId,
+      replyToClientId: replyToCid,
     };
 
     const response: SendMessageResponse = {
@@ -970,32 +983,50 @@ export class GroupMessaging {
         );
         return;
       }
-      if (this.deps.database.messageExists(parsed.messageId)) {
-        log(`[GROUP-MSG][IN][DROP] reason=duplicate_message_id ${msgTag}`);
-        return;
+
+      const decrypted = this.decryptContent(parsed.encryptedContent, ctx.groupKey, parsed.nonce);
+
+      // user text bodies are versioned envelopes carrying the shared cid + reply ref
+      const isText = parsed.messageType !== 'system';
+      let bodyText = decrypted;
+      let replyToClientId: string | undefined;
+      if (isText) {
+        const envelope = decodeEnvelope(decrypted);
+        bodyText = envelope.text;
+        replyToClientId = envelope.replyToCid;
       }
 
-      const content = this.decryptContent(parsed.encryptedContent, ctx.groupKey, parsed.nonce);
-
-      await this.deps.database.createMessage({
+      const { inserted } = await this.deps.database.tryCreateMessage({
         id: parsed.messageId,
         chat_id: ctx.chatId,
         sender_peer_id: parsed.senderPeerId,
-        content,
-        message_type: parsed.messageType === 'system' ? 'system' : 'text',
+        content: bodyText,
+        message_type: isText ? 'text' : 'system',
         timestamp: new Date(parsed.timestamp),
-      });
+        client_msg_id: parsed.messageId,
+        reply_to_client_id: replyToClientId ?? null,
+      }, { dedupe: 'any' });
+
+      // Cursor/seq must advance even for a deduped duplicate (idempotent), or we'd
+      // reprocess it forever. Only the "received" event is gated on `inserted`.
       this.deps.database.updateMemberSeq(parsed.groupId, parsed.keyVersion, parsed.senderPeerId, parsed.seq);
+
+      if (!inserted) {
+        log(`[GROUP-MSG][IN][SKIP] reason=duplicate_insert ${msgTag}`);
+        return;
+      }
 
       this.deps.onMessageReceived({
         chatId: ctx.chatId,
         messageId: parsed.messageId,
-        content,
+        content: bodyText,
         senderPeerId: parsed.senderPeerId,
         senderUsername: sender.username,
         timestamp: parsed.timestamp,
         messageSentStatus: 'online',
-        messageType: parsed.messageType === 'system' ? 'system' : 'text',
+        messageType: isText ? 'text' : 'system',
+        clientMsgId: parsed.messageId,
+        replyToClientId,
       });
       log(`[GROUP-MSG][IN][APPLY] ${msgTag} chatId=${ctx.chatId}`);
     } catch (error: unknown) {
@@ -1013,7 +1044,7 @@ export class GroupMessaging {
       Number.isInteger(msg.keyVersion) &&
       msg.keyVersion > 0 &&
       typeof msg.senderPeerId === 'string' &&
-      typeof msg.messageId === 'string' &&
+      isValidCid(msg.messageId) &&
       typeof msg.timestamp === 'number' &&
       typeof msg.messageType === 'string' &&
       (msg.messageType === 'text' || msg.messageType === 'system' || msg.messageType === 'heartbeat') &&

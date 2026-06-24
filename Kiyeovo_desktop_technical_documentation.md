@@ -30,6 +30,7 @@ Its goal is to provide complete context quickly in new AI conversations without 
   - ACK/republish mechanisms for reliability
   - key epoch rotation
   - encrypted group-info metadata in DHT versioned records
+  - replies (quote + jump-to), reusing the shared group `messageId` as the cross-peer id (§5.4)
 - Calls are implemented for fast mode direct chats:
   - 1:1 audio/video
   - screen sharing for active calls
@@ -194,7 +195,7 @@ Offline send is **non-blocking and batched**:
 
 #### 5.4 Reply to a message (quote + jump-to)
 
-Replies quote a specific earlier message and let the reader jump back to the original. **Direct 1:1 only** (groups out of scope for now).
+Replies quote a specific earlier message and let the reader jump back to the original. Supported in **both direct 1:1 and group chats**.
 
 Cross-peer identity:
 - message row IDs are minted independently per peer, so replies anchor to a **`client_msg_id` (cid)** — a stable id that is the *same value on both sides* of a message. The sender mints it; it rides inside the encrypted body and the recipient persists the same value. File/image rows reuse the shared `fileId` as their cid (so files are reply-/jump-able too).
@@ -202,9 +203,11 @@ Cross-peer identity:
 
 Wire format — the plaintext that gets encrypted is a small versioned **envelope** rather than a bare string: `{ v, cid, text, reply_to? }`. This keeps the cid + reply linkage private on the transport **and** in the offline DHT-at-rest payload. The recipient decodes and validates it (bounded cid shape/length, clamped text) and falls back to plain text for any non-envelope body. The envelope + cid are built **once per send** and reused across every delivery route (online, non-blocking offline queue, synchronous offline fallback), so the same cid arrives regardless of path.
 
-Dedup: a `UNIQUE(chat_id, client_msg_id)` index makes the same logical message delivered over two channels (online + offline) collapse to one row. Inbound inserts (`tryCreateMessage`) use `ON CONFLICT DO NOTHING` and skip the "received" event when no row was inserted; outbound inserts use a plain insert that **throws** on a cid collision (an invariant violation, never expected). This complements the pre-existing offline-message-UUID dedup.
+Dedup: a `UNIQUE(chat_id, client_msg_id)` index makes the same logical message delivered over two channels (online + offline) collapse to one row. Inbound inserts (`tryCreateMessage`) skip the "received" event when no row was inserted; outbound inserts use a plain insert that **throws** on a cid collision (an invariant violation, never expected). This complements the pre-existing offline-message-UUID dedup.
 
-UI: a hover **Reply** action (hidden in groups, and on un-settled/failed sends, and on files until transfer completes) opens a composer reply bar, transfers focus to the composer, and survives chat switches (`Esc`/✕ cancels). The quote renders above the bubble; clicking it scrolls to the original, waits until the target is visible and scrolling has settled, then starts a 2.5-second accent **highlight pulse**, paging older history in until the target loads. Jump pagination is owned by the active chat and a request generation, so chat switches or newer jumps cancel stale work; only confirmed history exhaustion reports that the original is unavailable.
+Groups: a group content message's `messageId` is already identical on every member, so it doubles as the shared cid — **`client_msg_id = messageId`** (no separate mint), and a reply just carries the target `messageId` inside the same envelope (`cid = messageId`), encrypted into `encryptedContent`. Both receive paths — gossip realtime and offline catch-up / late-gap repair — decode the envelope (text only; hidden call-hint system bodies stay raw), validate `messageId` (`isValidCid`, enforced in `isGroupChatMessage` for gossip and at the offline parse gate), and persist the cid + reply ref. Because `id == messageId == client_msg_id` for groups, the inbound insert uses a **targetless `ON CONFLICT DO NOTHING`** (covers the PK), and sequence/cursor state advances even for a deduped duplicate — only unread + the "received" event are gated on insertion. The reply envelope lives inside the signed offline backup, so catch-up carries it automatically.
+
+UI: a hover **Reply** action (available in direct and group chats; hidden on un-settled/failed sends, and on files until transfer completes) opens a composer reply bar, transfers focus to the composer, and survives chat switches (`Esc`/✕ cancels). The quote renders above the bubble; clicking it scrolls to the original, waits until the target is visible and scrolling has settled, then starts a 2.5-second accent **highlight pulse**, paging older history in until the target loads. Jump pagination is owned by the active chat and a request generation, so chat switches or newer jumps cancel stale work; only confirmed history exhaustion reports that the original is unavailable.
 
 ---
 
@@ -561,7 +564,7 @@ Composer behavior:
 - drafts auto-expand up to five visible lines, then switch to internal scrolling
 - pasted line breaks are preserved in both the draft and rendered text messages
 - rendered text message bubbles expose an inline hover/focus copy affordance that copies only the message text content to the clipboard
-- messages can be **replied to**: a hover reply affordance quotes a specific message and focuses the composer; the composer shows a cancelable reply bar (survives chat switches, `Esc`/✕ to cancel); the quote renders above the reply bubble (resolved by live lookup, shows *"Message deleted."* if the original is gone), and clicking it jumps to the original before starting a 2.5-second highlight pulse once the target is visible, paging older history in if needed. Reply is hidden in groups and on un-settled/failed sends. When the viewport is away from the latest message, a floating down-chevron returns it to the bottom. See §5.4.
+- messages can be **replied to**: a hover reply affordance quotes a specific message and focuses the composer; the composer shows a cancelable reply bar (survives chat switches, `Esc`/✕ to cancel); the quote renders above the reply bubble (resolved by live lookup, shows *"Message deleted."* if the original is gone), and clicking it jumps to the original before starting a 2.5-second highlight pulse once the target is visible, paging older history in if needed. Reply works in both direct and group chats; it is hidden only on un-settled/failed sends (and on files until transfer completes). When the viewport is away from the latest message, a floating down-chevron returns it to the bottom. See §5.4.
 - inbound message notifications are batched over a short renderer-side window so offline/startup bursts produce one sound and one summary desktop notification instead of one per message
 
 UI is event-driven while core remains authoritative.
