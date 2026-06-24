@@ -2,12 +2,12 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { finalizeSendingMessage, markOfflineFetched, markOfflineFetchFailed, prependMessages, resolveMessageSendOutcome, setMessages, setOfflineFetchStatus, updateChat, updateLocalMessageSendState, type ChatMessage } from "../../../state/slices/chatSlice";
 import type { RootState } from "../../../state/store";
 import { useDispatch, useSelector } from "react-redux";
-import { formatTimestampToHourMinute } from "../../../utils/dateUtils";
+import { formatTimestampToHourMinuteEu } from "../../../utils/dateUtils";
 import { PendingNotifications } from "./PendingNotifications";
 import { MessageRow } from "./MessageRow";
 import type { MessageSentStatus } from "../../../types";
 import type { FileTransferStatus } from "../../../../core/types";
-import { FILE_ACCEPTANCE_TIMEOUT, INITIAL_MESSAGES_LIMIT, LOAD_MORE_MESSAGES_LIMIT, SHOW_TIMESTAMP_INTERVAL } from "../../../constants";
+import { FILE_ACCEPTANCE_TIMEOUT, INITIAL_MESSAGES_LIMIT, LOAD_MORE_MESSAGES_LIMIT } from "../../../constants";
 import { useToast } from "../../ui/use-toast";
 import { useOfflineSendWarning } from "../../../hooks/useOfflineSendWarning";
 import type { Message } from "../../../../core/db/database";
@@ -18,6 +18,10 @@ import { ChevronDown } from "lucide-react";
 type MessagesContainerProps = {
   messages: ChatMessage[];
   isPending: boolean;
+  selectionMode?: boolean;
+  selectedMessageIds?: ReadonlySet<string>;
+  onToggleMessageSelection?: (messageId: string) => void;
+  onEnterMessageSelection?: (messageId: string) => void;
   onOfflineInboxRelevant?: () => void;
   bottomOverlayClearancePx?: number;
 }
@@ -78,6 +82,10 @@ function mapDbMessage(msg: Message & { sender_username?: string }): ChatMessage 
 export const MessagesContainer = ({
   messages,
   isPending,
+  selectionMode = false,
+  selectedMessageIds,
+  onToggleMessageSelection,
+  onEnterMessageSelection,
   onOfflineInboxRelevant,
   bottomOverlayClearancePx = 0,
 }: MessagesContainerProps) => {
@@ -128,6 +136,16 @@ export const MessagesContainer = ({
   // which runs before paint, reads an up-to-date count.
   messagesLengthRef.current = messages.length;
 
+  const isMessageSelectable = useCallback((message: ChatMessage): boolean => {
+    if (message.messageType === 'system' || message.localSendState) {
+      return false;
+    }
+    if (message.messageType === 'file' || message.messageType === 'image') {
+      return message.transferStatus === 'completed';
+    }
+    return true;
+  }, []);
+
   const getMembershipInfoTooltip = (message: ChatMessage): string | null => {
     if (message.messageType !== 'system' || !message.eventTimestamp) {
       return null;
@@ -140,7 +158,7 @@ export const MessagesContainer = ({
     if (!isMembershipEvent) {
       return null;
     }
-    return `${message.content} at ${formatTimestampToHourMinute(message.eventTimestamp)}.${normalized.includes('joined the group') ? ' This member can only see your messages after this system message, not strictly after the join time.' : ''}`;
+    return `${message.content} at ${formatTimestampToHourMinuteEu(message.eventTimestamp)}.${normalized.includes('joined the group') ? ' This member can only see your messages after this system message, not strictly after the join time.' : ''}`;
   };
 
   const suppressTopLoadTemporarily = useCallback((durationMs = 180) => {
@@ -816,7 +834,7 @@ export const MessagesContainer = ({
         {error}
       </div>
     </div>}
-    {messages.map((message, index) => {
+    {messages.map((message) => {
       const isSystemMessage = message.messageType === 'system';
       if (isSystemMessage) {
         // Break sender grouping across system events.
@@ -831,16 +849,12 @@ export const MessagesContainer = ({
         previousSenderPeerId = message.senderPeerId;
       }
 
-      const hasPendingSendState = !!message.localSendState;
-      const showTimestamp =
-        hasPendingSendState ||
-        senderChanged ||
-        (index > 0 && message.timestamp - messages[index - 1].timestamp > SHOW_TIMESTAMP_INTERVAL);
       const showSenderLabel =
         !isSystemMessage &&
         message.senderPeerId !== myPeerId &&
         !!activeChat?.groupId &&
         (senderChanged || senderStreak % 10 === 0);
+      const isSelectable = !isPending && isMessageSelectable(message);
       return (
         <MessageRow
           key={message.id}
@@ -848,10 +862,15 @@ export const MessagesContainer = ({
           myPeerId={myPeerId}
           hasActivePendingKeyExchange={!!activePendingKeyExchange}
           showSenderLabel={showSenderLabel}
-          showTimestamp={showTimestamp}
+          isFirstInSeries={senderChanged}
           membershipInfoTooltip={getMembershipInfoTooltip(message)}
           onRetry={handleRetryFailedMessage}
           onJumpToMessage={handleJumpToMessage}
+          selectionMode={selectionMode}
+          isSelectable={isSelectable}
+          isSelected={isSelectable && selectedMessageIds?.has(message.id) === true}
+          onToggleSelect={onToggleMessageSelection}
+          onEnterSelection={onEnterMessageSelection}
         />
       );
     })}

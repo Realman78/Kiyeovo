@@ -359,6 +359,15 @@ const chatSlice = createSlice({
         });
       }
       state.messages.sort(compareMessageOrder);
+
+      // Refresh the sidebar preview for our own sent message
+      const { chatId, content, timestamp, localSendState } = action.payload.finalMessage;
+      const chatIndex = state.chats.findIndex((c) => c.id === chatId);
+      if (!localSendState && chatIndex !== -1 && timestamp >= state.chats[chatIndex].lastMessageTimestamp) {
+        state.chats[chatIndex].lastMessage = content;
+        state.chats[chatIndex].lastMessageTimestamp = timestamp;
+        state.chats.sort((a, b) => b.lastMessageTimestamp - a.lastMessageTimestamp);
+      }
     },
     setPendingKeyExchanges: (state, action: PayloadAction<PendingKeyExchange[]>) => {
       state.pendingKeyExchanges = action.payload;
@@ -525,6 +534,14 @@ const chatSlice = createSlice({
         message.retryAfterTs = undefined;
         if (action.payload.messageSentStatus !== undefined) {
           message.messageSentStatus = action.payload.messageSentStatus;
+        }
+        // Confirmed delivery for a backgrounded (offline) send — now safe to
+        // refresh the sidebar preview. Guard against a newer inbound message.
+        const chatIndex = state.chats.findIndex((c) => c.id === message.chatId);
+        if (chatIndex !== -1 && message.timestamp >= state.chats[chatIndex].lastMessageTimestamp) {
+          state.chats[chatIndex].lastMessage = message.content;
+          state.chats[chatIndex].lastMessageTimestamp = message.timestamp;
+          state.chats.sort((a, b) => b.lastMessageTimestamp - a.lastMessageTimestamp);
         }
       } else if (action.payload.outcome === 'failed') {
         message.localSendState = 'failed';

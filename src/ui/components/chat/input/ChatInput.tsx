@@ -696,9 +696,9 @@ export const ChatInput: FC<ChatInputProps> = ({
             {replyTarget && (
                 <div className="flex items-center gap-2 border-t border-border bg-muted/30 px-4 py-2">
                     <Reply className="h-4 w-4 shrink-0 text-muted-foreground" />
-                    <div className="min-w-0 flex-1">
+                    <div className="min-w-0 flex-1 pl-2 flex flex-col justify-center items-start">
                         <p className="text-xs font-medium text-foreground/80">Replying to {replyTarget.sender}</p>
-                        <p className="truncate text-xs text-muted-foreground">{replyTarget.excerpt}</p>
+                        <p className="truncate w-full text-xs text-left text-muted-foreground">{replyTarget.excerpt}</p>
                     </div>
                     <button
                         type="button"

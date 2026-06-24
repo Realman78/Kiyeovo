@@ -82,17 +82,37 @@ const ChatWrapper = () => {
     });
   }, [activeChat]);
 
-  const enterSelectionMode = useCallback(() => {
+  const enterSelectionMode = useCallback((messageId: string) => {
     if (!activeChat) return;
     setMessageSelection({
       chatId: activeChat.id,
-      messageIds: new Set(),
+      messageIds: new Set([messageId]),
     });
   }, [activeChat]);
 
   const exitSelectionMode = useCallback(() => {
     setMessageSelection(null);
   }, []);
+
+  const toggleMessageSelection = useCallback((messageId: string) => {
+    setMessageSelection((current) => {
+      if (!current || current.chatId !== activeChat?.id) {
+        return current;
+      }
+
+      const messageIds = new Set(current.messageIds);
+      if (messageIds.has(messageId)) {
+        messageIds.delete(messageId);
+      } else {
+        messageIds.add(messageId);
+      }
+
+      return {
+        ...current,
+        messageIds,
+      };
+    });
+  }, [activeChat?.id]);
 
   useEffect(() => {
     if (!selectionMode) return;
@@ -164,7 +184,6 @@ const ChatWrapper = () => {
             chatType={activeChat?.type}
             groupStatus={activeChat?.groupStatus}
             chatId={activeChat?.id}
-            onSelectMessages={activeChat ? enterSelectionMode : undefined}
           />
           {groupCreatorLinkState.broken && (
             <div className="mx-6 mb-2 mt-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
@@ -177,6 +196,10 @@ const ChatWrapper = () => {
             <MessagesContainer
               messages={messagesToDisplay}
               isPending={!!activeContactAttempt || !!activePendingKeyExchange}
+              selectionMode={selectionMode}
+              selectedMessageIds={activeMessageSelection?.messageIds}
+              onToggleMessageSelection={toggleMessageSelection}
+              onEnterMessageSelection={enterSelectionMode}
               onOfflineInboxRelevant={openOfflineInbox}
               bottomOverlayClearancePx={activeChat
                 ? (isOfflineInboxExpanded

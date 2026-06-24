@@ -1,6 +1,6 @@
 import { useEffect, useState, type FC } from "react";
 import type { Chat } from "../../../state/slices/chatSlice";
-import { formatTimestampToHourMinute } from "../../../utils/dateUtils";
+import { formatTimestampToHourMinuteEu } from "../../../utils/dateUtils";
 import { AlertCircle, Ban, BellOff, Paperclip, Phone, Users } from "lucide-react";
 import { useSelector } from "react-redux";
 import type { RootState } from "../../../state/store";
@@ -74,7 +74,7 @@ export const ChatPreview: FC<ChatPreviewProps> = ({ chat, onSelectChat, selected
                         )}
                     </span>
                     <span className="text-xs text-muted-foreground shrink-0">
-                        {formatTimestampToHourMinute(chat.lastMessageTimestamp)}
+                        {formatTimestampToHourMinuteEu(chat.lastMessageTimestamp)}
                     </span>
                 </div>
                 <div className="flex items-center justify-between gap-2">

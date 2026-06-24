@@ -407,6 +407,38 @@
     animation: fade-in 0.3s ease-out forwards;
   }
 
+  @keyframes dropdown-menu-enter-bottom {
+    from {
+      opacity: 0;
+      transform: translateY(-6px) scale(0.97);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+
+  @keyframes dropdown-menu-enter-top {
+    from {
+      opacity: 0;
+      transform: translateY(6px) scale(0.97);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+
+  .dropdown-menu-enter-bottom {
+    animation: dropdown-menu-enter-bottom 180ms ease-out both;
+    transform-origin: top right;
+  }
+
+  .dropdown-menu-enter-top {
+    animation: dropdown-menu-enter-top 180ms ease-out both;
+    transform-origin: bottom right;
+  }
+
   /* Reply jump-to: brief accent tint over the target bubble that fades out.
      Uses an inset box-shadow so it overlays the bubble's own background and
      reverts cleanly (no background-color snap). */
