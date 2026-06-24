@@ -20,6 +20,38 @@ import {
     isNetworkMode,
 } from '../constants.js';
 
+/** Conversation-search tuning. */
+const MAX_SEARCH_QUERY_LENGTH = 256;
+const DEFAULT_SEARCH_PAGE_SIZE = 20;
+const MAX_SEARCH_PAGE_SIZE = 50;
+
+/** Escape LIKE wildcards so a 1-2 char fallback query matches literally. */
+function escapeLikePattern(value: string): string {
+    return value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+
+export interface ChatMessageSearchResult {
+    id: string;
+    clientMsgId: string | null;
+    content: string;
+    fileName: string | null;
+    messageType: 'text' | 'file' | 'image' | 'system';
+    senderPeerId: string;
+    timestamp: number; // epoch ms
+}
+
+export interface ChatMessageSearchCursor {
+    timestamp: number; // epoch ms of the last returned row
+    rowid: number;     // tiebreaker for equal timestamps
+}
+
+export interface ChatMessageSearchResponse {
+    results: ChatMessageSearchResult[];
+    total: number;
+    snapshotMaxRowid: number;
+    nextCursor: ChatMessageSearchCursor | null;
+}
+
 export interface User {
     network_mode: NetworkMode
     peer_id: string
@@ -300,6 +332,7 @@ export class ChatDatabase {
             this.initializeTables();
             this.sessionNetworkMode = this.getNetworkMode();
             this.createIndexes();
+            this.ensureMessageSearchIndex();
 
             this.checkIntegrity();
         } catch (error) {
@@ -766,6 +799,59 @@ export class ChatDatabase {
       CREATE INDEX IF NOT EXISTS idx_bootstrap_nodes_mode ON bootstrap_nodes(network_mode);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_bootstrap_nodes_unique_addr_mode ON bootstrap_nodes(address, network_mode);
         `);
+    }
+
+    /**
+     * Full-text search index over message text + filenames, backing conversation
+     * search. External-content FTS5 (no duplicated content column) keyed on the
+     * messages table's integer rowid, with the `trigram` tokenizer so MATCH does
+     * case-insensitive *substring* search (incl. inside filenames like
+     * `report_2024.pdf`). System messages are indexed too but excluded at query
+     * time. Triggers keep it in sync; the UPDATE trigger is scoped to the two
+     * indexed columns + a value-change guard so routine writes
+     * (transfer_status/local_send_state/read receipts) never churn the index.
+     */
+    private ensureMessageSearchIndex(): void {
+        const alreadyExists = this.db.prepare(
+            `SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts'`
+        ).get();
+
+        this.db.exec(`
+            CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+                content,
+                file_name,
+                content='messages',
+                content_rowid='rowid',
+                tokenize='trigram'
+            );
+
+            CREATE TRIGGER IF NOT EXISTS messages_fts_ai AFTER INSERT ON messages BEGIN
+                INSERT INTO messages_fts(rowid, content, file_name)
+                VALUES (new.rowid, new.content, new.file_name);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS messages_fts_ad AFTER DELETE ON messages BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, content, file_name)
+                VALUES ('delete', old.rowid, old.content, old.file_name);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS messages_fts_au
+                AFTER UPDATE OF content, file_name ON messages
+                WHEN old.content IS NOT new.content OR old.file_name IS NOT new.file_name
+            BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, content, file_name)
+                VALUES ('delete', old.rowid, old.content, old.file_name);
+                INSERT INTO messages_fts(rowid, content, file_name)
+                VALUES (new.rowid, new.content, new.file_name);
+            END;
+        `);
+
+        // First-time creation only: backfill existing rows from the content table.
+        // On later launches the triggers have kept the index current, so we skip
+        // the (potentially large) rebuild.
+        if (!alreadyExists) {
+            this.db.exec(`INSERT INTO messages_fts(messages_fts) VALUES('rebuild')`);
+        }
     }
 
     private ensureEventTimestampColumn(): void {
@@ -2455,37 +2541,129 @@ export class ChatDatabase {
         };
     }
 
-    searchMessages(query: string, chatId?: number): Message[] {
-        let stmt: Database.Statement;
-        let params: any[];
+    /**
+     * Conversation search, scoped to one chat. Matches message text + filenames,
+     * excludes system messages, newest-first. Two query paths by length:
+     *   - >= 3 chars -> FTS5 trigram MATCH (indexed substring search) as an
+     *     indexed pre-filter, refined by the type-scoped LIKE below.
+     *   - 1-2 chars  -> type-scoped LIKE over the single chat (trigram can't
+     *     index <3-char terms); bounded to one chat_id so the scan stays cheap.
+     *
+     * Column scope: TEXT messages match on `content`; FILE/IMAGE messages match
+     * on `file_name` only (their `content` is the synthetic "name (size bytes)"
+     * string, outside the agreed text+filename scope).
+     *
+     * Pagination is **keyset** on (timestamp, rowid), not OFFSET: a message
+     * deleted mid-search can't shift later pages and skip a match. `snapshotMaxRowid`
+     * additionally freezes the searchable universe (and the total) for the life
+     * of one query so arriving messages don't inflate the count.
+     */
+    searchChatMessages(
+        chatId: number,
+        rawQuery: string,
+        options?: {
+            limit?: number;
+            snapshotMaxRowid?: number;
+            cursor?: ChatMessageSearchCursor | null;
+        },
+    ): ChatMessageSearchResponse {
+        const empty: ChatMessageSearchResponse = {
+            results: [], total: 0, snapshotMaxRowid: 0, nextCursor: null,
+        };
 
-        if (chatId) {
-            stmt = this.db.prepare(`
-                SELECT m.* FROM messages m
-                JOIN chats c ON c.id = m.chat_id
-                WHERE m.chat_id = ? AND m.content LIKE ? AND c.network_mode = ?
-                ORDER BY timestamp DESC 
-                LIMIT 100
-            `);
-            params = [chatId, `%${query}%`, this.getActiveNetworkMode()];
-        } else {
-            stmt = this.db.prepare(`
-                SELECT m.* FROM messages m
-                JOIN chats c ON c.id = m.chat_id
-                WHERE m.content LIKE ? AND c.network_mode = ?
-                ORDER BY timestamp DESC 
-                LIMIT 100
-            `);
-            params = [`%${query}%`, this.getActiveNetworkMode()];
+        const query = (rawQuery ?? '').trim().slice(0, MAX_SEARCH_QUERY_LENGTH);
+        if (!Number.isInteger(chatId) || chatId <= 0 || query.length === 0) {
+            return empty;
         }
 
-        const rows = stmt.all(...params) as any[];
-        return rows.map(row => ({
-            ...row,
-            timestamp: new Date(row.timestamp),
-            event_timestamp: row.event_timestamp ? new Date(row.event_timestamp) : null,
-            created_at: new Date(row.created_at)
+        const rawLimit = options?.limit;
+        const limit = Number.isFinite(rawLimit)
+            ? Math.min(Math.max(Math.trunc(rawLimit as number), 1), MAX_SEARCH_PAGE_SIZE)
+            : DEFAULT_SEARCH_PAGE_SIZE;
+
+        // Stable snapshot: capture MAX(rowid) once per query and reuse across pages.
+        let snapshotMaxRowid =
+            Number.isFinite(options?.snapshotMaxRowid) && (options!.snapshotMaxRowid as number) > 0
+                ? Math.trunc(options!.snapshotMaxRowid as number)
+                : 0;
+        if (snapshotMaxRowid <= 0) {
+            const row = this.db
+                .prepare(`SELECT MAX(rowid) AS maxRowid FROM messages WHERE chat_id = ?`)
+                .get(chatId) as { maxRowid: number | null } | undefined;
+            snapshotMaxRowid = row?.maxRowid ?? 0;
+        }
+        if (snapshotMaxRowid <= 0) {
+            return empty;
+        }
+
+        const cursor = options?.cursor ?? null;
+        const hasCursor = !!cursor
+            && Number.isFinite(cursor.timestamp)
+            && Number.isInteger(cursor.rowid);
+
+        const useFts = query.length >= 3;
+        const likeExpr = `%${escapeLikePattern(query)}%`;
+
+        // text -> content; file/image -> file_name only.
+        const typeScoped = `(
+            (m.message_type = 'text' AND m.content LIKE ? ESCAPE '\\')
+            OR (m.message_type IN ('file', 'image')
+                AND m.file_name IS NOT NULL
+                AND m.file_name LIKE ? ESCAPE '\\')
+        )`;
+
+        // FTS path adds an indexed trigram MATCH as a pre-filter; the quoted
+        // term keeps special chars from altering the FTS grammar.
+        const source = useFts
+            ? `FROM messages_fts JOIN messages m ON m.rowid = messages_fts.rowid
+               WHERE messages_fts MATCH ? AND`
+            : `FROM messages m WHERE`;
+        const matchParam = useFts ? [`"${query.replace(/"/g, '""')}"`] : [];
+        const scopeParams = [chatId, snapshotMaxRowid, likeExpr, likeExpr];
+
+        const cursorClause = hasCursor
+            ? `AND (m.timestamp < ? OR (m.timestamp = ? AND m.rowid < ?))`
+            : '';
+        const cursorIso = hasCursor ? new Date(cursor!.timestamp).toISOString() : null;
+        const cursorParams = hasCursor ? [cursorIso, cursorIso, cursor!.rowid] : [];
+
+        const rows = this.db.prepare(`
+            SELECT m.id, m.client_msg_id, m.content, m.file_name, m.message_type,
+                   m.sender_peer_id, m.timestamp, m.rowid AS rowid
+            ${source} m.chat_id = ?
+                  AND m.message_type != 'system'
+                  AND m.rowid <= ?
+                  AND ${typeScoped}
+                  ${cursorClause}
+            ORDER BY m.timestamp DESC, m.rowid DESC
+            LIMIT ?
+        `).all(...matchParam, ...scopeParams, ...cursorParams, limit) as any[];
+
+        const total = (this.db.prepare(`
+            SELECT COUNT(*) AS total
+            ${source} m.chat_id = ?
+                  AND m.message_type != 'system'
+                  AND m.rowid <= ?
+                  AND ${typeScoped}
+        `).get(...matchParam, ...scopeParams) as { total: number }).total;
+
+        const results: ChatMessageSearchResult[] = rows.map((row) => ({
+            id: row.id as string,
+            clientMsgId: (row.client_msg_id ?? null) as string | null,
+            content: row.content as string,
+            fileName: (row.file_name ?? null) as string | null,
+            messageType: row.message_type as ChatMessageSearchResult['messageType'],
+            senderPeerId: row.sender_peer_id as string,
+            timestamp: new Date(row.timestamp).getTime(),
         }));
+
+        const last = rows[rows.length - 1];
+        const nextCursor: ChatMessageSearchCursor | null =
+            rows.length === limit && last
+                ? { timestamp: new Date(last.timestamp).getTime(), rowid: last.rowid as number }
+                : null;
+
+        return { results, total, snapshotMaxRowid, nextCursor };
     }
 
     // Utility methods

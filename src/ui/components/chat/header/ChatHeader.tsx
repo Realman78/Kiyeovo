@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useSelector, useDispatch } from "react-redux";
 import type { RootState } from "../../../state/store";
-import { UserPlus, AlertCircle, Users, Clock, Phone, PhoneOff, Loader2 } from "lucide-react";
+import { UserPlus, AlertCircle, Users, Clock, Phone, PhoneOff, Loader2, X } from "lucide-react";
 import { updateChat, clearMessages, removeChat, setOfflineFetchStatus, markOfflineFetched, markOfflineFetchFailed } from "../../../state/slices/chatSlice";
 import { AboutUserModal } from "./AboutUserModal";
 import { useToast } from "../../ui/use-toast";
@@ -34,6 +34,8 @@ type ChatHeaderProps = {
   groupStatus?: string;
   chatId?: number;
   onSelectMessages?: () => void;
+  selectionMode?: boolean;
+  onCancelSelection?: () => void;
 }
 
 export const ChatHeader = ({
@@ -43,6 +45,8 @@ export const ChatHeader = ({
   groupStatus,
   chatId,
   onSelectMessages,
+  selectionMode = false,
+  onCancelSelection,
 }: ChatHeaderProps) => {
   const activeChat = useSelector((state: RootState) => state.chat.activeChat);
   const chats = useSelector((state: RootState) => state.chat.chats);
@@ -1121,6 +1125,18 @@ export const ChatHeader = ({
     </div>
 
     <div className="flex shrink-0 items-center gap-1">
+      {selectionMode ? (
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onCancelSelection}
+          aria-label="Exit message selection"
+          title="Exit selection"
+        >
+          <X className="w-4 h-4" />
+        </Button>
+      ) : (
+      <>
       <ChatHeaderCallControls
         canShowCallButtons={canShowCallButtons}
         hasActiveCallWithThisPeer={hasActiveCallWithThisPeer}
@@ -1188,6 +1204,8 @@ export const ChatHeader = ({
         onDeleteAllMessages={handleDeleteAllMessages}
         onDeleteChatAndUser={handleDeleteChatAndUser}
       />
+      </>
+      )}
     </div>
 
     {activeChat && (

@@ -26,7 +26,7 @@ type MessageSelectionState = {
   messageIds: Set<string>;
 };
 
-const ChatWrapper = () => {
+const ChatWrapper = ({ active = true }: { active?: boolean }) => {
   const dispatch = useDispatch();
   const { toast } = useToast();
   const activeChat = useSelector((state: RootState) => state.chat.activeChat);
@@ -114,6 +114,15 @@ const ChatWrapper = () => {
     setDeleteConfirmOpen(false);
     setMessageSelection(null);
   }, []);
+
+  // Leaving the Chats/Groups section (ChatWrapper stays mounted but hidden)
+  // cancels any in-progress selection so it can't linger invisibly. Search will
+  // hook the same signal in Phase 2.
+  useEffect(() => {
+    if (!active) {
+      exitSelectionMode();
+    }
+  }, [active, exitSelectionMode]);
 
   const toggleMessageSelection = useCallback((messageId: string) => {
     setMessageSelection((current) => {
@@ -254,7 +263,6 @@ const ChatWrapper = () => {
           {selectionMode && (
             <MessageSelectionBar
               selectedCount={selectedMessageCount}
-              onClose={exitSelectionMode}
               onDelete={requestDeleteSelectedMessages}
             />
           )}
@@ -266,7 +274,6 @@ const ChatWrapper = () => {
     activePendingKeyExchange,
     activeContactAttempt,
     activeChat,
-    exitSelectionMode,
     openOfflineInbox,
     selectedMessageCount,
     selectionMode,
@@ -286,6 +293,8 @@ const ChatWrapper = () => {
             groupStatus={activeChat?.groupStatus}
             chatId={activeChat?.id}
             onSelectMessages={activeChat ? startSelectionMode : undefined}
+            selectionMode={selectionMode}
+            onCancelSelection={exitSelectionMode}
           />
           {groupCreatorLinkState.broken && (
             <div className="mx-6 mb-2 mt-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
