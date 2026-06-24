@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { finalizeSendingMessage, markOfflineFetched, markOfflineFetchFailed, prependMessages, resolveMessageSendOutcome, setMessages, setOfflineFetchStatus, updateChat, updateLocalMessageSendState, type ChatMessage } from "../../../state/slices/chatSlice";
+import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from "react";
+import { finalizeSendingMessage, markOfflineFetched, markOfflineFetchFailed, prependMessages, replaceMessagesForChat, resolveMessageSendOutcome, setMessages, setOfflineFetchStatus, updateChat, updateLocalMessageSendState, type ChatMessage } from "../../../state/slices/chatSlice";
 import type { RootState } from "../../../state/store";
 import { useDispatch, useSelector } from "react-redux";
 import { formatTimestampToHourMinuteEu } from "../../../utils/dateUtils";
@@ -22,9 +22,17 @@ type MessagesContainerProps = {
   selectedMessageIds?: ReadonlySet<string>;
   onToggleMessageSelection?: (messageId: string) => void;
   onEnterMessageSelection?: (messageId: string) => void;
+  historyRefreshRequest?: MessageHistoryRefreshRequest | null;
+  onHistoryRefreshHandled?: (requestId: number) => void;
   onOfflineInboxRelevant?: () => void;
   bottomOverlayClearancePx?: number;
 }
+
+export type MessageHistoryRefreshRequest = {
+  requestId: number;
+  chatId: number;
+  visibleCount: number;
+};
 
 type LoadMoreResult = 'loaded' | 'exhausted' | 'cancelled' | 'error';
 
@@ -86,6 +94,8 @@ export const MessagesContainer = ({
   selectedMessageIds,
   onToggleMessageSelection,
   onEnterMessageSelection,
+  historyRefreshRequest,
+  onHistoryRefreshHandled,
   onOfflineInboxRelevant,
   bottomOverlayClearancePx = 0,
 }: MessagesContainerProps) => {
@@ -119,6 +129,7 @@ export const MessagesContainer = ({
   const myPeerId = useSelector((state: RootState) => state.user.peerId);
   const activeChat = useSelector((state: RootState) => state.chat.activeChat);
   const activePendingKeyExchange = useSelector((state: RootState) => state.chat.activePendingKeyExchange);
+  const persistedMessages = useSelector((state: RootState) => state.chat.messages);
   const dispatch = useDispatch();
   const { toast } = useToast();
   const { showMessageFailureGuidance } = useConnectivityGuidance();
@@ -131,6 +142,7 @@ export const MessagesContainer = ({
   const [isAtBottom, setIsAtBottom] = useState(true);
   const offsetRef = useRef(0);
   const latestDisplayedMessagesRef = useRef(messages);
+  const persistedMessagesRef = useRef(persistedMessages);
   const showEmptyState = !isPending && messages.length === 0;
   // Kept current synchronously (during render) so the ResizeObserver callback,
   // which runs before paint, reads an up-to-date count.
@@ -218,6 +230,10 @@ export const MessagesContainer = ({
     latestDisplayedMessagesRef.current = messages;
   }, [messages]);
 
+  useEffect(() => {
+    persistedMessagesRef.current = persistedMessages;
+  }, [persistedMessages]);
+
   useLayoutEffect(() => {
     jumpGenerationRef.current += 1;
     isJumpingRef.current = false;
@@ -267,6 +283,113 @@ export const MessagesContainer = ({
     }
     void fetchMessages();
   }, [activeChat?.id, dispatch]);
+
+  useLayoutEffect(() => {
+    if (!historyRefreshRequest) return;
+    skipNextAutoScrollRef.current = true;
+  }, [historyRefreshRequest]);
+
+  const refreshMessagesAfterDelete = useEffectEvent(async (
+    request: MessageHistoryRefreshRequest,
+    chatId: number,
+    isCancelled: () => boolean,
+  ) => {
+      const requestToken = ++loadTokenRef.current;
+      loadMoreInFlightRef.current = null;
+      isLoadingMoreRef.current = false;
+      setIsLoadingMore(false);
+      jumpGenerationRef.current += 1;
+      isJumpingRef.current = false;
+      skipNextAutoScrollRef.current = true;
+
+      const startingIds = new Set(
+        persistedMessagesRef.current
+          .filter((message) => message.chatId === chatId)
+          .map((message) => message.id)
+      );
+      const limit = Math.max(INITIAL_MESSAGES_LIMIT, request.visibleCount);
+      const container = scrollContainerRef.current;
+      const previousScrollTop = container?.scrollTop ?? 0;
+      const wasAtBottom = isAtBottomRef.current;
+
+      try {
+        const result = await window.kiyeovoAPI.getMessages(chatId, limit, 0);
+        if (
+          isCancelled()
+          || loadTokenRef.current !== requestToken
+          || activeChatIdRef.current !== chatId
+        ) {
+          return;
+        }
+        if (!result.success) {
+          toast.error(result.error || 'Messages were deleted, but history could not be refreshed');
+          return;
+        }
+
+        const refreshed = result.messages.map(mapDbMessage);
+        const refreshedIds = new Set(refreshed.map((message) => message.id));
+        const messagesAddedDuringRefresh = persistedMessagesRef.current.filter(
+          (message) =>
+            message.chatId === chatId
+            && !startingIds.has(message.id)
+            && !refreshedIds.has(message.id)
+        );
+        const merged = [...refreshed, ...messagesAddedDuringRefresh]
+          .sort((a, b) => a.timestamp - b.timestamp);
+
+        skipNextAutoScrollRef.current = true;
+        dispatch(replaceMessagesForChat({ chatId, messages: merged }));
+        offsetRef.current = refreshed.length;
+        setHasMore(refreshed.length >= limit);
+
+        await new Promise<void>((resolve) => {
+          requestAnimationFrame(() => {
+            if (
+              !isCancelled()
+              && loadTokenRef.current === requestToken
+              && activeChatIdRef.current === chatId
+              && container
+            ) {
+              suppressTopLoadTemporarily();
+              container.scrollTop = wasAtBottom
+                ? container.scrollHeight
+                : Math.min(previousScrollTop, Math.max(0, container.scrollHeight - container.clientHeight));
+              updateBottomState(container);
+            }
+            resolve();
+          });
+        });
+      } catch (error) {
+        if (!isCancelled()) {
+          console.error('[MessagesContainer] Failed to refresh messages after deletion:', error);
+          toast.error('Messages were deleted, but history could not be refreshed');
+        }
+      } finally {
+        if (!isCancelled()) {
+          onHistoryRefreshHandled?.(request.requestId);
+        }
+      }
+  });
+
+  const markHistoryRefreshHandled = useEffectEvent((requestId: number) => {
+    onHistoryRefreshHandled?.(requestId);
+  });
+
+  useEffect(() => {
+    if (!historyRefreshRequest) return;
+    const request = historyRefreshRequest;
+    const chatId = activeChat?.id;
+    if (chatId !== request.chatId) {
+      markHistoryRefreshHandled(request.requestId);
+      return;
+    }
+
+    let cancelled = false;
+    void refreshMessagesAfterDelete(request, chatId, () => cancelled);
+    return () => {
+      cancelled = true;
+    };
+  }, [activeChat?.id, historyRefreshRequest]);
 
   // Load more on scroll to top
   const loadMore = useCallback((): Promise<LoadMoreResult> => {

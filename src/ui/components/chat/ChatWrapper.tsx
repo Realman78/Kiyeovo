@@ -1,8 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChatHeader } from "./header/ChatHeader";
-import { useSelector } from "react-redux";
+import { useDispatch, useSelector } from "react-redux";
 import type { RootState } from "../../state/store";
-import { MessagesContainer } from "./messages/MessagesContainer";
+import {
+  MessagesContainer,
+  type MessageHistoryRefreshRequest,
+} from "./messages/MessagesContainer";
 import { createPendingMessage } from "../../utils/general";
 import { ChatInput } from "./input/ChatInput";
 import { InvitationManager } from "./input/InvitationManager";
@@ -11,6 +14,9 @@ import { PendingKxManager } from "./input/PendingKxManager";
 import { getGroupCreatorLinkState, type GroupCreatorLinkState } from "../../utils/groupCreatorLinkHealth";
 import { OfflineInboxCapacity } from "./OfflineInboxCapacity";
 import { MessageSelectionBar } from "./MessageSelectionBar";
+import { DeleteSelectedMessagesDialog } from "./DeleteSelectedMessagesDialog";
+import { removeMessagesByIds } from "../../state/slices/chatSlice";
+import { useToast } from "../ui/use-toast";
 
 const OFFLINE_INBOX_COLLAPSED_CLEARANCE_PX = 44;
 const OFFLINE_INBOX_EXPANDED_CLEARANCE_PX = 120;
@@ -21,6 +27,8 @@ type MessageSelectionState = {
 };
 
 const ChatWrapper = () => {
+  const dispatch = useDispatch();
+  const { toast } = useToast();
   const activeChat = useSelector((state: RootState) => state.chat.activeChat);
   const activeContactAttempt = useSelector((state: RootState) => state.chat.activeContactAttempt);
   const activePendingKeyExchange = useSelector((state: RootState) => state.chat.activePendingKeyExchange);
@@ -30,6 +38,10 @@ const ChatWrapper = () => {
   const myPeerId = useSelector((state: RootState) => state.user.peerId);
   const [offlineInboxExpandedByChatId, setOfflineInboxExpandedByChatId] = useState<Record<number, boolean>>({});
   const [messageSelection, setMessageSelection] = useState<MessageSelectionState | null>(null);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [isDeletingMessages, setIsDeletingMessages] = useState(false);
+  const [historyRefreshRequest, setHistoryRefreshRequest] = useState<MessageHistoryRefreshRequest | null>(null);
+  const nextHistoryRefreshRequestIdRef = useRef(0);
   const activeMessageSelection =
     messageSelection && messageSelection.chatId === activeChat?.id
       ? messageSelection
@@ -91,6 +103,7 @@ const ChatWrapper = () => {
   }, [activeChat]);
 
   const exitSelectionMode = useCallback(() => {
+    setDeleteConfirmOpen(false);
     setMessageSelection(null);
   }, []);
 
@@ -119,17 +132,19 @@ const ChatWrapper = () => {
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
+      if (deleteConfirmOpen) return;
       event.preventDefault();
       exitSelectionMode();
     };
 
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [exitSelectionMode, selectionMode]);
+  }, [deleteConfirmOpen, exitSelectionMode, selectionMode]);
 
   useEffect(() => {
     if (!messageSelection || messageSelection.chatId === activeChat?.id) return;
 
+    setDeleteConfirmOpen(false);
     const staleSelection = messageSelection;
     // The derived mode turns off immediately; clear the stale owner after this
     // render so returning to the chat cannot revive an old selection.
@@ -137,6 +152,55 @@ const ChatWrapper = () => {
       setMessageSelection((current) => current === staleSelection ? null : current);
     });
   }, [activeChat?.id, messageSelection]);
+
+  const requestDeleteSelectedMessages = useCallback(() => {
+    if (selectedMessageCount === 0 || isDeletingMessages) return;
+    setDeleteConfirmOpen(true);
+  }, [isDeletingMessages, selectedMessageCount]);
+
+  const confirmDeleteSelectedMessages = useCallback(async () => {
+    const selection = activeMessageSelection;
+    if (!selection || selection.messageIds.size === 0 || isDeletingMessages) return;
+
+    const chatId = selection.chatId;
+    const messageIds = Array.from(selection.messageIds);
+    const visibleCount = messages.filter((message) => message.chatId === chatId).length;
+    setIsDeletingMessages(true);
+
+    try {
+      const result = await window.kiyeovoAPI.deleteMessagesForMe(chatId, messageIds);
+      if (!result.success) {
+        toast.error(result.error || 'Failed to delete selected messages');
+        return;
+      }
+
+      const refreshRequest: MessageHistoryRefreshRequest = {
+        requestId: ++nextHistoryRefreshRequestIdRef.current,
+        chatId,
+        visibleCount,
+      };
+      setHistoryRefreshRequest(refreshRequest);
+      dispatch(removeMessagesByIds({
+        chatId,
+        messageIds,
+        latestRemaining: result.latestRemaining,
+      }));
+      setDeleteConfirmOpen(false);
+      setMessageSelection(null);
+      toast.success(messageIds.length === 1 ? 'Message deleted' : `${messageIds.length} messages deleted`);
+    } catch (error) {
+      console.error('[ChatWrapper] Failed to delete selected messages:', error);
+      toast.error('Failed to delete selected messages');
+    } finally {
+      setIsDeletingMessages(false);
+    }
+  }, [activeMessageSelection, dispatch, isDeletingMessages, messages, toast]);
+
+  const handleHistoryRefreshHandled = useCallback((requestId: number) => {
+    setHistoryRefreshRequest((current) =>
+      current?.requestId === requestId ? null : current
+    );
+  }, []);
 
   const FooterToDisplay = useMemo(() => {
     if (activeContactAttempt) {
@@ -156,6 +220,7 @@ const ChatWrapper = () => {
             <MessageSelectionBar
               selectedCount={selectedMessageCount}
               onClose={exitSelectionMode}
+              onDelete={requestDeleteSelectedMessages}
             />
           )}
         </>
@@ -170,6 +235,7 @@ const ChatWrapper = () => {
     openOfflineInbox,
     selectedMessageCount,
     selectionMode,
+    requestDeleteSelectedMessages,
   ]);
 
   return (
@@ -200,6 +266,8 @@ const ChatWrapper = () => {
               selectedMessageIds={activeMessageSelection?.messageIds}
               onToggleMessageSelection={toggleMessageSelection}
               onEnterMessageSelection={enterSelectionMode}
+              historyRefreshRequest={historyRefreshRequest}
+              onHistoryRefreshHandled={handleHistoryRefreshHandled}
               onOfflineInboxRelevant={openOfflineInbox}
               bottomOverlayClearancePx={activeChat
                 ? (isOfflineInboxExpanded
@@ -222,6 +290,15 @@ const ChatWrapper = () => {
               {FooterToDisplay}
             </div>
           </div>
+          <DeleteSelectedMessagesDialog
+            open={deleteConfirmOpen}
+            onOpenChange={setDeleteConfirmOpen}
+            selectedCount={selectedMessageCount}
+            deleting={isDeletingMessages}
+            onConfirm={() => {
+              void confirmDeleteSelectedMessages();
+            }}
+          />
         </>
       )}
     </div>

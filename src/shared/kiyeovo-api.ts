@@ -64,6 +64,12 @@ export type KiyeovoMessage = Message & {
   sender_username?: string;
 };
 
+export type DeleteMessagesLatestRemaining = {
+  content: string;
+  timestamp: number;
+  clientMsgId: string | null;
+};
+
 export type ScreenShareSupportResponse = {
   success: boolean;
   supported: boolean;
@@ -275,6 +281,12 @@ export interface KiyeovoAPI {
       messageType: 'text' | 'file' | 'image' | 'system';
       fileName: string | undefined;
     } | null;
+    error: string | null;
+  }>;
+  deleteMessagesForMe: (chatId: number, messageIds: string[]) => Promise<{
+    success: boolean;
+    deletedCount: number;
+    latestRemaining: DeleteMessagesLatestRemaining | null;
     error: string | null;
   }>;
   onMessageReceived: (callback: (data: MessageReceivedEvent) => void) => Unsubscribe;

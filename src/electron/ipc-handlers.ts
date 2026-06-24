@@ -1474,6 +1474,51 @@ function setupMessageHandlers(
       return { success: false, preview: null, error: errStr(error, 'Failed to get message preview') };
     }
   });
+
+  ipcMain.handle(IPC_CHANNELS.DELETE_MESSAGES_FOR_ME, async (_event, chatId: number, messageIds: string[]) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return {
+          success: false,
+          deletedCount: 0,
+          latestRemaining: null,
+          error: 'P2P core not initialized',
+        };
+      }
+      if (!Array.isArray(messageIds)) {
+        return {
+          success: false,
+          deletedCount: 0,
+          latestRemaining: null,
+          error: 'Invalid message selection',
+        };
+      }
+
+      const result = p2pCore.database.deleteMessagesForMe(chatId, messageIds);
+      log(`[IPC] Deleted ${result.deletedCount} local message row(s) from chat ${chatId}`);
+      return {
+        success: true,
+        deletedCount: result.deletedCount,
+        latestRemaining: result.latestRemaining
+          ? {
+              content: result.latestRemaining.content,
+              timestamp: result.latestRemaining.timestamp.getTime(),
+              clientMsgId: result.latestRemaining.clientMsgId,
+            }
+          : null,
+        error: null,
+      };
+    } catch (error) {
+      console.error('[IPC] Failed to delete selected messages:', error);
+      return {
+        success: false,
+        deletedCount: 0,
+        latestRemaining: null,
+        error: errStr(error, 'Failed to delete selected messages'),
+      };
+    }
+  });
 }
 
 /**

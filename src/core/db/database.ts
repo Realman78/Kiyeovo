@@ -108,6 +108,15 @@ export interface Message {
     retry_after_ts?: number | null
 }
 
+export interface DeleteMessagesForMeResult {
+    deletedCount: number
+    latestRemaining: {
+        content: string
+        timestamp: Date
+        clientMsgId: string | null
+    } | null
+}
+
 // A 1:1 message awaiting an offline DHT write (durable background-send queue).
 export interface PendingOfflineSend {
     message_id: string
@@ -1465,6 +1474,7 @@ export class ChatDatabase {
             LEFT JOIN messages last_msg ON last_msg.id = (
                 SELECT id FROM messages
                 WHERE chat_id = c.id
+                  AND local_send_state IS NULL
                 ORDER BY timestamp DESC
                 LIMIT 1
             )
@@ -1528,6 +1538,7 @@ export class ChatDatabase {
             LEFT JOIN messages last_msg ON last_msg.id = (
                 SELECT id FROM messages
                 WHERE chat_id = c.id
+                  AND local_send_state IS NULL
                 ORDER BY timestamp DESC
                 LIMIT 1
             )
@@ -2481,6 +2492,98 @@ export class ChatDatabase {
     deleteMessage(messageId: number): void {
         const stmt = this.db.prepare('DELETE FROM messages WHERE id = ?');
         stmt.run(messageId);
+    }
+
+    deleteMessagesForMe(chatId: number, messageIds: string[]): DeleteMessagesForMeResult {
+        if (!Number.isInteger(chatId) || chatId <= 0) {
+            throw new Error('Invalid chat id');
+        }
+        if (messageIds.length === 0) {
+            throw new Error('Select at least one message to delete');
+        }
+        if (messageIds.some((messageId) => typeof messageId !== 'string' || messageId.length === 0)) {
+            throw new Error('Invalid message id');
+        }
+        if (new Set(messageIds).size !== messageIds.length) {
+            throw new Error('Duplicate message ids are not allowed');
+        }
+
+        const chunkSize = 500;
+        const transaction = this.db.transaction((): DeleteMessagesForMeResult => {
+            const selectedRows: Array<{
+                id: string;
+                message_type: Message['message_type'];
+                local_send_state: Message['local_send_state'];
+                transfer_status: FileTransferStatus | null;
+            }> = [];
+
+            for (let start = 0; start < messageIds.length; start += chunkSize) {
+                const ids = messageIds.slice(start, start + chunkSize);
+                const placeholders = ids.map(() => '?').join(',');
+                const rows = this.db.prepare(`
+                    SELECT id, message_type, local_send_state, transfer_status
+                    FROM messages
+                    WHERE chat_id = ? AND id IN (${placeholders})
+                `).all(chatId, ...ids) as typeof selectedRows;
+                selectedRows.push(...rows);
+            }
+
+            if (selectedRows.length !== messageIds.length) {
+                throw new Error('One or more selected messages no longer exist in this chat');
+            }
+
+            const hasIneligibleRow = selectedRows.some((row) =>
+                row.message_type === 'system'
+                || row.local_send_state !== null
+                || (
+                    (row.message_type === 'file' || row.message_type === 'image')
+                    && row.transfer_status !== 'completed'
+                )
+            );
+            if (hasIneligibleRow) {
+                throw new Error('One or more selected messages cannot be deleted');
+            }
+
+            let deletedCount = 0;
+            for (let start = 0; start < messageIds.length; start += chunkSize) {
+                const ids = messageIds.slice(start, start + chunkSize);
+                const placeholders = ids.map(() => '?').join(',');
+                const result = this.db.prepare(`
+                    DELETE FROM messages
+                    WHERE chat_id = ? AND id IN (${placeholders})
+                `).run(chatId, ...ids);
+                deletedCount += result.changes ?? 0;
+            }
+
+            if (deletedCount !== messageIds.length) {
+                throw new Error('Message deletion did not complete atomically');
+            }
+
+            const latestRow = this.db.prepare(`
+                SELECT content, timestamp, client_msg_id
+                FROM messages
+                WHERE chat_id = ? AND local_send_state IS NULL
+                ORDER BY timestamp DESC, created_at DESC, id DESC
+                LIMIT 1
+            `).get(chatId) as {
+                content: string;
+                timestamp: string | number;
+                client_msg_id: string | null;
+            } | undefined;
+
+            return {
+                deletedCount,
+                latestRemaining: latestRow
+                    ? {
+                        content: latestRow.content,
+                        timestamp: new Date(latestRow.timestamp),
+                        clientMsgId: latestRow.client_msg_id,
+                    }
+                    : null,
+            };
+        });
+
+        return transaction();
     }
 
     deleteAllMessagesForChat(chatId: number): void {

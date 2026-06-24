@@ -2,6 +2,7 @@ import { createSlice, type PayloadAction } from '@reduxjs/toolkit';
 import type { ContactAttempt } from '../../components/sidebar/contact-attempts/ContactAttemptItem';
 import type { MessageSentStatus } from '../../types';
 import type { FileTransferStatus } from '../../../core/types';
+import type { DeleteMessagesLatestRemaining } from '../../../shared/kiyeovo-api';
 
 // PendingKeyExchange is used for showing messages on the UI (Key Exchange) 
 // that are sent, but not accepted by the recipient
@@ -75,6 +76,12 @@ export interface ReplyTarget {
   excerpt: string;
 }
 
+type RemoveMessagesByIdsPayload = {
+  chatId: number;
+  messageIds: string[];
+  latestRemaining: DeleteMessagesLatestRemaining | null;
+};
+
 interface ChatState {
   chats: Chat[];
   contactAttempts: ContactAttempt[];
@@ -131,6 +138,16 @@ const getLastChatMessage = (messages: ChatMessage[], chatId: number, excludeId?:
     if (msg.chatId !== chatId) continue;
     if (excludeId && msg.id === excludeId) continue;
     return msg;
+  }
+  return null;
+};
+
+const getLastSettledChatMessage = (messages: ChatMessage[], chatId: number): ChatMessage | null => {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.chatId === chatId && !message.localSendState) {
+      return message;
+    }
   }
   return null;
 };
@@ -332,6 +349,78 @@ const chatSlice = createSlice({
       const newMessages = action.payload.filter(m => !existingIds.has(m.id));
       if (newMessages.length > 0) {
         state.messages = [...newMessages, ...state.messages].sort(compareMessageOrder);
+      }
+    },
+    replaceMessagesForChat: (
+      state,
+      action: PayloadAction<{ chatId: number; messages: ChatMessage[] }>
+    ) => {
+      state.messages = [
+        ...state.messages.filter((message) => message.chatId !== action.payload.chatId),
+        ...action.payload.messages,
+      ].sort(compareMessageOrder);
+    },
+    removeMessagesByIds: (state, action: PayloadAction<RemoveMessagesByIdsPayload>) => {
+      const { chatId, messageIds, latestRemaining } = action.payload;
+      const deletedIds = new Set(messageIds);
+      const deletedClientMsgIds = new Set<string>();
+
+      for (const message of state.messages) {
+        if (
+          message.chatId === chatId
+          && deletedIds.has(message.id)
+          && message.clientMsgId
+        ) {
+          deletedClientMsgIds.add(message.clientMsgId);
+        }
+      }
+
+      state.messages = state.messages.filter(
+        (message) => message.chatId !== chatId || !deletedIds.has(message.id)
+      );
+      state.sendingMessages = state.sendingMessages.filter(
+        (message) => message.chatId !== chatId || !deletedIds.has(message.id)
+      );
+
+      const replyTarget = state.replyTargetByChatId[chatId];
+      if (replyTarget && deletedClientMsgIds.has(replyTarget.cid)) {
+        delete state.replyTargetByChatId[chatId];
+      }
+
+      const reduxLatest = getLastSettledChatMessage(state.messages, chatId);
+      const useReduxLatest =
+        reduxLatest !== null
+        && (
+          latestRemaining === null
+          || reduxLatest.timestamp >= latestRemaining.timestamp
+        );
+      const preview = useReduxLatest
+        ? {
+            content: reduxLatest.content,
+            timestamp: reduxLatest.timestamp,
+          }
+        : latestRemaining
+          ? {
+              content: latestRemaining.content,
+              timestamp: latestRemaining.timestamp,
+            }
+          : null;
+
+      const chat = state.chats.find((candidate) => candidate.id === chatId);
+      if (chat) {
+        chat.lastMessage = preview?.content ?? 'SYSTEM: No messages yet';
+        if (preview) {
+          chat.lastMessageTimestamp = preview.timestamp;
+        }
+      }
+      if (state.activeChat?.id === chatId) {
+        state.activeChat.lastMessage = preview?.content ?? 'SYSTEM: No messages yet';
+        if (preview) {
+          state.activeChat.lastMessageTimestamp = preview.timestamp;
+        }
+      }
+      if (preview) {
+        state.chats.sort((a, b) => b.lastMessageTimestamp - a.lastMessageTimestamp);
       }
     },
     addSendingMessage: (state, action: PayloadAction<ChatMessage>) => {
@@ -572,6 +661,8 @@ export const {
   removeContactAttempt,
   setMessages,
   prependMessages,
+  replaceMessagesForChat,
+  removeMessagesByIds,
   addSendingMessage,
   removeSendingMessage,
   finalizeSendingMessage,
