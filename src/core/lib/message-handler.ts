@@ -2856,7 +2856,7 @@ export class MessageHandler {
   async sendGroupMessage(
     chatId: number,
     message: string,
-    options?: { rekeyRetryHint?: boolean }
+    options?: { rekeyRetryHint?: boolean; replyToCid?: string }
   ): Promise<SendMessageResponse> {
     const chat = this.database.getChatByIdWithUsernameAndLastMsg(chatId, this.node.peerId.toString());
     if (!chat) {

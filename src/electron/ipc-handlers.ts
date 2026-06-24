@@ -562,7 +562,7 @@ function setupMessagingHandlers(
       _event,
       chatId: number,
       message: string,
-      options?: { rekeyRetryHint?: boolean }
+      options?: { rekeyRetryHint?: boolean; replyToCid?: string }
     ) => {
     const startedAt = Date.now();
     try {

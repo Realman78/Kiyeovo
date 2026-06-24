@@ -562,7 +562,7 @@ export const MessagesContainer = ({
         const { success, error, warning, offlineBackupRetry, message: sentMessage, messageSentStatus } = await window.kiyeovoAPI.sendGroupMessage(
           activeChat.id,
           message.content,
-          { rekeyRetryHint: message.failedReason === 'group_rekeying' },
+          { rekeyRetryHint: message.failedReason === 'group_rekeying', replyToCid: message.replyToClientId },
         );
         if (!success) {
           const isRekeyFailure =
@@ -592,6 +592,8 @@ export const MessagesContainer = ({
               timestamp: sentMessage.timestamp ?? Date.now(),
               messageSentStatus: messageSentStatus ?? 'online',
               localSendState: undefined,
+              clientMsgId: sentMessage.clientMsgId,
+              replyToClientId: message.replyToClientId,
             },
           }));
           // Delivered online but backup failed again → re-show the dedicated affordance.
@@ -850,7 +852,6 @@ export const MessagesContainer = ({
           membershipInfoTooltip={getMembershipInfoTooltip(message)}
           onRetry={handleRetryFailedMessage}
           onJumpToMessage={handleJumpToMessage}
-          canReply={activeChat?.type !== 'group'}
         />
       );
     })}

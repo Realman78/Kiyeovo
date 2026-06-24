@@ -15,7 +15,7 @@ import { useConnectivityGuidance } from "../../../hooks/useConnectivityGuidance"
 
 type PendingSendJob =
     | { type: 'direct'; chatId: number; peerId: string; content: string; localMessageId: string; replyToCid?: string }
-    | { type: 'group'; chatId: number; content: string; localMessageId: string };
+    | { type: 'group'; chatId: number; content: string; localMessageId: string; replyToCid?: string };
 
 type SendResult = {
     success: boolean;
@@ -369,7 +369,7 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
     const performSendGroupMessage = async (
         chatId: number,
         messageContent: string,
-        options?: { rekeyRetryHint?: boolean }
+        options?: { rekeyRetryHint?: boolean; replyToCid?: string }
     ): Promise<SendResult> => {
         try {
             const {
@@ -405,6 +405,7 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
                 timestamp: message?.timestamp,
                 messageSentStatus: messageSentStatus ?? undefined,
                 backupFailed: !!(warning && offlineBackupRetry),
+                clientMsgId: message?.clientMsgId,
             };
         } catch (err) {
             console.error('Failed to send group message:', err);
@@ -424,7 +425,7 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
 
                 let result: SendResult = { success: false };
                 if (next.type === 'group') {
-                    result = await performSendGroupMessage(next.chatId, next.content);
+                    result = await performSendGroupMessage(next.chatId, next.content, { replyToCid: next.replyToCid });
                 } else {
                     result = await performSendMessage(next.peerId, next.content, next.replyToCid);
                 }
@@ -456,7 +457,7 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
                             localSendState: stillSending ? 'sending' : undefined,
                             currentUserPeerId: myPeerId ?? undefined,
                             clientMsgId: result.clientMsgId,
-                            replyToClientId: next.type === 'direct' ? next.replyToCid : undefined,
+                            replyToClientId: next.replyToCid,
                         },
                     }));
                     // Delivered online but DHT backup failed
@@ -548,7 +549,7 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
         }));
 
         if (activeChat.type === 'group') {
-            enqueueSendJob({ type: 'group', chatId, content: messageContent, localMessageId });
+            enqueueSendJob({ type: 'group', chatId, content: messageContent, localMessageId, replyToCid: replyTarget?.cid });
         } else {
             if (!activeChat.peerId) {
                 toast.error('No peer ID found for active chat');
