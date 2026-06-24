@@ -562,6 +562,7 @@ Composer behavior:
 - chat composer is multiline
 - `Enter` sends the current message while `Shift+Enter` inserts a newline
 - drafts auto-expand up to five visible lines, then switch to internal scrolling
+- message selection mode is owned by the active chat UI and entered from **Select messages** in the chat menu. Its action bar occupies the composer area while keeping `ChatInput` mounted but hidden/inert, preserving drafts and in-flight send queues; leaving the chat or pressing `Esc` exits the mode. The Phase 1 shell exposes the disabled Delete action before row selection and deletion are wired.
 - pasted line breaks are preserved in both the draft and rendered text messages
 - rendered text message bubbles expose an inline hover/focus copy affordance that copies only the message text content to the clipboard
 - messages can be **replied to**: a hover reply affordance quotes a specific message and focuses the composer; the composer shows a cancelable reply bar (survives chat switches, `Esc`/✕ to cancel); the quote renders above the reply bubble (resolved by live lookup, shows *"Original message unavailable."* if the original is gone), and clicking it jumps to the original before starting a 2.5-second highlight pulse once the target is visible, paging older history in if needed. Reply works in both direct and group chats; it is hidden only on un-settled/failed sends (and on files until transfer completes). When the viewport is away from the latest message, a floating down-chevron returns it to the bottom. See §5.4.

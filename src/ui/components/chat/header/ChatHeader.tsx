@@ -33,9 +33,17 @@ type ChatHeaderProps = {
   chatType?: 'direct' | 'group';
   groupStatus?: string;
   chatId?: number;
+  onSelectMessages?: () => void;
 }
 
-export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: ChatHeaderProps) => {
+export const ChatHeader = ({
+  username,
+  peerId,
+  chatType,
+  groupStatus,
+  chatId,
+  onSelectMessages,
+}: ChatHeaderProps) => {
   const activeChat = useSelector((state: RootState) => state.chat.activeChat);
   const chats = useSelector((state: RootState) => state.chat.chats);
   const myPeerId = useSelector((state: RootState) => state.user.peerId);
@@ -313,6 +321,11 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
 
   const handleDeleteAllMessages = () => {
     setDeleteConfirmOpen(true);
+    setDropdownOpen(false);
+  };
+
+  const handleSelectMessages = () => {
+    onSelectMessages?.();
     setDropdownOpen(false);
   };
 
@@ -1170,6 +1183,8 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
         onLeaveGroup={handleLeaveGroup}
         onDeleteGroupChat={handleDeleteGroupChat}
         onToggleBlock={handleToggleBlock}
+        canSelectMessages={!!activeChat && !!onSelectMessages}
+        onSelectMessages={handleSelectMessages}
         onDeleteAllMessages={handleDeleteAllMessages}
         onDeleteChatAndUser={handleDeleteChatAndUser}
       />

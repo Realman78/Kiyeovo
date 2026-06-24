@@ -37,9 +37,13 @@ const MAX_COMPOSER_LINES = 5;
 
 type ChatInputProps = {
     onOfflineInboxRelevant?: () => void;
+    selectionMode?: boolean;
 };
 
-export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
+export const ChatInput: FC<ChatInputProps> = ({
+    onOfflineInboxRelevant,
+    selectionMode = false,
+}) => {
     const { toast } = useToast();
     const { showMessageFailureGuidance } = useConnectivityGuidance();
     const warnOfflineSend = useOfflineSendWarning();
@@ -109,7 +113,7 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
             (m.transferStatus === 'pending' && m.senderPeerId === myPeerId)
         )
     );
-    const isDisabled = isBlocked || !!groupBlockedReason;
+    const isDisabled = selectionMode || isBlocked || !!groupBlockedReason;
     const sendQueueRef = useRef<Record<number, PendingSendJob[]>>({});
     const processingQueueRef = useRef<Record<number, boolean>>({});
     const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -167,6 +171,13 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
             setEmojiPickerOpen(false);
         }
     }, [isDisabled]);
+
+    useEffect(() => {
+        if (!selectionMode) return;
+        setEmojiPickerOpen(false);
+        setFileDialogOpen(false);
+        inputRef.current?.blur();
+    }, [selectionMode]);
 
     useEffect(() => {
         if (!emojiPickerOpen) return;
@@ -678,7 +689,10 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
     }
 
     return <>
-        <div className="relative">
+        <div
+            className={selectionMode ? "hidden" : "relative"}
+            aria-hidden={selectionMode}
+        >
             {replyTarget && (
                 <div className="flex items-center gap-2 border-t border-border bg-muted/30 px-4 py-2">
                     <Reply className="h-4 w-4 shrink-0 text-muted-foreground" />
@@ -780,8 +794,8 @@ export const ChatInput: FC<ChatInputProps> = ({ onOfflineInboxRelevant }) => {
         </div>
 
         <SendFileDialog
-            open={fileDialogOpen}
-            onOpenChange={setFileDialogOpen}
+            open={!selectionMode && fileDialogOpen}
+            onOpenChange={(open) => setFileDialogOpen(selectionMode ? false : open)}
             onSend={handleSendFile}
             transferBlocked={hasActiveFileTransfer}
             transferBlockedReason="Wait for the current file transfer to finish before selecting another file."

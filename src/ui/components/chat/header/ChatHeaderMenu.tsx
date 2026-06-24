@@ -1,5 +1,5 @@
 import type { FC, ReactNode } from "react";
-import { Ban, Bell, BellOff, Info, LogOut, MoreVertical, Pencil, RefreshCw, Trash2, UserCheck, UserMinus, UserPlus } from "lucide-react";
+import { Ban, Bell, BellOff, Info, ListChecks, LogOut, MoreVertical, Pencil, RefreshCw, Trash2, UserCheck, UserMinus, UserPlus } from "lucide-react";
 import { Button } from "../../ui/Button";
 import { DropdownMenu, DropdownMenuItem } from "../../ui/DropdownMenu";
 
@@ -17,6 +17,7 @@ type ChatHeaderMenuProps = {
   kickableMembersCount: number;
   canShowLeaveOrDisband: boolean;
   canDeleteGroupChat: boolean;
+  canSelectMessages: boolean;
   onAboutGroup: () => void;
   onAboutUser: () => void;
   onEditUsername: () => void;
@@ -29,6 +30,7 @@ type ChatHeaderMenuProps = {
   onLeaveGroup: () => void;
   onDeleteGroupChat: () => void;
   onToggleBlock: () => void;
+  onSelectMessages: () => void;
   onDeleteAllMessages: () => void;
   onDeleteChatAndUser: () => void;
 };
@@ -54,6 +56,7 @@ export const ChatHeaderMenu: FC<ChatHeaderMenuProps> = ({
   kickableMembersCount,
   canShowLeaveOrDisband,
   canDeleteGroupChat,
+  canSelectMessages,
   onAboutGroup,
   onAboutUser,
   onEditUsername,
@@ -66,6 +69,7 @@ export const ChatHeaderMenu: FC<ChatHeaderMenuProps> = ({
   onLeaveGroup,
   onDeleteGroupChat,
   onToggleBlock,
+  onSelectMessages,
   onDeleteAllMessages,
   onDeleteChatAndUser,
 }) => {
@@ -82,6 +86,14 @@ export const ChatHeaderMenu: FC<ChatHeaderMenuProps> = ({
           label: activeChatMuted ? 'Enable notifications' : 'Disable notifications',
           icon: activeChatMuted ? <Bell className="w-4 h-4" /> : <BellOff className="w-4 h-4" />,
           onClick: onToggleMute,
+        }]
+      : []),
+    ...(canSelectMessages
+      ? [{
+          key: 'select-messages',
+          label: 'Select messages',
+          icon: <ListChecks className="w-4 h-4" />,
+          onClick: onSelectMessages,
         }]
       : []),
     ...(groupStatus === 'active'
@@ -159,6 +171,14 @@ export const ChatHeaderMenu: FC<ChatHeaderMenuProps> = ({
           label: 'Check missed messages',
           icon: <RefreshCw className="w-4 h-4" />,
           onClick: onCheckMissedDirectMessages,
+        }]
+      : []),
+    ...(canSelectMessages
+      ? [{
+          key: 'select-messages',
+          label: 'Select messages',
+          icon: <ListChecks className="w-4 h-4" />,
+          onClick: onSelectMessages,
         }]
       : []),
     {
