@@ -1,25 +1,36 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Dialog,
+  DialogBody,
   DialogContent,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogBody,
-  DialogFooter,
 } from '../../ui/Dialog';
 import { Button } from '../../ui/Button';
-import { FileUp, X } from 'lucide-react';
+import { FileUp, Loader2, X } from 'lucide-react';
 import { useAppSelector } from '../../../state/hooks';
+import { UPLOADS_QUOTA_WARN_BYTES } from '../../../../core/constants';
+import { UploadsQuotaDialog } from './UploadsQuotaDialog';
+
+export interface PastedImageFile {
+  bytes: Uint8Array;
+  mime: string;
+  name: string;
+  size: number;
+}
 
 interface SendFileDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onClosed?: () => void;
   onSend: (
     filePath: string,
     fileName: string,
     fileSize: number,
     mediaToken?: string | null,
   ) => Promise<void>;
+  pastedFile?: PastedImageFile | null;
   transferBlocked?: boolean;
   transferBlockedReason?: string;
 }
@@ -32,11 +43,18 @@ interface SelectedFile {
 }
 
 interface SendFileDialogContentProps {
-  onOpenChange: (open: boolean) => void;
+  closeDialog: () => void;
+  onClosed: () => void;
   onSend: SendFileDialogProps['onSend'];
+  onPreparingChange: (preparing: boolean) => void;
+  onQuotaExceeded: (savedFilePath: string) => void;
+  pastedFile: PastedImageFile | null;
+  preparing: boolean;
   transferBlocked: boolean;
   transferBlockedReason: string;
 }
+
+let uploadsQuotaWarnedThisSession = false;
 
 const formatFileSize = (bytes: number): string => {
   if (bytes <= 0) return '0 B';
@@ -46,27 +64,71 @@ const formatFileSize = (bytes: number): string => {
   return `${Math.round((bytes / Math.pow(k, i)) * 100) / 100} ${sizes[i]}`;
 };
 
+const PreviewImage: React.FC<{
+  source: string;
+  fileName: string;
+}> = ({ source, fileName }) => {
+  const [failed, setFailed] = useState(false);
+
+  if (failed) return null;
+
+  return (
+    <div className="mb-4 flex max-h-[280px] w-full items-center justify-center overflow-hidden rounded-lg bg-background/30">
+      <img
+        src={source}
+        alt={`Preview of ${fileName}`}
+        className="block max-h-[280px] max-w-full object-contain"
+        onError={() => setFailed(true)}
+      />
+    </div>
+  );
+};
+
+const PastedImagePreview: React.FC<{
+  pastedFile: PastedImageFile;
+}> = ({ pastedFile }) => {
+  const [objectUrl] = useState(() => {
+    const bytes = new Uint8Array(pastedFile.bytes.length);
+    bytes.set(pastedFile.bytes);
+    return URL.createObjectURL(new Blob([bytes], { type: pastedFile.mime }));
+  });
+
+  useEffect(() => {
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [objectUrl]);
+
+  return <PreviewImage source={objectUrl} fileName={pastedFile.name} />;
+};
+
 const SendFileDialogContent: React.FC<SendFileDialogContentProps> = ({
-  onOpenChange,
+  closeDialog,
+  onClosed,
   onSend,
+  onPreparingChange,
+  onQuotaExceeded,
+  pastedFile,
+  preparing,
   transferBlocked,
   transferBlockedReason,
 }) => {
   const maxFileSize = useAppSelector((state) => state.appConfig.config.maxFileSize);
   const [selectedFile, setSelectedFile] = useState<SelectedFile | null>(null);
-  const [previewFailed, setPreviewFailed] = useState(false);
-  const sizeError = selectedFile && selectedFile.size > maxFileSize
+  const [localError, setLocalError] = useState<string | null>(null);
+  const activeFile = pastedFile ?? selectedFile;
+  const sizeError = activeFile && activeFile.size > maxFileSize
     ? `File exceeds size limit (${formatFileSize(maxFileSize)} max)`
     : null;
 
   const handleBrowse = async () => {
-    if (transferBlocked) return;
+    if (transferBlocked || preparing) return;
+    setLocalError(null);
+
     try {
       const result = await window.kiyeovoAPI.showOpenDialog({
         title: 'Select File',
         filters: [
-          { name: 'All Files', extensions: ['*'] }
-        ]
+          { name: 'All Files', extensions: ['*'] },
+        ],
       });
 
       if (!result.canceled && result.filePath) {
@@ -87,104 +149,160 @@ const SendFileDialogContent: React.FC<SendFileDialogContentProps> = ({
           size: fileSize,
           mediaToken: result.mediaToken,
         });
-        setPreviewFailed(false);
       }
     } catch (error) {
       console.error('Error selecting file:', error);
+      setLocalError('Failed to select file');
     }
   };
 
-  const handleSend = () => {
-    if (transferBlocked || !selectedFile || sizeError) return;
+  const handleSend = async () => {
+    if (transferBlocked || preparing || !activeFile || sizeError) return;
+    setLocalError(null);
 
-    const filePath = selectedFile.path;
-    const fileName = selectedFile.name;
-    const fileSize = selectedFile.size;
-    const mediaToken = selectedFile.mediaToken;
+    if (!pastedFile) {
+      closeDialog();
+      void onSend(
+        selectedFile!.path,
+        selectedFile!.name,
+        selectedFile!.size,
+        selectedFile!.mediaToken,
+      ).catch((error) => {
+        console.error('Error sending file:', error);
+      });
+      return;
+    }
 
-    onOpenChange(false);
-    void onSend(filePath, fileName, fileSize, mediaToken).catch(err => {
-      console.error('Error sending file:', err);
-    });
-  };
+    onPreparingChange(true);
+    try {
+      const result = await window.kiyeovoAPI.saveUpload(
+        pastedFile.bytes,
+        pastedFile.name,
+      );
+      if (!result.success || !result.filePath) {
+        setLocalError(result.error || 'Failed to save pasted image');
+        return;
+      }
 
-  const handleCancel = () => {
-    onOpenChange(false);
+      if (result.uploadsDirSizeBytes > UPLOADS_QUOTA_WARN_BYTES) {
+        onQuotaExceeded(result.filePath);
+      }
+
+      closeDialog();
+      void onSend(
+        result.filePath,
+        pastedFile.name,
+        pastedFile.size,
+        result.mediaToken,
+      ).catch((error) => {
+        console.error('Error sending pasted image:', error);
+      });
+    } catch (error) {
+      console.error('Error preparing pasted image:', error);
+      setLocalError('Failed to save pasted image');
+    } finally {
+      onPreparingChange(false);
+    }
   };
 
   const handleCloseAnimationComplete = () => {
     setSelectedFile(null);
-    setPreviewFailed(false);
+    setLocalError(null);
+    onPreparingChange(false);
+    onClosed();
   };
 
   return (
     <DialogContent onCloseAutoFocus={handleCloseAnimationComplete}>
       <DialogHeader>
-        <DialogTitle>Send File</DialogTitle>
+        <DialogTitle>{pastedFile ? 'Send Pasted Image' : 'Send File'}</DialogTitle>
       </DialogHeader>
 
       <DialogBody>
         {transferBlocked && (
-          <div className="border border-amber-500/30 rounded-lg p-3 bg-amber-500/10 text-amber-300 text-sm mb-3">
+          <div className="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-300">
             {transferBlockedReason}
           </div>
         )}
-        {selectedFile ? (
-          <div className="border border-border rounded-lg p-4 bg-muted">
-            {selectedFile.mediaToken && !previewFailed && (
-              <div className="mb-4 flex max-h-[280px] w-full items-center justify-center overflow-hidden rounded-lg bg-background/30">
-                <img
-                  src={`kiyeovo-media://media/${encodeURIComponent(selectedFile.mediaToken)}`}
-                  alt={`Preview of ${selectedFile.name}`}
-                  className="block max-h-[280px] max-w-full object-contain"
-                  onError={() => setPreviewFailed(true)}
-                />
-              </div>
-            )}
+        {activeFile ? (
+          <div className="rounded-lg border border-border bg-muted p-4">
+            {pastedFile ? (
+              <PastedImagePreview
+                key={`${pastedFile.name}:${pastedFile.size}:${pastedFile.mime}`}
+                pastedFile={pastedFile}
+              />
+            ) : selectedFile?.mediaToken ? (
+              <PreviewImage
+                key={selectedFile.mediaToken}
+                source={`kiyeovo-media://media/${encodeURIComponent(selectedFile.mediaToken)}`}
+                fileName={selectedFile.name}
+              />
+            ) : null}
             <div className="flex items-start justify-between">
-              <div className="flex-1 min-w-0">
-                <p className="font-medium text-sm truncate">{selectedFile.name}</p>
-                <p className="text-xs text-muted-foreground mt-1">{selectedFile.path}</p>
-                <p className="text-xs text-muted-foreground mt-1">{formatFileSize(selectedFile.size)}</p>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-medium">{activeFile.name}</p>
+                {!pastedFile && selectedFile && (
+                  <p className="mt-1 text-xs text-muted-foreground">{selectedFile.path}</p>
+                )}
+                <p className="mt-1 text-xs text-muted-foreground">{formatFileSize(activeFile.size)}</p>
               </div>
-              <button
-                onClick={() => {
-                  setSelectedFile(null);
-                  setPreviewFailed(false);
-                }}
-                className="ml-2 text-muted-foreground hover:text-destructive cursor-pointer"
-                aria-label="Clear selected file"
-              >
-                <X className="w-4 h-4" />
-              </button>
+              {!pastedFile && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedFile(null);
+                    setLocalError(null);
+                  }}
+                  className="ml-2 cursor-pointer text-muted-foreground hover:text-destructive"
+                  aria-label="Clear selected file"
+                  disabled={preparing}
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              )}
             </div>
-            {sizeError && (
-              <p className="text-xs text-destructive mt-2">{sizeError}</p>
+            {(sizeError || localError) && (
+              <p className="mt-2 text-xs text-destructive">{sizeError || localError}</p>
             )}
           </div>
         ) : (
-          <div className="border-2 border-dashed border-border rounded-lg p-8 text-center">
-            <p className="text-muted-foreground mb-3">No file selected</p>
-            <Button onClick={handleBrowse} variant="outline" disabled={transferBlocked}>
-              <FileUp className="w-4 h-4 mr-2" />
+          <div className="rounded-lg border-2 border-dashed border-border p-8 text-center">
+            <p className="mb-3 text-muted-foreground">No file selected</p>
+            <Button
+              onClick={() => void handleBrowse()}
+              variant="outline"
+              disabled={transferBlocked || preparing}
+            >
+              <FileUp className="mr-2 h-4 w-4" />
               Browse Files
             </Button>
+            {localError && (
+              <p className="mt-3 text-xs text-destructive">{localError}</p>
+            )}
           </div>
         )}
       </DialogBody>
 
       <DialogFooter>
         <Button
-          onClick={handleCancel}
+          onClick={closeDialog}
           variant="outline"
+          disabled={preparing}
         >
           Close
         </Button>
         <Button
-          onClick={handleSend}
-          disabled={transferBlocked || !selectedFile || !!sizeError}
+          onClick={() => void handleSend()}
+          disabled={transferBlocked || preparing || !activeFile || !!sizeError}
         >
-          Send
+          {preparing ? (
+            <>
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Preparing...
+            </>
+          ) : (
+            'Send'
+          )}
         </Button>
       </DialogFooter>
     </DialogContent>
@@ -194,16 +312,61 @@ const SendFileDialogContent: React.FC<SendFileDialogContentProps> = ({
 export const SendFileDialog: React.FC<SendFileDialogProps> = ({
   open,
   onOpenChange,
+  onClosed,
   onSend,
+  pastedFile = null,
   transferBlocked = false,
   transferBlockedReason = 'Another file transfer is already active in this chat.',
-}) => (
-  <Dialog open={open} onOpenChange={onOpenChange}>
-    <SendFileDialogContent
-      onOpenChange={onOpenChange}
-      onSend={onSend}
-      transferBlocked={transferBlocked}
-      transferBlockedReason={transferBlockedReason}
-    />
-  </Dialog>
-);
+}) => {
+  const [preparing, setPreparing] = useState(false);
+  const [pendingQuotaFilePath, setPendingQuotaFilePath] = useState<string | null>(null);
+  const [quotaFilePath, setQuotaFilePath] = useState<string | null>(null);
+  const [quotaDialogOpen, setQuotaDialogOpen] = useState(false);
+
+  const handleRootOpenChange = (nextOpen: boolean) => {
+    if (!preparing) {
+      onOpenChange(nextOpen);
+    }
+  };
+
+  const handleQuotaExceeded = (savedFilePath: string) => {
+    if (uploadsQuotaWarnedThisSession) return;
+    setPendingQuotaFilePath(savedFilePath);
+  };
+
+  const handleClosed = () => {
+    onClosed?.();
+    if (!pendingQuotaFilePath) return;
+
+    const savedFilePath = pendingQuotaFilePath;
+    setPendingQuotaFilePath(null);
+    if (uploadsQuotaWarnedThisSession) return;
+
+    uploadsQuotaWarnedThisSession = true;
+    setQuotaFilePath(savedFilePath);
+    setQuotaDialogOpen(true);
+  };
+
+  return (
+    <>
+      <Dialog open={open} onOpenChange={handleRootOpenChange}>
+        <SendFileDialogContent
+          closeDialog={() => onOpenChange(false)}
+          onClosed={handleClosed}
+          onSend={onSend}
+          onPreparingChange={setPreparing}
+          onQuotaExceeded={handleQuotaExceeded}
+          pastedFile={pastedFile}
+          preparing={preparing}
+          transferBlocked={transferBlocked}
+          transferBlockedReason={transferBlockedReason}
+        />
+      </Dialog>
+      <UploadsQuotaDialog
+        open={quotaDialogOpen}
+        onOpenChange={setQuotaDialogOpen}
+        savedFilePath={quotaFilePath}
+      />
+    </>
+  );
+};

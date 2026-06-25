@@ -37,7 +37,7 @@ export const ImagePreviewDialog: React.FC<ImagePreviewDialogProps> = ({
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
         aria-describedby={undefined}
-        className="flex h-[90vh] w-[94vw]! max-w-[94vw]! flex-col overflow-hidden bg-black/95! p-0"
+        className="flex max-h-[90vh] h-fit max-w-[94vw]! flex-col overflow-hidden bg-black/95! p-0"
       >
         <DialogTitle className="sr-only">Preview {fileName}</DialogTitle>
 

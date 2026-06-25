@@ -499,6 +499,16 @@ export interface KiyeovoAPI {
     token: string | null;
     error: string | null;
   }>;
+  saveUpload: (
+    bytes: Uint8Array,
+    fileName: string,
+  ) => Promise<{
+    success: boolean;
+    filePath: string | null;
+    mediaToken: string | null;
+    uploadsDirSizeBytes: number;
+    error: string | null;
+  }>;
   sendFile: (peerId: string, filePath: string, fileId?: string) => Promise<{ success: boolean; error: string | null }>;
   acceptFile: (fileId: string) => Promise<{ success: boolean; error: string | null }>;
   rejectFile: (fileId: string) => Promise<{ success: boolean; error: string | null }>;

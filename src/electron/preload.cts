@@ -152,6 +152,7 @@ const kiyeovoAPI: KiyeovoAPI = {
   showSaveDialog: (options) => invoke(IPC_CHANNELS.SHOW_SAVE_DIALOG, options),
   getFileMetadata: (filePath) => invoke(IPC_CHANNELS.GET_FILE_METADATA, filePath),
   registerMessageMedia: (messageId) => invoke(IPC_CHANNELS.REGISTER_MESSAGE_MEDIA, messageId),
+  saveUpload: (bytes, fileName) => invoke(IPC_CHANNELS.SAVE_UPLOAD, bytes, fileName),
   getTorSettings: () => invoke(IPC_CHANNELS.GET_TOR_SETTINGS),
   setTorSettings: (settings) => invoke(IPC_CHANNELS.SET_TOR_SETTINGS, settings),
   restartApp: () => invoke(IPC_CHANNELS.RESTART_APP),

@@ -5,13 +5,14 @@ import { useToast } from "../../ui/use-toast";
 import { useOfflineSendWarning } from "../../../hooks/useOfflineSendWarning";
 import { useDispatch, useSelector } from "react-redux";
 import type { RootState } from "../../../state/store";
-import { SendFileDialog } from "./SendFileDialog";
+import { SendFileDialog, type PastedImageFile } from "./SendFileDialog";
 import { addMessage, addSendingMessage, clearReplyTarget, finalizeSendingMessage, removeMessageById, updateChat, updateFileTransferStatus, updateLocalMessageSendState } from "../../../state/slices/chatSlice";
 import { EMOJI_CATEGORIES, MAX_MESSAGE_CONTENT_LENGTH, UNEXPECTED_ERROR } from "../../../constants";
 import { getGroupStatusMessage } from "../../../utils/groupStatusMessages";
 import { errStr } from '../../../../core/utils/general-error';
 import EmojiPicker, { EmojiStyle, Theme, type EmojiClickData } from "emoji-picker-react";
 import { useConnectivityGuidance } from "../../../hooks/useConnectivityGuidance";
+import { ACCEPTED_IMAGE_MIME } from "../../../../shared/file-types";
 
 type PendingSendJob =
     | { type: 'direct'; chatId: number; peerId: string; content: string; localMessageId: string; replyToCid?: string }
@@ -35,6 +36,16 @@ type SendResult = {
 
 const MAX_COMPOSER_LINES = 5;
 
+const createPastedImageName = (date: Date, extension: string): string => {
+    const year = String(date.getFullYear());
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    const seconds = String(date.getSeconds()).padStart(2, '0');
+    return `pasted-image-${year}${month}${day}-${hours}${minutes}${seconds}.${extension}`;
+};
+
 type ChatInputProps = {
     onOfflineInboxRelevant?: () => void;
     selectionMode?: boolean;
@@ -52,6 +63,7 @@ export const ChatInput: FC<ChatInputProps> = ({
     const dispatch = useDispatch();
     const [draftByChatId, setDraftByChatId] = useState<Record<number, string>>({});
     const [fileDialogOpen, setFileDialogOpen] = useState(false);
+    const [pastedFile, setPastedFile] = useState<PastedImageFile | null>(null);
     const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
     const activeChat = useSelector((state: RootState) => state.chat.activeChat);
     const myPeerId = useSelector((state: RootState) => state.user.peerId);
@@ -127,6 +139,10 @@ export const ChatInput: FC<ChatInputProps> = ({
     const selectionSyncUnlockFrameRef = useRef<number | null>(null);
     const resizeAnimationFrameRef = useRef<number | null>(null);
     const suppressSelectionSyncRef = useRef(false);
+    const activeChatIdRef = useRef(activeChatId);
+    const hasActiveFileTransferRef = useRef(hasActiveFileTransfer);
+    activeChatIdRef.current = activeChatId;
+    hasActiveFileTransferRef.current = hasActiveFileTransfer;
 
     // Auto-focus input when chat changes
     useEffect(() => {
@@ -595,6 +611,60 @@ export const ChatInput: FC<ChatInputProps> = ({
         }
     };
 
+    const handleComposerPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+        if (
+            !activeChat ||
+            activeChat.type !== 'direct' ||
+            !activeChat.peerId ||
+            isDisabled
+        ) {
+            return;
+        }
+
+        const imageItem = Array.from(event.clipboardData.items).find((item) =>
+            item.kind === 'file' && !!ACCEPTED_IMAGE_MIME[item.type]
+        );
+        if (!imageItem) return;
+
+        const pastedBlob = imageItem.getAsFile();
+        const extension = ACCEPTED_IMAGE_MIME[imageItem.type];
+        if (!pastedBlob || !extension) return;
+
+        event.preventDefault();
+
+        if (hasActiveFileTransfer) {
+            toast.error('Wait for the current file transfer to finish before sending another file');
+            return;
+        }
+
+        const chatIdAtPaste = activeChat.id;
+        const mime = imageItem.type;
+        const name = createPastedImageName(new Date(), extension);
+
+        void pastedBlob.arrayBuffer()
+            .then((arrayBuffer) => {
+                if (activeChatIdRef.current !== chatIdAtPaste) {
+                    return;
+                }
+                if (hasActiveFileTransferRef.current) {
+                    toast.error('Wait for the current file transfer to finish before sending another file');
+                    return;
+                }
+
+                setPastedFile({
+                    bytes: new Uint8Array(arrayBuffer),
+                    mime,
+                    name,
+                    size: pastedBlob.size,
+                });
+                setFileDialogOpen(true);
+            })
+            .catch((error) => {
+                console.error('Failed to read pasted image:', error);
+                toast.error('Failed to read pasted image');
+            });
+    };
+
     const handleSendFile = async (
         filePath: string,
         fileName: string,
@@ -730,7 +800,10 @@ export const ChatInput: FC<ChatInputProps> = ({
                         variant="ghost"
                         size="icon"
                         disabled={isDisabled || hasActiveFileTransfer}
-                        onClick={() => setFileDialogOpen(true)}
+                        onClick={() => {
+                            setPastedFile(null);
+                            setFileDialogOpen(true);
+                        }}
                         className="text-sidebar-foreground hover:text-foreground"
                         aria-label="Open file picker"
                         title="Files"
@@ -786,6 +859,7 @@ export const ChatInput: FC<ChatInputProps> = ({
                         onFocus={(e) => syncSelectionFromInput(e.currentTarget)}
                         onKeyDown={handleComposerKeyDown}
                         onKeyUp={(e) => syncSelectionFromInput(e.currentTarget)}
+                        onPaste={handleComposerPaste}
                         onSelect={(e) => syncSelectionFromInput(e.currentTarget)}
                     />
                     <Button
@@ -805,7 +879,9 @@ export const ChatInput: FC<ChatInputProps> = ({
         <SendFileDialog
             open={!interactionBlocked && fileDialogOpen}
             onOpenChange={(open) => setFileDialogOpen(interactionBlocked ? false : open)}
+            onClosed={() => setPastedFile(null)}
             onSend={handleSendFile}
+            pastedFile={pastedFile}
             transferBlocked={hasActiveFileTransfer}
             transferBlockedReason="Wait for the current file transfer to finish before selecting another file."
         />
