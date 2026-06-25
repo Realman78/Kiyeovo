@@ -1,11 +1,13 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, type ReactNode } from 'react';
 import { Button } from '../../ui/Button';
 import { FolderOpen, X } from 'lucide-react';
 import { useDispatch, useSelector } from 'react-redux';
 import type { RootState } from '../../../state/store';
 import type { FileTransferStatus } from '../../../../core/types';
+import { isImageFile } from '../../../../shared/file-types';
 import { setPendingFileStatus, updateFileTransferStatus } from '../../../state/slices/chatSlice';
 import { highlightText } from '../../../utils/highlightText';
+import { ImagePreviewDialog } from './ImagePreviewDialog';
 
 interface FileMessageProps {
   fileId: string;
@@ -14,12 +16,120 @@ interface FileMessageProps {
   searchQuery?: string;
   fileSize: number;
   filePath?: string;
+  previewMediaToken?: string;
   transferStatus: FileTransferStatus;
   transferProgress?: number;
   transferError?: string;
   transferExpiresAt?: number;
   isFromCurrentUser: boolean;
 }
+
+interface InlineImageMessageProps {
+  fileId: string;
+  fileName: string;
+  fileSizeText: string;
+  searchQuery?: string;
+  initialMediaToken?: string;
+  canOpenFile: boolean;
+  onOpenFile: () => Promise<void>;
+  statusContent?: ReactNode;
+  fallback: ReactNode;
+}
+
+const InlineImageMessage: React.FC<InlineImageMessageProps> = ({
+  fileId,
+  fileName,
+  fileSizeText,
+  searchQuery,
+  initialMediaToken,
+  canOpenFile,
+  onOpenFile,
+  statusContent,
+  fallback,
+}) => {
+  const [mediaToken, setMediaToken] = useState<string | null>(initialMediaToken ?? null);
+  const [imageFailed, setImageFailed] = useState(false);
+  const [previewOpen, setPreviewOpen] = useState(false);
+
+  useEffect(() => {
+    if (initialMediaToken) return;
+
+    let cancelled = false;
+
+    void window.kiyeovoAPI.registerMessageMedia(fileId)
+      .then((result) => {
+        if (cancelled) return;
+        if (result.success && result.token) {
+          setMediaToken(result.token);
+          return;
+        }
+        setImageFailed(true);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        console.error('Failed to register inline image:', error);
+        setImageFailed(true);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [fileId, initialMediaToken]);
+
+  if (!mediaToken || imageFailed) {
+    return fallback;
+  }
+
+  const mediaUrl = `kiyeovo-media://media/${encodeURIComponent(mediaToken)}`;
+
+  return (
+    <>
+      <div className="flex w-[320px] max-w-[65vw] flex-col gap-2">
+        <button
+          type="button"
+          onClick={() => setPreviewOpen(true)}
+          className="flex max-h-[320px] w-full cursor-pointer items-center justify-center overflow-hidden rounded-lg bg-background/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          aria-label={`Preview ${fileName}`}
+          title="View full size"
+        >
+          <img
+            src={mediaUrl}
+            alt={fileName}
+            className="block max-h-[320px] max-w-full object-contain"
+            onError={() => setImageFailed(true)}
+          />
+        </button>
+        <div className="flex min-w-0 items-center gap-2 text-left">
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-medium">{highlightText(fileName, searchQuery)}</p>
+            <p className="text-xs opacity-70">{fileSizeText}</p>
+          </div>
+          {canOpenFile && (
+            <Button
+              onClick={() => void onOpenFile()}
+              variant="outline"
+              size="icon"
+              className="shrink-0"
+              aria-label={`Show ${fileName} in folder`}
+              title="Show in folder"
+            >
+              <FolderOpen className="w-4 h-4" />
+            </Button>
+          )}
+        </div>
+        {statusContent}
+      </div>
+      <ImagePreviewDialog
+        open={previewOpen}
+        onOpenChange={setPreviewOpen}
+        mediaUrl={mediaUrl}
+        fileName={fileName}
+        canOpenFile={canOpenFile}
+        onOpenFile={onOpenFile}
+      />
+    </>
+  );
+};
 
 export const FileMessage: React.FC<FileMessageProps> = ({
   fileId,
@@ -28,6 +138,7 @@ export const FileMessage: React.FC<FileMessageProps> = ({
   searchQuery,
   fileSize,
   filePath,
+  previewMediaToken,
   transferStatus,
   transferProgress = 0,
   transferError,
@@ -233,25 +344,8 @@ export const FileMessage: React.FC<FileMessageProps> = ({
     return transferError;
   };
 
-  return (
-    <div className="flex flex-col gap-2 w-[250px]">
-      <div className="flex items-center justify-between gap-3">
-        <div className={`text-2xl ${isFromCurrentUser ? 'bg-background/50' : ''} rounded-md p-1`}>{getIcon()}</div>
-        <div className="flex-1 min-w-0 text-left">
-          <p className="text-sm font-medium truncate">{highlightText(fileName, searchQuery)}</p>
-          <p className="text-xs opacity-70">{formatFileSize(fileSize)}</p>
-        </div>
-        {transferStatus === 'completed' && !!filePath ? (
-          <Button
-            onClick={handleOpenFile}
-            variant="outline"
-            size="icon"
-          >
-            <FolderOpen className="w-4 h-4" />
-          </Button>
-        ) : <div />}
-      </div>
-
+  const transferStatusContent = (
+    <>
       {transferStatus === 'in_progress' && (
         <div className="w-full">
           <div className="flex items-center gap-2">
@@ -325,6 +419,57 @@ export const FileMessage: React.FC<FileMessageProps> = ({
           </Button>
         </div>
       )}
+    </>
+  );
+
+  const fileCard = (
+    <div className="flex flex-col gap-2 w-[250px]">
+      <div className="flex items-center justify-between gap-3">
+        <div className={`text-2xl ${isFromCurrentUser ? 'bg-background/50' : ''} rounded-md p-1`}>{getIcon()}</div>
+        <div className="flex-1 min-w-0 text-left">
+          <p className="text-sm font-medium truncate">{highlightText(fileName, searchQuery)}</p>
+          <p className="text-xs opacity-70">{formatFileSize(fileSize)}</p>
+        </div>
+        {transferStatus === 'completed' && !!filePath ? (
+          <Button
+            onClick={handleOpenFile}
+            variant="outline"
+            size="icon"
+          >
+            <FolderOpen className="w-4 h-4" />
+          </Button>
+        ) : <div />}
+      </div>
+      {transferStatusContent}
     </div>
   );
+
+  const isImage = isImageFile(fileName);
+  const hasSenderPreview =
+    isImage &&
+    isFromCurrentUser &&
+    !!previewMediaToken;
+  const hasCompletedImage =
+    isImage &&
+    transferStatus === 'completed' &&
+    !!filePath;
+
+  if (hasSenderPreview || hasCompletedImage) {
+    return (
+      <InlineImageMessage
+        key={`${fileId}:${previewMediaToken ?? filePath}`}
+        fileId={fileId}
+        fileName={fileName}
+        fileSizeText={formatFileSize(fileSize)}
+        searchQuery={searchQuery}
+        initialMediaToken={hasSenderPreview ? previewMediaToken : undefined}
+        canOpenFile={transferStatus === 'completed' && !!filePath}
+        onOpenFile={handleOpenFile}
+        statusContent={transferStatusContent}
+        fallback={fileCard}
+      />
+    );
+  }
+
+  return fileCard;
 };

@@ -397,6 +397,7 @@ export const MessageRow = memo(({
                   searchQuery={searchQuery}
                   fileSize={message.fileSize || 0}
                   filePath={message.filePath}
+                  previewMediaToken={message.filePreviewToken}
                   transferStatus={message.transferStatus || 'pending'}
                   transferProgress={message.transferProgress}
                   transferError={message.transferError}

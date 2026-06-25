@@ -595,7 +595,12 @@ export const ChatInput: FC<ChatInputProps> = ({
         }
     };
 
-    const handleSendFile = async (filePath: string, fileName: string, fileSize: number) => {
+    const handleSendFile = async (
+        filePath: string,
+        fileName: string,
+        fileSize: number,
+        mediaToken?: string | null,
+    ) => {
         if (!activeChat?.peerId) {
             toast.error('No active chat selected');
             return;
@@ -621,6 +626,7 @@ export const ChatInput: FC<ChatInputProps> = ({
                 clientMsgId: pendingMessageId,
                 fileName: fileName,
                 fileSize: fileSize,
+                filePreviewToken: mediaToken || undefined,
                 transferStatus: 'connecting',
                 transferProgress: 0,
             }));
