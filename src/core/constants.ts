@@ -342,7 +342,7 @@ export const FILE_REJECTION_COUNTER_RESET_INTERVAL = 10 * MINUTE; // Reset rejec
 export const SILENT_REJECTION_THRESHOLD_GLOBAL = 20; // After N global rejections, stop responding (bandwidth optimization)
 export const SILENT_REJECTION_THRESHOLD_PER_PEER = 5; // After N rejections to same peer, stop responding (bandwidth optimization)
 export const CHATS_TO_CHECK_FOR_OFFLINE_MESSAGES = 10; // Max chats scanned per offline-message check pass
-export const MAX_MESSAGE_CONTENT_LENGTH = 1024; // Max direct/group message characters
+export const MAX_MESSAGE_CONTENT_LENGTH = 2048; // Max direct/group message characters
 
 /**
  * Group chat constants

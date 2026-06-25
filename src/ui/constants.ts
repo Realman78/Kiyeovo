@@ -28,7 +28,7 @@ export const MAX_PENDING_FILES_PER_PEER = 5;
 export const MAX_PENDING_FILES_TOTAL = 10;
 export const SILENT_REJECTION_THRESHOLD_GLOBAL = 20;
 export const SILENT_REJECTION_THRESHOLD_PER_PEER = 5;
-export const MAX_MESSAGE_CONTENT_LENGTH = 1024;
+export const MAX_MESSAGE_CONTENT_LENGTH = 2048;
 export const MAX_GROUP_MEMBERS = 10;
 
 // String constants
