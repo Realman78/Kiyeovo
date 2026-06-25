@@ -162,10 +162,12 @@ export const MessagesContainer = ({
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [isScrollable, setIsScrollable] = useState(true);
   const [isAtBottom, setIsAtBottom] = useState(true);
+  const [loadedChatId, setLoadedChatId] = useState<number | null>(null);
   const offsetRef = useRef(0);
   const latestDisplayedMessagesRef = useRef(messages);
   const persistedMessagesRef = useRef(persistedMessages);
-  const showEmptyState = !isPending && messages.length === 0;
+  const showEmptyState =
+    !isPending && messages.length === 0 && loadedChatId === (activeChat?.id ?? null);
   // Kept current synchronously (during render) so the ResizeObserver callback,
   // which runs before paint, reads an up-to-date count.
   messagesLengthRef.current = messages.length;
@@ -298,14 +300,17 @@ export const MessagesContainer = ({
         if (mapped.length === 0 && hasOptimisticContactSeed) {
           offsetRef.current = 0;
           setHasMore(false);
+          setLoadedChatId(chatId);
           return;
         }
 
         dispatch(setMessages(mapped));
         offsetRef.current = mapped.length;
         setHasMore(mapped.length >= INITIAL_MESSAGES_LIMIT);
+        setLoadedChatId(chatId);
       } else {
         setError(result.error || 'Failed to fetch messages');
+        setLoadedChatId(chatId);
       }
     }
     void fetchMessages();
