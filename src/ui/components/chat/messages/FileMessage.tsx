@@ -5,11 +5,13 @@ import { useDispatch, useSelector } from 'react-redux';
 import type { RootState } from '../../../state/store';
 import type { FileTransferStatus } from '../../../../core/types';
 import { setPendingFileStatus, updateFileTransferStatus } from '../../../state/slices/chatSlice';
+import { highlightText } from '../../../utils/highlightText';
 
 interface FileMessageProps {
   fileId: string;
   chatId: number;
   fileName: string;
+  searchQuery?: string;
   fileSize: number;
   filePath?: string;
   transferStatus: FileTransferStatus;
@@ -23,6 +25,7 @@ export const FileMessage: React.FC<FileMessageProps> = ({
   fileId,
   chatId,
   fileName,
+  searchQuery,
   fileSize,
   filePath,
   transferStatus,
@@ -235,7 +238,7 @@ export const FileMessage: React.FC<FileMessageProps> = ({
       <div className="flex items-center justify-between gap-3">
         <div className={`text-2xl ${isFromCurrentUser ? 'bg-background/50' : ''} rounded-md p-1`}>{getIcon()}</div>
         <div className="flex-1 min-w-0 text-left">
-          <p className="text-sm font-medium truncate">{fileName}</p>
+          <p className="text-sm font-medium truncate">{highlightText(fileName, searchQuery)}</p>
           <p className="text-xs opacity-70">{formatFileSize(fileSize)}</p>
         </div>
         {transferStatus === 'completed' && !!filePath ? (

@@ -27,6 +27,7 @@ type MessagesContainerProps = {
   messageJumpRequest?: MessageJumpRequest | null;
   onMessageJumpHandled?: (requestId: number, outcome: MessageJumpOutcome) => void;
   activeSearchClientMsgId?: string | null;
+  searchHighlightQuery?: string;
   onOfflineInboxRelevant?: () => void;
   bottomOverlayClearancePx?: number;
 }
@@ -116,6 +117,7 @@ export const MessagesContainer = ({
   messageJumpRequest,
   onMessageJumpHandled,
   activeSearchClientMsgId,
+  searchHighlightQuery,
   onOfflineInboxRelevant,
   bottomOverlayClearancePx = 0,
 }: MessagesContainerProps) => {
@@ -1106,6 +1108,7 @@ export const MessagesContainer = ({
             !!activeSearchClientMsgId
             && message.clientMsgId === activeSearchClientMsgId
           }
+          searchQuery={searchHighlightQuery}
           onToggleSelect={onToggleMessageSelection}
           onEnterSelection={onEnterMessageSelection}
         />

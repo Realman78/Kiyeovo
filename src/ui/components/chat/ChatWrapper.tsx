@@ -576,6 +576,22 @@ const ChatWrapper = ({ active = true }: { active?: boolean }) => {
     });
   }, []);
 
+  // Enter -> next match, Shift+Enter -> previous match, while search is open.
+  useEffect(() => {
+    if (!searchMode) return;
+
+    const handleSearchNav = (event: KeyboardEvent) => {
+      if (event.key !== 'Enter' || event.altKey || event.ctrlKey || event.metaKey) {
+        return;
+      }
+      event.preventDefault();
+      void navigateConversationSearch(event.shiftKey ? -1 : 1);
+    };
+
+    document.addEventListener('keydown', handleSearchNav);
+    return () => document.removeEventListener('keydown', handleSearchNav);
+  }, [navigateConversationSearch, searchMode]);
+
   const requestDeleteSelectedMessages = useCallback(() => {
     if (selectedMessageCount === 0 || isDeletingMessages) return;
     setDeleteConfirmOpen(true);
@@ -748,6 +764,7 @@ const ChatWrapper = ({ active = true }: { active?: boolean }) => {
               messageJumpRequest={messageJumpRequest}
               onMessageJumpHandled={handleMessageJumpHandled}
               activeSearchClientMsgId={activeSearchClientMsgId}
+              searchHighlightQuery={searchMode ? conversationSearch.query.trim() : ''}
               onOfflineInboxRelevant={openOfflineInbox}
               bottomOverlayClearancePx={activeChat
                 ? (isOfflineInboxExpanded
