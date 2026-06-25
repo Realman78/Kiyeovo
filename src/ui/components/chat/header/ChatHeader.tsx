@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useSelector, useDispatch } from "react-redux";
 import type { RootState } from "../../../state/store";
-import { UserPlus, AlertCircle, Users, Clock, Phone, PhoneOff, Loader2 } from "lucide-react";
+import { UserPlus, AlertCircle, Users, Clock, Phone, PhoneOff, Loader2, X } from "lucide-react";
 import { updateChat, clearMessages, removeChat, setOfflineFetchStatus, markOfflineFetched, markOfflineFetchFailed } from "../../../state/slices/chatSlice";
 import { AboutUserModal } from "./AboutUserModal";
 import { useToast } from "../../ui/use-toast";
@@ -26,6 +26,7 @@ import { ChatHeaderMenu } from "./ChatHeaderMenu";
 import { errStr } from '../../../../core/utils/general-error';
 import { Button } from "../../ui/Button";
 import { useConnectivityGuidance } from "../../../hooks/useConnectivityGuidance";
+import { ConversationSearchHeader } from "./ConversationSearchHeader";
 
 type ChatHeaderProps = {
   username: string;
@@ -34,6 +35,15 @@ type ChatHeaderProps = {
   groupStatus?: string;
   chatId?: number;
   onSelectMessages?: () => void;
+  selectionMode?: boolean;
+  onCancelSelection?: () => void;
+  searchMode?: boolean;
+  searchQuery?: string;
+  searchLoading?: boolean;
+  searchFocusRequest?: number;
+  onStartSearch?: () => void;
+  onSearchQueryChange?: (query: string) => void;
+  onCancelSearch?: () => void;
 }
 
 export const ChatHeader = ({
@@ -43,6 +53,15 @@ export const ChatHeader = ({
   groupStatus,
   chatId,
   onSelectMessages,
+  selectionMode = false,
+  onCancelSelection,
+  searchMode = false,
+  searchQuery = '',
+  searchLoading = false,
+  searchFocusRequest = 0,
+  onStartSearch,
+  onSearchQueryChange,
+  onCancelSearch,
 }: ChatHeaderProps) => {
   const activeChat = useSelector((state: RootState) => state.chat.activeChat);
   const chats = useSelector((state: RootState) => state.chat.chats);
@@ -331,6 +350,11 @@ export const ChatHeader = ({
 
   const handleSelectMessages = () => {
     onSelectMessages?.();
+    setDropdownOpen(false);
+  };
+
+  const handleSearchMessages = () => {
+    onStartSearch?.();
     setDropdownOpen(false);
   };
 
@@ -1060,6 +1084,18 @@ export const ChatHeader = ({
   const canDeleteGroupChat = isGroup
     && (resolvedGroupStatus === 'disbanded' || groupCreatorLinkState.broken);
 
+  if (searchMode && onSearchQueryChange && onCancelSearch) {
+    return (
+      <ConversationSearchHeader
+        query={searchQuery}
+        loading={searchLoading}
+        focusRequest={searchFocusRequest}
+        onQueryChange={onSearchQueryChange}
+        onCancel={onCancelSearch}
+      />
+    );
+  }
+
   return <div className={`${showGroupStateMessage || showDirectInactivityWarning ? 'h-20' : 'h-16'} px-6 flex items-center justify-between border-b border-border ${activeChat?.status === 'pending' ? "" : "bg-card/50"}`}>
     <div className="flex min-w-12 flex-1 items-center gap-3">
       {isGroup ? (
@@ -1121,6 +1157,18 @@ export const ChatHeader = ({
     </div>
 
     <div className="flex shrink-0 items-center gap-1">
+      {selectionMode ? (
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onCancelSelection}
+          aria-label="Exit message selection"
+          title="Exit selection"
+        >
+          <X className="w-4 h-4" />
+        </Button>
+      ) : (
+      <>
       <ChatHeaderCallControls
         canShowCallButtons={canShowCallButtons}
         hasActiveCallWithThisPeer={hasActiveCallWithThisPeer}
@@ -1172,6 +1220,7 @@ export const ChatHeader = ({
         canShowLeaveOrDisband={canShowLeaveOrDisband}
         canDeleteGroupChat={canDeleteGroupChat}
         canSelectMessages={!!activeChat && !!onSelectMessages}
+        canSearchMessages={!!activeChat && !!onStartSearch}
         onAboutGroup={handleAboutGroup}
         onAboutUser={handleAboutUser}
         onEditUsername={handleEditUsername}
@@ -1185,9 +1234,12 @@ export const ChatHeader = ({
         onDeleteGroupChat={handleDeleteGroupChat}
         onToggleBlock={handleToggleBlock}
         onSelectMessages={handleSelectMessages}
+        onSearchMessages={handleSearchMessages}
         onDeleteAllMessages={handleDeleteAllMessages}
         onDeleteChatAndUser={handleDeleteChatAndUser}
       />
+      </>
+      )}
     </div>
 
     {activeChat && (

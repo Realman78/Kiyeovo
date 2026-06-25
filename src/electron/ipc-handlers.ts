@@ -1461,6 +1461,48 @@ function setupMessageHandlers(
     }
   });
 
+  ipcMain.handle(IPC_CHANNELS.GET_MESSAGE_JUMP_WINDOW, async (
+    _event,
+    chatId: number,
+    clientMsgId: string,
+  ) => {
+    const empty = {
+      status: 'not_found' as const,
+      messages: [],
+      hasMoreOlder: false,
+    };
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { success: false, ...empty, error: 'P2P core not initialized' };
+      }
+      if (
+        !Number.isInteger(chatId)
+        || chatId <= 0
+        || typeof clientMsgId !== 'string'
+        || clientMsgId.length === 0
+      ) {
+        return { success: false, ...empty, error: 'Invalid message jump request' };
+      }
+
+      const result = p2pCore.database.getMessageJumpWindow(chatId, clientMsgId);
+      return {
+        success: true,
+        status: result.status,
+        messages: result.messages,
+        hasMoreOlder: result.hasMoreOlder,
+        error: null,
+      };
+    } catch (error) {
+      console.error('[IPC] Failed to load message jump window:', error);
+      return {
+        success: false,
+        ...empty,
+        error: errStr(error, 'Failed to load message history'),
+      };
+    }
+  });
+
   ipcMain.handle(IPC_CHANNELS.GET_MESSAGE_PREVIEW_BY_CID, async (_event, chatId: number, clientMsgId: string) => {
     try {
       const p2pCore = getP2PCore();
@@ -1517,6 +1559,65 @@ function setupMessageHandlers(
         deletedCount: 0,
         latestRemaining: null,
         error: errStr(error, 'Failed to delete selected messages'),
+      };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SEARCH_CHAT_MESSAGES, async (
+    _event,
+    chatId: number,
+    query: string,
+    options?: {
+      limit?: number;
+      snapshotMaxRowid?: number;
+      cursor?: { timestamp: number; rowid: number } | null;
+    },
+  ) => {
+    const empty = { results: [], total: 0, snapshotMaxRowid: 0, nextCursor: null };
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { success: false, ...empty, error: 'P2P core not initialized' };
+      }
+      if (!Number.isInteger(chatId) || chatId <= 0 || typeof query !== 'string') {
+        return { success: false, ...empty, error: 'Invalid search request' };
+      }
+
+      // Sanitize numeric options so NaN/Infinity/fractional values never reach SQL;
+      // the DB layer clamps ranges but should not receive malformed numbers.
+      const dbOptions: {
+        limit?: number;
+        snapshotMaxRowid?: number;
+        cursor: { timestamp: number; rowid: number } | null;
+      } = {
+        cursor: options?.cursor
+          && Number.isFinite(options.cursor.timestamp)
+          && Number.isInteger(options.cursor.rowid)
+          ? { timestamp: options.cursor.timestamp, rowid: options.cursor.rowid }
+          : null,
+      };
+      if (Number.isFinite(options?.limit as number)) {
+        dbOptions.limit = Math.trunc(options!.limit as number);
+      }
+      if (Number.isFinite(options?.snapshotMaxRowid as number)) {
+        dbOptions.snapshotMaxRowid = Math.trunc(options!.snapshotMaxRowid as number);
+      }
+
+      const result = p2pCore.database.searchChatMessages(chatId, query, dbOptions);
+      return {
+        success: true,
+        results: result.results,
+        total: result.total,
+        snapshotMaxRowid: result.snapshotMaxRowid,
+        nextCursor: result.nextCursor,
+        error: null,
+      };
+    } catch (error) {
+      console.error('[IPC] Failed to search chat messages:', error);
+      return {
+        success: false,
+        ...empty,
+        error: errStr(error, 'Failed to search messages'),
       };
     }
   });

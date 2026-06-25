@@ -7,6 +7,7 @@ import { setReplyTarget, type ChatMessage } from "../../../state/slices/chatSlic
 import type { RootState } from "../../../state/store";
 import { RetryStatus } from "./RetryStatus";
 import { DropdownMenu, DropdownMenuItem } from "../../ui/DropdownMenu";
+import { highlightText } from "../../../utils/highlightText";
 
 export type MessageRowProps = {
   message: ChatMessage;
@@ -21,6 +22,8 @@ export type MessageRowProps = {
   selectionMode?: boolean;
   isSelectable?: boolean;
   isSelected?: boolean;
+  isActiveSearchResult?: boolean;
+  searchQuery?: string;
   onToggleSelect?: (messageId: string) => void;
   onEnterSelection?: (messageId: string) => void;
 };
@@ -54,6 +57,8 @@ export const MessageRow = memo(({
   selectionMode = false,
   isSelectable = false,
   isSelected = false,
+  isActiveSearchResult = false,
+  searchQuery,
   onToggleSelect,
   onEnterSelection,
 }: MessageRowProps) => {
@@ -329,7 +334,9 @@ export const MessageRow = memo(({
               message.messageType === 'file' ? "pb-5" : "pb-2.5"
             } ${isOwnMessage
               ? `order-2 bg-message-sent text-message-sent-foreground${isFirstInSeries ? " rounded-tr-none" : ""}`
-              : `order-1 bg-message-received text-message-received-foreground${isFirstInSeries ? " rounded-tl-none" : ""}`}`}
+              : `order-1 bg-message-received text-message-received-foreground${isFirstInSeries ? " rounded-tl-none" : ""}`} ${
+              isActiveSearchResult ? "search-result-active-highlight" : ""
+            }`}
             style={{ wordBreak: "break-word" }}
           >
             {isFirstInSeries && (
@@ -368,6 +375,7 @@ export const MessageRow = memo(({
                   fileId={message.id}
                   chatId={message.chatId}
                   fileName={message.fileName}
+                  searchQuery={searchQuery}
                   fileSize={message.fileSize || 0}
                   filePath={message.filePath}
                   transferStatus={message.transferStatus || 'pending'}
@@ -378,7 +386,7 @@ export const MessageRow = memo(({
                 />
               ) : (
                 <p className="text-left text-sm leading-relaxed whitespace-pre-wrap wrap-anywhere">
-                  {message.content}
+                  {highlightText(message.content, searchQuery)}
                   <span className="inline-block w-10" aria-hidden="true" />
                 </p>
               )}

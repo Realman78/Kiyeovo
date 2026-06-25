@@ -961,7 +961,7 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
             className={`absolute inset-0 flex ${isChatSection ? 'visible pointer-events-auto' : 'invisible pointer-events-none'}`}
             aria-hidden={!isChatSection}
           >
-            <ChatWrapper />
+            <ChatWrapper active={isChatSection} />
           </div>
           {!isChatSection && (
             <div

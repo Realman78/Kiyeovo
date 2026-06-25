@@ -113,8 +113,10 @@ export const IPC_CHANNELS = {
 
   // Messages
   GET_MESSAGES: 'messages:get',
+  GET_MESSAGE_JUMP_WINDOW: 'messages:getJumpWindow',
   GET_MESSAGE_PREVIEW_BY_CID: 'messages:getPreviewByCid',
   DELETE_MESSAGES_FOR_ME: 'messages:deleteForMe',
+  SEARCH_CHAT_MESSAGES: 'messages:searchInChat',
 
   // Offline messages
   CHECK_OFFLINE_MESSAGES: 'offlineMessages:check',

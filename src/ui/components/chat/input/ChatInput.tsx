@@ -38,11 +38,13 @@ const MAX_COMPOSER_LINES = 5;
 type ChatInputProps = {
     onOfflineInboxRelevant?: () => void;
     selectionMode?: boolean;
+    searchMode?: boolean;
 };
 
 export const ChatInput: FC<ChatInputProps> = ({
     onOfflineInboxRelevant,
     selectionMode = false,
+    searchMode = false,
 }) => {
     const { toast } = useToast();
     const { showMessageFailureGuidance } = useConnectivityGuidance();
@@ -113,7 +115,8 @@ export const ChatInput: FC<ChatInputProps> = ({
             (m.transferStatus === 'pending' && m.senderPeerId === myPeerId)
         )
     );
-    const isDisabled = selectionMode || isBlocked || !!groupBlockedReason;
+    const interactionBlocked = selectionMode || searchMode;
+    const isDisabled = interactionBlocked || isBlocked || !!groupBlockedReason;
     const sendQueueRef = useRef<Record<number, PendingSendJob[]>>({});
     const processingQueueRef = useRef<Record<number, boolean>>({});
     const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -173,11 +176,11 @@ export const ChatInput: FC<ChatInputProps> = ({
     }, [isDisabled]);
 
     useEffect(() => {
-        if (!selectionMode) return;
+        if (!interactionBlocked) return;
         setEmojiPickerOpen(false);
         setFileDialogOpen(false);
         inputRef.current?.blur();
-    }, [selectionMode]);
+    }, [interactionBlocked]);
 
     useEffect(() => {
         if (!emojiPickerOpen) return;
@@ -690,8 +693,8 @@ export const ChatInput: FC<ChatInputProps> = ({
 
     return <>
         <div
-            className={selectionMode ? "hidden" : "relative"}
-            aria-hidden={selectionMode}
+            className={interactionBlocked ? "hidden" : "relative"}
+            aria-hidden={interactionBlocked}
         >
             {replyTarget && (
                 <div className="flex items-center gap-2 border-t border-border bg-muted/30 px-4 py-2">
@@ -794,8 +797,8 @@ export const ChatInput: FC<ChatInputProps> = ({
         </div>
 
         <SendFileDialog
-            open={!selectionMode && fileDialogOpen}
-            onOpenChange={(open) => setFileDialogOpen(selectionMode ? false : open)}
+            open={!interactionBlocked && fileDialogOpen}
+            onOpenChange={(open) => setFileDialogOpen(interactionBlocked ? false : open)}
             onSend={handleSendFile}
             transferBlocked={hasActiveFileTransfer}
             transferBlockedReason="Wait for the current file transfer to finish before selecting another file."

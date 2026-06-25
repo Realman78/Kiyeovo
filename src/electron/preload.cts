@@ -125,8 +125,10 @@ const kiyeovoAPI: KiyeovoAPI = {
   getChatById: (chatId) => invoke(IPC_CHANNELS.GET_CHAT, chatId),
 
   getMessages: (chatId, limit, offset) => invoke(IPC_CHANNELS.GET_MESSAGES, chatId, limit, offset),
+  getMessageJumpWindow: (chatId, clientMsgId) => invoke(IPC_CHANNELS.GET_MESSAGE_JUMP_WINDOW, chatId, clientMsgId),
   getMessagePreviewByCid: (chatId, clientMsgId) => invoke(IPC_CHANNELS.GET_MESSAGE_PREVIEW_BY_CID, chatId, clientMsgId),
   deleteMessagesForMe: (chatId, messageIds) => invoke(IPC_CHANNELS.DELETE_MESSAGES_FOR_ME, chatId, messageIds),
+  searchChatMessages: (chatId, query, options) => invoke(IPC_CHANNELS.SEARCH_CHAT_MESSAGES, chatId, query, options),
   onMessageReceived: (callback) => subscribe(IPC_CHANNELS.MESSAGE_RECEIVED, callback),
   onMessageSendStateChanged: (callback) => subscribe(IPC_CHANNELS.MESSAGE_SEND_STATE_CHANGED, callback),
   onOfflineInboxCapacityChanged: (callback) => subscribe(IPC_CHANNELS.OFFLINE_INBOX_CAPACITY_CHANGED, callback),

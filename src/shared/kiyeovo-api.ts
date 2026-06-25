@@ -70,6 +70,34 @@ export type DeleteMessagesLatestRemaining = {
   clientMsgId: string | null;
 };
 
+export type ChatMessageSearchResult = {
+  id: string;
+  clientMsgId: string | null;
+  content: string;
+  fileName: string | null;
+  messageType: 'text' | 'file' | 'image' | 'system';
+  senderPeerId: string;
+  timestamp: number;
+};
+
+export type ChatMessageSearchCursor = {
+  timestamp: number;
+  rowid: number;
+};
+
+export type ChatMessageSearchResponse = {
+  results: ChatMessageSearchResult[];
+  total: number;
+  snapshotMaxRowid: number;
+  nextCursor: ChatMessageSearchCursor | null;
+};
+
+export type MessageJumpWindowResponse = {
+  status: 'loaded' | 'too_deep' | 'not_found';
+  messages: KiyeovoMessage[];
+  hasMoreOlder: boolean;
+};
+
 export type ScreenShareSupportResponse = {
   success: boolean;
   supported: boolean;
@@ -272,6 +300,13 @@ export interface KiyeovoAPI {
     messages: KiyeovoMessage[];
     error: string | null;
   }>;
+  getMessageJumpWindow: (chatId: number, clientMsgId: string) => Promise<{
+    success: boolean;
+    status: MessageJumpWindowResponse['status'];
+    messages: KiyeovoMessage[];
+    hasMoreOlder: boolean;
+    error: string | null;
+  }>;
   getMessagePreviewByCid: (chatId: number, clientMsgId: string) => Promise<{
     success: boolean;
     preview: {
@@ -287,6 +322,18 @@ export interface KiyeovoAPI {
     success: boolean;
     deletedCount: number;
     latestRemaining: DeleteMessagesLatestRemaining | null;
+    error: string | null;
+  }>;
+  searchChatMessages: (
+    chatId: number,
+    query: string,
+    options?: { limit?: number; snapshotMaxRowid?: number; cursor?: ChatMessageSearchCursor | null },
+  ) => Promise<{
+    success: boolean;
+    results: ChatMessageSearchResult[];
+    total: number;
+    snapshotMaxRowid: number;
+    nextCursor: ChatMessageSearchCursor | null;
     error: string | null;
   }>;
   onMessageReceived: (callback: (data: MessageReceivedEvent) => void) => Unsubscribe;
