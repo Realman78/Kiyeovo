@@ -109,6 +109,7 @@ Mode switch is done in settings and requires app restart (no hot stack replaceme
 ### 3. Startup and lifecycle flow
 
 1. Electron app starts and creates the window.
+   - privileged application and local-media URL schemes are registered before Electron becomes ready
 2. Main process reads DB settings (`network_mode`, onboarding flag).
 3. If onboarding requires explicit mode selection, initialization is gated until user picks mode.
 4. Tor manager starts only for `anonymous` mode.
@@ -286,6 +287,13 @@ Current operational behavior:
 - incoming download can be canceled by user
 - non-terminal transfers are marked failed on app restart/close
 - duplicate filename handling uses copy-style timestamped filenames
+- completed image files render inline for both sender and receiver; receivers retain the existing file card until completion, and non-previewable transfer states also remain cards
+- outgoing image sends keep the sender's trusted picker capability in renderer state, so the sender sees the image immediately with connecting/approval/progress/failure status beneath it; receivers still see the file-offer card until the transfer completes
+- clicking an inline image opens a viewport-sized preview dialog using the same capability-backed media URL; Escape, the close control, and backdrop clicks close it
+- inline images keep a compact searchable filename/size caption; completed files retain show-in-folder as a secondary action in both the message caption and preview dialog, while sender-only pending previews do not expose filesystem actions
+- unavailable inline media falls back to the file card
+- images selected through the paperclip flow show a capability-backed preview in the confirmation dialog, while non-image selections keep the existing dialog layout
+- the send-file dialog remains mounted through the shared Radix close transition and clears its local selection/preview state only after the exit lifecycle completes
 
 Protections:
 - rate limits (per peer + global)
@@ -293,6 +301,16 @@ Protections:
 - silent rejection thresholds for abuse
 - path traversal and file-size guards
 - backend remains authoritative even if UI pre-checks exist
+
+Local image delivery foundation:
+- renderer pages do not receive arbitrary filesystem-read access and do not load `file://` URLs
+- on-disk images are exposed through the dedicated `kiyeovo-media://media/<token>` protocol
+- tokens are random, process-lifetime capabilities bound to canonical filesystem paths; paths are never embedded in renderer media URLs
+- a token can be minted only for a completed, active-network file message persisted in the database, or for the exact image selected through the trusted OS open dialog
+- completed-message grants are mode-scoped in the database and require a persisted file path plus an image extension from the shared allowlist
+- symbolic-link file grants are rejected; accepted paths are canonicalized before token binding
+- the protocol resolves the canonical path again before serving, requires a regular file and an `image/*` content type, and returns `no-store`/`nosniff` headers
+- unknown, stale, non-image, or retargeted capabilities are rejected
 
 ---
 
@@ -568,6 +586,7 @@ Composer behavior:
 - conversation search is entered from **Search messages** in the direct/group chat header menu or with `Ctrl+F` / `Cmd+F`. The shortcut refocuses an open search and is consumed without leaving message-selection mode. Search replaces the complete chat header with an auto-focused search field and **Cancel**, while `ChatInput` remains mounted but hidden/inert so drafts and send queues survive. The search header owns the live input locally and emits only a 250 ms debounced query to `ChatWrapper`, preventing each keystroke from re-rendering the full message tree. Settled queries search the entire local chat history through `messages:searchInChat`; the composer area shows `N of total` on the left and previous/next controls on the right. Results are newest-first, fetched in cursor pages only when navigation crosses the loaded boundary, and each result reuses the bounded message jump-window path described in §5.4. `Enter` / `Shift+Enter` step to the next / previous match and `Esc` cancels search (the keyboard listeners are mounted only while search is open, so normal composer `Enter`-to-send is untouched). While search is open every loaded message highlights the matched query fragments inline — in text bubbles and filenames, rendered as React text segments only (never HTML injection) — and the active search result additionally keeps a persistent accent border until navigation or search cancellation. That border is drawn with `outline` rather than `box-shadow` so it stays visible immediately and throughout the reply-pulse, which animates `box-shadow` on the same bubble; the transient pulse starts only after the target row is visible and scrolling has settled. Search requests and jumps carry renderer generations/request IDs so rapid typing, cancellation, chat changes, or section changes cannot apply stale results or leave navigation pending. Search and selection are structurally exclusive because both entry actions live in the normal header menu, which is absent while either mode is active.
 - **Delete for me** requires confirmation and removes selected message rows only from local state/storage; it sends no peer notification or protocol tombstone and does not delete transferred files. Renderer-only failed optimistic rows are removed without IPC. Persisted rows are revalidated and deleted in one database transaction, together with any durable direct-send or group-backup retry record they own; matching in-memory group retry state is then discarded. Stale, duplicate, cross-chat, newly active, or otherwise ineligible selections fail without partial deletion. The renderer updates only after transaction success, clears a reply target that referenced a deleted message, and reconciles the chat preview against both the latest remaining settled database row and any newer settled message already in Redux; unsent rows are excluded from this preview. It then invalidates pagination and refetches the visible history window, merging messages that arrived during the request before resetting the database offset. Selection remains active on failure and exits on success; while its confirmation dialog is open, the dialog owns `Esc`.
 - pasted line breaks are preserved in both the draft and rendered text messages
+- opening a chat establishes stick-to-bottom intent; asynchronous message growth such as image loading keeps the latest message anchored until the user explicitly scrolls upward, while returning to the bottom restores anchoring
 - every normal message renders its timestamp in 24-hour `HH:mm` format inside the bubble at bottom-right; text reserves timestamp width at the end of its final line so short messages share one line with the time instead of receiving permanent extra height. Delivery/retry metadata remains below the bubble, while system-event timestamps remain centered below their event
 - rendered text message bubbles expose Copy through the hover/focus chevron menu, copying only the message text content to the clipboard
 - messages can be **replied to**: a hover reply affordance quotes a specific message and focuses the composer; the composer shows a cancelable reply bar (survives chat switches, `Esc`/✕ to cancel); the quote renders as a full-width header enclosed inside the reply bubble (resolved by live lookup, shows *"Original message unavailable."* if the original is gone), so the quote and reply share the width of whichever is wider. Clicking the quote jumps to the original before starting a 2.5-second highlight pulse once the target is visible, paging older history in if needed. Reply works in both direct and group chats; it is hidden only on un-settled/failed sends (and on files until transfer completes). When the viewport is away from the latest message, a floating down-chevron returns it to the bottom. See §5.4.
@@ -619,6 +638,7 @@ Call UI state:
    - renderer CSP present in `index.html`
    - `webPreferences.sandbox: true`
    - packaged UI is served via a custom `kiyeovo://app/...` protocol instead of `file://`
+   - local images use a separate CSP-allowlisted `kiyeovo-media://` capability protocol; the renderer cannot register arbitrary paths
    - packaged builds flip a minimal Electron fuse set via `electron-builder`:
      - disable `runAsNode`
      - disable `enableNodeOptionsEnvironmentVariable`

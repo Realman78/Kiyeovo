@@ -129,6 +129,9 @@ export const MessagesContainer = ({
   // Inner content wrapper observed for height changes (stick-to-bottom on async growth).
   const contentRef = useRef<HTMLDivElement>(null);
   const isAtBottomRef = useRef(true);
+  const stickToBottomRef = useRef(true);
+  const activePointerScrollRef = useRef(false);
+  const previousScrollTopRef = useRef(0);
   // Current vs. last-observed message count, to tell a real new/removed message
   // (count change → handled by the smooth auto-scroll / loadMore) apart from async
   // content growth at a stable count (e.g. a reply quote resolving late).
@@ -235,7 +238,11 @@ export const MessagesContainer = ({
     const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
     const atBottom = distanceFromBottom <= 64;
     isAtBottomRef.current = atBottom;
+    if (distanceFromBottom <= 2) {
+      stickToBottomRef.current = true;
+    }
     setIsAtBottom(atBottom);
+    return atBottom;
   }, []);
 
   // Stick to the bottom when content grows underneath the viewport at a *stable*
@@ -252,8 +259,10 @@ export const MessagesContainer = ({
       const countChanged = len !== observerSeenLengthRef.current;
       observerSeenLengthRef.current = len;
       if (countChanged) return;
-      if (isJumpingRef.current || isLoadingMoreRef.current || !isAtBottomRef.current) return;
+      if (isJumpingRef.current || isLoadingMoreRef.current || !stickToBottomRef.current) return;
       container.scrollTop = container.scrollHeight;
+      previousScrollTopRef.current = container.scrollTop;
+      isAtBottomRef.current = true;
       setIsAtBottom(true);
     });
     observer.observe(content);
@@ -275,6 +284,10 @@ export const MessagesContainer = ({
     loadMoreInFlightRef.current = null;
     activeChatIdRef.current = activeChat?.id ?? null;
     loadTokenRef.current += 1;
+    stickToBottomRef.current = true;
+    isAtBottomRef.current = true;
+    activePointerScrollRef.current = false;
+    previousScrollTopRef.current = 0;
   }, [activeChat?.id]);
 
   // Initial fetch
@@ -289,6 +302,9 @@ export const MessagesContainer = ({
     topZoneActiveRef.current = false;
     hasUserInteractedRef.current = false;
     suppressTopLoadRef.current = false;
+    stickToBottomRef.current = true;
+    activePointerScrollRef.current = false;
+    previousScrollTopRef.current = 0;
 
     const fetchMessages = async () => {
       if (!chatId) return;
@@ -347,7 +363,7 @@ export const MessagesContainer = ({
       const limit = Math.max(INITIAL_MESSAGES_LIMIT, request.visibleCount);
       const container = scrollContainerRef.current;
       const previousScrollTop = container?.scrollTop ?? 0;
-      const wasAtBottom = isAtBottomRef.current;
+      const wasAtBottom = stickToBottomRef.current;
 
       try {
         const result = await window.kiyeovoAPI.getMessages(chatId, limit, 0);
@@ -529,6 +545,13 @@ export const MessagesContainer = ({
     const container = scrollContainerRef.current;
     if (!container) return;
 
+    const currentScrollTop = container.scrollTop;
+    const movedUp = currentScrollTop < previousScrollTopRef.current - 1;
+    if (activePointerScrollRef.current && movedUp) {
+      stickToBottomRef.current = false;
+    }
+    previousScrollTopRef.current = currentScrollTop;
+
     const thresholdPx = Math.min(120, Math.max(24, container.clientHeight * 0.08));
     const inTopZone = container.scrollTop <= thresholdPx;
     const wasInTopZone = topZoneActiveRef.current;
@@ -544,7 +567,25 @@ export const MessagesContainer = ({
     }
   }, [hasMore, loadMore, updateBottomState]);
 
+  const handleWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
+    markUserInteraction();
+    if (event.deltaY < 0) {
+      stickToBottomRef.current = false;
+    }
+  }, [markUserInteraction]);
+
+  const handlePointerDown = useCallback(() => {
+    markUserInteraction();
+    activePointerScrollRef.current = true;
+    previousScrollTopRef.current = scrollContainerRef.current?.scrollTop ?? 0;
+  }, [markUserInteraction]);
+
+  const handlePointerEnd = useCallback(() => {
+    activePointerScrollRef.current = false;
+  }, []);
+
   const scrollToBottom = useCallback(() => {
+    stickToBottomRef.current = true;
     suppressTopLoadTemporarily();
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [suppressTopLoadTemporarily]);
@@ -576,7 +617,7 @@ export const MessagesContainer = ({
     }
     // No new/replaced message (just an in-place field edit) — don't scroll.
     if (!tailChanged) return;
-    if (messagesEndRef.current) {
+    if (messagesEndRef.current && stickToBottomRef.current) {
       suppressTopLoadTemporarily();
       messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
     }
@@ -665,6 +706,7 @@ export const MessagesContainer = ({
       && scrollContainerRef.current === container;
 
     isJumpingRef.current = true;
+    stickToBottomRef.current = false;
     try {
       let row = findRow();
       if (!row) {
@@ -1008,9 +1050,12 @@ export const MessagesContainer = ({
     <div
       ref={scrollContainerRef}
       onScroll={handleScroll}
-      onWheel={markUserInteraction}
+      onWheel={handleWheel}
       onTouchStart={markUserInteraction}
-      onPointerDown={markUserInteraction}
+      onPointerDown={handlePointerDown}
+      onPointerUp={handlePointerEnd}
+      onPointerCancel={handlePointerEnd}
+      onPointerLeave={handlePointerEnd}
       className="h-full overflow-y-auto p-6"
       style={{ paddingBottom: `${bottomOverlayClearancePx}px` }}
     >

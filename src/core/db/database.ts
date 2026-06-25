@@ -2213,6 +2213,36 @@ export class ChatDatabase {
         return !!row;
     }
 
+    getCompletedFileMediaById(messageId: string): {
+        filePath: string;
+        fileName: string;
+    } | null {
+        const row = this.db.prepare(`
+            SELECT m.file_path, m.file_name
+            FROM messages m
+            JOIN chats c ON c.id = m.chat_id
+            WHERE m.id = ?
+              AND c.network_mode = ?
+              AND m.message_type = 'file'
+              AND m.transfer_status = 'completed'
+              AND m.file_path IS NOT NULL
+              AND m.file_path != ''
+            LIMIT 1
+        `).get(messageId, this.sessionNetworkMode) as {
+            file_path: string;
+            file_name: string | null;
+        } | undefined;
+
+        if (!row) {
+            return null;
+        }
+
+        return {
+            filePath: row.file_path,
+            fileName: row.file_name || path.basename(row.file_path),
+        };
+    }
+
     /**
      * Authoritative insert. A (chat_id, client_msg_id) collision is an invariant
      * violation here — outbound sends mint fresh cids, and other callers default

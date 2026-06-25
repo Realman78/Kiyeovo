@@ -414,7 +414,7 @@ export interface KiyeovoAPI {
     title?: string;
     filters?: Array<{ name: string; extensions: string[] }>;
     properties?: Array<'openFile' | 'openDirectory'>;
-  }) => Promise<{ filePath: string | null; canceled: boolean }>;
+  }) => Promise<{ filePath: string | null; canceled: boolean; mediaToken: string | null }>;
   showSaveDialog: (options: {
     title?: string;
     defaultPath?: string;
@@ -494,6 +494,21 @@ export interface KiyeovoAPI {
   getDownloadsDir: () => Promise<{ success: boolean; path: string | null; error: string | null }>;
   setDownloadsDir: (path: string) => Promise<{ success: boolean; error: string | null }>;
 
+  registerMessageMedia: (messageId: string) => Promise<{
+    success: boolean;
+    token: string | null;
+    error: string | null;
+  }>;
+  saveUpload: (
+    bytes: Uint8Array,
+    fileName: string,
+  ) => Promise<{
+    success: boolean;
+    filePath: string | null;
+    mediaToken: string | null;
+    uploadsDirSizeBytes: number;
+    error: string | null;
+  }>;
   sendFile: (peerId: string, filePath: string, fileId?: string) => Promise<{ success: boolean; error: string | null }>;
   acceptFile: (fileId: string) => Promise<{ success: boolean; error: string | null }>;
   rejectFile: (fileId: string) => Promise<{ success: boolean; error: string | null }>;

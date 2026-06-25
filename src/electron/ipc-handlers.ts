@@ -17,7 +17,7 @@ import {
   type IceServerType,
   type IceServersResponse,
 } from '../core/index.js';
-import { CHATS_TO_CHECK_FOR_OFFLINE_MESSAGES, DEFAULT_NETWORK_MODE, DOWNLOADS_DIR, FAST_MISSING_ICE_WARNING_ACKNOWLEDGED_SETTING_KEY, FAST_RELAY_MULTIADDRS_SETTING_KEY, FILE_OFFER_RATE_LIMIT, KEY_EXCHANGE_RATE_LIMIT_DEFAULT, MAX_FILE_SIZE, MAX_PENDING_FILES_PER_PEER, MAX_PENDING_FILES_TOTAL, NETWORK_MODE_ONBOARDED_SETTING_KEY, OFFLINE_MESSAGE_LIMIT, SILENT_REJECTION_THRESHOLD_GLOBAL, SILENT_REJECTION_THRESHOLD_PER_PEER, NETWORK_MODES, WEBRTC_ICE_SERVERS_SETTING_KEY, getInitialSetupStatusSettingKey, getTorConfig, isNetworkMode } from '../core/constants.js';
+import { CHATS_TO_CHECK_FOR_OFFLINE_MESSAGES, DEFAULT_NETWORK_MODE, DOWNLOADS_DIR, FAST_MISSING_ICE_WARNING_ACKNOWLEDGED_SETTING_KEY, FAST_RELAY_MULTIADDRS_SETTING_KEY, FILE_OFFER_RATE_LIMIT, KEY_EXCHANGE_RATE_LIMIT_DEFAULT, MAX_FILE_SIZE, MAX_PENDING_FILES_PER_PEER, MAX_PENDING_FILES_TOTAL, NETWORK_MODE_ONBOARDED_SETTING_KEY, OFFLINE_MESSAGE_LIMIT, SILENT_REJECTION_THRESHOLD_GLOBAL, SILENT_REJECTION_THRESHOLD_PER_PEER, NETWORK_MODES, UPLOADS_DIR, WEBRTC_ICE_SERVERS_SETTING_KEY, getInitialSetupStatusSettingKey, getTorConfig, isNetworkMode } from '../core/constants.js';
 import { validateMessageLength, validateUsername } from '../core/utils/validators.js';
 import { peerIdFromString } from '@libp2p/peer-id';
 import { multiaddr } from '@multiformats/multiaddr';
@@ -32,16 +32,18 @@ import {
   serializeFastRelayAddressList,
 } from '../core/network/node-relays.js';
 import { DEFAULT_WEBRTC_ICE_SERVERS } from '../core/network/default-infrastructure.js';
-import { ensureAppDataDir } from '../core/utils/miscellaneous.js';
+import { ensureAppDataDir, formatCopyTimestamp } from '../core/utils/miscellaneous.js';
 import { homedir } from 'os';
-import { basename, isAbsolute, join, resolve as resolvePath } from 'path';
-import { copyFile, stat } from 'fs/promises';
+import { basename, dirname, extname, isAbsolute, join, resolve as resolvePath } from 'path';
+import { copyFile, lstat, mkdir, readdir, realpath, rm, stat, writeFile } from 'fs/promises';
 import { log } from '../shared/logger.js';
+import { isImageFile } from '../shared/file-types.js';
 import { errStr } from '../core/utils/general-error.js';
 import { ChatDatabase } from '../core/db/database.js';
 import { isNetworkConnected } from './network-connectivity.js';
 import { scheduleAppRelaunch } from './relaunch.js';
 import { createTrustedIpcMainHandle, type IpcMainHandleRegistrar } from './trusted-ipc.js';
+import { mintMediaToken } from './app-protocol.js';
 import type { InitialSetupStatus } from '../shared/kiyeovo-api.js';
 
 function requestAppRestart(): void {
@@ -63,6 +65,56 @@ function withSettingsDatabase<T>(getP2PCore: () => P2PCore | null, run: (db: Cha
   } finally {
     tempDb.close();
   }
+}
+
+function resolveUploadsDirectory(db: ChatDatabase): string {
+  const configuredDownloadsDir = db.getSetting('downloads_directory') || DOWNLOADS_DIR;
+  const downloadsDir = isAbsolute(configuredDownloadsDir)
+    ? configuredDownloadsDir
+    : resolvePath(process.cwd(), configuredDownloadsDir);
+  return join(dirname(downloadsDir), UPLOADS_DIR);
+}
+
+function getConfiguredMaxFileSize(db: ChatDatabase): number {
+  const configured = Number.parseInt(db.getSetting('max_file_size') || '', 10);
+  return Number.isFinite(configured) && configured > 0 ? configured : MAX_FILE_SIZE;
+}
+
+async function writeUploadAtomically(
+  uploadsDir: string,
+  fileName: string,
+  bytes: Buffer,
+): Promise<string> {
+  const extension = extname(fileName);
+  const nameWithoutExtension = basename(fileName, extension);
+
+  for (let attempt = 0; attempt < 1000; attempt += 1) {
+    const candidateName = attempt === 0
+      ? fileName
+      : `${nameWithoutExtension}_copy_${formatCopyTimestamp(new Date())}${attempt > 1 ? `_${attempt - 1}` : ''}${extension}`;
+    const candidatePath = join(uploadsDir, candidateName);
+
+    try {
+      await writeFile(candidatePath, bytes, { flag: 'wx' });
+      return candidatePath;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw error;
+      }
+    }
+  }
+
+  throw new Error('Unable to allocate a unique upload filename');
+}
+
+async function getFlatDirectorySize(directoryPath: string): Promise<number> {
+  const entries = await readdir(directoryPath, { withFileTypes: true });
+  const sizes = await Promise.all(
+    entries
+      .filter((entry) => entry.isFile())
+      .map(async (entry) => (await stat(join(directoryPath, entry.name))).size),
+  );
+  return sizes.reduce((total, size) => total + size, 0);
 }
 
 function normalizeAddressList(addresses: string[]): string[] {
@@ -267,6 +319,12 @@ export function setupIPCHandlers(
 
   // File dialog handlers
   setupFileDialogHandlers(trustedIpcMain);
+
+  // Capability-gated local media handlers
+  setupMediaHandlers(trustedIpcMain, getP2PCore);
+
+  // Persistent pasted-image storage
+  setupUploadHandlers(trustedIpcMain, getP2PCore);
 
   // Chat handlers
   setupChatHandlers(trustedIpcMain, getP2PCore);
@@ -1313,13 +1371,37 @@ function setupFileDialogHandlers(ipcMain: IpcMainHandleRegistrar): void {
         filters: options.filters || []
       });
 
+      const filePath = result.filePaths[0] || null;
+      let mediaToken: string | null = null;
+      if (!result.canceled && filePath && isImageFile(filePath)) {
+        try {
+          const selectedPathStats = await lstat(filePath);
+          if (selectedPathStats.isSymbolicLink()) {
+            console.warn('[IPC][SECURITY] Refusing media capability for symbolic-link selection');
+            return {
+              filePath,
+              canceled: result.canceled,
+              mediaToken: null,
+            };
+          }
+          const canonicalPath = await realpath(filePath);
+          const fileStats = await stat(canonicalPath);
+          if (fileStats.isFile()) {
+            mediaToken = mintMediaToken(canonicalPath);
+          }
+        } catch (error) {
+          console.warn('[IPC] Failed to create selected-image media capability:', error);
+        }
+      }
+
       return {
-        filePath: result.filePaths[0] || null,
-        canceled: result.canceled
+        filePath,
+        canceled: result.canceled,
+        mediaToken,
       };
     } catch (error) {
       console.error('[IPC] Failed to show open dialog:', error);
-      return { filePath: null, canceled: true };
+      return { filePath: null, canceled: true, mediaToken: null };
     }
   });
 
@@ -1366,6 +1448,165 @@ function setupFileDialogHandlers(ipcMain: IpcMainHandleRegistrar): void {
         name: null,
         size: null,
         error: errStr(error, 'Failed to get file metadata')
+      };
+    }
+  });
+}
+
+function setupMediaHandlers(
+  ipcMain: IpcMainHandleRegistrar,
+  getP2PCore: () => P2PCore | null,
+): void {
+  ipcMain.handle(IPC_CHANNELS.REGISTER_MESSAGE_MEDIA, async (_event, messageId: string) => {
+    try {
+      if (typeof messageId !== 'string' || !messageId.trim()) {
+        return { success: false, token: null, error: 'Invalid message ID' };
+      }
+
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { success: false, token: null, error: 'P2P core not initialized' };
+      }
+
+      const media = p2pCore.database.getCompletedFileMediaById(messageId);
+      if (!media || !isImageFile(media.fileName)) {
+        return { success: false, token: null, error: 'Completed image message not found' };
+      }
+
+      const storedPathStats = await lstat(media.filePath);
+      if (storedPathStats.isSymbolicLink()) {
+        return { success: false, token: null, error: 'Symbolic-link media paths are not allowed' };
+      }
+
+      const canonicalPath = await realpath(media.filePath);
+      const fileStats = await stat(canonicalPath);
+      if (!fileStats.isFile()) {
+        return { success: false, token: null, error: 'Media path is not a file' };
+      }
+
+      return {
+        success: true,
+        token: mintMediaToken(canonicalPath),
+        error: null,
+      };
+    } catch (error) {
+      console.error('[IPC] Failed to register message media:', error);
+      return {
+        success: false,
+        token: null,
+        error: errStr(error, 'Failed to register message media'),
+      };
+    }
+  });
+}
+
+function setupUploadHandlers(
+  ipcMain: IpcMainHandleRegistrar,
+  getP2PCore: () => P2PCore | null,
+): void {
+  ipcMain.handle(IPC_CHANNELS.SAVE_UPLOAD, async (
+    _event,
+    bytes: unknown,
+    fileName: unknown,
+  ) => {
+    let savedFilePath: string | null = null;
+
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return {
+          success: false,
+          filePath: null,
+          mediaToken: null,
+          uploadsDirSizeBytes: 0,
+          error: 'P2P core not initialized',
+        };
+      }
+
+      if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0) {
+        return {
+          success: false,
+          filePath: null,
+          mediaToken: null,
+          uploadsDirSizeBytes: 0,
+          error: 'Upload bytes are required',
+        };
+      }
+
+      if (typeof fileName !== 'string' || !fileName.trim()) {
+        return {
+          success: false,
+          filePath: null,
+          mediaToken: null,
+          uploadsDirSizeBytes: 0,
+          error: 'Upload filename is required',
+        };
+      }
+
+      const sanitizedFileName = basename(fileName.trim());
+      if (
+        !sanitizedFileName
+        || sanitizedFileName.length > 255
+        || !isImageFile(sanitizedFileName)
+      ) {
+        return {
+          success: false,
+          filePath: null,
+          mediaToken: null,
+          uploadsDirSizeBytes: 0,
+          error: 'Unsupported upload filename',
+        };
+      }
+
+      const maxFileSize = getConfiguredMaxFileSize(p2pCore.database);
+      if (bytes.byteLength > maxFileSize) {
+        return {
+          success: false,
+          filePath: null,
+          mediaToken: null,
+          uploadsDirSizeBytes: 0,
+          error: `Image exceeds the configured file-size limit (${maxFileSize} bytes)`,
+        };
+      }
+
+      const uploadsDir = resolveUploadsDirectory(p2pCore.database);
+      await mkdir(uploadsDir, { recursive: true });
+      savedFilePath = await writeUploadAtomically(
+        uploadsDir,
+        sanitizedFileName,
+        Buffer.from(bytes),
+      );
+
+      const uploadsDirSizeBytes = await getFlatDirectorySize(uploadsDir);
+      const canonicalPath = await realpath(savedFilePath);
+      const savedFileStats = await stat(canonicalPath);
+      if (!savedFileStats.isFile()) {
+        throw new Error('Saved upload is not a regular file');
+      }
+
+      log(`[IPC] Saved pasted image upload: ${sanitizedFileName} (${bytes.byteLength} bytes)`);
+      return {
+        success: true,
+        filePath: savedFilePath,
+        mediaToken: mintMediaToken(canonicalPath),
+        uploadsDirSizeBytes,
+        error: null,
+      };
+    } catch (error) {
+      if (savedFilePath) {
+        try {
+          await rm(savedFilePath, { force: true });
+        } catch (cleanupError) {
+          console.error('[IPC] Failed to remove incomplete pasted-image upload:', cleanupError);
+        }
+      }
+      console.error('[IPC] Failed to save pasted-image upload:', error);
+      return {
+        success: false,
+        filePath: null,
+        mediaToken: null,
+        uploadsDirSizeBytes: 0,
+        error: errStr(error, 'Failed to save pasted image'),
       };
     }
   });
@@ -2915,8 +3156,35 @@ function setupAppHandlers(ipcMain: IpcMainHandleRegistrar, getP2PCore: () => P2P
       }
 
       log('[IPC] Deleting all account data...');
+      const uploadsDir = resolveUploadsDirectory(p2pCore.database);
 
       await p2pCore.database.wipeDatabase();
+
+      try {
+        await rm(uploadsDir, { recursive: true, force: true });
+      } catch (error) {
+        const cleanupError = errStr(error, 'Unknown filesystem error');
+        console.error('[IPC] Account database was wiped, but pasted-image uploads could not be removed:', error);
+        try {
+          await dialog.showMessageBox({
+            type: 'error',
+            title: 'Account deleted with cleanup error',
+            message: 'Your account database was deleted, but pasted-image uploads could not be removed.',
+            detail: `${uploadsDir}\n\n${cleanupError}`,
+            buttons: ['Restart Kiyeovo'],
+            defaultId: 0,
+            noLink: true,
+          });
+        } catch (dialogError) {
+          console.error('[IPC] Failed to show pasted-image cleanup error dialog:', dialogError);
+        } finally {
+          requestAppRestart();
+        }
+        return {
+          success: false,
+          error: `Account database was wiped, but pasted-image uploads could not be removed: ${cleanupError}`,
+        };
+      }
 
       log('[IPC] Database wiped. Restarting app...');
 

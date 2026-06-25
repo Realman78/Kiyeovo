@@ -30,6 +30,9 @@ export interface ChatMessage {
   fileName?: string;
   fileSize?: number;
   filePath?: string;
+  // Renderer-session capability for previewing an outgoing image before completion.
+  // Never persisted; completed messages can mint a fresh capability from file_path.
+  filePreviewToken?: string;
   transferStatus?: FileTransferStatus;
   transferProgress?: number; // Percentage 0-100
   transferError?: string;
