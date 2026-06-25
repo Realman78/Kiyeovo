@@ -8,6 +8,7 @@ import type { RootState } from "../../../state/store";
 import { RetryStatus } from "./RetryStatus";
 import { DropdownMenu, DropdownMenuItem } from "../../ui/DropdownMenu";
 import { renderMessageText, endsWithCodeBlock } from "../../../utils/renderMessageText";
+import { MessageInfoDialog } from "./MessageInfoDialog";
 
 export type MessageRowProps = {
   message: ChatMessage;
@@ -66,6 +67,7 @@ export const MessageRow = memo(({
 }: MessageRowProps) => {
   const dispatch = useDispatch();
   const [isCopied, setIsCopied] = useState(false);
+  const [infoOpen, setInfoOpen] = useState(false);
   const [messageMenuOpen, setMessageMenuOpen] = useState(false);
   const [messageMenuSide, setMessageMenuSide] = useState<'top' | 'bottom'>('bottom');
   const rowRef = useRef<HTMLDivElement>(null);
@@ -236,8 +238,12 @@ export const MessageRow = memo(({
     setMessageMenuOpen(open);
   };
 
-  const hasMessageMenu = isCopyableTextMessage || isSelectable || isPinnable;
-  const messageMenu = !selectionMode && hasMessageMenu ? (
+  const handleOpenInfo = () => {
+    setMessageMenuOpen(false);
+    setInfoOpen(true);
+  };
+
+  const messageMenu = !selectionMode ? (
     <div className={`absolute right-1 top-1 z-70 transition-[opacity,transform] duration-200 ease-out ${
       messageMenuOpen
         ? "pointer-events-auto translate-y-0 scale-100 opacity-100"
@@ -261,6 +267,12 @@ export const MessageRow = memo(({
           </button>
         )}
       >
+        <DropdownMenuItem
+          icon={<Info className="h-4 w-4" />}
+          onClick={handleOpenInfo}
+        >
+          Info
+        </DropdownMenuItem>
         {isCopyableTextMessage && (
           <DropdownMenuItem
             icon={isCopied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
@@ -431,6 +443,13 @@ export const MessageRow = memo(({
           </span>
         )}
       </div>
+      <MessageInfoDialog
+        open={infoOpen}
+        onOpenChange={setInfoOpen}
+        message={message}
+        isOwnMessage={isOwnMessage}
+        replyQuote={replyQuote}
+      />
     </div>
   );
 });

@@ -5,3 +5,8 @@ export const formatTimestampToHourMinuteEu = (timestamp: number) => {
         hour12: false,
     });
 };
+
+// Full, locale-aware date + time
+export const formatFullDateTime = (timestamp: number) => {
+    return new Date(timestamp).toLocaleString();
+};
