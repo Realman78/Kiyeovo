@@ -44,7 +44,8 @@ import { isNetworkConnected } from './network-connectivity.js';
 import { scheduleAppRelaunch } from './relaunch.js';
 import { createTrustedIpcMainHandle, type IpcMainHandleRegistrar } from './trusted-ipc.js';
 import { mintMediaToken } from './app-protocol.js';
-import type { InitialSetupStatus } from '../shared/kiyeovo-api.js';
+import { prepareTextUpload } from './text-upload.js';
+import type { InitialSetupStatus, SaveTextUploadResponse } from '../shared/kiyeovo-api.js';
 
 function requestAppRestart(): void {
   scheduleAppRelaunch();
@@ -1608,6 +1609,73 @@ function setupUploadHandlers(
         uploadsDirSizeBytes: 0,
         error: errStr(error, 'Failed to save pasted image'),
       };
+    }
+  });
+
+  const textUploadFailure = (error: string): SaveTextUploadResponse => ({
+    success: false,
+    filePath: null,
+    fileName: null,
+    fileSize: 0,
+    uploadsDirSizeBytes: 0,
+    error,
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SAVE_TEXT_UPLOAD, async (
+    _event,
+    text: unknown,
+    fileName: unknown,
+  ): Promise<SaveTextUploadResponse> => {
+    let savedFilePath: string | null = null;
+
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return textUploadFailure('P2P core not initialized');
+      }
+
+      const maxFileSize = getConfiguredMaxFileSize(p2pCore.database);
+      const prepared = prepareTextUpload(text, fileName, maxFileSize);
+      if (!prepared.success) {
+        return textUploadFailure(prepared.error);
+      }
+
+      const uploadsDir = resolveUploadsDirectory(p2pCore.database);
+      await mkdir(uploadsDir, { recursive: true });
+      savedFilePath = await writeUploadAtomically(
+        uploadsDir,
+        prepared.fileName,
+        prepared.bytes,
+      );
+
+      const canonicalPath = await realpath(savedFilePath);
+      const savedFileStats = await stat(canonicalPath);
+      if (!savedFileStats.isFile()) {
+        throw new Error('Saved text upload is not a regular file');
+      }
+
+      const uploadsDirSizeBytes = await getFlatDirectorySize(uploadsDir);
+      const finalFileName = basename(savedFilePath);
+      log(`[IPC] Saved generated text upload: ${finalFileName} (${savedFileStats.size} bytes)`);
+
+      return {
+        success: true,
+        filePath: savedFilePath,
+        fileName: finalFileName,
+        fileSize: savedFileStats.size,
+        uploadsDirSizeBytes,
+        error: null,
+      };
+    } catch (error) {
+      if (savedFilePath) {
+        try {
+          await rm(savedFilePath, { force: true });
+        } catch (cleanupError) {
+          console.error('[IPC] Failed to remove incomplete text upload:', cleanupError);
+        }
+      }
+      console.error('[IPC] Failed to save generated text upload:', error);
+      return textUploadFailure(errStr(error, 'Failed to save generated text'));
     }
   });
 }
