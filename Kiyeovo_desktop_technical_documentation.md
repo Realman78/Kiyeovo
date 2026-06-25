@@ -288,11 +288,15 @@ Current operational behavior:
 - non-terminal transfers are marked failed on app restart/close
 - duplicate filename handling uses copy-style timestamped filenames
 - completed image files render inline for both sender and receiver; receivers retain the existing file card until completion, and non-previewable transfer states also remain cards
-- outgoing image sends keep the sender's trusted picker capability in renderer state, so the sender sees the image immediately with connecting/approval/progress/failure status beneath it; receivers still see the file-offer card until the transfer completes
+- outgoing image sends keep the sender's trusted selection/upload capability in renderer state, so the sender sees the image immediately with connecting/approval/progress/failure status beneath it; receivers still see the file-offer card until the transfer completes
 - clicking an inline image opens a viewport-sized preview dialog using the same capability-backed media URL; Escape, the close control, and backdrop clicks close it
 - inline images keep a compact searchable filename/size caption; completed files retain show-in-folder as a secondary action in both the message caption and preview dialog, while sender-only pending previews do not expose filesystem actions
 - unavailable inline media falls back to the file card
 - images selected through the paperclip flow show a capability-backed preview in the confirmation dialog, while non-image selections keep the existing dialog layout
+- pasting a supported image MIME into a direct-chat composer opens the same confirmation dialog with a renderer-owned blob preview; group chats and unsupported clipboard content retain normal paste behavior
+- pasted bytes are not re-encoded or compressed; after confirmation, the main process validates the image extension and configured file-size limit, writes the file atomically without overwriting, and then hands the resulting path to the unchanged file-transfer pipeline
+- pasted images persist in `kiyeovo-uploads/`, resolved as a sibling of the configured downloads directory; generated names use `pasted-image-YYYYMMDD-HHMMSS.<ext>` and collision copies receive timestamped suffixes
+- when the uploads directory grows beyond 100 MB, a non-blocking warning appears once per app session with an action that reveals the newly saved file in its folder
 - the send-file dialog remains mounted through the shared Radix close transition and clears its local selection/preview state only after the exit lifecycle completes
 
 Protections:
@@ -306,7 +310,8 @@ Local image delivery foundation:
 - renderer pages do not receive arbitrary filesystem-read access and do not load `file://` URLs
 - on-disk images are exposed through the dedicated `kiyeovo-media://media/<token>` protocol
 - tokens are random, process-lifetime capabilities bound to canonical filesystem paths; paths are never embedded in renderer media URLs
-- a token can be minted only for a completed, active-network file message persisted in the database, or for the exact image selected through the trusted OS open dialog
+- a token can be minted only for a completed, active-network file message persisted in the database, the exact image selected through the trusted OS open dialog, or the exact pasted-image file just created by the validated upload handler
+- pasted-image save capabilities do not accept renderer paths: the renderer supplies bytes and a sanitized image filename, and the main process chooses and creates the destination before minting the sender-preview token
 - completed-message grants are mode-scoped in the database and require a persisted file path plus an image extension from the shared allowlist
 - symbolic-link file grants are rejected; accepted paths are canonicalized before token binding
 - the protocol resolves the canonical path again before serving, requires a regular file and an `image/*` content type, and returns `no-store`/`nosniff` headers
@@ -475,7 +480,7 @@ Current navigation rollout status:
 - `Settings` is the single settings entry point and is a rail-only page with page-native action rows for About, Notifications & Sounds, downloads, network-mode switching, application configuration, database backup, account deletion, and quitting the app; the duplicate footer settings button and legacy settings modal have been removed
 - in anonymous mode, the Settings page also exposes Tor transport settings; edits require explicit confirmation and an app restart, and a failed automatic restart leaves a visible manual-restart action after the settings have been saved
 - changing network mode requires confirmation and an app restart; if the mode is saved but automatic restart fails, the Settings page keeps the running mode distinct from the pending saved mode and tells the user that a manual restart is required
-- database backup uses a native save dialog and leaves the user on Settings after completion; account deletion requires a typed confirmation before wiping local data and restarting, and closing the confirmation dialog always clears the typed phrase
+- database backup uses a native save dialog and leaves the user on Settings after completion; account deletion requires a typed confirmation before wiping local data and restarting, removes the resolved `kiyeovo-uploads/` directory while leaving downloads untouched, and uses a native error dialog before still restarting if upload cleanup fails after the database wipe; closing the confirmation dialog always clears the typed phrase
 - quitting from Settings requires confirmation and then uses Electron's existing graceful shutdown path, which closes network services and the database before process exit
 - `Help` remains a placeholder pane
 - the left rail remains visible while the adjacent sidebar pane can collapse independently
