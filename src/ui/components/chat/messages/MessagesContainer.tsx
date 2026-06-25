@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from "react";
 import { finalizeSendingMessage, markOfflineFetched, markOfflineFetchFailed, prependMessages, replaceMessagesForChat, resolveMessageSendOutcome, setMessages, setOfflineFetchStatus, updateChat, updateLocalMessageSendState, type ChatMessage } from "../../../state/slices/chatSlice";
 import type { RootState } from "../../../state/store";
 import { useDispatch, useSelector } from "react-redux";
-import { formatTimestampToHourMinuteEu } from "../../../utils/dateUtils";
+import { formatTimestampToHourMinuteEu, formatDateDivider, startOfDay } from "../../../utils/dateUtils";
 import { PendingNotifications } from "./PendingNotifications";
 import { MessageRow } from "./MessageRow";
 import type { MessageSentStatus } from "../../../types";
@@ -633,6 +633,7 @@ export const MessagesContainer = ({
   const isTrustedOutOfBand = activeChat?.trusted_out_of_band;
   let previousSenderPeerId: string | null = null;
   let senderStreak = 0;
+  let previousDayStart: number | null = null;
 
   // Briefly tint the target bubble so the eye lands on it after a jump.
   const pulseRow = useCallback((rowEl: HTMLElement) => {
@@ -1132,6 +1133,17 @@ export const MessagesContainer = ({
     </div>}
     {messages.map((message) => {
       const isSystemMessage = message.messageType === 'system';
+
+      const messageDayStart = startOfDay(message.timestamp).getTime();
+      const showDateDivider = previousDayStart === null || previousDayStart !== messageDayStart;
+      previousDayStart = messageDayStart;
+      if (showDateDivider) {
+        // A new day breaks sender grouping so the first bubble under the
+        // divider gets its tail corner (same as system messages do).
+        previousSenderPeerId = null;
+        senderStreak = 0;
+      }
+
       if (isSystemMessage) {
         // Break sender grouping across system events.
         previousSenderPeerId = null;
@@ -1152,28 +1164,36 @@ export const MessagesContainer = ({
         (senderChanged || senderStreak % 10 === 0);
       const isSelectable = !isPending && isMessageSelectable(message);
       return (
-        <MessageRow
-          key={message.id}
-          message={message}
-          myPeerId={myPeerId}
-          hasActivePendingKeyExchange={!!activePendingKeyExchange}
-          showSenderLabel={showSenderLabel}
-          isFirstInSeries={senderChanged}
-          membershipInfoTooltip={getMembershipInfoTooltip(message)}
-          onRetry={handleRetryFailedMessage}
-          onJumpToMessage={handleJumpToMessage}
-          onTogglePin={onTogglePin}
-          selectionMode={selectionMode}
-          isSelectable={isSelectable}
-          isSelected={isSelectable && selectedMessageIds?.has(message.id) === true}
-          isActiveSearchResult={
-            !!activeSearchClientMsgId
-            && message.clientMsgId === activeSearchClientMsgId
-          }
-          searchQuery={searchHighlightQuery}
-          onToggleSelect={onToggleMessageSelection}
-          onEnterSelection={onEnterMessageSelection}
-        />
+        <Fragment key={message.id}>
+          {showDateDivider && (
+            <div className="w-full flex justify-center py-1">
+              <span className="rounded-md bg-muted/50 px-3 py-1 text-xs text-muted-foreground">
+                {formatDateDivider(message.timestamp)}
+              </span>
+            </div>
+          )}
+          <MessageRow
+            message={message}
+            myPeerId={myPeerId}
+            hasActivePendingKeyExchange={!!activePendingKeyExchange}
+            showSenderLabel={showSenderLabel}
+            isFirstInSeries={senderChanged}
+            membershipInfoTooltip={getMembershipInfoTooltip(message)}
+            onRetry={handleRetryFailedMessage}
+            onJumpToMessage={handleJumpToMessage}
+            onTogglePin={onTogglePin}
+            selectionMode={selectionMode}
+            isSelectable={isSelectable}
+            isSelected={isSelectable && selectedMessageIds?.has(message.id) === true}
+            isActiveSearchResult={
+              !!activeSearchClientMsgId
+              && message.clientMsgId === activeSearchClientMsgId
+            }
+            searchQuery={searchHighlightQuery}
+            onToggleSelect={onToggleMessageSelection}
+            onEnterSelection={onEnterMessageSelection}
+          />
+        </Fragment>
       );
     })}
       <div ref={messagesEndRef} />
