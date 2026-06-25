@@ -451,6 +451,12 @@
     animation: reply-pulse 2.5s ease-out;
   }
 
+  .search-result-active-highlight {
+    box-shadow:
+      inset 0 0 0 9999px hsl(var(--primary) / 0.16),
+      0 0 0 2px hsl(var(--primary) / 0.65);
+  }
+
   /* Loading spinner */
   @keyframes spin-slow {
     from { transform: rotate(0deg); }

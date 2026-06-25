@@ -1461,6 +1461,48 @@ function setupMessageHandlers(
     }
   });
 
+  ipcMain.handle(IPC_CHANNELS.GET_MESSAGE_JUMP_WINDOW, async (
+    _event,
+    chatId: number,
+    clientMsgId: string,
+  ) => {
+    const empty = {
+      status: 'not_found' as const,
+      messages: [],
+      hasMoreOlder: false,
+    };
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { success: false, ...empty, error: 'P2P core not initialized' };
+      }
+      if (
+        !Number.isInteger(chatId)
+        || chatId <= 0
+        || typeof clientMsgId !== 'string'
+        || clientMsgId.length === 0
+      ) {
+        return { success: false, ...empty, error: 'Invalid message jump request' };
+      }
+
+      const result = p2pCore.database.getMessageJumpWindow(chatId, clientMsgId);
+      return {
+        success: true,
+        status: result.status,
+        messages: result.messages,
+        hasMoreOlder: result.hasMoreOlder,
+        error: null,
+      };
+    } catch (error) {
+      console.error('[IPC] Failed to load message jump window:', error);
+      return {
+        success: false,
+        ...empty,
+        error: errStr(error, 'Failed to load message history'),
+      };
+    }
+  });
+
   ipcMain.handle(IPC_CHANNELS.GET_MESSAGE_PREVIEW_BY_CID, async (_event, chatId: number, clientMsgId: string) => {
     try {
       const p2pCore = getP2PCore();

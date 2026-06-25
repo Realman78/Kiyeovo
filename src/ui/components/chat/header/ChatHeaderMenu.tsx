@@ -1,5 +1,5 @@
 import type { FC, ReactNode } from "react";
-import { Ban, Bell, BellOff, Info, ListChecks, LogOut, MoreVertical, Pencil, RefreshCw, Trash2, UserCheck, UserMinus, UserPlus } from "lucide-react";
+import { Ban, Bell, BellOff, Info, ListChecks, LogOut, MoreVertical, Pencil, RefreshCw, Search, Trash2, UserCheck, UserMinus, UserPlus } from "lucide-react";
 import { Button } from "../../ui/Button";
 import { DropdownMenu, DropdownMenuItem } from "../../ui/DropdownMenu";
 
@@ -18,6 +18,7 @@ type ChatHeaderMenuProps = {
   canShowLeaveOrDisband: boolean;
   canDeleteGroupChat: boolean;
   canSelectMessages: boolean;
+  canSearchMessages: boolean;
   onAboutGroup: () => void;
   onAboutUser: () => void;
   onEditUsername: () => void;
@@ -31,6 +32,7 @@ type ChatHeaderMenuProps = {
   onDeleteGroupChat: () => void;
   onToggleBlock: () => void;
   onSelectMessages: () => void;
+  onSearchMessages: () => void;
   onDeleteAllMessages: () => void;
   onDeleteChatAndUser: () => void;
 };
@@ -57,6 +59,7 @@ export const ChatHeaderMenu: FC<ChatHeaderMenuProps> = ({
   canShowLeaveOrDisband,
   canDeleteGroupChat,
   canSelectMessages,
+  canSearchMessages,
   onAboutGroup,
   onAboutUser,
   onEditUsername,
@@ -70,6 +73,7 @@ export const ChatHeaderMenu: FC<ChatHeaderMenuProps> = ({
   onDeleteGroupChat,
   onToggleBlock,
   onSelectMessages,
+  onSearchMessages,
   onDeleteAllMessages,
   onDeleteChatAndUser,
 }) => {
@@ -94,6 +98,14 @@ export const ChatHeaderMenu: FC<ChatHeaderMenuProps> = ({
           label: 'Select messages',
           icon: <ListChecks className="w-4 h-4" />,
           onClick: onSelectMessages,
+        }]
+      : []),
+    ...(canSearchMessages
+      ? [{
+          key: 'search-messages',
+          label: 'Search messages',
+          icon: <Search className="w-4 h-4" />,
+          onClick: onSearchMessages,
         }]
       : []),
     ...(groupStatus === 'active'
@@ -179,6 +191,14 @@ export const ChatHeaderMenu: FC<ChatHeaderMenuProps> = ({
           label: 'Select messages',
           icon: <ListChecks className="w-4 h-4" />,
           onClick: onSelectMessages,
+        }]
+      : []),
+    ...(canSearchMessages
+      ? [{
+          key: 'search-messages',
+          label: 'Search messages',
+          icon: <Search className="w-4 h-4" />,
+          onClick: onSearchMessages,
         }]
       : []),
     {

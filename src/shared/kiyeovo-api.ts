@@ -92,6 +92,12 @@ export type ChatMessageSearchResponse = {
   nextCursor: ChatMessageSearchCursor | null;
 };
 
+export type MessageJumpWindowResponse = {
+  status: 'loaded' | 'too_deep' | 'not_found';
+  messages: KiyeovoMessage[];
+  hasMoreOlder: boolean;
+};
+
 export type ScreenShareSupportResponse = {
   success: boolean;
   supported: boolean;
@@ -292,6 +298,13 @@ export interface KiyeovoAPI {
   getMessages: (chatId: number, limit?: number, offset?: number) => Promise<{
     success: boolean;
     messages: KiyeovoMessage[];
+    error: string | null;
+  }>;
+  getMessageJumpWindow: (chatId: number, clientMsgId: string) => Promise<{
+    success: boolean;
+    status: MessageJumpWindowResponse['status'];
+    messages: KiyeovoMessage[];
+    hasMoreOlder: boolean;
     error: string | null;
   }>;
   getMessagePreviewByCid: (chatId: number, clientMsgId: string) => Promise<{

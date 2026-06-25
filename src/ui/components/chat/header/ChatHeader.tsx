@@ -26,6 +26,7 @@ import { ChatHeaderMenu } from "./ChatHeaderMenu";
 import { errStr } from '../../../../core/utils/general-error';
 import { Button } from "../../ui/Button";
 import { useConnectivityGuidance } from "../../../hooks/useConnectivityGuidance";
+import { ConversationSearchHeader } from "./ConversationSearchHeader";
 
 type ChatHeaderProps = {
   username: string;
@@ -36,6 +37,13 @@ type ChatHeaderProps = {
   onSelectMessages?: () => void;
   selectionMode?: boolean;
   onCancelSelection?: () => void;
+  searchMode?: boolean;
+  searchQuery?: string;
+  searchLoading?: boolean;
+  searchFocusRequest?: number;
+  onStartSearch?: () => void;
+  onSearchQueryChange?: (query: string) => void;
+  onCancelSearch?: () => void;
 }
 
 export const ChatHeader = ({
@@ -47,6 +55,13 @@ export const ChatHeader = ({
   onSelectMessages,
   selectionMode = false,
   onCancelSelection,
+  searchMode = false,
+  searchQuery = '',
+  searchLoading = false,
+  searchFocusRequest = 0,
+  onStartSearch,
+  onSearchQueryChange,
+  onCancelSearch,
 }: ChatHeaderProps) => {
   const activeChat = useSelector((state: RootState) => state.chat.activeChat);
   const chats = useSelector((state: RootState) => state.chat.chats);
@@ -335,6 +350,11 @@ export const ChatHeader = ({
 
   const handleSelectMessages = () => {
     onSelectMessages?.();
+    setDropdownOpen(false);
+  };
+
+  const handleSearchMessages = () => {
+    onStartSearch?.();
     setDropdownOpen(false);
   };
 
@@ -1064,6 +1084,18 @@ export const ChatHeader = ({
   const canDeleteGroupChat = isGroup
     && (resolvedGroupStatus === 'disbanded' || groupCreatorLinkState.broken);
 
+  if (searchMode && onSearchQueryChange && onCancelSearch) {
+    return (
+      <ConversationSearchHeader
+        query={searchQuery}
+        loading={searchLoading}
+        focusRequest={searchFocusRequest}
+        onQueryChange={onSearchQueryChange}
+        onCancel={onCancelSearch}
+      />
+    );
+  }
+
   return <div className={`${showGroupStateMessage || showDirectInactivityWarning ? 'h-20' : 'h-16'} px-6 flex items-center justify-between border-b border-border ${activeChat?.status === 'pending' ? "" : "bg-card/50"}`}>
     <div className="flex min-w-12 flex-1 items-center gap-3">
       {isGroup ? (
@@ -1188,6 +1220,7 @@ export const ChatHeader = ({
         canShowLeaveOrDisband={canShowLeaveOrDisband}
         canDeleteGroupChat={canDeleteGroupChat}
         canSelectMessages={!!activeChat && !!onSelectMessages}
+        canSearchMessages={!!activeChat && !!onStartSearch}
         onAboutGroup={handleAboutGroup}
         onAboutUser={handleAboutUser}
         onEditUsername={handleEditUsername}
@@ -1201,6 +1234,7 @@ export const ChatHeader = ({
         onDeleteGroupChat={handleDeleteGroupChat}
         onToggleBlock={handleToggleBlock}
         onSelectMessages={handleSelectMessages}
+        onSearchMessages={handleSearchMessages}
         onDeleteAllMessages={handleDeleteAllMessages}
         onDeleteChatAndUser={handleDeleteChatAndUser}
       />

@@ -24,6 +24,8 @@ import {
 const MAX_SEARCH_QUERY_LENGTH = 256;
 const DEFAULT_SEARCH_PAGE_SIZE = 20;
 const MAX_SEARCH_PAGE_SIZE = 50;
+const MESSAGE_JUMP_CONTEXT_SIZE = 20;
+const MAX_MESSAGE_JUMP_WINDOW_SIZE = 200;
 
 /** Escape LIKE wildcards so a 1-2 char fallback query matches literally. */
 function escapeLikePattern(value: string): string {
@@ -50,6 +52,12 @@ export interface ChatMessageSearchResponse {
     total: number;
     snapshotMaxRowid: number;
     nextCursor: ChatMessageSearchCursor | null;
+}
+
+export interface MessageJumpWindowResponse {
+    status: 'loaded' | 'too_deep' | 'not_found';
+    messages: Array<Message & { sender_username?: string | undefined }>;
+    hasMoreOlder: boolean;
 }
 
 export interface User {
@@ -2493,6 +2501,79 @@ export class ChatDatabase {
             created_at: new Date(row.created_at),
             sender_username: row.sender_username || undefined
         }));
+    }
+
+    getMessageJumpWindow(chatId: number, clientMsgId: string): MessageJumpWindowResponse {
+        if (!Number.isInteger(chatId) || chatId <= 0 || typeof clientMsgId !== 'string' || clientMsgId.length === 0) {
+            throw new Error('Invalid message jump request');
+        }
+
+        const loadWindow = this.db.transaction((): MessageJumpWindowResponse => {
+            const target = this.db.prepare(`
+                SELECT rowid, timestamp
+                FROM messages
+                WHERE chat_id = ? AND client_msg_id = ?
+                LIMIT 1
+            `).get(chatId, clientMsgId) as { rowid: number; timestamp: string } | undefined;
+
+            if (!target) {
+                return { status: 'not_found', messages: [], hasMoreOlder: false };
+            }
+
+            const newerCount = (this.db.prepare(`
+                SELECT COUNT(*) AS count
+                FROM messages
+                WHERE chat_id = ?
+                  AND (
+                    timestamp > ?
+                    OR (timestamp = ? AND rowid > ?)
+                  )
+            `).get(chatId, target.timestamp, target.timestamp, target.rowid) as { count: number }).count;
+
+            const requiredCount = newerCount + 1;
+            if (requiredCount > MAX_MESSAGE_JUMP_WINDOW_SIZE) {
+                return { status: 'too_deep', messages: [], hasMoreOlder: true };
+            }
+
+            const limit = Math.min(
+                MAX_MESSAGE_JUMP_WINDOW_SIZE,
+                requiredCount + MESSAGE_JUMP_CONTEXT_SIZE,
+            );
+            const rows = this.db.prepare(`
+                SELECT * FROM (
+                    SELECT
+                        m.*,
+                        u.username AS sender_username
+                    FROM messages m
+                    JOIN chats c ON c.id = m.chat_id
+                    LEFT JOIN users u
+                      ON m.sender_peer_id = u.peer_id
+                     AND u.network_mode = c.network_mode
+                    WHERE m.chat_id = ?
+                    ORDER BY m.timestamp DESC, m.rowid DESC
+                    LIMIT ?
+                ) AS jump_window
+                ORDER BY timestamp ASC
+            `).all(chatId, limit) as any[];
+
+            const total = (this.db.prepare(
+                'SELECT COUNT(*) AS count FROM messages WHERE chat_id = ?'
+            ).get(chatId) as { count: number }).count;
+
+            return {
+                status: 'loaded',
+                messages: rows.map((row) => ({
+                    ...row,
+                    timestamp: new Date(row.timestamp),
+                    event_timestamp: row.event_timestamp ? new Date(row.event_timestamp) : null,
+                    created_at: new Date(row.created_at),
+                    sender_username: row.sender_username || undefined,
+                })),
+                hasMoreOlder: total > rows.length,
+            };
+        });
+
+        return loadWindow();
     }
 
     getMessagePreviewByClientMsgId(chatId: number, clientMsgId: string): {

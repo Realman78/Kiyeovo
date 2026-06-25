@@ -24,6 +24,9 @@ type MessagesContainerProps = {
   onEnterMessageSelection?: (messageId: string) => void;
   historyRefreshRequest?: MessageHistoryRefreshRequest | null;
   onHistoryRefreshHandled?: (requestId: number) => void;
+  messageJumpRequest?: MessageJumpRequest | null;
+  onMessageJumpHandled?: (requestId: number, outcome: MessageJumpOutcome) => void;
+  activeSearchClientMsgId?: string | null;
   onOfflineInboxRelevant?: () => void;
   bottomOverlayClearancePx?: number;
 }
@@ -33,6 +36,14 @@ export type MessageHistoryRefreshRequest = {
   chatId: number;
   visibleCount: number;
 };
+
+export type MessageJumpRequest = {
+  requestId: number;
+  chatId: number;
+  clientMsgId: string;
+};
+
+export type MessageJumpOutcome = 'completed' | 'unavailable' | 'cancelled' | 'error';
 
 type LoadMoreResult = 'loaded' | 'exhausted' | 'cancelled' | 'error';
 const TERMINAL_FILE_TRANSFER_STATUSES = new Set<FileTransferStatus>([
@@ -102,6 +113,9 @@ export const MessagesContainer = ({
   onEnterMessageSelection,
   historyRefreshRequest,
   onHistoryRefreshHandled,
+  messageJumpRequest,
+  onMessageJumpHandled,
+  activeSearchClientMsgId,
   onOfflineInboxRelevant,
   bottomOverlayClearancePx = 0,
 }: MessagesContainerProps) => {
@@ -614,11 +628,16 @@ export const MessagesContainer = ({
     requestAnimationFrame(checkVisibility);
   }), []);
 
-  const handleJumpToMessage = useCallback(async (clientMsgId: string) => {
+  const performMessageJump = useCallback(async (
+    clientMsgId: string,
+    expectedChatId?: number,
+  ): Promise<MessageJumpOutcome> => {
     const chatId = activeChat?.id;
     const container = scrollContainerRef.current;
-    if (!chatId || !container) return;
-    const requestToken = loadTokenRef.current;
+    if (!chatId || !container || (expectedChatId !== undefined && expectedChatId !== chatId)) {
+      return 'cancelled';
+    }
+    let requestToken = loadTokenRef.current;
     const jumpGeneration = ++jumpGenerationRef.current;
     const findRow = () => container.querySelector<HTMLElement>(`[data-cid="${CSS.escape(clientMsgId)}"]`);
     const isCurrentJump = () =>
@@ -630,15 +649,57 @@ export const MessagesContainer = ({
     isJumpingRef.current = true;
     try {
       let row = findRow();
+      if (!row) {
+        const startingIds = new Set(
+          persistedMessagesRef.current
+            .filter((message) => message.chatId === chatId)
+            .map((message) => message.id)
+        );
+        const jumpWindow = await window.kiyeovoAPI.getMessageJumpWindow(chatId, clientMsgId);
+        if (!isCurrentJump()) return 'cancelled';
+        if (!jumpWindow.success) return 'error';
+        if (jumpWindow.status === 'not_found') return 'unavailable';
+
+        if (jumpWindow.status === 'loaded') {
+          requestToken = ++loadTokenRef.current;
+          loadMoreInFlightRef.current = null;
+          isLoadingMoreRef.current = false;
+          setIsLoadingMore(false);
+
+          const fetched = jumpWindow.messages.map(mapDbMessage);
+          const fetchedIds = new Set(fetched.map((message) => message.id));
+          const messagesAddedDuringFetch = persistedMessagesRef.current.filter(
+            (message) =>
+              message.chatId === chatId
+              && !startingIds.has(message.id)
+              && !fetchedIds.has(message.id)
+          );
+          const merged = [...fetched, ...messagesAddedDuringFetch]
+            .sort((a, b) => a.timestamp - b.timestamp);
+
+          skipNextAutoScrollRef.current = true;
+          dispatch(replaceMessagesForChat({ chatId, messages: merged }));
+          offsetRef.current = fetched.length;
+          setHasMore(jumpWindow.hasMoreOlder);
+
+          await new Promise<void>((resolve) => {
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+          });
+          if (!isCurrentJump()) return 'cancelled';
+          row = findRow();
+          if (!row) return 'unavailable';
+        }
+      }
+
       const MAX_PAGES = 200;
       let pages = 0;
       let exhausted = false;
       while (!row && pages < MAX_PAGES) {
         const result = await loadMore();
-        if (!isCurrentJump()) return;
+        if (!isCurrentJump()) return 'cancelled';
 
         await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-        if (!isCurrentJump()) return;
+        if (!isCurrentJump()) return 'cancelled';
 
         row = findRow();
         if (row) break;
@@ -650,30 +711,68 @@ export const MessagesContainer = ({
           exhausted = true;
           break;
         }
-        if (result === 'error') {
-          toast.error('Could not load older messages');
-        }
-        return;
+        return result === 'error' ? 'error' : 'cancelled';
       }
 
-      if (!isCurrentJump()) return;
+      if (!isCurrentJump()) return 'cancelled';
       if (row) {
         row.scrollIntoView({ behavior: 'smooth', block: 'center' });
         const isVisible = await waitForJumpTarget(row, container, isCurrentJump);
-        if (!isVisible || !isCurrentJump()) return;
+        if (!isVisible || !isCurrentJump()) return 'cancelled';
         pulseRow(row);
-      } else if (exhausted) {
-        toast.info('Original message is no longer available');
-      } else {
-        toast.info('Could not search the full message history');
+        return 'completed';
       }
+      return exhausted ? 'unavailable' : 'error';
     } finally {
       if (jumpGenerationRef.current === jumpGeneration) {
         isJumpingRef.current = false;
         skipNextAutoScrollRef.current = false;
       }
     }
-  }, [activeChat?.id, loadMore, pulseRow, toast, waitForJumpTarget]);
+  }, [activeChat?.id, dispatch, loadMore, pulseRow, waitForJumpTarget]);
+
+  const handleJumpToMessage = useCallback(async (clientMsgId: string) => {
+    const outcome = await performMessageJump(clientMsgId);
+    if (outcome === 'unavailable') {
+      toast.info('Original message is no longer available');
+    } else if (outcome === 'error') {
+      toast.error('Could not search the full message history');
+    }
+  }, [performMessageJump, toast]);
+
+  const runExternalMessageJump = useEffectEvent(async (request: MessageJumpRequest) => {
+    return performMessageJump(request.clientMsgId, request.chatId);
+  });
+
+  const reportExternalMessageJump = useEffectEvent((
+    requestId: number,
+    outcome: MessageJumpOutcome,
+  ) => {
+    onMessageJumpHandled?.(requestId, outcome);
+  });
+
+  useEffect(() => {
+    if (!messageJumpRequest) return;
+
+    const request = messageJumpRequest;
+    let cancelled = false;
+    void (async () => {
+      const outcome = await runExternalMessageJump(request);
+      if (!cancelled) {
+        reportExternalMessageJump(request.requestId, outcome);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      jumpGenerationRef.current += 1;
+      isJumpingRef.current = false;
+      skipNextAutoScrollRef.current = false;
+    };
+  }, [
+    activeChat?.id,
+    messageJumpRequest,
+  ]);
 
   const handleRetryFailedMessage = useCallback(async (message: ChatMessage) => {
     if (!activeChat) return;
@@ -1003,6 +1102,10 @@ export const MessagesContainer = ({
           selectionMode={selectionMode}
           isSelectable={isSelectable}
           isSelected={isSelectable && selectedMessageIds?.has(message.id) === true}
+          isActiveSearchResult={
+            !!activeSearchClientMsgId
+            && message.clientMsgId === activeSearchClientMsgId
+          }
           onToggleSelect={onToggleMessageSelection}
           onEnterSelection={onEnterMessageSelection}
         />

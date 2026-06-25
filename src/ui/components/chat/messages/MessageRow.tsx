@@ -21,6 +21,7 @@ export type MessageRowProps = {
   selectionMode?: boolean;
   isSelectable?: boolean;
   isSelected?: boolean;
+  isActiveSearchResult?: boolean;
   onToggleSelect?: (messageId: string) => void;
   onEnterSelection?: (messageId: string) => void;
 };
@@ -54,6 +55,7 @@ export const MessageRow = memo(({
   selectionMode = false,
   isSelectable = false,
   isSelected = false,
+  isActiveSearchResult = false,
   onToggleSelect,
   onEnterSelection,
 }: MessageRowProps) => {
@@ -329,7 +331,9 @@ export const MessageRow = memo(({
               message.messageType === 'file' ? "pb-5" : "pb-2.5"
             } ${isOwnMessage
               ? `order-2 bg-message-sent text-message-sent-foreground${isFirstInSeries ? " rounded-tr-none" : ""}`
-              : `order-1 bg-message-received text-message-received-foreground${isFirstInSeries ? " rounded-tl-none" : ""}`}`}
+              : `order-1 bg-message-received text-message-received-foreground${isFirstInSeries ? " rounded-tl-none" : ""}`} ${
+              isActiveSearchResult ? "search-result-active-highlight" : ""
+            }`}
             style={{ wordBreak: "break-word" }}
           >
             {isFirstInSeries && (
