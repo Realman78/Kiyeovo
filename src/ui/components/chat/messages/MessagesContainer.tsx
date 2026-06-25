@@ -30,6 +30,7 @@ type MessagesContainerProps = {
   searchHighlightQuery?: string;
   onOfflineInboxRelevant?: () => void;
   bottomOverlayClearancePx?: number;
+  onTogglePin?: (message: ChatMessage) => void;
 }
 
 export type MessageHistoryRefreshRequest = {
@@ -102,6 +103,7 @@ function mapDbMessage(msg: Message & { sender_username?: string }): ChatMessage 
     localSendState: msg.local_send_state ?? undefined,
     failedReason: (msg.failed_reason as ChatMessage['failedReason']) ?? undefined,
     retryAfterTs: msg.retry_after_ts ?? undefined,
+    pinnedAt: msg.pinned_at ?? undefined,
   };
 }
 
@@ -120,6 +122,7 @@ export const MessagesContainer = ({
   searchHighlightQuery,
   onOfflineInboxRelevant,
   bottomOverlayClearancePx = 0,
+  onTogglePin,
 }: MessagesContainerProps) => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -132,6 +135,8 @@ export const MessagesContainer = ({
   const messagesLengthRef = useRef(0);
   const observerSeenLengthRef = useRef(0);
   const skipNextAutoScrollRef = useRef(false);
+  // Signature of the message tail
+  const autoScrollTailSignatureRef = useRef('');
   // Jump-to-message: suppress the bottom auto-scroll while we page back to a quote
   const isJumpingRef = useRef(false);
   const jumpGenerationRef = useRef(0);
@@ -561,10 +566,16 @@ export const MessagesContainer = ({
 
   useEffect(() => {
     if (isJumpingRef.current) return;
+    const lastMessage = messages[messages.length - 1];
+    const tailSignature = `${messages.length}:${lastMessage?.id ?? ''}`;
+    const tailChanged = tailSignature !== autoScrollTailSignatureRef.current;
+    autoScrollTailSignatureRef.current = tailSignature;
     if (skipNextAutoScrollRef.current) {
       skipNextAutoScrollRef.current = false;
       return;
     }
+    // No new/replaced message (just an in-place field edit) — don't scroll.
+    if (!tailChanged) return;
     if (messagesEndRef.current) {
       suppressTopLoadTemporarily();
       messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
@@ -1106,6 +1117,7 @@ export const MessagesContainer = ({
           membershipInfoTooltip={getMembershipInfoTooltip(message)}
           onRetry={handleRetryFailedMessage}
           onJumpToMessage={handleJumpToMessage}
+          onTogglePin={onTogglePin}
           selectionMode={selectionMode}
           isSelectable={isSelectable}
           isSelected={isSelectable && selectedMessageIds?.has(message.id) === true}

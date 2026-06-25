@@ -1,5 +1,5 @@
 import { memo, useEffect, useRef, useState } from "react";
-import { Check, ChevronDown, Copy, Info, ListChecks, Loader2, Reply } from "lucide-react";
+import { Check, ChevronDown, Copy, Info, ListChecks, Loader2, Pin, PinOff, Reply } from "lucide-react";
 import { useDispatch, useSelector } from "react-redux";
 import { formatTimestampToHourMinuteEu } from "../../../utils/dateUtils";
 import { FileMessage } from "./FileMessage";
@@ -18,6 +18,7 @@ export type MessageRowProps = {
   membershipInfoTooltip: string | null;
   onRetry: (message: ChatMessage) => void;
   onJumpToMessage?: (clientMsgId: string) => void;
+  onTogglePin?: (message: ChatMessage) => void;
   canReply?: boolean;
   selectionMode?: boolean;
   isSelectable?: boolean;
@@ -53,6 +54,7 @@ export const MessageRow = memo(({
   membershipInfoTooltip,
   onRetry,
   onJumpToMessage,
+  onTogglePin,
   canReply = true,
   selectionMode = false,
   isSelectable = false,
@@ -196,6 +198,14 @@ export const MessageRow = memo(({
   const isFileLike = message.messageType === 'file' || message.messageType === 'image';
   const fileReplyAllowed = !isFileLike || message.transferStatus === 'completed';
   const isReplyable = canReply && !!message.clientMsgId && !message.localSendState && fileReplyAllowed;
+
+  const isPinned = message.pinnedAt !== undefined;
+  const isPinnable = !!onTogglePin && !!message.clientMsgId && !message.localSendState && fileReplyAllowed;
+  const handleTogglePin = () => {
+    setMessageMenuOpen(false);
+    onTogglePin?.(message);
+  };
+
   const replyButton = !selectionMode && isReplyable ? (
     <button
       type="button"
@@ -225,7 +235,7 @@ export const MessageRow = memo(({
     setMessageMenuOpen(open);
   };
 
-  const hasMessageMenu = isCopyableTextMessage || isSelectable;
+  const hasMessageMenu = isCopyableTextMessage || isSelectable || isPinnable;
   const messageMenu = !selectionMode && hasMessageMenu ? (
     <div className={`absolute right-1 top-1 z-70 transition-[opacity,transform] duration-200 ease-out ${
       messageMenuOpen
@@ -256,6 +266,14 @@ export const MessageRow = memo(({
             onClick={() => void handleCopyMessage()}
           >
             {isCopied ? 'Copied' : 'Copy'}
+          </DropdownMenuItem>
+        )}
+        {isPinnable && (
+          <DropdownMenuItem
+            icon={isPinned ? <PinOff className="h-4 w-4" /> : <Pin className="h-4 w-4" />}
+            onClick={handleTogglePin}
+          >
+            {isPinned ? 'Unpin' : 'Pin'}
           </DropdownMenuItem>
         )}
         {isSelectable && (
@@ -391,7 +409,8 @@ export const MessageRow = memo(({
                 </p>
               )}
             </div>
-            <span className="pointer-events-none absolute bottom-0.5 right-2 font-mono text-[10px] leading-none opacity-60">
+            <span className="pointer-events-none absolute bottom-0.5 right-2 inline-flex items-center gap-1 font-mono text-[10px] leading-none opacity-60">
+              {isPinned && <Pin className="h-2.5 w-2.5 fill-current" aria-label="Pinned" />}
               {formatTimestampToHourMinuteEu(message.timestamp)}
             </span>
           </div>

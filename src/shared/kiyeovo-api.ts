@@ -39,7 +39,7 @@ import type {
   RelayRetryResponse,
   SendMessageResponse,
 } from '../core/types.js';
-import type { Chat, Message } from '../core/db/database.js';
+import type { Chat, Message, PinnedMessagePreview } from '../core/db/database.js';
 
 export type Unsubscribe = () => void;
 export type InitialSetupStatus = 'not_started' | 'in_progress' | 'completed' | 'skipped';
@@ -322,6 +322,15 @@ export interface KiyeovoAPI {
     success: boolean;
     deletedCount: number;
     latestRemaining: DeleteMessagesLatestRemaining | null;
+    error: string | null;
+  }>;
+  setMessagePinned: (chatId: number, clientMsgId: string, pinned: boolean) => Promise<{
+    success: boolean;
+    error: string | null;
+  }>;
+  getPinnedMessage: (chatId: number) => Promise<{
+    success: boolean;
+    pinned: PinnedMessagePreview | null;
     error: string | null;
   }>;
   searchChatMessages: (

@@ -17,13 +17,15 @@ import { getGroupCreatorLinkState, type GroupCreatorLinkState } from "../../util
 import { OfflineInboxCapacity } from "./OfflineInboxCapacity";
 import { MessageSelectionBar } from "./MessageSelectionBar";
 import { DeleteSelectedMessagesDialog } from "./DeleteSelectedMessagesDialog";
-import { removeMessagesByIds, removeSendingMessagesByIds } from "../../state/slices/chatSlice";
+import { applyPinnedMessage, removeMessagesByIds, removeSendingMessagesByIds, type ChatMessage } from "../../state/slices/chatSlice";
 import { useToast } from "../ui/use-toast";
 import { ConversationSearchNavigation } from "./ConversationSearchNavigation";
+import { PinnedMessageBar } from "./messages/PinnedMessageBar";
 import type {
   ChatMessageSearchCursor,
   ChatMessageSearchResult,
 } from "../../../shared/kiyeovo-api";
+import type { PinnedMessagePreview } from "../../../core/db/database";
 
 const OFFLINE_INBOX_COLLAPSED_CLEARANCE_PX = 44;
 const OFFLINE_INBOX_EXPANDED_CLEARANCE_PX = 120;
@@ -82,6 +84,7 @@ const ChatWrapper = ({ active = true }: { active?: boolean }) => {
   const [conversationSearch, setConversationSearch] =
     useState<ConversationSearchState>(createClosedSearchState);
   const [messageJumpRequest, setMessageJumpRequest] = useState<MessageJumpRequest | null>(null);
+  const [pinnedPreview, setPinnedPreview] = useState<PinnedMessagePreview | null>(null);
   const [searchFocusRequest, setSearchFocusRequest] = useState(0);
   const nextHistoryRefreshRequestIdRef = useRef(0);
   const nextMessageJumpRequestIdRef = useRef(0);
@@ -146,6 +149,93 @@ const ChatWrapper = ({ active = true }: { active?: boolean }) => {
       };
     });
   }, [activeChat]);
+
+  const refreshPinnedPreview = useCallback(async (chatId: number) => {
+    try {
+      const res = await window.kiyeovoAPI.getPinnedMessage(chatId);
+      // Ignore stale responses after the user switched chats.
+      if (activeChatIdRef.current !== chatId) return;
+      setPinnedPreview(res.success ? res.pinned : null);
+    } catch (error) {
+      console.error('[ChatWrapper] Failed to load pinned message:', error);
+      if (activeChatIdRef.current === chatId) setPinnedPreview(null);
+    }
+  }, []);
+
+  // Load the pinned message whenever the active chat changes.
+  useEffect(() => {
+    const chatId = activeChat?.id;
+    if (chatId === undefined) {
+      setPinnedPreview(null);
+      return;
+    }
+    setPinnedPreview(null);
+    void refreshPinnedPreview(chatId);
+  }, [activeChat?.id, refreshPinnedPreview]);
+
+  // When the pinned message is deleted, the pinned row is gone too
+  const pinnedSyncRef = useRef<{ chatId: number | null; count: number }>({ chatId: null, count: 0 });
+  useEffect(() => {
+    const chatId = activeChat?.id ?? null;
+    const count = chatId === null ? 0 : messages.filter((m) => m.chatId === chatId).length;
+    const prev = pinnedSyncRef.current;
+    if (prev.chatId === chatId && prev.count > 0 && count === 0 && pinnedPreview) {
+      void refreshPinnedPreview(chatId as number);
+    }
+    pinnedSyncRef.current = { chatId, count };
+  }, [messages, activeChat?.id, pinnedPreview, refreshPinnedPreview]);
+
+  // Pin (with preview) or unpin (preview=null) a message in the active chat,
+  // keeping the bar and the inline bubble icons in sync.
+  const applyPin = useCallback(async (
+    chatId: number,
+    cid: string,
+    nextPreview: PinnedMessagePreview | null,
+  ) => {
+    const pinned = nextPreview !== null;
+    try {
+      const res = await window.kiyeovoAPI.setMessagePinned(chatId, cid, pinned);
+      if (!res.success) {
+        toast.error(res.error || (pinned ? 'Failed to pin message' : 'Failed to unpin message'));
+        return;
+      }
+      if (activeChatIdRef.current === chatId) {
+        setPinnedPreview(nextPreview);
+      }
+      dispatch(applyPinnedMessage({ chatId, clientMsgId: pinned ? cid : null }));
+    } catch (error) {
+      console.error('[ChatWrapper] Failed to toggle pin:', error);
+      toast.error(pinned ? 'Failed to pin message' : 'Failed to unpin message');
+    }
+  }, [dispatch, toast]);
+
+  const handleTogglePin = useCallback((message: ChatMessage) => {
+    const chatId = activeChat?.id;
+    if (chatId === undefined || !message.clientMsgId) return;
+    const cid = message.clientMsgId;
+    const alreadyPinned = pinnedPreview?.clientMsgId === cid;
+    void applyPin(chatId, cid, alreadyPinned ? null : {
+      clientMsgId: cid,
+      senderPeerId: message.senderPeerId,
+      senderUsername: message.senderUsername,
+      content: message.content,
+      messageType: message.messageType,
+      fileName: message.fileName,
+    });
+  }, [activeChat, pinnedPreview, applyPin]);
+
+  const handleUnpinFromBar = useCallback(() => {
+    const chatId = activeChat?.id;
+    if (chatId === undefined || !pinnedPreview) return;
+    void applyPin(chatId, pinnedPreview.clientMsgId, null);
+  }, [activeChat, pinnedPreview, applyPin]);
+
+  const handleJumpToPinned = useCallback(() => {
+    const chatId = activeChat?.id;
+    if (chatId === undefined || !pinnedPreview) return;
+    const requestId = ++nextMessageJumpRequestIdRef.current;
+    setMessageJumpRequest({ requestId, chatId, clientMsgId: pinnedPreview.clientMsgId });
+  }, [activeChat, pinnedPreview]);
 
   const enterSelectionMode = useCallback((messageId: string) => {
     if (!activeChat) return;
@@ -555,13 +645,15 @@ const ChatWrapper = ({ active = true }: { active?: boolean }) => {
     requestId: number,
     outcome: MessageJumpOutcome,
   ) => {
-    if (activeSearchJumpRequestIdRef.current !== requestId) return;
-    activeSearchJumpRequestIdRef.current = null;
-    searchOperationInFlightRef.current = false;
     setMessageJumpRequest((current) => {
       if (current?.requestId !== requestId) return current;
       return null;
     });
+
+    if (activeSearchJumpRequestIdRef.current !== requestId) return;
+    activeSearchJumpRequestIdRef.current = null;
+    searchOperationInFlightRef.current = false;
+
     setConversationSearch((current) => {
       if (!current.open) return current;
       return {
@@ -653,6 +745,10 @@ const ChatWrapper = ({ active = true }: { active?: boolean }) => {
       }
       setDeleteConfirmOpen(false);
       setMessageSelection(null);
+      // A deleted message takes its pin with it (the row is gone); re-sync the bar.
+      if (persistedMessageIds.length > 0 && pinnedPreview) {
+        void refreshPinnedPreview(chatId);
+      }
       toast.success(messageIds.length === 1 ? 'Message deleted' : `${messageIds.length} messages deleted`);
     } catch (error) {
       console.error('[ChatWrapper] Failed to delete selected messages:', error);
@@ -660,7 +756,7 @@ const ChatWrapper = ({ active = true }: { active?: boolean }) => {
     } finally {
       setIsDeletingMessages(false);
     }
-  }, [activeMessageSelection, dispatch, isDeletingMessages, messages, sendingMessages, toast]);
+  }, [activeMessageSelection, dispatch, isDeletingMessages, messages, sendingMessages, toast, pinnedPreview, refreshPinnedPreview]);
 
   const handleHistoryRefreshHandled = useCallback((requestId: number) => {
     setHistoryRefreshRequest((current) =>
@@ -751,6 +847,14 @@ const ChatWrapper = ({ active = true }: { active?: boolean }) => {
               To fix this: make sure {groupCreatorLinkState.creatorName || 'the creator'} also deletes you, then establish a new conversation.
             </div>
           )}
+          {activeChat && pinnedPreview && (
+            <PinnedMessageBar
+              preview={pinnedPreview}
+              myPeerId={myPeerId}
+              onJump={handleJumpToPinned}
+              onUnpin={handleUnpinFromBar}
+            />
+          )}
           <div className="relative flex min-h-0 flex-1 flex-col">
             <MessagesContainer
               messages={messagesToDisplay}
@@ -771,6 +875,7 @@ const ChatWrapper = ({ active = true }: { active?: boolean }) => {
                   ? OFFLINE_INBOX_EXPANDED_CLEARANCE_PX
                   : OFFLINE_INBOX_COLLAPSED_CLEARANCE_PX)
                 : 0}
+              onTogglePin={handleTogglePin}
             />
             <div className="relative">
               {activeChat && (

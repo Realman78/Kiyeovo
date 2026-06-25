@@ -38,6 +38,7 @@ export interface ChatMessage {
   // 'offline_backup' = delivered online, only the DHT backup failed (retry re-stores, not re-sends)
   failedReason?: 'group_rekeying' | 'other' | 'offline_backup';
   retryAfterTs?: number;
+  pinnedAt?: number;
 }
 
 export interface Chat {
@@ -442,6 +443,18 @@ const chatSlice = createSlice({
     removeSendingMessage: (state, action: PayloadAction<string>) => {
       state.sendingMessages = state.sendingMessages.filter((m) => m.id !== action.payload);
     },
+    applyPinnedMessage: (state, action: PayloadAction<{ chatId: number; clientMsgId: string | null }>) => {
+      const { chatId, clientMsgId } = action.payload;
+      const stamp = Date.now();
+      for (const message of state.messages) {
+        if (message.chatId !== chatId) continue;
+        if (clientMsgId && message.clientMsgId === clientMsgId) {
+          message.pinnedAt = stamp;
+        } else if (message.pinnedAt !== undefined) {
+          message.pinnedAt = undefined;
+        }
+      }
+    },
     setReplyTarget: (state, action: PayloadAction<{ chatId: number; target: ReplyTarget }>) => {
       state.replyTargetByChatId[action.payload.chatId] = action.payload.target;
     },
@@ -678,6 +691,7 @@ export const {
   addSendingMessage,
   removeSendingMessage,
   finalizeSendingMessage,
+  applyPinnedMessage,
   setReplyTarget,
   clearReplyTarget,
   setPendingKeyExchanges,

@@ -1563,6 +1563,46 @@ function setupMessageHandlers(
     }
   });
 
+  ipcMain.handle(IPC_CHANNELS.SET_MESSAGE_PINNED, async (
+    _event,
+    chatId: number,
+    clientMsgId: string,
+    pinned: boolean,
+  ) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { success: false, error: 'P2P core not initialized' };
+      }
+      if (!Number.isInteger(chatId) || chatId <= 0 || typeof clientMsgId !== 'string' || clientMsgId.length === 0) {
+        return { success: false, error: 'Invalid pin request' };
+      }
+
+      const matched = p2pCore.database.setMessagePinned(chatId, clientMsgId, !!pinned);
+      if (pinned && !matched) {
+        return { success: false, error: 'Message not found' };
+      }
+      return { success: true, error: null };
+    } catch (error) {
+      console.error('[IPC] Failed to set message pin:', error);
+      return { success: false, error: errStr(error, 'Failed to pin message') };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.GET_PINNED_MESSAGE, async (_event, chatId: number) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { success: false, pinned: null, error: 'P2P core not initialized' };
+      }
+      const pinned = p2pCore.database.getPinnedMessage(chatId);
+      return { success: true, pinned, error: null };
+    } catch (error) {
+      console.error('[IPC] Failed to get pinned message:', error);
+      return { success: false, pinned: null, error: errStr(error, 'Failed to get pinned message') };
+    }
+  });
+
   ipcMain.handle(IPC_CHANNELS.SEARCH_CHAT_MESSAGES, async (
     _event,
     chatId: number,

@@ -146,6 +146,17 @@ export interface Message {
     // Absolute ms timestamp before which a failed send may not be retried
     // (e.g. group-rekey cooldown). Persisted so the block survives a restart.
     retry_after_ts?: number | null
+    // Local-only pin. NULL = not pinned
+    pinned_at?: number | null
+}
+
+export interface PinnedMessagePreview {
+    clientMsgId: string
+    senderPeerId: string
+    senderUsername: string | undefined
+    content: string
+    messageType: 'text' | 'file' | 'image' | 'system'
+    fileName: string | undefined
 }
 
 export interface DeleteMessagesForMeResult {
@@ -927,8 +938,9 @@ export class ChatDatabase {
         this.ensureColumnExists('messages', 'local_send_state', 'TEXT');
         this.ensureColumnExists('messages', 'failed_reason', 'TEXT');
         this.ensureColumnExists('messages', 'retry_after_ts', 'INTEGER');
-        // Reply feature: cross-peer stable id + reply reference. Backfill existing
-        // rows so client_msg_id is always populated (file rows already have id=fileId).
+        // Pin feature: local-only pinned marker
+        this.ensureColumnExists('messages', 'pinned_at', 'INTEGER');
+        // Reply feature: cross-peer stable id + reply reference
         this.ensureColumnExists('messages', 'client_msg_id', 'TEXT');
         this.ensureColumnExists('messages', 'reply_to_client_id', 'TEXT');
         this.db.prepare(`UPDATE messages SET client_msg_id = id WHERE client_msg_id IS NULL`).run();
@@ -2594,6 +2606,45 @@ export class ChatDatabase {
         const row = stmt.get(chatId, clientMsgId) as any;
         if (!row) return null;
         return {
+            senderPeerId: row.sender_peer_id,
+            senderUsername: row.sender_username || undefined,
+            content: row.content,
+            messageType: row.message_type,
+            fileName: row.file_name || undefined,
+        };
+    }
+
+    // Pin or unpin a message
+    setMessagePinned(chatId: number, clientMsgId: string, pinned: boolean): boolean {
+        const tx = this.db.transaction((): boolean => {
+            this.db.prepare(
+                'UPDATE messages SET pinned_at = NULL WHERE chat_id = ? AND pinned_at IS NOT NULL'
+            ).run(chatId);
+            if (!pinned) return true;
+            const result = this.db.prepare(
+                'UPDATE messages SET pinned_at = ? WHERE chat_id = ? AND client_msg_id = ?'
+            ).run(Date.now(), chatId, clientMsgId);
+            return (result.changes ?? 0) > 0;
+        });
+        return tx();
+    }
+
+    /** The single pinned message for a chat (local-only), or null. */
+    getPinnedMessage(chatId: number): PinnedMessagePreview | null {
+        const stmt = this.db.prepare(`
+            SELECT m.client_msg_id, m.sender_peer_id, m.content, m.message_type, m.file_name,
+                   u.username AS sender_username
+            FROM messages m
+            JOIN chats c ON c.id = m.chat_id
+            LEFT JOIN users u ON m.sender_peer_id = u.peer_id AND u.network_mode = c.network_mode
+            WHERE m.chat_id = ? AND m.pinned_at IS NOT NULL
+            ORDER BY m.pinned_at DESC
+            LIMIT 1
+        `);
+        const row = stmt.get(chatId) as any;
+        if (!row || !row.client_msg_id) return null;
+        return {
+            clientMsgId: row.client_msg_id,
             senderPeerId: row.sender_peer_id,
             senderUsername: row.sender_username || undefined,
             content: row.content,
