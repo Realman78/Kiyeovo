@@ -1,6 +1,7 @@
 import { useEffect, useState, type FC } from "react";
 import type { Chat } from "../../../state/slices/chatSlice";
 import { formatRelativeTimestamp } from "../../../utils/dateUtils";
+import { useHour12 } from "../../../hooks/useHour12";
 import { AlertCircle, Ban, BellOff, Paperclip, Phone, Users } from "lucide-react";
 import { useSelector } from "react-redux";
 import type { RootState } from "../../../state/store";
@@ -16,6 +17,7 @@ type ChatPreviewProps = {
 export const ChatPreview: FC<ChatPreviewProps> = ({ chat, onSelectChat, selectedChatId }) => {
     const chats = useSelector((state: RootState) => state.chat.chats);
     const myPeerId = useSelector((state: RootState) => state.user.peerId);
+    const hour12 = useHour12();
     const [groupCallSnapshot, setGroupCallSnapshot] = useState(() => groupCallService.getSnapshot());
     const creatorLinkState = getGroupCreatorLinkState(chat, chats, myPeerId);
     const isAwaitingActivation = chat.type === 'group' && chat.groupStatus === 'awaiting_activation';
@@ -74,7 +76,7 @@ export const ChatPreview: FC<ChatPreviewProps> = ({ chat, onSelectChat, selected
                         )}
                     </span>
                     <span className="text-xs text-muted-foreground shrink-0">
-                        {formatRelativeTimestamp(chat.lastMessageTimestamp)}
+                        {formatRelativeTimestamp(chat.lastMessageTimestamp, hour12)}
                     </span>
                 </div>
                 <div className="flex items-center justify-between gap-2">

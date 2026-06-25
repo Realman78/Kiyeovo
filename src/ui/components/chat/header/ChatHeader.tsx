@@ -27,6 +27,8 @@ import { errStr } from '../../../../core/utils/general-error';
 import { Button } from "../../ui/Button";
 import { useConnectivityGuidance } from "../../../hooks/useConnectivityGuidance";
 import { ConversationSearchHeader } from "./ConversationSearchHeader";
+import { formatFullDateTime } from "../../../utils/dateUtils";
+import { useHour12 } from "../../../hooks/useHour12";
 
 type ChatHeaderProps = {
   username: string;
@@ -68,6 +70,7 @@ export const ChatHeader = ({
   const myPeerId = useSelector((state: RootState) => state.user.peerId);
   const activeCall = useSelector((state: RootState) => state.call.activeCall);
   const dispatch = useDispatch();
+  const hour12 = useHour12();
   const { toast } = useToast();
   const { confirmCallAttempt } = useConnectivityGuidance();
   const [dropdownOpen, setDropdownOpen] = useState(false);
@@ -1059,7 +1062,7 @@ export const ChatHeader = ({
   const groupInfoCreatorPeerId = groupInfoDetails?.createdByPeerId || activeChat?.groupCreatorPeerId || 'Unknown';
   const groupInfoStatus = groupInfoDetails?.groupStatus || groupStatus || 'unknown';
   const groupInfoCreatedAt = groupInfoDetails?.createdAt
-    ? groupInfoDetails.createdAt.toLocaleString()
+    ? formatFullDateTime(groupInfoDetails.createdAt.getTime(), hour12)
     : 'Unknown';
   const confirmedGroupMemberCount = groupMembers.filter((member) => member.status === 'confirmed').length;
   const invitedOrPendingGroupMemberCount = groupMembers.filter((member) => member.status !== 'confirmed').length;

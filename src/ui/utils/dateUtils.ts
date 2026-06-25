@@ -1,14 +1,27 @@
-export const formatTimestampToHourMinuteEu = (timestamp: number) => {
-    return new Date(timestamp).toLocaleTimeString('en-GB', {
+// Bare HH:MM. 24h uses en-GB ("14:30"); 12h uses en-US for uppercase AM/PM ("02:30 PM").
+export const formatTimestampToHourMinuteEu = (timestamp: number, hour12 = false) => {
+    return new Date(timestamp).toLocaleTimeString(hour12 ? 'en-US' : 'en-GB', {
         hour: '2-digit',
         minute: '2-digit',
-        hour12: false,
+        hour12,
     });
 };
 
-// Full, locale-aware date + time
-export const formatFullDateTime = (timestamp: number) => {
-    return new Date(timestamp).toLocaleString();
+// Full, locale-aware date + time. `hour12` overrides the locale's clock convention.
+export const formatFullDateTime = (timestamp: number, hour12 = false) => {
+    return new Date(timestamp).toLocaleString(undefined, { hour12 });
+};
+
+// Compact date + time ("Mar 5, 2026, 02:30 PM"). Shared by the about/call modals.
+export const formatDateTimeShort = (timestamp: number, hour12 = false) => {
+    return new Date(timestamp).toLocaleString('en-US', {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12,
+    });
 };
 
 // Local-midnight Date for the day a timestamp falls in.
@@ -39,9 +52,9 @@ export const formatDateDivider = (timestamp: number): string => {
 };
 
 // Last-message timestamp for the chat list: today → the time.
-export const formatRelativeTimestamp = (timestamp: number): string => {
+export const formatRelativeTimestamp = (timestamp: number, hour12 = false): string => {
     const daysAgo = calendarDaysAgo(timestamp);
     return daysAgo <= 0
-        ? formatTimestampToHourMinuteEu(timestamp)
+        ? formatTimestampToHourMinuteEu(timestamp, hour12)
         : formatRelativeDayBucket(timestamp, daysAgo);
 };

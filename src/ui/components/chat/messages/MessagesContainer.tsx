@@ -3,6 +3,7 @@ import { finalizeSendingMessage, markOfflineFetched, markOfflineFetchFailed, pre
 import type { RootState } from "../../../state/store";
 import { useDispatch, useSelector } from "react-redux";
 import { formatTimestampToHourMinuteEu, formatDateDivider, startOfDay } from "../../../utils/dateUtils";
+import { useHour12 } from "../../../hooks/useHour12";
 import { PendingNotifications } from "./PendingNotifications";
 import { MessageRow } from "./MessageRow";
 import type { MessageSentStatus } from "../../../types";
@@ -160,6 +161,7 @@ export const MessagesContainer = ({
   const activeChat = useSelector((state: RootState) => state.chat.activeChat);
   const activePendingKeyExchange = useSelector((state: RootState) => state.chat.activePendingKeyExchange);
   const persistedMessages = useSelector((state: RootState) => state.chat.messages);
+  const hour12 = useHour12();
   const dispatch = useDispatch();
   const { toast } = useToast();
   const { showMessageFailureGuidance } = useConnectivityGuidance();
@@ -207,7 +209,7 @@ export const MessagesContainer = ({
     if (!isMembershipEvent) {
       return null;
     }
-    return `${message.content} at ${formatTimestampToHourMinuteEu(message.eventTimestamp)}.${normalized.includes('joined the group') ? ' This member can only see your messages after this system message, not strictly after the join time.' : ''}`;
+    return `${message.content} at ${formatTimestampToHourMinuteEu(message.eventTimestamp, hour12)}.${normalized.includes('joined the group') ? ' This member can only see your messages after this system message, not strictly after the join time.' : ''}`;
   };
 
   const suppressTopLoadTemporarily = useCallback((durationMs = 180) => {

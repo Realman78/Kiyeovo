@@ -1,7 +1,9 @@
 import { useEffect, useState, type FC, type ReactNode } from 'react';
+import { useSelector } from 'react-redux';
 import {
   Bell,
   BellOff,
+  Clock,
   Database,
   FolderOpen,
   Info,
@@ -11,6 +13,8 @@ import {
   SlidersHorizontal,
   Trash2,
 } from 'lucide-react';
+import type { RootState } from '../../../state/store';
+import { TimeFormatDialog } from './TimeFormatDialog';
 import { NETWORK_MODES } from '../../../../core/constants';
 import type { NetworkMode } from '../../../../core/types';
 import { errStr } from '../../../../core/utils/general-error';
@@ -83,6 +87,8 @@ export const SettingsPage: FC = () => {
   const [deletingAccount, setDeletingAccount] = useState(false);
   const [quitAppOpen, setQuitAppOpen] = useState(false);
   const [quittingApp, setQuittingApp] = useState(false);
+  const [timeFormatOpen, setTimeFormatOpen] = useState(false);
+  const timeFormat = useSelector((state: RootState) => state.uiPrefs.timeFormat);
 
   useEffect(() => {
     let disposed = false;
@@ -485,6 +491,21 @@ export const SettingsPage: FC = () => {
             />
 
             <SettingsActionRow
+              icon={<Clock className="h-5 w-5 shrink-0 text-primary" />}
+              title="Time format"
+              description={timeFormat === '12h' ? '12-hour (AM/PM)' : '24-hour'}
+              action={(
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setTimeFormatOpen(true)}
+                >
+                  Change
+                </Button>
+              )}
+            />
+
+            <SettingsActionRow
               icon={<FolderOpen className="h-5 w-5 shrink-0 text-primary" />}
               title="Downloads Directory"
               description={(
@@ -615,6 +636,7 @@ export const SettingsPage: FC = () => {
       </div>
 
       <KiyeovoDialog open={aboutOpen} onOpenChange={setAboutOpen} />
+      <TimeFormatDialog open={timeFormatOpen} onOpenChange={setTimeFormatOpen} />
       <ConfigurationDialog
         open={configurationOpen}
         onOpenChange={setConfigurationOpen}

@@ -5,6 +5,7 @@ import appConfigReducer from './slices/appConfigSlice';
 import callReducer from './slices/callSlice';
 import setupNodesReducer from './slices/setupNodesSlice';
 import iceSetupReducer from './slices/iceSetupSlice';
+import uiPrefsReducer from './slices/uiPrefsSlice';
 
 export const store = configureStore({
   reducer: {
@@ -14,6 +15,7 @@ export const store = configureStore({
     call: callReducer,
     setupNodes: setupNodesReducer,
     iceSetup: iceSetupReducer,
+    uiPrefs: uiPrefsReducer,
   },
 });
 

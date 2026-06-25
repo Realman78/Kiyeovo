@@ -9,6 +9,8 @@ import {
 } from "../../ui/Dialog";
 import { Button } from "../../ui/Button";
 import { Copy, Check, User, MessageSquare, Shield, BadgeInfo, CircleUser } from "lucide-react";
+import { formatDateTimeShort, formatFullDateTime } from "../../../utils/dateUtils";
+import { useHour12 } from "../../../hooks/useHour12";
 
 type UserInfo = {
   username: string;
@@ -36,6 +38,7 @@ export const AboutUserModal: FC<AboutUserModalProps> = ({
   peerId,
   chatId,
 }) => {
+  const hour12 = useHour12();
   const [userInfo, setUserInfo] = useState<UserInfo | null>(null);
   const [loading, setLoading] = useState(false);
   const [copiedField, setCopiedField] = useState<string | null>(null);
@@ -76,13 +79,13 @@ export const AboutUserModal: FC<AboutUserModalProps> = ({
     const allInfo = `
 Username: ${userInfo.username}
 Peer ID: ${userInfo.peerId}
-User Since: ${new Date(userInfo.userSince).toLocaleString()}
-Chat Created: ${userInfo.chatCreated ? new Date(userInfo.chatCreated).toLocaleString() : "N/A"}
+User Since: ${formatFullDateTime(new Date(userInfo.userSince).getTime(), hour12)}
+Chat Created: ${userInfo.chatCreated ? formatFullDateTime(new Date(userInfo.chatCreated).getTime(), hour12) : "N/A"}
 Connection Type: ${userInfo.trustedOutOfBand ? "Out-of-band profile import" : "DHT key exchange"}
 Message Count: ${userInfo.messageCount}
 Muted: ${userInfo.muted ? "Yes" : "No"}
 Blocked: ${userInfo.blocked ? "Yes" : "No"}${userInfo.blocked && userInfo.blockedAt
-        ? `\nBlocked At: ${new Date(userInfo.blockedAt).toLocaleString()}`
+        ? `\nBlocked At: ${formatFullDateTime(new Date(userInfo.blockedAt).getTime(), hour12)}`
         : ""
       }${userInfo.blocked && userInfo.blockReason
         ? `\nBlock Reason: ${userInfo.blockReason}`
@@ -95,13 +98,7 @@ Blocked: ${userInfo.blocked ? "Yes" : "No"}${userInfo.blocked && userInfo.blocke
 
   const formatDate = (date: Date | undefined) => {
     if (!date) return "N/A";
-    return new Date(date).toLocaleString("en-US", {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
+    return formatDateTimeShort(new Date(date).getTime(), hour12);
   };
 
   if (loading || !userInfo) {

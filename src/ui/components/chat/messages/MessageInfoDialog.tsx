@@ -1,6 +1,7 @@
 import type { FC, ReactNode } from "react";
 import type { ChatMessage } from "../../../state/slices/chatSlice";
 import { formatFullDateTime } from "../../../utils/dateUtils";
+import { useHour12 } from "../../../hooks/useHour12";
 import {
   Dialog,
   DialogBody,
@@ -64,6 +65,7 @@ export const MessageInfoDialog: FC<MessageInfoDialogProps> = ({
   isOwnMessage,
   replyQuote,
 }) => {
+  const hour12 = useHour12();
   const status = deriveStatus(message);
   const isFileLike = message.messageType === "file" || message.messageType === "image";
 
@@ -77,7 +79,7 @@ export const MessageInfoDialog: FC<MessageInfoDialogProps> = ({
           <div className="flex flex-col">
             <InfoRow label="Type">{TYPE_LABELS[message.messageType]}</InfoRow>
             <InfoRow label="From">{isOwnMessage ? "You" : message.senderUsername}</InfoRow>
-            <InfoRow label="Sent">{formatFullDateTime(message.timestamp)}</InfoRow>
+            <InfoRow label="Sent">{formatFullDateTime(message.timestamp, hour12)}</InfoRow>
             {status && <InfoRow label="Status">{status}</InfoRow>}
             {replyQuote && (
               <InfoRow label="Replying to">
@@ -102,7 +104,7 @@ export const MessageInfoDialog: FC<MessageInfoDialogProps> = ({
               <InfoRow label="Transfer">{message.transferStatus}</InfoRow>
             )}
             {message.pinnedAt !== undefined && (
-              <InfoRow label="Pinned">{formatFullDateTime(message.pinnedAt)}</InfoRow>
+              <InfoRow label="Pinned">{formatFullDateTime(message.pinnedAt, hour12)}</InfoRow>
             )}
           </div>
         </DialogBody>

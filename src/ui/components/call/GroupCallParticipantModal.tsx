@@ -3,6 +3,8 @@ import { BadgeInfo, Check, CircleUser, Copy, Shield, Users } from 'lucide-react'
 
 import type { GroupCallParticipant } from '../../../core/types';
 import { Button } from '../ui/Button';
+import { formatDateTimeShort } from '../../utils/dateUtils';
+import { useHour12 } from '../../hooks/useHour12';
 import {
   Dialog,
   DialogBody,
@@ -31,17 +33,11 @@ type GroupCallParticipantModalProps = {
   writerPeerId: string | null;
 };
 
-function formatDate(timestamp: number | null): string {
+function formatDate(timestamp: number | null, hour12: boolean): string {
   if (!timestamp || !Number.isFinite(timestamp)) {
     return 'Unknown';
   }
-  return new Date(timestamp).toLocaleString('en-US', {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+  return formatDateTimeShort(timestamp, hour12);
 }
 
 export const GroupCallParticipantModal: FC<GroupCallParticipantModalProps> = ({
@@ -56,6 +52,7 @@ export const GroupCallParticipantModal: FC<GroupCallParticipantModalProps> = ({
   participant,
   writerPeerId,
 }) => {
+  const hour12 = useHour12();
   const [loading, setLoading] = useState(false);
   const [groupMember, setGroupMember] = useState<GroupMemberInfo | null>(null);
   const [copiedField, setCopiedField] = useState<string | null>(null);
@@ -180,7 +177,7 @@ export const GroupCallParticipantModal: FC<GroupCallParticipantModalProps> = ({
               </div>
               <div className="flex items-center">
                 <span className="min-w-[140px] text-muted-foreground">Joined call:</span>
-                <span className="font-mono text-xs">{formatDate(participant?.joinedAt ?? null)}</span>
+                <span className="font-mono text-xs">{formatDate(participant?.joinedAt ?? null, hour12)}</span>
               </div>
             </div>
           </div>

@@ -9,6 +9,7 @@ import { RetryStatus } from "./RetryStatus";
 import { DropdownMenu, DropdownMenuItem } from "../../ui/DropdownMenu";
 import { renderMessageText, endsWithCodeBlock } from "../../../utils/renderMessageText";
 import { MessageInfoDialog } from "./MessageInfoDialog";
+import { useHour12 } from "../../../hooks/useHour12";
 
 export type MessageRowProps = {
   message: ChatMessage;
@@ -66,6 +67,7 @@ export const MessageRow = memo(({
   onEnterSelection,
 }: MessageRowProps) => {
   const dispatch = useDispatch();
+  const hour12 = useHour12();
   const [isCopied, setIsCopied] = useState(false);
   const [infoOpen, setInfoOpen] = useState(false);
   const [messageMenuOpen, setMessageMenuOpen] = useState(false);
@@ -137,7 +139,7 @@ export const MessageRow = memo(({
           {message.content}
         </div>
         <span className="text-xs text-muted-foreground mt-1 font-mono inline-flex items-center gap-1">
-          {formatTimestampToHourMinuteEu(message.timestamp)}
+          {formatTimestampToHourMinuteEu(message.timestamp, hour12)}
           {membershipInfoTooltip && (
             <span className="relative inline-flex items-center group">
               <button
@@ -425,7 +427,7 @@ export const MessageRow = memo(({
             </div>
             <span className="pointer-events-none absolute bottom-0.5 right-2 inline-flex items-center gap-1 font-mono text-[10px] leading-none opacity-60">
               {isPinned && <Pin className="h-2.5 w-2.5 fill-current" aria-label="Pinned" />}
-              {formatTimestampToHourMinuteEu(message.timestamp)}
+              {formatTimestampToHourMinuteEu(message.timestamp, hour12)}
             </span>
           </div>
         </div>
