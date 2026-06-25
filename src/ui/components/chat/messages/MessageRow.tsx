@@ -7,7 +7,7 @@ import { setReplyTarget, type ChatMessage } from "../../../state/slices/chatSlic
 import type { RootState } from "../../../state/store";
 import { RetryStatus } from "./RetryStatus";
 import { DropdownMenu, DropdownMenuItem } from "../../ui/DropdownMenu";
-import { highlightText } from "../../../utils/highlightText";
+import { renderMessageText, endsWithCodeBlock } from "../../../utils/renderMessageText";
 
 export type MessageRowProps = {
   message: ChatMessage;
@@ -157,6 +157,7 @@ export const MessageRow = memo(({
 
   const isOwnMessage = message.senderPeerId === myPeerId || hasActivePendingKeyExchange;
   const isCopyableTextMessage = message.messageType === 'text' && message.content.length > 0;
+  const contentEndsWithBlock = endsWithCodeBlock(message.content);
 
   const senderName = (peerId: string, username?: string) =>
     peerId === myPeerId ? 'You' : (username || `user_${peerId.slice(-8)}`);
@@ -349,7 +350,7 @@ export const MessageRow = memo(({
             className={`relative max-w-[70%] rounded-lg ${
               replyQuote ? "px-1 pt-1" : "pl-[9px] pr-[7px] pt-1.5"
             } ${
-              message.messageType === 'file' ? "pb-5" : "pb-2.5"
+              message.messageType === 'file' || contentEndsWithBlock ? "pb-5" : "pb-2.5"
             } ${isOwnMessage
               ? `order-2 bg-message-sent text-message-sent-foreground${isFirstInSeries ? " rounded-tr-none" : ""}`
               : `order-1 bg-message-received text-message-received-foreground${isFirstInSeries ? " rounded-tl-none" : ""}`} ${
@@ -403,10 +404,10 @@ export const MessageRow = memo(({
                   isFromCurrentUser={message.senderPeerId === myPeerId}
                 />
               ) : (
-                <p className="text-left text-sm leading-relaxed whitespace-pre-wrap wrap-anywhere">
-                  {highlightText(message.content, searchQuery)}
-                  <span className="inline-block w-10" aria-hidden="true" />
-                </p>
+                <div className="text-left text-sm leading-relaxed whitespace-pre-wrap wrap-anywhere">
+                  {renderMessageText(message.content, searchQuery)}
+                  {!contentEndsWithBlock && <span className="inline-block w-10" aria-hidden="true" />}
+                </div>
               )}
             </div>
             <span className="pointer-events-none absolute bottom-0.5 right-2 inline-flex items-center gap-1 font-mono text-[10px] leading-none opacity-60">
