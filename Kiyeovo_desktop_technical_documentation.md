@@ -109,6 +109,7 @@ Mode switch is done in settings and requires app restart (no hot stack replaceme
 ### 3. Startup and lifecycle flow
 
 1. Electron app starts and creates the window.
+   - privileged application and local-media URL schemes are registered before Electron becomes ready
 2. Main process reads DB settings (`network_mode`, onboarding flag).
 3. If onboarding requires explicit mode selection, initialization is gated until user picks mode.
 4. Tor manager starts only for `anonymous` mode.
@@ -293,6 +294,16 @@ Protections:
 - silent rejection thresholds for abuse
 - path traversal and file-size guards
 - backend remains authoritative even if UI pre-checks exist
+
+Local image delivery foundation:
+- renderer pages do not receive arbitrary filesystem-read access and do not load `file://` URLs
+- on-disk images are exposed through the dedicated `kiyeovo-media://media/<token>` protocol
+- tokens are random, process-lifetime capabilities bound to canonical filesystem paths; paths are never embedded in renderer media URLs
+- a token can be minted only for a completed, active-network file message persisted in the database, or for the exact image selected through the trusted OS open dialog
+- completed-message grants are mode-scoped in the database and require a persisted file path plus an image extension from the shared allowlist
+- symbolic-link file grants are rejected; accepted paths are canonicalized before token binding
+- the protocol resolves the canonical path again before serving, requires a regular file and an `image/*` content type, and returns `no-store`/`nosniff` headers
+- unknown, stale, non-image, or retargeted capabilities are rejected
 
 ---
 
@@ -619,6 +630,7 @@ Call UI state:
    - renderer CSP present in `index.html`
    - `webPreferences.sandbox: true`
    - packaged UI is served via a custom `kiyeovo://app/...` protocol instead of `file://`
+   - local images use a separate CSP-allowlisted `kiyeovo-media://` capability protocol; the renderer cannot register arbitrary paths
    - packaged builds flip a minimal Electron fuse set via `electron-builder`:
      - disable `runAsNode`
      - disable `enableNodeOptionsEnvironmentVariable`

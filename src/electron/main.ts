@@ -49,7 +49,12 @@ import { applyWindowSecurityPolicies } from './window-security.js';
 import { applySessionSecurityPolicies } from './session-security.js';
 import { setupDisplayMediaPicker } from './display-media-picker.js';
 import { DEV_SERVER_URL } from './constants.js';
-import { getPackagedAppEntryUrl, registerAppProtocolHandler, registerAppProtocolScheme } from './app-protocol.js';
+import {
+  getPackagedAppEntryUrl,
+  registerAppProtocolHandler,
+  registerMediaProtocolHandler,
+  registerProtocolSchemes,
+} from './app-protocol.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -86,9 +91,7 @@ let hasStartedInitialization = false;
 let requiresNetworkModeSelection = false;
 let pendingPasswordRequest: PasswordRequest | null = null;
 
-if (!isDev()) {
-  registerAppProtocolScheme();
-}
+registerProtocolSchemes();
 
 // Enforce single instance
 const gotTheLock = app.requestSingleInstanceLock();
@@ -723,6 +726,7 @@ async function initializeApp() {
     if (!isDevelopment) {
       registerAppProtocolHandler();
     }
+    registerMediaProtocolHandler();
 
     const displayMediaPicker = setupDisplayMediaPicker(trustedIpcMain, () => mainWindow);
 

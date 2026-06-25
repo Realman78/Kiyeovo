@@ -35,13 +35,15 @@ import { DEFAULT_WEBRTC_ICE_SERVERS } from '../core/network/default-infrastructu
 import { ensureAppDataDir } from '../core/utils/miscellaneous.js';
 import { homedir } from 'os';
 import { basename, isAbsolute, join, resolve as resolvePath } from 'path';
-import { copyFile, stat } from 'fs/promises';
+import { copyFile, lstat, realpath, stat } from 'fs/promises';
 import { log } from '../shared/logger.js';
+import { isImageFile } from '../shared/file-types.js';
 import { errStr } from '../core/utils/general-error.js';
 import { ChatDatabase } from '../core/db/database.js';
 import { isNetworkConnected } from './network-connectivity.js';
 import { scheduleAppRelaunch } from './relaunch.js';
 import { createTrustedIpcMainHandle, type IpcMainHandleRegistrar } from './trusted-ipc.js';
+import { mintMediaToken } from './app-protocol.js';
 import type { InitialSetupStatus } from '../shared/kiyeovo-api.js';
 
 function requestAppRestart(): void {
@@ -267,6 +269,9 @@ export function setupIPCHandlers(
 
   // File dialog handlers
   setupFileDialogHandlers(trustedIpcMain);
+
+  // Capability-gated local media handlers
+  setupMediaHandlers(trustedIpcMain, getP2PCore);
 
   // Chat handlers
   setupChatHandlers(trustedIpcMain, getP2PCore);
@@ -1313,13 +1318,37 @@ function setupFileDialogHandlers(ipcMain: IpcMainHandleRegistrar): void {
         filters: options.filters || []
       });
 
+      const filePath = result.filePaths[0] || null;
+      let mediaToken: string | null = null;
+      if (!result.canceled && filePath && isImageFile(filePath)) {
+        try {
+          const selectedPathStats = await lstat(filePath);
+          if (selectedPathStats.isSymbolicLink()) {
+            console.warn('[IPC][SECURITY] Refusing media capability for symbolic-link selection');
+            return {
+              filePath,
+              canceled: result.canceled,
+              mediaToken: null,
+            };
+          }
+          const canonicalPath = await realpath(filePath);
+          const fileStats = await stat(canonicalPath);
+          if (fileStats.isFile()) {
+            mediaToken = mintMediaToken(canonicalPath);
+          }
+        } catch (error) {
+          console.warn('[IPC] Failed to create selected-image media capability:', error);
+        }
+      }
+
       return {
-        filePath: result.filePaths[0] || null,
-        canceled: result.canceled
+        filePath,
+        canceled: result.canceled,
+        mediaToken,
       };
     } catch (error) {
       console.error('[IPC] Failed to show open dialog:', error);
-      return { filePath: null, canceled: true };
+      return { filePath: null, canceled: true, mediaToken: null };
     }
   });
 
@@ -1366,6 +1395,53 @@ function setupFileDialogHandlers(ipcMain: IpcMainHandleRegistrar): void {
         name: null,
         size: null,
         error: errStr(error, 'Failed to get file metadata')
+      };
+    }
+  });
+}
+
+function setupMediaHandlers(
+  ipcMain: IpcMainHandleRegistrar,
+  getP2PCore: () => P2PCore | null,
+): void {
+  ipcMain.handle(IPC_CHANNELS.REGISTER_MESSAGE_MEDIA, async (_event, messageId: string) => {
+    try {
+      if (typeof messageId !== 'string' || !messageId.trim()) {
+        return { success: false, token: null, error: 'Invalid message ID' };
+      }
+
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { success: false, token: null, error: 'P2P core not initialized' };
+      }
+
+      const media = p2pCore.database.getCompletedFileMediaById(messageId);
+      if (!media || !isImageFile(media.fileName)) {
+        return { success: false, token: null, error: 'Completed image message not found' };
+      }
+
+      const storedPathStats = await lstat(media.filePath);
+      if (storedPathStats.isSymbolicLink()) {
+        return { success: false, token: null, error: 'Symbolic-link media paths are not allowed' };
+      }
+
+      const canonicalPath = await realpath(media.filePath);
+      const fileStats = await stat(canonicalPath);
+      if (!fileStats.isFile()) {
+        return { success: false, token: null, error: 'Media path is not a file' };
+      }
+
+      return {
+        success: true,
+        token: mintMediaToken(canonicalPath),
+        error: null,
+      };
+    } catch (error) {
+      console.error('[IPC] Failed to register message media:', error);
+      return {
+        success: false,
+        token: null,
+        error: errStr(error, 'Failed to register message media'),
       };
     }
   });
