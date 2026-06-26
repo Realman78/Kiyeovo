@@ -210,6 +210,8 @@ Cross-peer identity:
 
 Wire format — the plaintext that gets encrypted is a small versioned **envelope** rather than a bare string: `{ v, cid, text, reply_to? }`. This keeps the cid + reply linkage private on the transport **and** in the offline DHT-at-rest payload. The recipient decodes and validates it (bounded cid shape/length, clamped text) and falls back to plain text for any non-envelope body. The envelope + cid are built **once per send** and reused across every delivery route (online, non-blocking offline queue, synchronous offline fallback), so the same cid arrives regardless of path.
 
+Direct file replies use the file-transfer protocol rather than the text envelope. A signed `file_offer` may carry optional `replyToCid` metadata, validated with the same cid shape/length rules and included in the signed offer payload. When present, both outgoing file rows and incoming pending-offer rows persist it as `reply_to_client_id`; the live pending-file event carries the same value so the renderer can show the quote before acceptance.
+
 Dedup: a `UNIQUE(chat_id, client_msg_id)` index makes the same logical message delivered over two channels (online + offline) collapse to one row. Inbound inserts (`tryCreateMessage`) skip the "received" event when no row was inserted; outbound inserts use a plain insert that **throws** on a cid collision (an invariant violation, never expected). This complements the pre-existing offline-message-UUID dedup.
 
 Groups: a group content message's `messageId` is already identical on every member, so it doubles as the shared cid — **`client_msg_id = messageId`** (no separate mint), and a reply just carries the target `messageId` inside the same envelope (`cid = messageId`), encrypted into `encryptedContent`. Both receive paths — gossip realtime and offline catch-up / late-gap repair — decode the envelope (text only; hidden call-hint system bodies stay raw), validate `messageId` (`isValidCid`, enforced in `isGroupChatMessage` for gossip and at the offline parse gate), and persist the cid + reply ref. Because `id == messageId == client_msg_id` for groups, the inbound insert uses a **targetless `ON CONFLICT DO NOTHING`** (covers the PK), and sequence/cursor state advances even for a deduped duplicate — only unread + the "received" event are gated on insertion. The reply envelope lives inside the signed offline backup, so catch-up carries it automatically.
@@ -283,7 +285,7 @@ Bucket nudges are best-effort acceleration hints (not a correctness dependency):
 File transfer uses dedicated `fileTransferProtocol`.
 
 Flow:
-1. sender emits signed `file_offer` with timeout
+1. sender emits signed `file_offer` with timeout and optional signed reply metadata
 2. receiver accepts/rejects
 3. accepted transfer sends encrypted chunks
 4. progress/completion/failure events update UI and DB

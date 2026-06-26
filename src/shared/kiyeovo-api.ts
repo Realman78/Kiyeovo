@@ -522,7 +522,7 @@ export interface KiyeovoAPI {
     text: string,
     fileName: string,
   ) => Promise<SaveTextUploadResponse>;
-  sendFile: (peerId: string, filePath: string, fileId?: string) => Promise<{ success: boolean; error: string | null }>;
+  sendFile: (peerId: string, filePath: string, fileId?: string, replyToCid?: string) => Promise<{ success: boolean; error: string | null }>;
   acceptFile: (fileId: string) => Promise<{ success: boolean; error: string | null }>;
   rejectFile: (fileId: string) => Promise<{ success: boolean; error: string | null }>;
   cancelFileDownload: (fileId: string) => Promise<{ success: boolean; error: string | null }>;
@@ -535,6 +535,7 @@ export interface KiyeovoAPI {
       senderId: string;
       senderUsername: string;
       expiresAt: number;
+      replyToClientId?: string;
     }>;
     error: string | null;
   }>;

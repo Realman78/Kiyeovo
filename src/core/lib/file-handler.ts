@@ -17,6 +17,7 @@ import { EncryptedUserIdentity } from "../identity/encrypted-user-identity.js";
 import { dialProtocolWithRelayFallback } from "../transport/protocol-dialer.js";
 import { formatCopyTimestamp } from "../utils/miscellaneous.js";
 import { isDebugModeEnabled, log } from "../../shared/logger.js";
+import { isValidCid } from "../protocol/message-envelope.js";
 
 interface FileMetadata {
   buffer: Buffer
@@ -34,6 +35,7 @@ interface OutgoingFileTransferContext {
   targetPeerIdStr: string
   metadata: FileMetadata
   fileId: string
+  replyToCid: string | undefined
 }
 
 interface OutgoingTransferResult {
@@ -222,6 +224,7 @@ export class FileHandler {
   }
 
   private buildSignedFileOfferPayload(offer: FileOffer): object {
+    const replyToCid = isValidCid(offer.replyToCid) ? offer.replyToCid : undefined;
     return {
       type: offer.type,
       fileId: offer.fileId,
@@ -230,6 +233,7 @@ export class FileHandler {
       size: offer.size,
       checksum: offer.checksum,
       totalChunks: offer.totalChunks,
+      ...(replyToCid ? { replyToCid } : {}),
       timestamp: offer.timestamp,
       expiresAt: offer.expiresAt,
     };
@@ -237,6 +241,9 @@ export class FileHandler {
 
   private isFileOfferSignatureValid(offer: FileOffer, signingPublicKey: string): boolean {
     if (!offer.signature || !offer.timestamp || !offer.expiresAt) {
+      return false;
+    }
+    if (offer.replyToCid !== undefined && !isValidCid(offer.replyToCid)) {
       return false;
     }
 
@@ -285,15 +292,19 @@ export class FileHandler {
     return this.pendingFileAcceptances.size;
   }
 
-  getPendingFiles(): Array<{ fileId: string; filename: string; size: number; senderId: string; senderUsername: string; expiresAt: number }> {
-    return Array.from(this.pendingFileAcceptances.values()).map(p => ({
-      fileId: p.offer.fileId,
-      filename: p.offer.filename,
-      size: p.offer.size,
-      senderId: p.senderId,
-      senderUsername: p.senderUsername,
-      expiresAt: p.expiresAt
-    }));
+  getPendingFiles(): Array<{ fileId: string; filename: string; size: number; senderId: string; senderUsername: string; expiresAt: number; replyToClientId?: string }> {
+    return Array.from(this.pendingFileAcceptances.values()).map(p => {
+      const replyToClientId = p.offer.replyToCid;
+      return {
+        fileId: p.offer.fileId,
+        filename: p.offer.filename,
+        size: p.offer.size,
+        senderId: p.senderId,
+        senderUsername: p.senderUsername,
+        expiresAt: p.expiresAt,
+        ...(replyToClientId ? { replyToClientId } : {}),
+      };
+    });
   }
 
   acceptPendingFile(fileId: string): void {
@@ -825,15 +836,15 @@ export class FileHandler {
     }
   }
 
-  async sendFile(targetUsername: string, filePath: string, providedFileId?: string): Promise<void> {
+  async sendFile(targetUsername: string, filePath: string, providedFileId?: string, replyToCidInput?: string): Promise<void> {
     let chat: any = null;
     let fileId: string = '';
     let stream: Stream | null = null;
     let pinnedSessionPeerId: string | null = null;
     let activePeerId: string | null = null;
     try {
-      const outgoingContext = await this.#createOutgoingTransferContext(targetUsername, filePath, providedFileId);
-      const { chat: ensuredChat, session, targetPeerId, targetPeerIdStr, metadata, fileId: preparedFileId } = outgoingContext;
+      const outgoingContext = await this.#createOutgoingTransferContext(targetUsername, filePath, providedFileId, replyToCidInput);
+      const { chat: ensuredChat, session, targetPeerId, targetPeerIdStr, metadata, fileId: preparedFileId, replyToCid } = outgoingContext;
       chat = ensuredChat;
       fileId = preparedFileId;
       pinnedSessionPeerId = targetPeerIdStr;
@@ -887,8 +898,8 @@ export class FileHandler {
       let transferQueued = false;
 
       try {
-        await this.#persistOutgoingPendingTransferMessage(chat.id, fileId, metadata);
-        const offer = this.#createSignedFileOffer(fileId, metadata);
+        await this.#persistOutgoingPendingTransferMessage(chat.id, fileId, metadata, replyToCid);
+        const offer = this.#createSignedFileOffer(fileId, metadata, replyToCid);
         writable.push(this.#encodeMessage(offer));
         this.database.updateMessageTransfer(fileId, {
           transfer_status: 'awaiting_acceptance',
@@ -1056,6 +1067,7 @@ export class FileHandler {
     targetUsername: string,
     filePath: string,
     providedFileId?: string,
+    replyToCidInput?: string,
   ): Promise<OutgoingFileTransferContext> {
     const { session, peerId: targetPeerId } = await this.messageHandler.ensureUserSession(targetUsername, '', true);
     const targetPeerIdStr = targetPeerId.toString();
@@ -1078,6 +1090,7 @@ export class FileHandler {
 
     const metadata = await this.#loadFileMetadata(filePath);
     const fileId = providedFileId && providedFileId.trim() ? providedFileId : randomUUID();
+    const replyToCid = isValidCid(replyToCidInput) ? replyToCidInput : undefined;
 
     return {
       chat,
@@ -1086,13 +1099,15 @@ export class FileHandler {
       targetPeerIdStr,
       metadata,
       fileId,
+      replyToCid,
     };
   }
 
-  async #persistOutgoingPendingTransferMessage(chatId: number, fileId: string, metadata: FileMetadata): Promise<void> {
+  async #persistOutgoingPendingTransferMessage(chatId: number, fileId: string, metadata: FileMetadata, replyToCid?: string): Promise<void> {
     await this.database.createMessage({
       id: fileId,
       client_msg_id: fileId,
+      reply_to_client_id: replyToCid ?? null,
       chat_id: chatId,
       sender_peer_id: this.node.peerId.toString(),
       content: `${metadata.filename} (${metadata.size} bytes)`,
@@ -1154,6 +1169,7 @@ export class FileHandler {
   #createSignedFileOffer(
     fileId: string,
     metadata: FileMetadata,
+    replyToCid?: string,
   ): FileOffer & { timestamp: number; expiresAt: number; signature: string } {
     const timestamp = Date.now();
     const expiresAt = timestamp + FILE_ACCEPTANCE_TIMEOUT;
@@ -1165,6 +1181,7 @@ export class FileHandler {
       size: metadata.size,
       checksum: metadata.checksum,
       totalChunks: metadata.totalChunks,
+      ...(replyToCid ? { replyToCid } : {}),
       timestamp,
       expiresAt,
     };
@@ -1405,6 +1422,7 @@ export class FileHandler {
     await this.database.createMessage({
       id: offerMsg.fileId,
       client_msg_id: offerMsg.fileId,
+      reply_to_client_id: offerMsg.replyToCid ?? null,
       chat_id: chat.id,
       sender_peer_id: senderPeerId,
       content: `${offerMsg.filename} (${offerMsg.size} bytes)`,
@@ -1425,7 +1443,8 @@ export class FileHandler {
         size: offerMsg.size,
         senderId: senderPeerId,
         senderUsername: sender.username,
-        expiresAt
+        expiresAt,
+        ...(offerMsg.replyToCid ? { replyToClientId: offerMsg.replyToCid } : {}),
       });
     }
   }

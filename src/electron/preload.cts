@@ -185,7 +185,7 @@ const kiyeovoAPI: KiyeovoAPI = {
   getDownloadsDir: () => invoke(IPC_CHANNELS.GET_DOWNLOADS_DIR),
   setDownloadsDir: (path) => invoke(IPC_CHANNELS.SET_DOWNLOADS_DIR, path),
 
-  sendFile: (peerId, filePath, fileId) => invoke(IPC_CHANNELS.SEND_FILE_REQUEST, peerId, filePath, fileId),
+  sendFile: (peerId, filePath, fileId, replyToCid) => invoke(IPC_CHANNELS.SEND_FILE_REQUEST, peerId, filePath, fileId, replyToCid),
   acceptFile: (fileId) => invoke(IPC_CHANNELS.ACCEPT_FILE, fileId),
   rejectFile: (fileId) => invoke(IPC_CHANNELS.REJECT_FILE, fileId),
   cancelFileDownload: (fileId) => invoke(IPC_CHANNELS.CANCEL_FILE_DOWNLOAD, fileId),

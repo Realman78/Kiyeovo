@@ -297,6 +297,7 @@ export interface FileOffer {
   size: number
   checksum: string      // BLAKE3 of full file
   totalChunks: number
+  replyToCid?: string
   timestamp?: number
   expiresAt?: number
   signature?: string
@@ -727,6 +728,7 @@ export interface PendingFileReceivedEvent {
   senderId: string;
   senderUsername: string;
   expiresAt: number;
+  replyToClientId?: string;
 }
 
 export type CallSignalType =
