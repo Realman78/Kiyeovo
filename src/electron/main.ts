@@ -174,6 +174,38 @@ function setupMinimalMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
+function setupTextContextMenu(win: BrowserWindow): void {
+  win.webContents.on('context-menu', (_event, params) => {
+    const hasSelection = params.selectionText.length > 0;
+    if (!params.isEditable && !hasSelection) {
+      return;
+    }
+
+    const template: Electron.MenuItemConstructorOptions[] = [];
+
+    if (params.isEditable) {
+      template.push(
+        { role: 'undo' as const, enabled: params.editFlags.canUndo },
+        { role: 'redo' as const, enabled: params.editFlags.canRedo },
+        { type: 'separator' as const },
+        { role: 'cut' as const, enabled: params.editFlags.canCut },
+        { role: 'copy' as const, enabled: params.editFlags.canCopy },
+        { role: 'paste' as const, enabled: params.editFlags.canPaste },
+        { type: 'separator' as const },
+        { role: 'selectAll' as const, enabled: params.editFlags.canSelectAll },
+      );
+    } else {
+      template.push(
+        { role: 'copy' as const, enabled: params.editFlags.canCopy || hasSelection },
+        { type: 'separator' as const },
+        { role: 'selectAll' as const },
+      );
+    }
+
+    Menu.buildFromTemplate(template).popup({ window: win });
+  });
+}
+
 function getWindowBrandingForMode(mode: NetworkMode): { title: string; icon: string } {
   const iconsDir = app.isPackaged
     ? path.join(process.resourcesPath, 'icons')
@@ -246,6 +278,7 @@ function createMainWindow() {
   });
   win.webContents.on('did-finish-load', enforceWindowTitle);
   applyWindowSecurityPolicies(win, { appEntryUrl, isDevelopment });
+  setupTextContextMenu(win);
 
   // Restore maximized state or maximize on first run
   if (savedBounds?.isMaximized || !savedBounds) {

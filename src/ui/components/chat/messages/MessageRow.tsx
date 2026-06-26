@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { Check, ChevronDown, Copy, Info, ListChecks, Loader2, Pin, PinOff, Reply } from "lucide-react";
 import { useDispatch, useSelector } from "react-redux";
 import { formatTimestampToHourMinuteEu } from "../../../utils/dateUtils";
@@ -6,7 +6,7 @@ import { FileMessage, shouldRenderInlineImage } from "./FileMessage";
 import { setReplyTarget, type ChatMessage } from "../../../state/slices/chatSlice";
 import type { RootState } from "../../../state/store";
 import { RetryStatus } from "./RetryStatus";
-import { DropdownMenu, DropdownMenuItem } from "../../ui/DropdownMenu";
+import { DropdownMenu, DropdownMenuItem, type DropdownAnchorRect } from "../../ui/DropdownMenu";
 import { renderMessageText, endsWithCodeBlock } from "../../../utils/renderMessageText";
 import { MessageInfoDialog } from "./MessageInfoDialog";
 import { useHour12 } from "../../../hooks/useHour12";
@@ -47,6 +47,47 @@ type FetchedQuote = {
   fileName?: string;
 };
 
+function isEditableContextTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) {
+    return false;
+  }
+
+  const editableCandidate = target.closest('input, textarea, [contenteditable]');
+  if (!editableCandidate) {
+    return false;
+  }
+
+  if (editableCandidate instanceof HTMLInputElement || editableCandidate instanceof HTMLTextAreaElement) {
+    return true;
+  }
+
+  return editableCandidate instanceof HTMLElement && editableCandidate.isContentEditable;
+}
+
+function isTargetInsideActiveSelection(target: EventTarget | null): boolean {
+  if (!(target instanceof Node)) {
+    return false;
+  }
+
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0 || selection.toString().length === 0) {
+    return false;
+  }
+
+  for (let index = 0; index < selection.rangeCount; index += 1) {
+    const range = selection.getRangeAt(index);
+    try {
+      if (range.intersectsNode(target)) {
+        return true;
+      }
+    } catch {
+      // Ignore detached/transient nodes; they should not block message actions.
+    }
+  }
+
+  return false;
+}
+
 export const MessageRow = memo(({
   message,
   myPeerId,
@@ -71,6 +112,7 @@ export const MessageRow = memo(({
   const [isCopied, setIsCopied] = useState(false);
   const [infoOpen, setInfoOpen] = useState(false);
   const [messageMenuOpen, setMessageMenuOpen] = useState(false);
+  const [messageMenuAnchorRect, setMessageMenuAnchorRect] = useState<DropdownAnchorRect | null>(null);
   const [messageMenuSide, setMessageMenuSide] = useState<'top' | 'bottom'>('bottom');
   const rowRef = useRef<HTMLDivElement>(null);
   const isSystemMessage = message.messageType === 'system';
@@ -251,6 +293,9 @@ export const MessageRow = memo(({
   };
 
   const handleMessageMenuOpenChange = (open: boolean) => {
+    if (!open) {
+      setMessageMenuAnchorRect(null);
+    }
     if (open) {
       const rowRect = rowRef.current?.getBoundingClientRect();
       if (rowRect) {
@@ -259,6 +304,27 @@ export const MessageRow = memo(({
       }
     }
     setMessageMenuOpen(open);
+  };
+
+  const handleMessageContextMenu = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (selectionMode) {
+      return;
+    }
+    if (isEditableContextTarget(event.target) || isTargetInsideActiveSelection(event.target)) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    setMessageMenuSide(event.clientY > window.innerHeight / 2 ? 'top' : 'bottom');
+    setMessageMenuAnchorRect({
+      top: event.clientY,
+      bottom: event.clientY,
+      left: event.clientX,
+      right: event.clientX,
+      width: 0,
+    });
+    setMessageMenuOpen(true);
   };
 
   const handleOpenInfo = () => {
@@ -275,6 +341,7 @@ export const MessageRow = memo(({
       <DropdownMenu
         open={messageMenuOpen}
         onOpenChange={handleMessageMenuOpenChange}
+        anchorRect={messageMenuAnchorRect}
         align={isOwnMessage ? "end" : "start"}
         side={messageMenuSide}
         minWidthClass="min-w-36"
@@ -390,6 +457,7 @@ export const MessageRow = memo(({
           )}
           <div
             data-message-bubble
+            onContextMenu={handleMessageContextMenu}
             className={`relative max-w-[70%] rounded-lg ${
               replyQuote ? "px-1 pt-1" : "pl-[9px] pr-[7px] pt-1.5"
             } ${

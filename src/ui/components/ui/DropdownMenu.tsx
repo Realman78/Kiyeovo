@@ -2,11 +2,14 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties, type FC, 
 import { createPortal } from "react-dom";
 import { cn } from "../../lib/utils";
 
+export type DropdownAnchorRect = Pick<DOMRect, "top" | "bottom" | "left" | "right" | "width">;
+
 interface DropdownMenuProps {
   trigger: ReactNode;
   children: ReactNode;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  anchorRect?: DropdownAnchorRect | null;
   align?: "start" | "end" | "center";
   side?: "top" | "bottom";
   minWidthClass?: string;
@@ -18,6 +21,7 @@ export const DropdownMenu: FC<DropdownMenuProps> = ({
   children,
   open,
   onOpenChange,
+  anchorRect = null,
   align = "end",
   side = "bottom",
   minWidthClass = "min-w-56",
@@ -58,16 +62,17 @@ export const DropdownMenu: FC<DropdownMenuProps> = ({
     };
   }, [open, onOpenChange, portal, updateTriggerRect]);
 
-  const portalPosition: CSSProperties | undefined = triggerRect
+  const positionRect = anchorRect ?? triggerRect;
+  const portalPosition: CSSProperties | undefined = positionRect
     ? {
         ...(side === "bottom"
-          ? { top: triggerRect.bottom + 8 }
-          : { bottom: window.innerHeight - triggerRect.top + 8 }),
+          ? { top: positionRect.bottom + 8 }
+          : { bottom: window.innerHeight - positionRect.top + 8 }),
         ...(align === "end"
-          ? { right: Math.max(8, window.innerWidth - triggerRect.right) }
+          ? { right: Math.max(8, window.innerWidth - positionRect.right) }
           : align === "start"
-            ? { left: Math.max(8, triggerRect.left) }
-            : { left: triggerRect.left + (triggerRect.width / 2), transform: "translateX(-50%)" }),
+            ? { left: Math.max(8, positionRect.left) }
+            : { left: positionRect.left + (positionRect.width / 2), transform: "translateX(-50%)" }),
       }
     : undefined;
 
@@ -114,7 +119,7 @@ export const DropdownMenu: FC<DropdownMenuProps> = ({
       </div>
 
       {portal
-        ? (menuContent && triggerRect ? createPortal(menuContent, document.body) : null)
+        ? (menuContent && positionRect ? createPortal(menuContent, document.body) : null)
         : menuContent}
     </div>
   );
