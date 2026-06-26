@@ -22,12 +22,14 @@ import { BootstrapSetup } from '../components/sidebar/setup/BootstrapSetup';
 import { RelaySetup } from '../components/sidebar/setup/RelaySetup';
 import { IceSetup } from '../components/sidebar/setup/IceSetup';
 import { SettingsPage } from '../components/sidebar/settings/SettingsPage';
+import { ProfilePage } from '../components/sidebar/profile/ProfilePage';
 import { InitialSetupWelcome } from '../components/sidebar/setup/InitialSetupWelcome';
 import { InitialSetupWizard } from '../components/sidebar/setup/InitialSetupWizard';
-import { OPEN_SETUP_EVENT } from '../utils/uiSignals';
+import { OPEN_REGISTER_DIALOG_EVENT, OPEN_SETUP_EVENT } from '../utils/uiSignals';
 import type { InitialSetupStatus } from '../../shared/kiyeovo-api';
 import { useSetupReadiness } from '../hooks/useSetupReadiness';
 import { useConnectivityGuidance } from '../hooks/useConnectivityGuidance';
+import { useDHTConnectionStatus } from '../hooks/useDHTConnectionStatus';
 
 type InitialSetupSessionPhase = 'welcome' | 'guided' | 'dismissed';
 
@@ -61,6 +63,8 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
 
   useNotifications();
   useCallRingtone();
+  // Keep user.connected fresh everywhere
+  useDHTConnectionStatus();
 
   const guideCallConnectionFailure = useEffectEvent(() => {
     return showCallConnectionFailure();
@@ -140,6 +144,12 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
     };
     window.addEventListener(OPEN_SETUP_EVENT, handler);
     return () => window.removeEventListener(OPEN_SETUP_EVENT, handler);
+  }, []);
+
+  useEffect(() => {
+    const handler = () => setActiveSection('profile');
+    window.addEventListener(OPEN_REGISTER_DIALOG_EVENT, handler);
+    return () => window.removeEventListener(OPEN_REGISTER_DIALOG_EVENT, handler);
   }, []);
 
   const resolvePeerName = (peerId: string): string => {
@@ -980,6 +990,9 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
               )}
               {activeSection === 'settings' && (
                 <SettingsPage />
+              )}
+              {activeSection === 'profile' && (
+                <ProfilePage />
               )}
             </div>
           )}

@@ -145,7 +145,7 @@ const kiyeovoAPI: KiyeovoAPI = {
   cancelPendingKeyExchange: (peerId) => invoke(IPC_CHANNELS.CANCEL_PENDING_KEY_EXCHANGE, peerId),
 
   importTrustedUser: (filePath, password, customName) => invoke(IPC_CHANNELS.IMPORT_TRUSTED_USER, filePath, password, customName),
-  exportProfile: (password, sharedSecret) => invoke(IPC_CHANNELS.EXPORT_PROFILE, password, sharedSecret),
+  exportProfile: (password, sharedSecret, filename, label) => invoke(IPC_CHANNELS.EXPORT_PROFILE, password, sharedSecret, filename, label),
   checkTrustedSecretReuse: (sharedSecret) => invoke(IPC_CHANNELS.CHECK_TRUSTED_SECRET_REUSE, sharedSecret),
 
   showOpenDialog: (options) => invoke(IPC_CHANNELS.SHOW_OPEN_DIALOG, options),

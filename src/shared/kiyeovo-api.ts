@@ -406,6 +406,8 @@ export interface KiyeovoAPI {
   exportProfile: (
     password: string,
     sharedSecret: string,
+    filename: string,
+    label: string,
   ) => Promise<{
     success: boolean;
     error?: string;

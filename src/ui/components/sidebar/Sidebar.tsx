@@ -38,7 +38,8 @@ export const Sidebar: FC<SidebarProps> = ({
   const [networkMode, setNetworkMode] = useState<NetworkMode>('fast');
   const networkOnline = useSelector((state: RootState) => state.user.networkOnline);
   const statusSuffix = networkOnline === false ? ' (local)' : isTorEnabled ? ' (tor)' : '';
-  const isRailOnly = activeSection === 'settings';
+  const isRailOnly = activeSection === 'settings' || activeSection === 'profile';
+  const openProfile = () => onSelectSection('profile');
 
   const contactAttempts = useSelector((state: RootState) => state.chat.contactAttempts)
   const { toast } = useToast();
@@ -151,7 +152,7 @@ export const Sidebar: FC<SidebarProps> = ({
         collapsed
       />
       <div className="flex-1" />
-      <SidebarFooter collapsed />
+      <SidebarFooter collapsed onOpenProfile={openProfile} />
     </>
   );
 
@@ -194,7 +195,7 @@ export const Sidebar: FC<SidebarProps> = ({
           />
           <GroupInviteList />
           <ChatList scope="groups" />
-          <SidebarFooter />
+          <SidebarFooter onOpenProfile={openProfile} />
         </>
       );
     }
@@ -215,7 +216,7 @@ export const Sidebar: FC<SidebarProps> = ({
         <GroupInviteList />
         <PendingKeyExchangeList />
         <ChatList scope="all" />
-        <SidebarFooter />
+        <SidebarFooter onOpenProfile={openProfile} />
       </>
     );
   };

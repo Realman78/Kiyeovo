@@ -149,6 +149,10 @@ Trusted profile import/export is also supported for out-of-band onboarding:
 - exported profiles are signed, password-encrypted files containing username, peer ID, signing/offline/notifications public keys, and a default inbox key
 - importing a verified profile can seed a trusted direct chat without the normal username lookup / first-contact discovery path
 - trusted imported chats are tracked separately in chat state (`trusted_out_of_band`) so the app can preserve that bootstrap behavior explicitly
+- export does **not** require registration: the embedded username is only a display label (the importer can rename via `customName`), and the trusted chat is built from the profile's default inbox key, so a peer can export and be reachable out-of-band without ever publishing a DHT username
+- the `profile:export` IPC takes `(password, sharedSecret, filename, label)`. The renderer collects the destination via the native save dialog and a required display label (prefilled with the current username when registered). The main process validates inputs (label trimmed and bounded to 2–64 chars to match the import-side username constraint, file path required, `.kiyeovo` extension ensured) and embeds `label` as the profile username, falling back to the registered username when no label is provided
+- in the UI, export lives in a dedicated `ExportDialog` opened from the `Profile` tab (available in both registered and unregistered states); it is no longer part of `UserDialog`, which now covers only peer ID, change username, and unregister
+- auto-register defaults to ON for a first-ever registration: `user:getAutoRegister` treats an unset value as enabled and only an explicit `'never'` (written when the user opts out) as disabled. `RegisterIdentityDialog` persists the user's explicit choice after a successful register (`setAutoRegister(rememberMe)`) so an opt-out is durably recorded as `'never'` rather than left unset; the change-username path does not touch the setting, so renames cannot disable auto-register. Core startup auto-registration still requires an explicit `'true'`, so behavior stays consistent with the toggle
 
 ---
 
@@ -478,7 +482,7 @@ Operational notes:
 The main window sidebar is now split into:
 - a thin left navigation rail for `Chats`, `Groups`, and `Setup`
 - a context pane that changes based on the selected rail section
-- utility rail actions at the bottom for `Help` and `Settings`
+- utility rail actions at the bottom for `Profile` and `Settings` (`Profile` sits above `Settings`)
 
 Current navigation rollout status:
 - `Chats` shows the legacy mixed sidebar content (direct chats, group chats, and request/invite sections)
@@ -497,6 +501,10 @@ Current navigation rollout status:
 - changing network mode requires confirmation and an app restart; if the mode is saved but automatic restart fails, the Settings page keeps the running mode distinct from the pending saved mode and tells the user that a manual restart is required
 - database backup uses a native save dialog and leaves the user on Settings after completion; account deletion requires a typed confirmation before wiping local data and restarting, removes the resolved `kiyeovo-uploads/` directory (pasted images and generated text uploads) while leaving downloads untouched, and uses a native error dialog before still restarting if upload cleanup fails after the database wipe; closing the confirmation dialog always clears the typed phrase
 - quitting from Settings requires confirmation and then uses Electron's existing graceful shutdown path, which closes network services and the database before process exit
+- `Profile` is a rail-only page that is the single home for identity management (peer ID, username registration, change username, auto-register toggle, trusted-profile export, and unregister); it reuses the existing register and identity dialogs rather than re-implementing them inline. The auto-register toggle is a registered-only row on the tab itself (moved out of `UserDialog`); trusted-profile export is reachable in both states via `ExportDialog`
+- the `Profile` rail action shows an amber attention dot while no username is registered, nudging first-run users toward registration; the dot uses a profile-specific accessibility label rather than the Setup wording
+- the sidebar footer adapts to identity state: a registered user's identity chip is a shortcut into the `Profile` tab, while an unregistered user's Register button opens the registration modal in place (it does not navigate to the tab); the empty chat-area and chat-list "Register" calls-to-action route to the `Profile` tab instead of opening a modal directly
+- registration logic is owned by a single shared `RegisterIdentityDialog` wrapper (register handler, loading/error state, and Redux updates) used by both the footer and the `Profile` tab, so the two entry points cannot diverge
 - `Help` remains a placeholder pane
 - the left rail remains visible while the adjacent sidebar pane can collapse independently
 - the left rail may expand on hover/focus as an overlay to reveal labels without shifting the main layout
@@ -504,10 +512,11 @@ Current navigation rollout status:
 - navigation state is renderer-local UI state; it is not persisted or stored in Redux
 - initial infrastructure onboarding persists `not_started`, `in_progress`, `completed`, or `skipped` independently for fast and anonymous mode; Electron derives the active-mode settings key rather than accepting a mode from the renderer, and absent or invalid values read as `not_started`
 - `not_started` opens a dedicated full-window welcome page; `Start setup` enters a full-window mode-aware guide around the real Setup pages, while `Skip for now` opens Chats
-- fast-mode guidance progresses through Bootstrap, Relay, and optional STUN/TURN configuration; anonymous-mode guidance contains only Bootstrap
+- fast-mode guidance progresses through Bootstrap, Relay, an optional Register step, and optional STUN/TURN configuration (in that order); anonymous-mode guidance contains Bootstrap followed by the optional Register step
+- the optional Register step reuses the shared `RegisterIdentityDialog`; it is "configured" when a username is registered (`user.registered`) and may be skipped like Calls. It is layered into the wizard via a wizard-local `WizardStepId = SetupSection | 'register'` and an internal flag, so `register` is never added to `SetupSection` and `Main` keeps driving only the network steps (the wizard renders its own register panel instead of the passed network page when the register step is active)
 - the guide's numbered step indicators are clickable, so users may configure sections in any order without skipping the entire guide
-- Bootstrap and Relay must still contain configuration before the Ready state can be reached; STUN/TURN may be skipped, and the Ready summary does not describe an unconfigured or warning-acknowledged ICE list as configured
-- starting, skipping, and completing the guide persist `in_progress`, `skipped`, and `completed` respectively before changing the UI; failed writes leave the current onboarding surface open
+- Bootstrap and Relay must still contain configuration before the Ready state can be reached; the Register and STUN/TURN steps may be skipped, and the Ready summary does not describe an unconfigured or warning-acknowledged ICE list (or an unregistered identity) as configured
+- starting, skipping, and completing the guide persist `in_progress`, `skipped`, and `completed` respectively before changing the UI; failed writes leave the current onboarding surface open. When resuming an `in_progress` guide, the wizard waits for an initial user-state snapshot before deciding whether to auto-open Register, so already-registered users are not routed there by the default unregistered Redux state
 - restarting an `in_progress` guide keeps the app behind an opaque loading surface until both persisted status and Setup readiness are available, then opens the first missing required section, or Calls in fast mode when Bootstrap and Relay are already configured; the resume decision is applied once so later readiness refreshes do not move the active step
 - switching network modes preserves each mode's independent onboarding history; removing configuration later shows normal Setup warnings without reopening a completed or skipped guide
 
@@ -591,6 +600,8 @@ Main slices:
 - `userSlice` (identity, connected state, registration flags, mode markers)
 - `chatSlice` (chats/messages, pending KX/contact attempts, group/file/call events)
 - `appConfigSlice` (runtime-editable limits/settings)
+
+DHT connectivity freshness (`userSlice.connected`) is maintained globally by an always-mounted `useDHTConnectionStatus` hook in `Main` (snapshot + `dht-connection-status` subscription). This keeps the connected flag correct in rail-only views (Profile/Settings) and the setup wizard, where `SidebarHeader` is not mounted, so the registration UI no longer falsely reports the network as disconnected. `SidebarHeader` retains its own auto-register-on-connect logic; only connectivity reporting was lifted to the global hook, not auto-register ownership.
 
 Main event sinks from Electron:
 - message/chat/group events

@@ -33,7 +33,6 @@ import {
 } from '../core/network/node-relays.js';
 import { DEFAULT_WEBRTC_ICE_SERVERS } from '../core/network/default-infrastructure.js';
 import { ensureAppDataDir, formatCopyTimestamp } from '../core/utils/miscellaneous.js';
-import { homedir } from 'os';
 import { basename, dirname, extname, isAbsolute, join, resolve as resolvePath } from 'path';
 import { copyFile, lstat, mkdir, readdir, realpath, rm, stat, writeFile } from 'fs/promises';
 import { log } from '../shared/logger.js';
@@ -489,7 +488,8 @@ function setupRegistrationHandlers(
 
       const mode = p2pCore.database.getSessionNetworkMode();
       const setting = p2pCore.database.getSetting(`auto_register_${mode}`);
-      return { autoRegister: setting === 'true' };
+      // Default ON when the user has never set a preference
+      return { autoRegister: setting !== 'never' };
     } catch (error) {
       console.error('[IPC] Failed to get auto-register setting:', error);
       return { autoRegister: false };
@@ -1312,30 +1312,41 @@ function setupTrustedUserHandlers(
     }
   });
 
-  ipcMain.handle(IPC_CHANNELS.EXPORT_PROFILE, async (_event, password: string, sharedSecret: string) => {
+  ipcMain.handle(IPC_CHANNELS.EXPORT_PROFILE, async (_event, password: string, sharedSecret: string, filename: string, label: string) => {
     try {
       const p2pCore = getP2PCore();
       if (!p2pCore) {
         return { success: false, error: 'P2P core not initialized' };
       }
 
-      const username = p2pCore.usernameRegistry.getCurrentUsername();
-      if (!username) {
-        return { success: false, error: 'No username registered' };
+      const registeredUsername = p2pCore.usernameRegistry.getCurrentUsername();
+      const trimmedLabel = typeof label === 'string' ? label.trim() : '';
+      const resolvedLabel = trimmedLabel || (registeredUsername ?? '');
+      if (!resolvedLabel) {
+        return { success: false, error: 'A display label is required' };
       }
+      if (resolvedLabel.length < 2 || resolvedLabel.length > 64) {
+        return { success: false, error: 'Display label must be between 2 and 64 characters' };
+      }
+
+      // The destination path comes from the renderer's native save dialog
+      const trimmedFilename = typeof filename === 'string' ? filename.trim() : '';
+      if (!trimmedFilename) {
+        return { success: false, error: 'A file path is required' };
+      }
+      const resolvedFilename = trimmedFilename.toLowerCase().endsWith('.kiyeovo')
+        ? trimmedFilename
+        : `${trimmedFilename}.kiyeovo`;
 
       const myPeerId = p2pCore.userIdentity.id;
 
-      // Save to home directory as ${username}.kiyeovo
-      const filename = join(homedir(), `${username}.kiyeovo`);
-
-      log(`[IPC] Exporting profile to: ${filename}`);
+      log(`[IPC] Exporting profile to: ${resolvedFilename}`);
 
       const result = await ProfileManager.exportProfileDesktop(
         p2pCore.userIdentity,
-        username,
+        resolvedLabel,
         myPeerId,
-        filename,
+        resolvedFilename,
         password,
         sharedSecret
       );

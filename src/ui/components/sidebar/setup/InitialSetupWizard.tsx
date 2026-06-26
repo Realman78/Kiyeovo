@@ -1,4 +1,5 @@
-import { useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useSelector } from 'react-redux';
 import {
   ArrowLeft,
   ArrowRight,
@@ -10,28 +11,37 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import { useSetupReadiness, type SetupReadiness } from '../../../hooks/useSetupReadiness';
+import type { RootState } from '../../../state/store';
 import { Button } from '../../ui/Button';
 import { SkipSetupConfirmDialog } from './SkipSetupConfirmDialog';
+import { WizardRegisterStep } from './WizardRegisterStep';
 import type { SetupSection } from '../navigation';
 
+type WizardStepId = SetupSection | 'register';
+
 type WizardStep = {
-  section: SetupSection;
+  id: WizardStepId;
   title: string;
   optional?: boolean;
 };
 
 const FAST_STEPS: WizardStep[] = [
-  { section: 'bootstrap', title: 'Bootstrap' },
-  { section: 'relay', title: 'Relay' },
-  { section: 'ice', title: 'Calls', optional: true },
+  { id: 'bootstrap', title: 'Bootstrap' },
+  { id: 'relay', title: 'Relay' },
+  { id: 'register', title: 'Register', optional: true },
+  { id: 'ice', title: 'Calls', optional: true },
 ];
 
 const ANONYMOUS_STEPS: WizardStep[] = [
-  { section: 'bootstrap', title: 'Bootstrap' },
+  { id: 'bootstrap', title: 'Bootstrap' },
+  { id: 'register', title: 'Register', optional: true },
 ];
 
-function isConfigured(section: SetupSection, readiness: SetupReadiness): boolean {
-  return readiness[section] === 'configured';
+function isStepConfigured(step: WizardStep, readiness: SetupReadiness, registered: boolean): boolean {
+  if (step.id === 'register') {
+    return registered;
+  }
+  return readiness[step.id] === 'configured';
 }
 
 function requiredSetupComplete(readiness: SetupReadiness): boolean {
@@ -57,34 +67,77 @@ export function InitialSetupWizard({
   children,
 }: InitialSetupWizardProps) {
   const readiness = useSetupReadiness();
+  const registered = useSelector((state: RootState) => state.user.registered);
+  const registrationInProgress = useSelector((state: RootState) => state.user.registrationInProgress);
+  const [initialUserRegistered, setInitialUserRegistered] = useState<boolean | null>(null);
   const [showingReady, setShowingReady] = useState(false);
   const [showSkipConfirm, setShowSkipConfirm] = useState(false);
+  // `register` is a wizard-local step layered on top of the network step driven by `activeSection`.
+  const [registerActive, setRegisterActive] = useState(false);
   const steps = readiness?.mode === 'anonymous' ? ANONYMOUS_STEPS : FAST_STEPS;
-  const activeStepIndex = steps.findIndex((step) => step.section === activeSection);
-  const activeStep = activeStepIndex >= 0 ? steps[activeStepIndex]! : steps[0]!;
+  const activeStepId: WizardStepId = registerActive ? 'register' : activeSection;
+  const activeStepIndex = Math.max(0, steps.findIndex((step) => step.id === activeStepId));
+  const activeStep = steps[activeStepIndex]!;
+  const registrationStateKnown = initialUserRegistered !== null || registered;
+  const registeredForWizard = registered || initialUserRegistered === true;
+
+  useEffect(() => {
+    let disposed = false;
+    void window.kiyeovoAPI.getUserState()
+      .then((userState) => {
+        if (!disposed) {
+          setInitialUserRegistered(userState.isRegistered);
+        }
+      })
+      .catch((error) => {
+        console.error('[InitialSetupWizard] Failed to load user state:', error);
+        if (!disposed) {
+          setInitialUserRegistered(false);
+        }
+      });
+
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  // Resume lands on a network section
+  const initialStepDecidedRef = useRef(false);
+  useEffect(() => {
+    if (initialStepDecidedRef.current || !readiness || !registrationStateKnown) return;
+    initialStepDecidedRef.current = true;
+    if (requiredSetupComplete(readiness) && !registeredForWizard) {
+      setRegisterActive(true);
+    }
+  }, [readiness, registeredForWizard, registrationStateKnown]);
+
+  const goToStep = (step: WizardStep) => {
+    if (step.id === 'register') {
+      setRegisterActive(true);
+      return;
+    }
+    setRegisterActive(false);
+    onSelectSection(step.id);
+  };
+
+  // Lock wizard navigation while a registration triggered from the Register step is in flight
+  const navLocked = saving || registrationInProgress;
+  const requiredComplete = readiness ? requiredSetupComplete(readiness) : false;
+  const canContinue = readiness !== null && (
+    activeStepId === 'bootstrap'
+      ? readiness.bootstrap === 'configured'
+      : requiredComplete
+  );
 
   const handleContinue = () => {
-    if (!readiness) return;
+    if (!readiness || !canContinue) return;
 
-    if (activeSection === 'bootstrap') {
-      if (readiness.bootstrap !== 'configured') return;
-      if (readiness.mode === 'anonymous') {
-        setShowingReady(true);
-      } else {
-        onSelectSection('relay');
-      }
-      return;
-    }
-
-    if (activeSection === 'relay') {
-      if (!requiredSetupComplete(readiness)) return;
-      onSelectSection('ice');
-      return;
-    }
-
-    if (requiredSetupComplete(readiness)) {
+    const nextIndex = activeStepIndex + 1;
+    if (nextIndex >= steps.length) {
       setShowingReady(true);
+      return;
     }
+    goToStep(steps[nextIndex]!);
   };
 
   const handleBack = () => {
@@ -92,12 +145,9 @@ export function InitialSetupWizard({
       setShowingReady(false);
       return;
     }
-
-    if (activeSection === 'ice') {
-      onSelectSection('relay');
-    } else if (activeSection === 'relay') {
-      onSelectSection('bootstrap');
-    }
+    const prevIndex = activeStepIndex - 1;
+    if (prevIndex < 0) return;
+    goToStep(steps[prevIndex]!);
   };
 
   if (showingReady && readiness) {
@@ -117,10 +167,10 @@ export function InitialSetupWizard({
 
           <div className="mx-auto mt-7 grid max-w-lg gap-2 text-left">
             {steps.map((step) => {
-              const configured = isConfigured(step.section, readiness);
+              const configured = isStepConfigured(step, readiness, registeredForWizard);
               return (
                 <div
-                  key={step.section}
+                  key={step.id}
                   className="flex items-center justify-between rounded-lg border border-border bg-background/45 px-4 py-3"
                 >
                   <span className="flex items-center gap-3 text-sm text-foreground">
@@ -155,28 +205,16 @@ export function InitialSetupWizard({
   }
 
   const activeConfigured = readiness
-    ? isConfigured(activeStep.section, readiness)
+    ? isStepConfigured(activeStep, readiness, registeredForWizard)
     : false;
-  const requiredComplete = readiness ? requiredSetupComplete(readiness) : false;
-  const earlierRequiredComplete = readiness
-    ? activeSection === 'bootstrap'
-      || (
-        readiness.bootstrap === 'configured'
-        && (activeSection !== 'ice' || readiness.relay === 'configured')
-      )
-    : false;
-  const canContinue = readiness !== null && (
-    activeSection === 'bootstrap'
-      ? readiness.bootstrap === 'configured'
-      : requiredComplete
-  );
-  const continueLabel = !earlierRequiredComplete
+  const isLastStep = activeStepIndex === steps.length - 1;
+  const continueLabel = !canContinue
     ? 'Complete required steps'
-    : activeStep.section === 'ice' && !activeConfigured
-      ? 'Finish without calls'
-      : activeStepIndex === steps.length - 1
-        ? 'Finish setup'
-        : 'Continue';
+    : isLastStep
+      ? (activeStep.optional && !activeConfigured
+          ? (activeStep.id === 'register' ? 'Finish without registering' : 'Finish without calls')
+          : 'Finish setup')
+      : 'Continue';
 
   return (
     <div className="flex h-full flex-col bg-sidebar-accent">
@@ -192,15 +230,15 @@ export function InitialSetupWizard({
 
             <div className="mt-3 flex items-center">
               {steps.map((step, index) => {
-                const configured = readiness ? isConfigured(step.section, readiness) : false;
-                const active = step.section === activeSection;
+                const configured = readiness ? isStepConfigured(step, readiness, registeredForWizard) : false;
+                const active = step.id === activeStepId;
 
                 return (
-                  <div key={step.section} className="flex min-w-0 flex-1 items-center">
+                  <div key={step.id} className="flex min-w-0 flex-1 items-center">
                     <button
                       type="button"
-                      onClick={() => onSelectSection(step.section)}
-                      disabled={saving}
+                      onClick={() => goToStep(step)}
+                      disabled={navLocked}
                       aria-current={active ? 'step' : undefined}
                       aria-label={`${step.title} setup${step.optional ? ', optional' : ''}${configured ? ', configured' : ''}`}
                       className="group flex min-w-0 cursor-pointer items-center gap-2 rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-60"
@@ -238,25 +276,27 @@ export function InitialSetupWizard({
             <button
               type="button"
               onClick={() => setShowSkipConfirm(true)}
-              disabled={saving}
+              disabled={navLocked}
               className="mr-1 cursor-pointer text-xs text-muted-foreground underline-offset-2 transition-colors hover:text-foreground hover:underline focus:outline-none focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
             >
               Skip setup
             </button>
             {activeStepIndex > 0 && (
-              <Button variant="ghost" size="sm" onClick={handleBack} disabled={saving}>
+              <Button variant="ghost" size="sm" onClick={handleBack} disabled={navLocked}>
                 <ArrowLeft />
                 Back
               </Button>
             )}
-            <Button size="sm" onClick={handleContinue} disabled={!canContinue || saving}>
+            <Button size="sm" onClick={handleContinue} disabled={!canContinue || navLocked}>
               {continueLabel}
               <ArrowRight />
             </Button>
           </div>
         </div>
       </div>
-      <div className="min-h-0 flex-1">{children}</div>
+      <div className="min-h-0 flex-1">
+        {activeStepId === 'register' ? <WizardRegisterStep /> : children}
+      </div>
 
       <SkipSetupConfirmDialog
         open={showSkipConfirm}

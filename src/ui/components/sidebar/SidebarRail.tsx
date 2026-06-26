@@ -1,8 +1,10 @@
 import { useState, type FC, type FocusEvent as ReactFocusEvent } from 'react';
-import { MessageSquare, Network, Settings, Users } from 'lucide-react';
+import { MessageSquare, Network, Settings, User, Users } from 'lucide-react';
+import { useSelector } from 'react-redux';
 import { Logo } from '../icons/Logo';
 import { KiyeovoDialog } from './header/KiyeovoDialog';
 import { useSetupReadiness, type SetupSeverity } from '../../hooks/useSetupReadiness';
+import type { RootState } from '../../state/store';
 import type { SidebarSection } from './navigation';
 
 type SidebarRailProps = {
@@ -25,6 +27,7 @@ const PRIMARY_ITEMS: RailItem[] = [
 
 const SECONDARY_ITEMS: RailItem[] = [
   // { section: 'help', label: 'Help', icon: CircleHelp },
+  { section: 'profile', label: 'Profile', icon: User },
   { section: 'settings', label: 'Settings', icon: Settings },
 ];
 
@@ -35,6 +38,7 @@ type SidebarRailButtonProps = {
   label: string;
   onClick: () => void;
   severity?: SetupSeverity;
+  severityLabel?: string;
 };
 
 const SidebarRailButton: FC<SidebarRailButtonProps> = ({
@@ -43,9 +47,11 @@ const SidebarRailButton: FC<SidebarRailButtonProps> = ({
   icon: Icon,
   label,
   onClick,
-  severity
+  severity,
+  severityLabel
 }) => {
   const statusLabel = !severity ? null
+    : severityLabel ? severityLabel
     : severity === 'blocked' ? 'setup blocked'
     : 'setup needs attention'
   const accessibleLabel = statusLabel ? `${label}, ${statusLabel}` : label;
@@ -86,6 +92,7 @@ export const SidebarRail: FC<SidebarRailProps> = ({
   const [kiyeovoDialogOpen, setKiyeovoDialogOpen] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const setupReadiness = useSetupReadiness();
+  const isRegistered = useSelector((state: RootState) => state.user.registered);
 
   const openKiyeovoDialog = () => {
     setKiyeovoDialogOpen(true);
@@ -142,6 +149,8 @@ export const SidebarRail: FC<SidebarRailProps> = ({
                 icon={item.icon}
                 label={item.label}
                 onClick={() => onSelectSection(item.section)}
+                severity={item.section === 'profile' && !isRegistered ? 'warning' : undefined}
+                severityLabel={item.section === 'profile' ? 'profile needs attention' : undefined}
               />
             ))}
           </div>
