@@ -177,6 +177,7 @@ export const IPC_CHANNELS = {
   // File transfer
   REGISTER_MESSAGE_MEDIA: 'media:registerMessage',
   SAVE_UPLOAD: 'file:saveUpload',
+  SAVE_TEXT_UPLOAD: 'file:saveTextUpload',
   SEND_FILE_REQUEST: 'file:send',
   ACCEPT_FILE: 'file:accept',
   REJECT_FILE: 'file:reject',

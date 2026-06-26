@@ -10,8 +10,6 @@ import {
 import { Button } from '../../ui/Button';
 import { FileUp, Loader2, X } from 'lucide-react';
 import { useAppSelector } from '../../../state/hooks';
-import { UPLOADS_QUOTA_WARN_BYTES } from '../../../../core/constants';
-import { UploadsQuotaDialog } from './UploadsQuotaDialog';
 
 export interface PastedImageFile {
   bytes: Uint8Array;
@@ -33,6 +31,10 @@ interface SendFileDialogProps {
   pastedFile?: PastedImageFile | null;
   transferBlocked?: boolean;
   transferBlockedReason?: string;
+  onUploadSaved?: (
+    savedFilePath: string,
+    uploadsDirSizeBytes: number,
+  ) => void;
 }
 
 interface SelectedFile {
@@ -47,14 +49,12 @@ interface SendFileDialogContentProps {
   onClosed: () => void;
   onSend: SendFileDialogProps['onSend'];
   onPreparingChange: (preparing: boolean) => void;
-  onQuotaExceeded: (savedFilePath: string) => void;
+  onUploadSaved?: SendFileDialogProps['onUploadSaved'];
   pastedFile: PastedImageFile | null;
   preparing: boolean;
   transferBlocked: boolean;
   transferBlockedReason: string;
 }
-
-let uploadsQuotaWarnedThisSession = false;
 
 const formatFileSize = (bytes: number): string => {
   if (bytes <= 0) return '0 B';
@@ -105,7 +105,7 @@ const SendFileDialogContent: React.FC<SendFileDialogContentProps> = ({
   onClosed,
   onSend,
   onPreparingChange,
-  onQuotaExceeded,
+  onUploadSaved,
   pastedFile,
   preparing,
   transferBlocked,
@@ -184,9 +184,7 @@ const SendFileDialogContent: React.FC<SendFileDialogContentProps> = ({
         return;
       }
 
-      if (result.uploadsDirSizeBytes > UPLOADS_QUOTA_WARN_BYTES) {
-        onQuotaExceeded(result.filePath);
-      }
+      onUploadSaved?.(result.filePath, result.uploadsDirSizeBytes);
 
       closeDialog();
       void onSend(
@@ -317,11 +315,9 @@ export const SendFileDialog: React.FC<SendFileDialogProps> = ({
   pastedFile = null,
   transferBlocked = false,
   transferBlockedReason = 'Another file transfer is already active in this chat.',
+  onUploadSaved,
 }) => {
   const [preparing, setPreparing] = useState(false);
-  const [pendingQuotaFilePath, setPendingQuotaFilePath] = useState<string | null>(null);
-  const [quotaFilePath, setQuotaFilePath] = useState<string | null>(null);
-  const [quotaDialogOpen, setQuotaDialogOpen] = useState(false);
 
   const handleRootOpenChange = (nextOpen: boolean) => {
     if (!preparing) {
@@ -329,44 +325,23 @@ export const SendFileDialog: React.FC<SendFileDialogProps> = ({
     }
   };
 
-  const handleQuotaExceeded = (savedFilePath: string) => {
-    if (uploadsQuotaWarnedThisSession) return;
-    setPendingQuotaFilePath(savedFilePath);
-  };
-
   const handleClosed = () => {
     onClosed?.();
-    if (!pendingQuotaFilePath) return;
-
-    const savedFilePath = pendingQuotaFilePath;
-    setPendingQuotaFilePath(null);
-    if (uploadsQuotaWarnedThisSession) return;
-
-    uploadsQuotaWarnedThisSession = true;
-    setQuotaFilePath(savedFilePath);
-    setQuotaDialogOpen(true);
   };
 
   return (
-    <>
-      <Dialog open={open} onOpenChange={handleRootOpenChange}>
-        <SendFileDialogContent
-          closeDialog={() => onOpenChange(false)}
-          onClosed={handleClosed}
-          onSend={onSend}
-          onPreparingChange={setPreparing}
-          onQuotaExceeded={handleQuotaExceeded}
-          pastedFile={pastedFile}
-          preparing={preparing}
-          transferBlocked={transferBlocked}
-          transferBlockedReason={transferBlockedReason}
-        />
-      </Dialog>
-      <UploadsQuotaDialog
-        open={quotaDialogOpen}
-        onOpenChange={setQuotaDialogOpen}
-        savedFilePath={quotaFilePath}
+    <Dialog open={open} onOpenChange={handleRootOpenChange}>
+      <SendFileDialogContent
+        closeDialog={() => onOpenChange(false)}
+        onClosed={handleClosed}
+        onSend={onSend}
+        onPreparingChange={setPreparing}
+        onUploadSaved={onUploadSaved}
+        pastedFile={pastedFile}
+        preparing={preparing}
+        transferBlocked={transferBlocked}
+        transferBlockedReason={transferBlockedReason}
       />
-    </>
+    </Dialog>
   );
 };

@@ -98,6 +98,15 @@ export type MessageJumpWindowResponse = {
   hasMoreOlder: boolean;
 };
 
+export type SaveTextUploadResponse = {
+  success: boolean;
+  filePath: string | null;
+  fileName: string | null;
+  fileSize: number;
+  uploadsDirSizeBytes: number;
+  error: string | null;
+};
+
 export type ScreenShareSupportResponse = {
   success: boolean;
   supported: boolean;
@@ -509,6 +518,10 @@ export interface KiyeovoAPI {
     uploadsDirSizeBytes: number;
     error: string | null;
   }>;
+  saveTextUpload: (
+    text: string,
+    fileName: string,
+  ) => Promise<SaveTextUploadResponse>;
   sendFile: (peerId: string, filePath: string, fileId?: string) => Promise<{ success: boolean; error: string | null }>;
   acceptFile: (fileId: string) => Promise<{ success: boolean; error: string | null }>;
   rejectFile: (fileId: string) => Promise<{ success: boolean; error: string | null }>;
