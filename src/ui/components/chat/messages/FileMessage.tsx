@@ -427,7 +427,7 @@ export const FileMessage: React.FC<FileMessageProps> = ({
       <div className="flex items-center justify-between gap-3">
         <div className={`text-2xl ${isFromCurrentUser ? 'bg-background/50' : ''} rounded-md p-1`}>{getIcon()}</div>
         <div className="flex-1 min-w-0 text-left">
-          <p className="text-sm font-medium truncate">{highlightText(fileName, searchQuery)}</p>
+          <p className="text-sm font-medium truncate" title={fileName}>{highlightText(fileName, searchQuery)}</p>
           <p className="text-xs opacity-70">{formatFileSize(fileSize)}</p>
         </div>
         {transferStatus === 'completed' && !!filePath ? (
