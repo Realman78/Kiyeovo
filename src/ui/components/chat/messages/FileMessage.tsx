@@ -9,6 +9,20 @@ import { setPendingFileStatus, updateFileTransferStatus } from '../../../state/s
 import { highlightText } from '../../../utils/highlightText';
 import { ImagePreviewDialog } from './ImagePreviewDialog';
 
+export function shouldRenderInlineImage(params: {
+  fileName: string;
+  isFromCurrentUser: boolean;
+  previewMediaToken?: string;
+  transferStatus: FileTransferStatus | undefined;
+  filePath?: string;
+}): boolean {
+  const { fileName, isFromCurrentUser, previewMediaToken, transferStatus, filePath } = params;
+  if (!isImageFile(fileName)) return false;
+  const hasSenderPreview = isFromCurrentUser && !!previewMediaToken;
+  const hasCompletedImage = transferStatus === 'completed' && !!filePath;
+  return hasSenderPreview || hasCompletedImage;
+}
+
 interface FileMessageProps {
   fileId: string;
   chatId: number;
@@ -444,17 +458,9 @@ export const FileMessage: React.FC<FileMessageProps> = ({
     </div>
   );
 
-  const isImage = isImageFile(fileName);
-  const hasSenderPreview =
-    isImage &&
-    isFromCurrentUser &&
-    !!previewMediaToken;
-  const hasCompletedImage =
-    isImage &&
-    transferStatus === 'completed' &&
-    !!filePath;
+  const hasSenderPreview = isImageFile(fileName) && isFromCurrentUser && !!previewMediaToken;
 
-  if (hasSenderPreview || hasCompletedImage) {
+  if (shouldRenderInlineImage({ fileName, isFromCurrentUser, previewMediaToken, transferStatus, filePath })) {
     return (
       <InlineImageMessage
         key={`${fileId}:${previewMediaToken ?? filePath}`}

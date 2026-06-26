@@ -120,6 +120,14 @@ export const ChatInput: FC<ChatInputProps> = ({
     const [groupHasOtherMembers, setGroupHasOtherMembers] = useState(true);
 
     useEffect(() => {
+        if (!pastedFile?.previewUrl) return;
+        const previewUrl = pastedFile.previewUrl;
+        return () => {
+            URL.revokeObjectURL(previewUrl);
+        };
+    }, [pastedFile?.previewUrl]);
+
+    useEffect(() => {
         let isMounted = true;
         let unsubscribe: (() => void) | undefined;
 
@@ -772,13 +780,16 @@ export const ChatInput: FC<ChatInputProps> = ({
         const fileSourceAtPaste = createCurrentFileDialogSource();
         const mime = imageItem.type;
         const name = createPastedImageName(new Date(), extension);
+        const previewUrl = URL.createObjectURL(pastedBlob);
 
         void pastedBlob.arrayBuffer()
             .then((arrayBuffer) => {
                 if (activeChatIdRef.current !== chatIdAtPaste) {
+                    URL.revokeObjectURL(previewUrl);
                     return;
                 }
                 if (hasActiveFileTransferRef.current) {
+                    URL.revokeObjectURL(previewUrl);
                     toast.error('Wait for the current file transfer to finish before sending another file');
                     return;
                 }
@@ -788,11 +799,13 @@ export const ChatInput: FC<ChatInputProps> = ({
                     bytes: new Uint8Array(arrayBuffer),
                     mime,
                     name,
+                    previewUrl,
                     size: pastedBlob.size,
                 });
                 setFileDialogOpen(true);
             })
             .catch((error) => {
+                URL.revokeObjectURL(previewUrl);
                 console.error('Failed to read pasted image:', error);
                 toast.error('Failed to read pasted image');
             });

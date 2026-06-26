@@ -2,7 +2,7 @@ import { memo, useEffect, useRef, useState } from "react";
 import { Check, ChevronDown, Copy, Info, ListChecks, Loader2, Pin, PinOff, Reply } from "lucide-react";
 import { useDispatch, useSelector } from "react-redux";
 import { formatTimestampToHourMinuteEu } from "../../../utils/dateUtils";
-import { FileMessage } from "./FileMessage";
+import { FileMessage, shouldRenderInlineImage } from "./FileMessage";
 import { setReplyTarget, type ChatMessage } from "../../../state/slices/chatSlice";
 import type { RootState } from "../../../state/store";
 import { RetryStatus } from "./RetryStatus";
@@ -162,6 +162,21 @@ export const MessageRow = memo(({
   const isOwnMessage = message.senderPeerId === myPeerId || hasActivePendingKeyExchange;
   const isCopyableTextMessage = message.messageType === 'text' && message.content.length > 0;
   const contentEndsWithBlock = endsWithCodeBlock(message.content);
+  const isFileMessage = message.messageType === 'file' && !!message.fileName;
+  const isInlineImageFileMessage =
+    isFileMessage &&
+    shouldRenderInlineImage({
+      fileName: message.fileName ?? '',
+      isFromCurrentUser: message.senderPeerId === myPeerId,
+      previewMediaToken: message.filePreviewToken,
+      transferStatus: message.transferStatus,
+      filePath: message.filePath,
+    });
+  const replyQuoteWidthClass = isFileMessage
+    ? isInlineImageFileMessage
+      ? "w-[320px] max-w-[65vw]"
+      : "w-[250px] max-w-[65vw]"
+    : "w-full";
 
   const senderName = (peerId: string, username?: string) =>
     peerId === myPeerId ? 'You' : (username || `user_${peerId.slice(-8)}`);
@@ -177,9 +192,15 @@ export const MessageRow = memo(({
       replyQuote = { sender: senderName(fetchedQuote.senderPeerId, fetchedQuote.senderUsername), text: quoteExcerpt(fetchedQuote) };
     }
   }
+  const messageContentInsetClass = replyQuote
+    ? isFileMessage
+      ? undefined
+      : "pl-[5px] pr-[3px]"
+    : undefined;
 
   const handleReply = () => {
     if (!message.clientMsgId) return;
+    setMessageMenuOpen(false);
     dispatch(setReplyTarget({
       chatId: message.chatId,
       target: {
@@ -219,7 +240,7 @@ export const MessageRow = memo(({
       aria-label="Reply to message"
       title="Reply"
     >
-      <Reply className="w-3 h-3" />
+      <Reply className="w-4 h-4" />
     </button>
   ) : null;
 
@@ -275,6 +296,14 @@ export const MessageRow = memo(({
         >
           Info
         </DropdownMenuItem>
+        {isReplyable && (
+          <DropdownMenuItem
+            icon={<Reply className="h-4 w-4" />}
+            onClick={handleReply}
+          >
+            Reply
+          </DropdownMenuItem>
+        )}
         {isCopyableTextMessage && (
           <DropdownMenuItem
             icon={isCopied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
@@ -388,7 +417,7 @@ export const MessageRow = memo(({
                 type="button"
                 disabled={replyQuote === 'deleted'}
                 onClick={() => { if (replyQuote !== 'deleted' && replyToCid) onJumpToMessage?.(replyToCid); }}
-                className={`mb-1 flex w-full min-w-0 flex-col rounded-md border-l-2 px-2 py-1 text-left text-xs ${replyQuote === 'deleted'
+                className={`mb-1 flex min-w-0 flex-col rounded-md border-l-2 px-2 py-1 text-left text-xs ${replyQuoteWidthClass} ${replyQuote === 'deleted'
                   ? "border-muted text-muted-foreground italic cursor-default"
                   : "border-primary/60 bg-muted/40 text-muted-foreground hover:bg-muted/70 cursor-pointer"}`}
               >
@@ -402,7 +431,7 @@ export const MessageRow = memo(({
                 )}
               </button>
             )}
-            <div className={replyQuote ? "pl-[5px] pr-[3px]" : undefined}>
+            <div className={messageContentInsetClass}>
               {message.messageType === 'file' && message.fileName ? (
                 <FileMessage
                   fileId={message.id}

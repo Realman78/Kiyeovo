@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import {
   Dialog,
   DialogBody,
@@ -15,6 +15,7 @@ export interface PastedImageFile {
   bytes: Uint8Array;
   mime: string;
   name: string;
+  previewUrl: string;
   size: number;
 }
 
@@ -94,17 +95,7 @@ const PreviewImage: React.FC<{
 const PastedImagePreview: React.FC<{
   pastedFile: PastedImageFile;
 }> = ({ pastedFile }) => {
-  const [objectUrl] = useState(() => {
-    const bytes = new Uint8Array(pastedFile.bytes.length);
-    bytes.set(pastedFile.bytes);
-    return URL.createObjectURL(new Blob([bytes], { type: pastedFile.mime }));
-  });
-
-  useEffect(() => {
-    return () => URL.revokeObjectURL(objectUrl);
-  }, [objectUrl]);
-
-  return <PreviewImage source={objectUrl} fileName={pastedFile.name} />;
+  return <PreviewImage source={pastedFile.previewUrl} fileName={pastedFile.name} />;
 };
 
 const SendFileDialogContent: React.FC<SendFileDialogContentProps> = ({
@@ -248,7 +239,7 @@ const SendFileDialogContent: React.FC<SendFileDialogContentProps> = ({
           <div className="rounded-lg border border-border bg-muted p-4">
             {pastedFile ? (
               <PastedImagePreview
-                key={`${pastedFile.name}:${pastedFile.size}:${pastedFile.mime}`}
+                key={pastedFile.previewUrl}
                 pastedFile={pastedFile}
               />
             ) : selectedFile?.mediaToken ? (
