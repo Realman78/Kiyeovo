@@ -8,7 +8,7 @@ import {
   DialogTitle,
 } from '../../ui/Dialog';
 import { Button } from '../../ui/Button';
-import { FileUp, Loader2, X } from 'lucide-react';
+import { FileUp, Loader2, Reply, X } from 'lucide-react';
 import { useAppSelector } from '../../../state/hooks';
 
 export interface PastedImageFile {
@@ -16,6 +16,11 @@ export interface PastedImageFile {
   mime: string;
   name: string;
   size: number;
+}
+
+export interface FileReplyTargetPreview {
+  sender: string;
+  excerpt: string;
 }
 
 interface SendFileDialogProps {
@@ -35,6 +40,7 @@ interface SendFileDialogProps {
     savedFilePath: string,
     uploadsDirSizeBytes: number,
   ) => void;
+  replyTarget?: FileReplyTargetPreview | null;
 }
 
 interface SelectedFile {
@@ -54,6 +60,7 @@ interface SendFileDialogContentProps {
   preparing: boolean;
   transferBlocked: boolean;
   transferBlockedReason: string;
+  replyTarget: FileReplyTargetPreview | null;
 }
 
 const formatFileSize = (bytes: number): string => {
@@ -110,6 +117,7 @@ const SendFileDialogContent: React.FC<SendFileDialogContentProps> = ({
   preparing,
   transferBlocked,
   transferBlockedReason,
+  replyTarget,
 }) => {
   const maxFileSize = useAppSelector((state) => state.appConfig.config.maxFileSize);
   const [selectedFile, setSelectedFile] = useState<SelectedFile | null>(null);
@@ -217,6 +225,20 @@ const SendFileDialogContent: React.FC<SendFileDialogContentProps> = ({
       </DialogHeader>
 
       <DialogBody>
+        {replyTarget && (
+          <div className="mb-3 flex items-start gap-2 rounded-lg border border-primary/30 bg-primary/10 p-3 text-sm">
+            <Reply className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+            <div className="min-w-0 flex-1">
+              <p className="text-xs font-medium text-foreground/80">
+                Replying to {replyTarget.sender}
+              </p>
+              <p className="mt-1 truncate text-xs text-muted-foreground">
+                {replyTarget.excerpt}
+              </p>
+            </div>
+          </div>
+        )}
+
         {transferBlocked && (
           <div className="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-300">
             {transferBlockedReason}
@@ -316,6 +338,7 @@ export const SendFileDialog: React.FC<SendFileDialogProps> = ({
   transferBlocked = false,
   transferBlockedReason = 'Another file transfer is already active in this chat.',
   onUploadSaved,
+  replyTarget = null,
 }) => {
   const [preparing, setPreparing] = useState(false);
 
@@ -341,6 +364,7 @@ export const SendFileDialog: React.FC<SendFileDialogProps> = ({
         preparing={preparing}
         transferBlocked={transferBlocked}
         transferBlockedReason={transferBlockedReason}
+        replyTarget={replyTarget}
       />
     </Dialog>
   );

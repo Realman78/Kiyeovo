@@ -523,7 +523,8 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
         fileSize: data.size,
         transferStatus: 'incoming_pending_user',
         transferProgress: 0,
-        transferExpiresAt: data.expiresAt
+        transferExpiresAt: data.expiresAt,
+        ...(data.replyToClientId ? { replyToClientId: data.replyToClientId } : {}),
       }));
       dispatch(updateChat({
         id: data.chatId,

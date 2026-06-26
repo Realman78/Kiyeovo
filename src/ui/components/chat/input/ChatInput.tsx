@@ -8,7 +8,7 @@ import type { RootState } from "../../../state/store";
 import { SendFileDialog, type PastedImageFile } from "./SendFileDialog";
 import { SendLongMessageDialog, type PendingLongMessage } from "./SendLongMessageDialog";
 import { UploadsQuotaDialog } from "./UploadsQuotaDialog";
-import { addMessage, addSendingMessage, clearReplyTarget, finalizeSendingMessage, removeMessageById, updateChat, updateFileTransferStatus, updateLocalMessageSendState } from "../../../state/slices/chatSlice";
+import { addMessage, addSendingMessage, clearReplyTarget, finalizeSendingMessage, removeMessageById, setReplyTarget, updateChat, updateFileTransferStatus, updateLocalMessageSendState, type ReplyTarget } from "../../../state/slices/chatSlice";
 import { EMOJI_CATEGORIES, MAX_MESSAGE_CONTENT_LENGTH, UNEXPECTED_ERROR } from "../../../constants";
 import { getGroupStatusMessage } from "../../../utils/groupStatusMessages";
 import { errStr } from '../../../../core/utils/general-error';
@@ -47,6 +47,15 @@ type FileSendOutcome =
 type FileSendTarget = {
     chatId: number;
     peerId: string;
+};
+
+type FileSendOptions = {
+    target?: FileSendTarget;
+    replyTarget?: ReplyTarget;
+};
+
+type FileDialogSource = FileSendTarget & {
+    replyTarget?: ReplyTarget;
 };
 
 const MAX_COMPOSER_LINES = 5;
@@ -90,6 +99,7 @@ export const ChatInput: FC<ChatInputProps> = ({
     const [draftByChatId, setDraftByChatId] = useState<Record<number, string>>({});
     const [fileDialogOpen, setFileDialogOpen] = useState(false);
     const [pastedFile, setPastedFile] = useState<PastedImageFile | null>(null);
+    const [fileDialogSource, setFileDialogSource] = useState<FileDialogSource | null>(null);
     const [longMessageDialogOpen, setLongMessageDialogOpen] = useState(false);
     const [pendingLongMessage, setPendingLongMessage] = useState<PendingLongMessage | null>(null);
     const [pendingQuotaFilePath, setPendingQuotaFilePath] = useState<string | null>(null);
@@ -102,8 +112,8 @@ export const ChatInput: FC<ChatInputProps> = ({
     const myUsername = useSelector((state: RootState) => state.user.username);
     const isTorActive = useSelector((state: RootState) => state.user.torEnabled);
     const messages = useSelector((state: RootState) => state.chat.messages);
-    const replyTarget = useSelector((state: RootState) =>
-        activeChat ? state.chat.replyTargetByChatId[activeChat.id] : undefined);
+    const replyTargetByChatId = useSelector((state: RootState) => state.chat.replyTargetByChatId);
+    const replyTarget = activeChat ? replyTargetByChatId[activeChat.id] : undefined;
     const activeChatId = activeChat?.id;
     const activeChatType = activeChat?.type;
     const isBlocked = activeChat?.blocked || false;
@@ -172,10 +182,45 @@ export const ChatInput: FC<ChatInputProps> = ({
     const resizeAnimationFrameRef = useRef<number | null>(null);
     const suppressSelectionSyncRef = useRef(false);
     const draftRevisionByChatIdRef = useRef<Record<number, number>>({});
+    const replyTargetByChatIdRef = useRef(replyTargetByChatId);
     const activeChatIdRef = useRef(activeChatId);
     const hasActiveFileTransferRef = useRef(hasActiveFileTransfer);
+    replyTargetByChatIdRef.current = replyTargetByChatId;
     activeChatIdRef.current = activeChatId;
     hasActiveFileTransferRef.current = hasActiveFileTransfer;
+
+    const createCurrentFileDialogSource = (): FileDialogSource | null => {
+        if (!activeChat || activeChat.type !== 'direct' || !activeChat.peerId) {
+            return null;
+        }
+        return {
+            chatId: activeChat.id,
+            peerId: activeChat.peerId,
+            ...(replyTarget ? { replyTarget } : {}),
+        };
+    };
+
+    const clearReplyTargetIfUnchanged = (chatId: number, target?: ReplyTarget): boolean => {
+        if (!target) return false;
+        const current = replyTargetByChatIdRef.current[chatId];
+        if (current?.cid !== target.cid) return false;
+
+        dispatch(clearReplyTarget(chatId));
+        const nextTargets = { ...replyTargetByChatIdRef.current };
+        delete nextTargets[chatId];
+        replyTargetByChatIdRef.current = nextTargets;
+        return true;
+    };
+
+    const restoreReplyTargetIfEmpty = (chatId: number, target?: ReplyTarget): void => {
+        if (!target || replyTargetByChatIdRef.current[chatId]) return;
+
+        dispatch(setReplyTarget({ chatId, target }));
+        replyTargetByChatIdRef.current = {
+            ...replyTargetByChatIdRef.current,
+            [chatId]: target,
+        };
+    };
 
     // Auto-focus input when chat changes
     useEffect(() => {
@@ -228,6 +273,7 @@ export const ChatInput: FC<ChatInputProps> = ({
         if (!interactionBlocked) return;
         setEmojiPickerOpen(false);
         setFileDialogOpen(false);
+        setFileDialogSource(null);
         setLongMessageDialogOpen(false);
         inputRef.current?.blur();
     }, [interactionBlocked]);
@@ -619,6 +665,7 @@ export const ChatInput: FC<ChatInputProps> = ({
                     trimmedText: messageContent,
                     draftRevision: draftRevisionByChatIdRef.current[activeChat.id] ?? 0,
                     defaultFileName: createLongMessageName(new Date()),
+                    ...(replyTarget ? { replyTarget } : {}),
                 });
                 setLongMessageDialogOpen(true);
                 return;
@@ -722,6 +769,7 @@ export const ChatInput: FC<ChatInputProps> = ({
         }
 
         const chatIdAtPaste = activeChat.id;
+        const fileSourceAtPaste = createCurrentFileDialogSource();
         const mime = imageItem.type;
         const name = createPastedImageName(new Date(), extension);
 
@@ -735,6 +783,7 @@ export const ChatInput: FC<ChatInputProps> = ({
                     return;
                 }
 
+                setFileDialogSource(fileSourceAtPaste);
                 setPastedFile({
                     bytes: new Uint8Array(arrayBuffer),
                     mime,
@@ -754,8 +803,11 @@ export const ChatInput: FC<ChatInputProps> = ({
         fileName: string,
         fileSize: number,
         mediaToken?: string | null,
-        target?: FileSendTarget,
+        options?: FileSendOptions,
     ): Promise<FileSendOutcome> => {
+        const target = options?.target;
+        const replyTargetForSend = options?.replyTarget;
+        const replyToCid = replyTargetForSend?.cid;
         const targetChat = target
             ? chats.find((chat) => chat.id === target.chatId)
             : activeChat;
@@ -777,6 +829,7 @@ export const ChatInput: FC<ChatInputProps> = ({
         const pendingMessageId =
             globalThis.crypto?.randomUUID?.() ??
             `file-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        let clearedReplyTarget = false;
         try {
             dispatch(addMessage({
                 id: pendingMessageId,
@@ -794,9 +847,11 @@ export const ChatInput: FC<ChatInputProps> = ({
                 filePreviewToken: mediaToken || undefined,
                 transferStatus: 'connecting',
                 transferProgress: 0,
+                ...(replyToCid ? { replyToClientId: replyToCid } : {}),
             }));
+            clearedReplyTarget = clearReplyTargetIfUnchanged(chatId, replyTargetForSend);
 
-            const result = await window.kiyeovoAPI.sendFile(targetPeerId, filePath, pendingMessageId);
+            const result = await window.kiyeovoAPI.sendFile(targetPeerId, filePath, pendingMessageId, replyToCid);
             if (!result.success) {
                 const errorText = result.error?.toLowerCase() || '';
                 console.error(result.error);
@@ -818,6 +873,9 @@ export const ChatInput: FC<ChatInputProps> = ({
                             lastMessageTimestamp: previousLastMessageTimestamp
                         }
                     }));
+                    if (clearedReplyTarget) {
+                        restoreReplyTargetIfEmpty(chatId, replyTargetForSend);
+                    }
                     return {
                         completed: false,
                         reason: failedBeforePersist ? 'offline' : 'busy',
@@ -853,6 +911,9 @@ export const ChatInput: FC<ChatInputProps> = ({
                         lastMessageTimestamp: previousLastMessageTimestamp
                     }
                 }));
+                if (clearedReplyTarget) {
+                    restoreReplyTargetIfEmpty(chatId, replyTargetForSend);
+                }
                 return {
                     completed: false,
                     reason: failedBeforePersist ? 'offline' : 'busy',
@@ -891,8 +952,11 @@ export const ChatInput: FC<ChatInputProps> = ({
             file.fileSize,
             null,
             {
-                chatId: source.chatId,
-                peerId: source.peerId,
+                target: {
+                    chatId: source.chatId,
+                    peerId: source.peerId,
+                },
+                ...(source.replyTarget ? { replyTarget: source.replyTarget } : {}),
             },
         );
         if (!outcome.completed) return;
@@ -944,6 +1008,7 @@ export const ChatInput: FC<ChatInputProps> = ({
                         size="icon"
                         disabled={isDisabled || hasActiveFileTransfer}
                         onClick={() => {
+                            setFileDialogSource(createCurrentFileDialogSource());
                             setPastedFile(null);
                             setFileDialogOpen(true);
                         }}
@@ -1024,13 +1089,29 @@ export const ChatInput: FC<ChatInputProps> = ({
             onOpenChange={(open) => setFileDialogOpen(interactionBlocked ? false : open)}
             onClosed={() => {
                 setPastedFile(null);
+                setFileDialogSource(null);
                 showQueuedUploadsQuotaWarning();
             }}
             onSend={async (filePath, fileName, fileSize, mediaToken) => {
-                await handleSendFile(filePath, fileName, fileSize, mediaToken);
+                await handleSendFile(
+                    filePath,
+                    fileName,
+                    fileSize,
+                    mediaToken,
+                    fileDialogSource
+                        ? {
+                            target: {
+                                chatId: fileDialogSource.chatId,
+                                peerId: fileDialogSource.peerId,
+                            },
+                            ...(fileDialogSource.replyTarget ? { replyTarget: fileDialogSource.replyTarget } : {}),
+                        }
+                        : undefined,
+                );
             }}
             onUploadSaved={queueUploadsQuotaWarning}
             pastedFile={pastedFile}
+            replyTarget={fileDialogSource?.replyTarget ?? null}
             transferBlocked={hasActiveFileTransfer}
             transferBlockedReason="Wait for the current file transfer to finish before selecting another file."
         />

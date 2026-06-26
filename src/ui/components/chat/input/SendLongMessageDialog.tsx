@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { FileText, Loader2 } from 'lucide-react';
+import { FileText, Loader2, Reply } from 'lucide-react';
 import {
   Dialog,
   DialogBody,
@@ -22,6 +22,11 @@ export interface PendingLongMessage {
   trimmedText: string;
   draftRevision: number;
   defaultFileName: string;
+  replyTarget?: {
+    cid: string;
+    sender: string;
+    excerpt: string;
+  };
 }
 
 interface PreparedLongMessageFile {
@@ -184,6 +189,20 @@ const SendLongMessageDialogContent: React.FC<SendLongMessageDialogContentProps> 
       </DialogHeader>
 
       <DialogBody className="space-y-4">
+        {pendingMessage?.replyTarget && (
+          <div className="flex items-start gap-2 rounded-lg border border-primary/30 bg-primary/10 p-3 text-sm">
+            <Reply className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+            <div className="min-w-0 flex-1">
+              <p className="text-xs font-medium text-foreground/80">
+                Replying to {pendingMessage.replyTarget.sender}
+              </p>
+              <p className="mt-1 truncate text-xs text-muted-foreground">
+                {pendingMessage.replyTarget.excerpt}
+              </p>
+            </div>
+          </div>
+        )}
+
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-300">
           This will only work if {pendingMessage?.recipientName || 'the recipient'} is online right now.
         </div>
