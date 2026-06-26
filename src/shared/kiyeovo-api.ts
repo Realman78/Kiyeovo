@@ -508,6 +508,7 @@ export interface KiyeovoAPI {
     token: string | null;
     error: string | null;
   }>;
+  copyImageToClipboard: (messageId: string) => Promise<{ success: boolean; error: string | null }>;
   saveUpload: (
     bytes: Uint8Array,
     fileName: string,

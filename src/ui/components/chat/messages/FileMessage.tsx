@@ -8,20 +8,7 @@ import { isImageFile } from '../../../../shared/file-types';
 import { setPendingFileStatus, updateFileTransferStatus } from '../../../state/slices/chatSlice';
 import { highlightText } from '../../../utils/highlightText';
 import { ImagePreviewDialog } from './ImagePreviewDialog';
-
-export function shouldRenderInlineImage(params: {
-  fileName: string;
-  isFromCurrentUser: boolean;
-  previewMediaToken?: string;
-  transferStatus: FileTransferStatus | undefined;
-  filePath?: string;
-}): boolean {
-  const { fileName, isFromCurrentUser, previewMediaToken, transferStatus, filePath } = params;
-  if (!isImageFile(fileName)) return false;
-  const hasSenderPreview = isFromCurrentUser && !!previewMediaToken;
-  const hasCompletedImage = transferStatus === 'completed' && !!filePath;
-  return hasSenderPreview || hasCompletedImage;
-}
+import { shouldRenderInlineImage } from './fileMessageUtils';
 
 interface FileMessageProps {
   fileId: string;
@@ -46,6 +33,8 @@ interface InlineImageMessageProps {
   initialMediaToken?: string;
   canOpenFile: boolean;
   onOpenFile: () => Promise<void>;
+  canCopyImage: boolean;
+  onCopyImage: () => Promise<boolean>;
   statusContent?: ReactNode;
   fallback: ReactNode;
 }
@@ -58,6 +47,8 @@ const InlineImageMessage: React.FC<InlineImageMessageProps> = ({
   initialMediaToken,
   canOpenFile,
   onOpenFile,
+  canCopyImage,
+  onCopyImage,
   statusContent,
   fallback,
 }) => {
@@ -140,6 +131,8 @@ const InlineImageMessage: React.FC<InlineImageMessageProps> = ({
         fileName={fileName}
         canOpenFile={canOpenFile}
         onOpenFile={onOpenFile}
+        canCopyImage={canCopyImage}
+        onCopyImage={onCopyImage}
       />
     </>
   );
@@ -296,6 +289,24 @@ export const FileMessage: React.FC<FileMessageProps> = ({
       if (!result.success) {
         console.error('Failed to open file location:', result.error);
       }
+    }
+  };
+
+  const canCopyImage = isImageFile(fileName) && transferStatus === 'completed' && !!filePath;
+
+  const handleCopyImage = async (): Promise<boolean> => {
+    if (!canCopyImage) return false;
+
+    try {
+      const result = await window.kiyeovoAPI.copyImageToClipboard(fileId);
+      if (!result.success) {
+        console.error('Failed to copy image:', result.error);
+        return false;
+      }
+      return true;
+    } catch (error) {
+      console.error('Error copying image:', error);
+      return false;
     }
   };
 
@@ -471,6 +482,8 @@ export const FileMessage: React.FC<FileMessageProps> = ({
         initialMediaToken={hasSenderPreview ? previewMediaToken : undefined}
         canOpenFile={transferStatus === 'completed' && !!filePath}
         onOpenFile={handleOpenFile}
+        canCopyImage={canCopyImage}
+        onCopyImage={handleCopyImage}
         statusContent={transferStatusContent}
         fallback={fileCard}
       />

@@ -176,6 +176,7 @@ export const IPC_CHANNELS = {
 
   // File transfer
   REGISTER_MESSAGE_MEDIA: 'media:registerMessage',
+  COPY_IMAGE_TO_CLIPBOARD: 'media:copyImageToClipboard',
   SAVE_UPLOAD: 'file:saveUpload',
   SAVE_TEXT_UPLOAD: 'file:saveTextUpload',
   SEND_FILE_REQUEST: 'file:send',

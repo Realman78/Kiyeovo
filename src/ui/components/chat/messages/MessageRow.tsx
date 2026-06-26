@@ -2,7 +2,7 @@ import { memo, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent }
 import { Check, ChevronDown, Copy, Info, ListChecks, Loader2, Pin, PinOff, Reply } from "lucide-react";
 import { useDispatch, useSelector } from "react-redux";
 import { formatTimestampToHourMinuteEu } from "../../../utils/dateUtils";
-import { FileMessage, shouldRenderInlineImage } from "./FileMessage";
+import { FileMessage } from "./FileMessage";
 import { setReplyTarget, type ChatMessage } from "../../../state/slices/chatSlice";
 import type { RootState } from "../../../state/store";
 import { RetryStatus } from "./RetryStatus";
@@ -10,6 +10,9 @@ import { DropdownMenu, DropdownMenuItem, type DropdownAnchorRect } from "../../u
 import { renderMessageText, endsWithCodeBlock } from "../../../utils/renderMessageText";
 import { MessageInfoDialog } from "./MessageInfoDialog";
 import { useHour12 } from "../../../hooks/useHour12";
+import { useToast } from "../../ui/use-toast";
+import { isImageFile } from "../../../../shared/file-types";
+import { shouldRenderInlineImage } from "./fileMessageUtils";
 
 export type MessageRowProps = {
   message: ChatMessage;
@@ -109,6 +112,7 @@ export const MessageRow = memo(({
 }: MessageRowProps) => {
   const dispatch = useDispatch();
   const hour12 = useHour12();
+  const { toast } = useToast();
   const [isCopied, setIsCopied] = useState(false);
   const [infoOpen, setInfoOpen] = useState(false);
   const [messageMenuOpen, setMessageMenuOpen] = useState(false);
@@ -263,6 +267,28 @@ export const MessageRow = memo(({
     }
   };
 
+  const isCompletedLocalImage =
+    isFileMessage &&
+    isImageFile(message.fileName ?? '') &&
+    message.transferStatus === 'completed' &&
+    !!message.filePath;
+
+  const handleCopyImage = async () => {
+    try {
+      const result = await window.kiyeovoAPI.copyImageToClipboard(message.id);
+      if (!result.success) {
+        console.error("Failed to copy image:", result.error);
+        toast.error(result.error || "Failed to copy image to clipboard");
+        return;
+      }
+      setIsCopied(true);
+      setMessageMenuOpen(false);
+    } catch (error) {
+      console.error("Failed to copy image:", error);
+      toast.error("Failed to copy image to clipboard");
+    }
+  };
+
   const isFileLike = message.messageType === 'file' || message.messageType === 'image';
   const fileReplyAllowed = !isFileLike || message.transferStatus === 'completed';
   const isReplyable = canReply && !!message.clientMsgId && !message.localSendState && fileReplyAllowed;
@@ -369,6 +395,14 @@ export const MessageRow = memo(({
             onClick={handleReply}
           >
             Reply
+          </DropdownMenuItem>
+        )}
+        {isCompletedLocalImage && (
+          <DropdownMenuItem
+            icon={isCopied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+            onClick={() => void handleCopyImage()}
+          >
+            {isCopied ? 'Copied' : 'Copy image'}
           </DropdownMenuItem>
         )}
         {isCopyableTextMessage && (

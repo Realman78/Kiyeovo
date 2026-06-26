@@ -1,5 +1,5 @@
 import type { BrowserWindow } from 'electron';
-import { app, dialog, Notification, shell } from 'electron';
+import { app, clipboard, dialog, nativeImage, Notification, shell } from 'electron';
 import {
   IPC_CHANNELS,
   type P2PCore,
@@ -116,6 +116,32 @@ async function getFlatDirectorySize(directoryPath: string): Promise<number> {
       .map(async (entry) => (await stat(join(directoryPath, entry.name))).size),
   );
   return sizes.reduce((total, size) => total + size, 0);
+}
+
+async function resolveCompletedImageMedia(
+  p2pCore: P2PCore,
+  messageId: string,
+): Promise<{ canonicalPath: string; fileName: string }> {
+  const media = p2pCore.database.getCompletedFileMediaById(messageId);
+  if (!media || !isImageFile(media.fileName)) {
+    throw new Error('Completed image message not found');
+  }
+
+  const storedPathStats = await lstat(media.filePath);
+  if (storedPathStats.isSymbolicLink()) {
+    throw new Error('Symbolic-link media paths are not allowed');
+  }
+
+  const canonicalPath = await realpath(media.filePath);
+  const fileStats = await stat(canonicalPath);
+  if (!fileStats.isFile()) {
+    throw new Error('Media path is not a file');
+  }
+
+  return {
+    canonicalPath,
+    fileName: media.fileName,
+  };
 }
 
 function normalizeAddressList(addresses: string[]): string[] {
@@ -1469,21 +1495,7 @@ function setupMediaHandlers(
         return { success: false, token: null, error: 'P2P core not initialized' };
       }
 
-      const media = p2pCore.database.getCompletedFileMediaById(messageId);
-      if (!media || !isImageFile(media.fileName)) {
-        return { success: false, token: null, error: 'Completed image message not found' };
-      }
-
-      const storedPathStats = await lstat(media.filePath);
-      if (storedPathStats.isSymbolicLink()) {
-        return { success: false, token: null, error: 'Symbolic-link media paths are not allowed' };
-      }
-
-      const canonicalPath = await realpath(media.filePath);
-      const fileStats = await stat(canonicalPath);
-      if (!fileStats.isFile()) {
-        return { success: false, token: null, error: 'Media path is not a file' };
-      }
+      const { canonicalPath } = await resolveCompletedImageMedia(p2pCore, messageId);
 
       return {
         success: true,
@@ -1496,6 +1508,34 @@ function setupMediaHandlers(
         success: false,
         token: null,
         error: errStr(error, 'Failed to register message media'),
+      };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.COPY_IMAGE_TO_CLIPBOARD, async (_event, messageId: string) => {
+    try {
+      if (typeof messageId !== 'string' || !messageId.trim()) {
+        return { success: false, error: 'Invalid message ID' };
+      }
+
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { success: false, error: 'P2P core not initialized' };
+      }
+
+      const { canonicalPath } = await resolveCompletedImageMedia(p2pCore, messageId);
+      const image = nativeImage.createFromPath(canonicalPath);
+      if (image.isEmpty()) {
+        return { success: false, error: 'Image could not be decoded for clipboard' };
+      }
+
+      clipboard.writeImage(image);
+      return { success: true, error: null };
+    } catch (error) {
+      console.error('[IPC] Failed to copy image to clipboard:', error);
+      return {
+        success: false,
+        error: errStr(error, 'Failed to copy image to clipboard'),
       };
     }
   });

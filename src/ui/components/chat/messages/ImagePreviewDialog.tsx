@@ -1,11 +1,12 @@
-import React, { useState } from 'react';
-import { FolderOpen } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { Check, Copy, FolderOpen, Loader2 } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
   DialogTitle,
 } from '../../ui/Dialog';
 import { Button } from '../../ui/Button';
+import { useToast } from '../../ui/use-toast';
 
 interface ImagePreviewDialogProps {
   open: boolean;
@@ -14,6 +15,8 @@ interface ImagePreviewDialogProps {
   fileName: string;
   canOpenFile: boolean;
   onOpenFile: () => Promise<void>;
+  canCopyImage?: boolean;
+  onCopyImage?: () => Promise<boolean>;
 }
 
 export const ImagePreviewDialog: React.FC<ImagePreviewDialogProps> = ({
@@ -23,14 +26,57 @@ export const ImagePreviewDialog: React.FC<ImagePreviewDialogProps> = ({
   fileName,
   canOpenFile,
   onOpenFile,
+  canCopyImage = false,
+  onCopyImage,
 }) => {
+  const { toast } = useToast();
   const [previewFailed, setPreviewFailed] = useState(false);
+  const [copying, setCopying] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const copiedResetTimeoutRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copiedResetTimeoutRef.current !== null) {
+        window.clearTimeout(copiedResetTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const handleOpenChange = (nextOpen: boolean) => {
+    if (copiedResetTimeoutRef.current !== null) {
+      window.clearTimeout(copiedResetTimeoutRef.current);
+      copiedResetTimeoutRef.current = null;
+    }
     if (nextOpen) {
       setPreviewFailed(false);
     }
+    setCopied(false);
     onOpenChange(nextOpen);
+  };
+
+  const handleCopyImage = async () => {
+    if (!onCopyImage || copying) return;
+
+    setCopying(true);
+    try {
+      const success = await onCopyImage();
+      if (copiedResetTimeoutRef.current !== null) {
+        window.clearTimeout(copiedResetTimeoutRef.current);
+        copiedResetTimeoutRef.current = null;
+      }
+      setCopied(success);
+      if (success) {
+        copiedResetTimeoutRef.current = window.setTimeout(() => {
+          setCopied(false);
+          copiedResetTimeoutRef.current = null;
+        }, 2000);
+      } else {
+        toast.error('Failed to copy image to clipboard');
+      }
+    } finally {
+      setCopying(false);
+    }
   };
 
   return (
@@ -58,6 +104,25 @@ export const ImagePreviewDialog: React.FC<ImagePreviewDialogProps> = ({
           <p className="min-w-0 flex-1 truncate text-sm font-medium" title={fileName}>
             {fileName}
           </p>
+          {canCopyImage && onCopyImage && (
+            <Button
+              type="button"
+              onClick={() => void handleCopyImage()}
+              variant="outline"
+              size="sm"
+              className="shrink-0"
+              disabled={copying}
+            >
+              {copying ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : copied ? (
+                <Check className="h-4 w-4" />
+              ) : (
+                <Copy className="h-4 w-4" />
+              )}
+              {copied ? 'Copied' : 'Copy image'}
+            </Button>
+          )}
           {canOpenFile && (
             <Button
               type="button"
