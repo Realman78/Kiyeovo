@@ -59,7 +59,10 @@ function validateTextFileName(value: unknown): { fileName: string } | { error: s
     return { error: 'Text upload filename is invalid' };
   }
 
-  const windowsBasename = stem.split('.', 1)[0] ?? stem;
+  const firstDotIndex = stem.indexOf('.');
+  const windowsBasename = firstDotIndex === -1
+    ? stem
+    : stem.slice(0, firstDotIndex);
   if (WINDOWS_RESERVED_BASENAME.test(windowsBasename)) {
     return { error: 'Text upload filename is reserved by the operating system' };
   }

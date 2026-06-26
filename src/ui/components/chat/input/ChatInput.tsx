@@ -6,6 +6,8 @@ import { useOfflineSendWarning } from "../../../hooks/useOfflineSendWarning";
 import { useDispatch, useSelector } from "react-redux";
 import type { RootState } from "../../../state/store";
 import { SendFileDialog, type PastedImageFile } from "./SendFileDialog";
+import { SendLongMessageDialog, type PendingLongMessage } from "./SendLongMessageDialog";
+import { UploadsQuotaDialog } from "./UploadsQuotaDialog";
 import { addMessage, addSendingMessage, clearReplyTarget, finalizeSendingMessage, removeMessageById, updateChat, updateFileTransferStatus, updateLocalMessageSendState } from "../../../state/slices/chatSlice";
 import { EMOJI_CATEGORIES, MAX_MESSAGE_CONTENT_LENGTH, UNEXPECTED_ERROR } from "../../../constants";
 import { getGroupStatusMessage } from "../../../utils/groupStatusMessages";
@@ -13,6 +15,7 @@ import { errStr } from '../../../../core/utils/general-error';
 import EmojiPicker, { EmojiStyle, Theme, type EmojiClickData } from "emoji-picker-react";
 import { useConnectivityGuidance } from "../../../hooks/useConnectivityGuidance";
 import { ACCEPTED_IMAGE_MIME } from "../../../../shared/file-types";
+import { UPLOADS_QUOTA_WARN_BYTES } from "../../../../core/constants";
 
 type PendingSendJob =
     | { type: 'direct'; chatId: number; peerId: string; content: string; localMessageId: string; replyToCid?: string }
@@ -34,7 +37,20 @@ type SendResult = {
     clientMsgId?: string;
 };
 
+type FileSendOutcome =
+    | { completed: true }
+    | {
+        completed: false;
+        reason: 'invalid_target' | 'offline' | 'busy' | 'expired' | 'rejected' | 'failed';
+    };
+
+type FileSendTarget = {
+    chatId: number;
+    peerId: string;
+};
+
 const MAX_COMPOSER_LINES = 5;
+let uploadsQuotaWarnedThisSession = false;
 
 const createPastedImageName = (date: Date, extension: string): string => {
     const year = String(date.getFullYear());
@@ -44,6 +60,16 @@ const createPastedImageName = (date: Date, extension: string): string => {
     const minutes = String(date.getMinutes()).padStart(2, '0');
     const seconds = String(date.getSeconds()).padStart(2, '0');
     return `pasted-image-${year}${month}${day}-${hours}${minutes}${seconds}.${extension}`;
+};
+
+const createLongMessageName = (date: Date): string => {
+    const year = String(date.getFullYear());
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    const seconds = String(date.getSeconds()).padStart(2, '0');
+    return `long-message-${year}${month}${day}-${hours}${minutes}${seconds}.txt`;
 };
 
 type ChatInputProps = {
@@ -64,8 +90,14 @@ export const ChatInput: FC<ChatInputProps> = ({
     const [draftByChatId, setDraftByChatId] = useState<Record<number, string>>({});
     const [fileDialogOpen, setFileDialogOpen] = useState(false);
     const [pastedFile, setPastedFile] = useState<PastedImageFile | null>(null);
+    const [longMessageDialogOpen, setLongMessageDialogOpen] = useState(false);
+    const [pendingLongMessage, setPendingLongMessage] = useState<PendingLongMessage | null>(null);
+    const [pendingQuotaFilePath, setPendingQuotaFilePath] = useState<string | null>(null);
+    const [quotaFilePath, setQuotaFilePath] = useState<string | null>(null);
+    const [quotaDialogOpen, setQuotaDialogOpen] = useState(false);
     const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
     const activeChat = useSelector((state: RootState) => state.chat.activeChat);
+    const chats = useSelector((state: RootState) => state.chat.chats);
     const myPeerId = useSelector((state: RootState) => state.user.peerId);
     const myUsername = useSelector((state: RootState) => state.user.username);
     const isTorActive = useSelector((state: RootState) => state.user.torEnabled);
@@ -139,6 +171,7 @@ export const ChatInput: FC<ChatInputProps> = ({
     const selectionSyncUnlockFrameRef = useRef<number | null>(null);
     const resizeAnimationFrameRef = useRef<number | null>(null);
     const suppressSelectionSyncRef = useRef(false);
+    const draftRevisionByChatIdRef = useRef<Record<number, number>>({});
     const activeChatIdRef = useRef(activeChatId);
     const hasActiveFileTransferRef = useRef(hasActiveFileTransfer);
     activeChatIdRef.current = activeChatId;
@@ -195,8 +228,14 @@ export const ChatInput: FC<ChatInputProps> = ({
         if (!interactionBlocked) return;
         setEmojiPickerOpen(false);
         setFileDialogOpen(false);
+        setLongMessageDialogOpen(false);
         inputRef.current?.blur();
     }, [interactionBlocked]);
+
+    useEffect(() => {
+        if (!pendingLongMessage || activeChatId === pendingLongMessage.chatId) return;
+        setLongMessageDialogOpen(false);
+    }, [activeChatId, pendingLongMessage]);
 
     useEffect(() => {
         if (!emojiPickerOpen) return;
@@ -281,11 +320,38 @@ export const ChatInput: FC<ChatInputProps> = ({
         chatId: number,
         value: string | ((currentValue: string) => string)
     ) => {
+        draftRevisionByChatIdRef.current[chatId] =
+            (draftRevisionByChatIdRef.current[chatId] ?? 0) + 1;
         setDraftByChatId((prev) => {
             const currentValue = prev[chatId] ?? "";
             const nextValue = typeof value === 'function' ? value(currentValue) : value;
             return { ...prev, [chatId]: nextValue };
         });
+    };
+
+    const queueUploadsQuotaWarning = (
+        savedFilePath: string,
+        uploadsDirSizeBytes: number,
+    ) => {
+        if (
+            uploadsQuotaWarnedThisSession
+            || uploadsDirSizeBytes <= UPLOADS_QUOTA_WARN_BYTES
+        ) {
+            return;
+        }
+        setPendingQuotaFilePath(savedFilePath);
+    };
+
+    const showQueuedUploadsQuotaWarning = () => {
+        if (!pendingQuotaFilePath) return;
+
+        const savedFilePath = pendingQuotaFilePath;
+        setPendingQuotaFilePath(null);
+        if (uploadsQuotaWarnedThisSession) return;
+
+        uploadsQuotaWarnedThisSession = true;
+        setQuotaFilePath(savedFilePath);
+        setQuotaDialogOpen(true);
     };
 
     const syncSelectionFromInput = (target?: HTMLTextAreaElement | null) => {
@@ -539,6 +605,24 @@ export const ChatInput: FC<ChatInputProps> = ({
             return;
         }
         if (messageContent.length > MAX_MESSAGE_CONTENT_LENGTH) {
+            if (activeChat.type === 'direct') {
+                if (!activeChat.peerId) {
+                    toast.error('No peer ID found for active chat');
+                    return;
+                }
+
+                setPendingLongMessage({
+                    chatId: activeChat.id,
+                    peerId: activeChat.peerId,
+                    recipientName: activeChat.username || activeChat.name || 'the recipient',
+                    rawDraft: inputQuery,
+                    trimmedText: messageContent,
+                    draftRevision: draftRevisionByChatIdRef.current[activeChat.id] ?? 0,
+                    defaultFileName: createLongMessageName(new Date()),
+                });
+                setLongMessageDialogOpen(true);
+                return;
+            }
             toast.error(`Message too long. Max ${MAX_MESSAGE_CONTENT_LENGTH} characters`);
             return;
         }
@@ -670,15 +754,26 @@ export const ChatInput: FC<ChatInputProps> = ({
         fileName: string,
         fileSize: number,
         mediaToken?: string | null,
-    ) => {
-        if (!activeChat?.peerId) {
+        target?: FileSendTarget,
+    ): Promise<FileSendOutcome> => {
+        const targetChat = target
+            ? chats.find((chat) => chat.id === target.chatId)
+            : activeChat;
+        const targetPeerId = target?.peerId ?? targetChat?.peerId;
+
+        if (
+            !targetChat
+            || targetChat.type !== 'direct'
+            || !targetPeerId
+            || targetChat.peerId !== targetPeerId
+        ) {
             toast.error('No active chat selected');
-            return;
+            return { completed: false, reason: 'invalid_target' };
         }
 
-        const previousLastMessage = activeChat.lastMessage;
-        const previousLastMessageTimestamp = activeChat.lastMessageTimestamp;
-        const chatId = activeChat.id;
+        const previousLastMessage = targetChat.lastMessage;
+        const previousLastMessageTimestamp = targetChat.lastMessageTimestamp;
+        const chatId = targetChat.id;
         const pendingMessageId =
             globalThis.crypto?.randomUUID?.() ??
             `file-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -701,7 +796,7 @@ export const ChatInput: FC<ChatInputProps> = ({
                 transferProgress: 0,
             }));
 
-            const result = await window.kiyeovoAPI.sendFile(activeChat.peerId, filePath, pendingMessageId);
+            const result = await window.kiyeovoAPI.sendFile(targetPeerId, filePath, pendingMessageId);
             if (!result.success) {
                 const errorText = result.error?.toLowerCase() || '';
                 console.error(result.error);
@@ -723,7 +818,10 @@ export const ChatInput: FC<ChatInputProps> = ({
                             lastMessageTimestamp: previousLastMessageTimestamp
                         }
                     }));
-                    return;
+                    return {
+                        completed: false,
+                        reason: failedBeforePersist ? 'offline' : 'busy',
+                    };
                 }
                 const status =
                     errorText.includes('timeout waiting for file acceptance') ? 'expired' :
@@ -734,7 +832,12 @@ export const ChatInput: FC<ChatInputProps> = ({
                     status,
                     transferError: result.error || (status === 'expired' ? 'Offer expired' : 'Offer rejected')
                 }));
+                return {
+                    completed: false,
+                    reason: status,
+                };
             }
+            return { completed: true };
         } catch (error) {
             console.error('Error sending file:', error);
             toast.error(errStr(error, 'Failed to send file'));
@@ -750,7 +853,10 @@ export const ChatInput: FC<ChatInputProps> = ({
                         lastMessageTimestamp: previousLastMessageTimestamp
                     }
                 }));
-                return;
+                return {
+                    completed: false,
+                    reason: failedBeforePersist ? 'offline' : 'busy',
+                };
             }
             const status =
                 errorText.includes('timeout waiting for file acceptance') ? 'expired' :
@@ -764,8 +870,45 @@ export const ChatInput: FC<ChatInputProps> = ({
                     status === 'expired' ? 'Offer expired' : 'Offer rejected',
                 ),
             }));
+            return {
+                completed: false,
+                reason: status,
+            };
         }
     }
+
+    const handlePreparedLongMessage = async (
+        file: {
+            filePath: string;
+            fileName: string;
+            fileSize: number;
+        },
+        source: PendingLongMessage,
+    ) => {
+        const outcome = await handleSendFile(
+            file.filePath,
+            file.fileName,
+            file.fileSize,
+            null,
+            {
+                chatId: source.chatId,
+                peerId: source.peerId,
+            },
+        );
+        if (!outcome.completed) return;
+        if (
+            (draftRevisionByChatIdRef.current[source.chatId] ?? 0)
+            !== source.draftRevision
+        ) {
+            return;
+        }
+
+        setDraftForChat(source.chatId, '');
+        if (activeChatIdRef.current === source.chatId) {
+            selectionRef.current = { start: 0, end: 0 };
+            setEmojiPickerOpen(false);
+        }
+    };
 
     return <>
         <div
@@ -879,11 +1022,37 @@ export const ChatInput: FC<ChatInputProps> = ({
         <SendFileDialog
             open={!interactionBlocked && fileDialogOpen}
             onOpenChange={(open) => setFileDialogOpen(interactionBlocked ? false : open)}
-            onClosed={() => setPastedFile(null)}
-            onSend={handleSendFile}
+            onClosed={() => {
+                setPastedFile(null);
+                showQueuedUploadsQuotaWarning();
+            }}
+            onSend={async (filePath, fileName, fileSize, mediaToken) => {
+                await handleSendFile(filePath, fileName, fileSize, mediaToken);
+            }}
+            onUploadSaved={queueUploadsQuotaWarning}
             pastedFile={pastedFile}
             transferBlocked={hasActiveFileTransfer}
             transferBlockedReason="Wait for the current file transfer to finish before selecting another file."
+        />
+
+        <SendLongMessageDialog
+            open={!interactionBlocked && longMessageDialogOpen}
+            onOpenChange={(open) => setLongMessageDialogOpen(interactionBlocked ? false : open)}
+            onClosed={() => {
+                setPendingLongMessage(null);
+                showQueuedUploadsQuotaWarning();
+            }}
+            onPrepared={handlePreparedLongMessage}
+            onUploadSaved={queueUploadsQuotaWarning}
+            pendingMessage={pendingLongMessage}
+            transferBlocked={hasActiveFileTransfer}
+            transferBlockedReason="Wait for the current file transfer to finish before sending this message as a file."
+        />
+
+        <UploadsQuotaDialog
+            open={quotaDialogOpen}
+            onOpenChange={setQuotaDialogOpen}
+            savedFilePath={quotaFilePath}
         />
     </>
 }

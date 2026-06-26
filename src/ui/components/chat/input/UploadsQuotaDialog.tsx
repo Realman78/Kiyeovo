@@ -37,11 +37,11 @@ export const UploadsQuotaDialog: React.FC<UploadsQuotaDialogProps> = ({
     try {
       const result = await window.kiyeovoAPI.openFileLocation(savedFilePath);
       if (!result.success) {
-        toast.error(result.error || 'Failed to show pasted images folder');
+        toast.error(result.error || 'Failed to show uploads folder');
       }
     } catch (error) {
-      console.error('Failed to show pasted images folder:', error);
-      toast.error('Failed to show pasted images folder');
+      console.error('Failed to show uploads folder:', error);
+      toast.error('Failed to show uploads folder');
     } finally {
       setOpeningFolder(false);
     }
@@ -53,10 +53,10 @@ export const UploadsQuotaDialog: React.FC<UploadsQuotaDialogProps> = ({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <HardDrive className="h-5 w-5 text-amber-400" />
-            Your pasted images use over 100 MB! 
+            Your saved uploads use over 100 MB!
           </DialogTitle>
           <DialogDescription>
-            Pasted images are kept at <span className='font-bold'>{uploadsFolderPath}</span> <br />That enables sent images to remain visible in chat.
+            Pasted images and generated text files are kept at <span className='font-bold'>{uploadsFolderPath}</span> <br />That keeps sent uploads available to the app.
             You can remove files you no longer need from the uploads folder so that it doesn't take up as much space.
           </DialogDescription>
         </DialogHeader>
