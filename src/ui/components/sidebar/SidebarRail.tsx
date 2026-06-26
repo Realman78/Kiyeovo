@@ -1,5 +1,5 @@
 import { useState, type FC, type FocusEvent as ReactFocusEvent } from 'react';
-import { MessageSquare, Network, Settings, User, Users } from 'lucide-react';
+import { CircleHelp, MessageSquare, Network, Settings, User, Users } from 'lucide-react';
 import { useSelector } from 'react-redux';
 import { Logo } from '../icons/Logo';
 import { KiyeovoDialog } from './header/KiyeovoDialog';
@@ -26,9 +26,9 @@ const PRIMARY_ITEMS: RailItem[] = [
 ];
 
 const SECONDARY_ITEMS: RailItem[] = [
-  // { section: 'help', label: 'Help', icon: CircleHelp },
   { section: 'profile', label: 'Profile', icon: User },
   { section: 'settings', label: 'Settings', icon: Settings },
+  { section: 'help', label: 'Help', icon: CircleHelp },
 ];
 
 type SidebarRailButtonProps = {
@@ -52,8 +52,8 @@ const SidebarRailButton: FC<SidebarRailButtonProps> = ({
 }) => {
   const statusLabel = !severity ? null
     : severityLabel ? severityLabel
-    : severity === 'blocked' ? 'setup blocked'
-    : 'setup needs attention'
+      : severity === 'blocked' ? 'setup blocked'
+        : 'setup needs attention'
   const accessibleLabel = statusLabel ? `${label}, ${statusLabel}` : label;
 
   return (
@@ -63,17 +63,16 @@ const SidebarRailButton: FC<SidebarRailButtonProps> = ({
       title={accessibleLabel}
       aria-label={accessibleLabel}
       className={`flex outline-0 h-12 w-full cursor-pointer items-center gap-3 overflow-hidden border px-0 transition-colors ${active
-          ? 'border-transparent border-l-primary/40 border-3 bg-primary/15 text-primary shadow-[inset_0_0_0_1px_rgba(0,0,0,0.05)]'
-          : 'border-transparent text-muted-foreground hover:border-sidebar-border hover:bg-sidebar-accent hover:text-foreground'
+        ? 'border-transparent border-l-primary/40 border-3 bg-primary/15 text-primary shadow-[inset_0_0_0_1px_rgba(0,0,0,0.05)]'
+        : 'border-transparent text-muted-foreground hover:border-sidebar-border hover:bg-sidebar-accent hover:text-foreground'
         }`}
     >
       <span className="relative flex h-full w-14 shrink-0 items-center justify-center">
         <Icon className="h-5 w-5" />
         {severity && (
           <span
-            className={`absolute right-3 top-2 h-2 w-2 rounded-full ring-2 ring-sidebar-background ${
-              severity === 'blocked' ? 'bg-destructive' : 'bg-warning'
-            }`}
+            className={`absolute right-3 top-2 h-2 w-2 rounded-full ring-2 ring-sidebar-background ${severity === 'blocked' ? 'bg-destructive' : 'bg-warning'
+              }`}
           />
         )}
       </span>
@@ -119,12 +118,20 @@ export const SidebarRail: FC<SidebarRailProps> = ({
       >
         <div className="relative z-10 flex h-full flex-col justify-between pb-4 pt-4">
           <div className="flex flex-col gap-3">
-            <div
-              className={`mx-auto mb-4 flex h-10 w-10 cursor-pointer items-center justify-center rounded-full border ${isTorEnabled ? "border-[#5a3184] glow-border-tor" : "border-primary/50 glow-border"}`}
-              onClick={openKiyeovoDialog}
-            >
-              <Logo version="2" />
+            <div className="flex items-center gap-3 overflow-hidden">
+              <span className="flex w-14 shrink-0 items-center justify-center">
+                <span
+                  className={`flex h-10 w-10 cursor-pointer items-center justify-center rounded-full border ${isTorEnabled ? "border-[#5a3184] glow-border-tor" : "border-primary/50 glow-border"}`}
+                  onClick={openKiyeovoDialog}
+                >
+                  <Logo version="2" />
+                </span>
+              </span>
+              <span className={`whitespace-nowrap text-md font-bold transition-opacity duration-150 cursor-pointer ${expanded ? 'opacity-100' : 'opacity-0'}`} onClick={openKiyeovoDialog}>
+                Kiyeovo
+              </span>
             </div>
+            <hr />
             {PRIMARY_ITEMS.map((item) => (
               <SidebarRailButton
                 key={item.section}

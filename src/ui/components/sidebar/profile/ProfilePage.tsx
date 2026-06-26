@@ -123,12 +123,12 @@ export const ProfilePage: FC = () => {
                   <div className="min-w-0 text-left">
                     <p className="truncate font-mono text-sm font-medium text-foreground">{user.username}</p>
                     <div className="flex items-center gap-1">
-                      <p
-                        title={user.peerId}
-                        className="cursor-pointer truncate font-mono text-xs text-success"
-                        onClick={handleCopyPeerId}
-                      >
-                        {user.peerId}
+                      <p className='font-mono text-xs text-foreground'>
+                        Peer ID: <span title={user.peerId}
+                          className="cursor-pointer truncate font-mono text-xs text-success"
+                          onClick={handleCopyPeerId}>
+                          {user.peerId}
+                        </span>
                       </p>
                       <button
                         type="button"
@@ -165,14 +165,12 @@ export const ProfilePage: FC = () => {
                   aria-label="Auto-register username"
                   onClick={() => handleAutoRegisterToggle(!autoRegister)}
                   disabled={isSavingAutoRegister}
-                  className={`relative shrink-0 cursor-pointer inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                    autoRegister ? 'bg-primary hover:bg-primary/80' : 'bg-input hover:bg-input/80'
-                  } disabled:cursor-not-allowed disabled:opacity-60`}
+                  className={`relative shrink-0 cursor-pointer inline-flex h-6 w-11 items-center rounded-full transition-colors ${autoRegister ? 'bg-primary hover:bg-primary/80' : 'bg-input hover:bg-input/80'
+                    } disabled:cursor-not-allowed disabled:opacity-60`}
                 >
                   <span
-                    className={`inline-block h-4 w-4 transform rounded-full bg-background transition-transform ${
-                      autoRegister ? 'translate-x-6' : 'translate-x-1'
-                    }`}
+                    className={`inline-block h-4 w-4 transform rounded-full bg-background transition-transform ${autoRegister ? 'translate-x-6' : 'translate-x-1'
+                      }`}
                   />
                 </button>
               </div>

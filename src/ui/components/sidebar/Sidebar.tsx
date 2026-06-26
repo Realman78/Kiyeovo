@@ -38,7 +38,7 @@ export const Sidebar: FC<SidebarProps> = ({
   const [networkMode, setNetworkMode] = useState<NetworkMode>('fast');
   const networkOnline = useSelector((state: RootState) => state.user.networkOnline);
   const statusSuffix = networkOnline === false ? ' (local)' : isTorEnabled ? ' (tor)' : '';
-  const isRailOnly = activeSection === 'settings' || activeSection === 'profile';
+  const isRailOnly = activeSection === 'settings' || activeSection === 'profile' || activeSection === 'help';
   const openProfile = () => onSelectSection('profile');
 
   const contactAttempts = useSelector((state: RootState) => state.chat.contactAttempts)

@@ -23,6 +23,7 @@ import { RelaySetup } from '../components/sidebar/setup/RelaySetup';
 import { IceSetup } from '../components/sidebar/setup/IceSetup';
 import { SettingsPage } from '../components/sidebar/settings/SettingsPage';
 import { ProfilePage } from '../components/sidebar/profile/ProfilePage';
+import { HelpPage } from '../components/sidebar/help/HelpPage';
 import { InitialSetupWelcome } from '../components/sidebar/setup/InitialSetupWelcome';
 import { InitialSetupWizard } from '../components/sidebar/setup/InitialSetupWizard';
 import { OPEN_REGISTER_DIALOG_EVENT, OPEN_SETUP_EVENT } from '../utils/uiSignals';
@@ -993,6 +994,9 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
               )}
               {activeSection === 'profile' && (
                 <ProfilePage />
+              )}
+              {activeSection === 'help' && (
+                <HelpPage />
               )}
             </div>
           )}

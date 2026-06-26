@@ -16,7 +16,7 @@ export const KiyeovoDialog: FC<KiyeovoDialogProps> = ({ open, onOpenChange }) =>
         <Dialog open={open} onOpenChange={onOpenChange}>
             <DialogContent className="max-w-2xl">
                 <DialogHeader>
-                    <DialogTitle className="flex items-center justify-center gap-2 mb-6 text-2xl! cursor-default">
+                    <DialogTitle className="flex items-center justify-center gap-2 text-2xl! cursor-default">
                         <div className={`w-12 h-12 rounded-full border ${isTorActive ? "border-[#5a3184] glow-border-tor" : "border-primary/50 glow-border"} flex items-center justify-center`}>
                             <Logo version="2" />
                         </div>
