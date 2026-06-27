@@ -2275,8 +2275,13 @@ export class ChatDatabase {
         }));
     }
 
-    rejectPendingIncomingFileOffer(messageId: string): boolean {
-        const result = this.db.prepare(`
+    rejectPendingIncomingFileOffer(messageId: string): {
+        messageId: string;
+        offerId: string;
+        chatId: number;
+        senderPeerId: string;
+    } | null {
+        const row = this.db.prepare(`
             UPDATE messages
             SET transfer_status = 'rejected',
                 transfer_progress = 0,
@@ -2287,8 +2292,54 @@ export class ChatDatabase {
               AND chat_id IN (
                 SELECT id FROM chats WHERE network_mode = ?
               )
-        `).run(messageId, this.sessionNetworkMode);
-        return result.changes === 1;
+              AND file_offer_id IS NOT NULL
+            RETURNING
+              id AS messageId,
+              file_offer_id AS offerId,
+              chat_id AS chatId,
+              sender_peer_id AS senderPeerId
+        `).get(messageId, this.sessionNetworkMode) as {
+            messageId: string;
+            offerId: string;
+            chatId: number;
+            senderPeerId: string;
+        } | undefined;
+        return row ?? null;
+    }
+
+    terminalizeOutgoingFileOfferFromNack(input: {
+        offerId: string;
+        chatId: number;
+        localPeerId: string;
+        status: 'rejected' | 'failed';
+        error: string;
+    }): { messageId: string; filename: string } | null {
+        const row = this.db.prepare(`
+            UPDATE messages
+            SET transfer_status = ?,
+                transfer_progress = 0,
+                transfer_error = ?
+            WHERE file_offer_id = ?
+              AND chat_id = ?
+              AND sender_peer_id = ?
+              AND message_type = 'file'
+              AND transfer_status = 'awaiting_acceptance'
+              AND chat_id IN (
+                SELECT id FROM chats WHERE network_mode = ?
+              )
+            RETURNING id AS messageId, file_name AS filename
+        `).get(
+            input.status,
+            input.error,
+            input.offerId,
+            input.chatId,
+            input.localPeerId,
+            this.sessionNetworkMode,
+        ) as { messageId: string; filename: string | null } | undefined;
+        return row ? {
+            messageId: row.messageId,
+            filename: row.filename ?? 'Unknown file',
+        } : null;
     }
 
     getCompletedFileMediaById(messageId: string): {

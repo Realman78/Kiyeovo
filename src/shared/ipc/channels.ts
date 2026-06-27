@@ -190,6 +190,7 @@ export const IPC_CHANNELS = {
   FILE_TRANSFER_COMPLETE: 'file:complete',
   FILE_TRANSFER_FAILED: 'file:failed',
   OUTGOING_FILE_OFFER_PENDING: 'file:outgoingOfferPending',
+  OUTGOING_FILE_OFFER_TERMINAL: 'file:outgoingOfferTerminal',
   PENDING_FILE_RECEIVED: 'file:pendingReceived',
 
   // Group chats

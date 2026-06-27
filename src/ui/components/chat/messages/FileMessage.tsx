@@ -277,7 +277,7 @@ export const FileMessage: React.FC<FileMessageProps> = ({
       case 'connecting':
         return 'Connecting...';
       case 'awaiting_acceptance':
-        return 'Waiting for approval';
+        return 'File offered';
       case 'incoming_pending_user':
         return 'Waiting for your decision';
       case 'in_progress':
@@ -290,7 +290,7 @@ export const FileMessage: React.FC<FileMessageProps> = ({
       case 'failed':
         return 'Failed';
       case 'rejected':
-        return 'Offer rejected';
+        return isFromCurrentUser ? 'Recipient declined' : 'Offer rejected';
       default:
         return '';
     }

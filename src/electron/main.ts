@@ -20,6 +20,7 @@ import {
   type FileTransferCompleteEvent,
   type FileTransferFailedEvent,
   type OutgoingFileOfferPendingEvent,
+  type OutgoingFileOfferTerminalEvent,
   type PendingFileReceivedEvent,
   type GroupChatActivatedEvent,
   type GroupMembersUpdatedEvent,
@@ -428,6 +429,13 @@ function sendOutgoingFileOfferPending(data: OutgoingFileOfferPendingEvent) {
   }
 }
 
+function sendOutgoingFileOfferTerminal(data: OutgoingFileOfferTerminalEvent) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    log(`[Electron] Outgoing file offer terminal: ${data.messageId} status=${data.status}`);
+    mainWindow.webContents.send(IPC_CHANNELS.OUTGOING_FILE_OFFER_TERMINAL, data);
+  }
+}
+
 function sendPendingFileReceived(data: PendingFileReceivedEvent) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     log(`[Electron] Pending file received: ${data.filename} from ${data.senderUsername}`);
@@ -686,6 +694,9 @@ async function initializeP2PAfterWindow() {
       },
       onOutgoingFileOfferPending: (data: OutgoingFileOfferPendingEvent) => {
         sendOutgoingFileOfferPending(data);
+      },
+      onOutgoingFileOfferTerminal: (data: OutgoingFileOfferTerminalEvent) => {
+        sendOutgoingFileOfferTerminal(data);
       },
       onPendingFileReceived: (data: PendingFileReceivedEvent) => {
         sendPendingFileReceived(data);

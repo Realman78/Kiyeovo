@@ -67,6 +67,18 @@ test('validates typed envelope identifiers and payload bounds', () => {
     kind: 'file_offer_cancel',
     payload: { type: 'file_offer_cancel', offerId: 'offer_1', signature: '' },
   })), { ok: false, reason: 'invalid_envelope' });
+
+  assert.deepEqual(decodeEnvelope(JSON.stringify({
+    v: MESSAGE_ENVELOPE_VERSION,
+    cid: 'message_1',
+    kind: 'file_offer_nack',
+    payload: {
+      type: 'file_offer_nack',
+      offerId: 'offer_1',
+      reason: 'unknown_reason',
+      signature: 'signature',
+    },
+  })), { ok: false, reason: 'invalid_envelope' });
 });
 
 test('dispatches by kind and leaves recognized-but-unregistered kinds unhandled', async () => {

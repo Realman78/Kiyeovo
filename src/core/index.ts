@@ -32,6 +32,7 @@ import type {
   FileTransferCompleteEvent,
   FileTransferFailedEvent,
   OutgoingFileOfferPendingEvent,
+  OutgoingFileOfferTerminalEvent,
   PendingFileReceivedEvent,
   GroupChatActivatedEvent,
   GroupMembersUpdatedEvent,
@@ -93,6 +94,7 @@ export interface P2PCoreConfig {
   onFileTransferComplete: (data: FileTransferCompleteEvent) => void;
   onFileTransferFailed: (data: FileTransferFailedEvent) => void;
   onOutgoingFileOfferPending: (data: OutgoingFileOfferPendingEvent) => void;
+  onOutgoingFileOfferTerminal: (data: OutgoingFileOfferTerminalEvent) => void;
   onPendingFileReceived: (data: PendingFileReceivedEvent) => void;
   onGroupChatActivated: (data: GroupChatActivatedEvent) => void;
   onGroupMembersUpdated: (data: GroupMembersUpdatedEvent) => void;
@@ -128,6 +130,7 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     onFileTransferComplete,
     onFileTransferFailed,
     onOutgoingFileOfferPending,
+    onOutgoingFileOfferTerminal,
     onPendingFileReceived,
     onGroupChatActivated,
     onGroupMembersUpdated,
@@ -423,6 +426,10 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     onOutgoingFileOfferPending(data);
   };
 
+  const sendOutgoingFileOfferTerminal = (data: OutgoingFileOfferTerminalEvent) => {
+    onOutgoingFileOfferTerminal(data);
+  };
+
   const sendPendingFileReceived = (data: PendingFileReceivedEvent) => {
     onPendingFileReceived(data);
   };
@@ -505,6 +512,7 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     sendFileTransferComplete,
     sendFileTransferFailed,
     sendOutgoingFileOfferPending,
+    sendOutgoingFileOfferTerminal,
     sendPendingFileReceived,
     sendGroupChatActivated,
     sendGroupMembersUpdated,

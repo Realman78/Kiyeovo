@@ -25,6 +25,7 @@ import type {
   FileTransferCompleteEvent,
   FileTransferFailedEvent,
   OutgoingFileOfferPendingEvent,
+  OutgoingFileOfferTerminalEvent,
   PendingFileReceivedEvent,
   GroupChatActivatedEvent,
   GroupMembersUpdatedEvent,
@@ -263,6 +264,7 @@ export class MessageHandler {
     onFileTransferComplete: (data: FileTransferCompleteEvent) => void,
     onFileTransferFailed: (data: FileTransferFailedEvent) => void,
     onOutgoingFileOfferPending: (data: OutgoingFileOfferPendingEvent) => void,
+    onOutgoingFileOfferTerminal: (data: OutgoingFileOfferTerminalEvent) => void,
     onPendingFileReceived: (data: PendingFileReceivedEvent) => void,
     onGroupChatActivated: (data: GroupChatActivatedEvent) => void,
     onGroupMembersUpdated: (data: GroupMembersUpdatedEvent) => void,
@@ -308,6 +310,7 @@ export class MessageHandler {
       onFileTransferComplete,
       onFileTransferFailed,
       onOutgoingFileOfferPending,
+      onOutgoingFileOfferTerminal,
       onPendingFileReceived,
     );
     const sessionNetworkMode = database.getSessionNetworkMode();

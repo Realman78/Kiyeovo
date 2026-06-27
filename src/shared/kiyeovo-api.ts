@@ -34,6 +34,7 @@ import type {
   OfflineInboxCapacityChangedEvent,
   OfflineInboxCapacitySnapshot,
   OutgoingFileOfferPendingEvent,
+  OutgoingFileOfferTerminalEvent,
   PasswordRequest,
   PendingFileReceivedEvent,
   RelayRetryResponse,
@@ -534,6 +535,7 @@ export interface KiyeovoAPI {
   onFileTransferComplete: (callback: (data: FileTransferCompleteEvent) => void) => Unsubscribe;
   onFileTransferFailed: (callback: (data: FileTransferFailedEvent) => void) => Unsubscribe;
   onOutgoingFileOfferPending: (callback: (data: OutgoingFileOfferPendingEvent) => void) => Unsubscribe;
+  onOutgoingFileOfferTerminal: (callback: (data: OutgoingFileOfferTerminalEvent) => void) => Unsubscribe;
   onPendingFileReceived: (callback: (data: PendingFileReceivedEvent) => void) => Unsubscribe;
 
   getContacts: () => Promise<{ success: boolean; contacts: Array<{ peerId: string; username: string }>; error: string | null }>;

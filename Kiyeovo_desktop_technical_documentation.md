@@ -290,7 +290,7 @@ Bucket nudges are best-effort acceleration hints (not a correctness dependency):
 
 File transfer reserves dedicated `fileTransferProtocol` for the recipient-initiated pull stream. The obsolete sender-initiated push handler is not registered and its held-open acceptance flow has been removed.
 
-File-sharing-v2 Phase 1 is in progress. Its first validated seam replaces the direct offer delivery path: the sender persists a caller-owned file row containing `file_offer_id`, checksum, chunk count, and protocol version, then sends a signed typed `file_offer` through the ordinary direct online/offline transport. The recipient routes that non-text kind into `FileHandler`, validates the sender, signature, ids, portable basename, size, checksum, chunk count, rate/pending limits, and persists an `incoming_pending_user` row. Acceptance countdowns are removed and recipient pending rows survive restart. Reject conditionally changes that row to terminal `rejected`; accepting currently returns an explicit not-yet-available error and leaves the offer pending. The pull stream and ephemeral sender registry are the next increment, so this milestone does not start file bytes.
+File-sharing-v2 Phase 1 is in progress. Its first validated seam replaces the direct offer delivery path: the sender persists a caller-owned file row containing `file_offer_id`, checksum, chunk count, and protocol version, then sends a signed typed `file_offer` through the ordinary direct online/offline transport. The recipient routes that non-text kind into `FileHandler`, validates the sender, signature, ids, portable basename, size, checksum, chunk count, rate/pending limits, and persists an `incoming_pending_user` row. Acceptance countdowns are removed and recipient pending rows survive restart. Reject conditionally changes that row to terminal `rejected` and best-effort sends a domain-separated, app-key-signed `file_offer_nack` with `reason:'declined'`; a verified NACK changes only the sender's matching `awaiting_acceptance` row to `rejected`. Accepting currently returns an explicit not-yet-available error and leaves the offer pending. The pull stream and ephemeral sender registry are the next increment, so this milestone does not start file bytes.
 
 Target Phase-1 flow:
 1. sender persists serving metadata in an ephemeral registry and emits a signed typed `file_offer`
@@ -301,7 +301,9 @@ Target Phase-1 flow:
 Current Phase-1 milestone behavior:
 - direct offers can be delivered in realtime or through the existing offline bucket
 - recipient pending offers are persisted and survive app restart/close
-- rejecting an offer is a local, terminal database transition; no network response is required
+- a valid direct offer that exceeds the pending capacity receives an `inbox_full` NACK; a rate-limited peer receives at most one signed rejection attempt per rate window and later excess traffic is dropped silently
+- rejecting a direct offer is locally terminal and immediately frees the recipient pending slot; a signed best-effort decline NACK updates the sender when delivery succeeds
+- unknown, duplicate, wrongly signed, cross-chat, and late decline NACKs cannot change an outgoing row
 - sender rows in `awaiting_acceptance` become `failed` on restart/close because the sender-side serving authority is intentionally ephemeral
 - there is currently no registered file stream handler; acceptance, download cancellation, per-peer transfer limits, and collision-safe destination allocation become active with the pull increment
 - completed image files render inline for both sender and receiver; receivers retain the existing file card until completion, and non-previewable transfer states also remain cards

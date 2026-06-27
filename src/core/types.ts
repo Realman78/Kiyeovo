@@ -678,6 +678,14 @@ export interface OutgoingFileOfferPendingEvent {
   messageId: string;
 }
 
+export interface OutgoingFileOfferTerminalEvent {
+  chatId: number;
+  messageId: string;
+  filename: string;
+  status: 'rejected' | 'failed';
+  error: string;
+}
+
 export interface PendingFileReceivedEvent {
   chatId: number;
   fileId: string;

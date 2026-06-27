@@ -516,6 +516,17 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
       }));
     });
 
+    const unsubOutgoingFileOfferTerminal = window.kiyeovoAPI.onOutgoingFileOfferTerminal((data) => {
+      dispatch(updateFileTransferStatus({
+        messageId: data.messageId,
+        status: data.status,
+        transferError: data.error,
+      }));
+      toast.info(data.status === 'rejected'
+        ? `${data.filename} was declined`
+        : `File offer failed: ${data.error}`);
+    });
+
     const unsubPendingFileReceived = window.kiyeovoAPI.onPendingFileReceived((data) => {
       const currentPeerId = store.getState().user.peerId;
       dispatch(addMessage({
@@ -705,6 +716,7 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
       unsubFileTransferComplete();
       unsubFileTransferFailed();
       unsubOutgoingFileOfferPending();
+      unsubOutgoingFileOfferTerminal();
       unsubPendingFileReceived();
       unsubCallIncoming();
       unsubCallSignalReceived();

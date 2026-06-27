@@ -7,7 +7,6 @@ const MAX_FILENAME_LENGTH = 255;
 const MAX_MIME_TYPE_LENGTH = 255;
 const MAX_CHECKSUM_LENGTH = 128;
 const MAX_SIGNATURE_LENGTH = 512;
-const MAX_CONTROL_REASON_LENGTH = 512;
 
 export type ApplicationMessageKind =
   | 'text'
@@ -40,10 +39,12 @@ export interface FileOfferCancelApplicationPayload {
   signature: string;
 }
 
+export type FileOfferNackReason = 'declined' | 'inbox_full' | 'rate_limited';
+
 export interface FileOfferNackApplicationPayload {
   type: 'file_offer_nack';
   offerId: string;
-  reason: string;
+  reason: FileOfferNackReason;
   signature: string;
 }
 
@@ -250,8 +251,12 @@ function isFileOfferNackPayload(value: unknown): value is FileOfferNackApplicati
   return isRecord(value)
     && value.type === 'file_offer_nack'
     && isValidCid(value.offerId)
-    && isBoundedString(value.reason, MAX_CONTROL_REASON_LENGTH)
+    && isFileOfferNackReason(value.reason)
     && isBoundedString(value.signature, MAX_SIGNATURE_LENGTH);
+}
+
+function isFileOfferNackReason(value: unknown): value is FileOfferNackReason {
+  return value === 'declined' || value === 'inbox_full' || value === 'rate_limited';
 }
 
 function isApplicationMessageKind(value: unknown): value is ApplicationMessageKind {

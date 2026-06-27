@@ -1,4 +1,4 @@
-import { ChatNode, FileTransferProgressEvent, FileTransferCompleteEvent, FileTransferFailedEvent, OutgoingFileOfferPendingEvent, PendingFileReceivedEvent } from "../types";
+import { ChatNode, FileTransferProgressEvent, FileTransferCompleteEvent, FileTransferFailedEvent, OutgoingFileOfferPendingEvent, OutgoingFileOfferTerminalEvent, PendingFileReceivedEvent } from "../types";
 import type { Stream } from "@libp2p/interface";
 import { ChatDatabase } from "../db/database";
 import { readFile, stat } from "fs/promises";
@@ -15,12 +15,19 @@ import {
   MESSAGE_ENVELOPE_VERSION,
   isValidCid,
   type FileOfferApplicationPayload,
+  type FileOfferNackApplicationPayload,
+  type FileOfferNackReason,
 } from "../protocol/message-envelope.js";
 import type { InboundApplicationMessageContext } from "../protocol/application-message.js";
 import {
   createFileOfferSignaturePayload,
   validateIncomingFileOffer,
 } from "../protocol/file-offer-validation.js";
+import {
+  createFileOfferNackSignaturePayload,
+  getFileOfferNackOutcome,
+  validateFileOfferNack,
+} from "../protocol/file-offer-control.js";
 
 interface FileMetadata {
   buffer: Buffer
@@ -37,12 +44,14 @@ export class FileHandler {
   private messageHandler: MessageHandler;
   private database: ChatDatabase;
   private fileOfferTimestamps = new Map<string, number[]>();
+  private fileOfferRateLimitNackAt = new Map<string, number>();
   private activeTransfersByPeer = new Map<string, { fileId: string; direction: 'send' | 'receive' }>();
   private activeTransferStreams = new Map<string, Stream>();
   private onFileTransferProgress: (data: FileTransferProgressEvent) => void;
   private onFileTransferComplete: (data: FileTransferCompleteEvent) => void;
   private onFileTransferFailed: (data: FileTransferFailedEvent) => void;
   private onOutgoingFileOfferPending: (data: OutgoingFileOfferPendingEvent) => void;
+  private onOutgoingFileOfferTerminal: (data: OutgoingFileOfferTerminalEvent) => void;
   private onPendingFileReceived: (data: PendingFileReceivedEvent) => void;
 
   constructor(
@@ -53,6 +62,7 @@ export class FileHandler {
     onFileTransferComplete: (data: FileTransferCompleteEvent) => void,
     onFileTransferFailed: (data: FileTransferFailedEvent) => void,
     onOutgoingFileOfferPending: (data: OutgoingFileOfferPendingEvent) => void,
+    onOutgoingFileOfferTerminal: (data: OutgoingFileOfferTerminalEvent) => void,
     onPendingFileReceived: (data: PendingFileReceivedEvent) => void
   ) {
     this.node = node;
@@ -62,6 +72,7 @@ export class FileHandler {
     this.onFileTransferComplete = onFileTransferComplete;
     this.onFileTransferFailed = onFileTransferFailed;
     this.onOutgoingFileOfferPending = onOutgoingFileOfferPending;
+    this.onOutgoingFileOfferTerminal = onOutgoingFileOfferTerminal;
     this.onPendingFileReceived = onPendingFileReceived;
     const failedCount = this.database.failNonTerminalFileTransfers('Transfer interrupted (app restart/close)');
     if (failedCount > 0) {
@@ -120,6 +131,16 @@ export class FileHandler {
     this.fileOfferTimestamps.set(peerId, timestamps);
   }
 
+  private shouldAttemptRateLimitNack(peerId: string): boolean {
+    const now = Date.now();
+    const lastAttempt = this.fileOfferRateLimitNackAt.get(peerId) ?? 0;
+    if (now - lastAttempt < FILE_OFFER_RATE_LIMIT_WINDOW) {
+      return false;
+    }
+    this.fileOfferRateLimitNackAt.set(peerId, now);
+    return true;
+  }
+
   acceptPendingFile(fileId: string): void {
     const message = this.database.getFileMessageById(fileId);
     if (!message || message.transfer_status !== 'incoming_pending_user') {
@@ -130,7 +151,13 @@ export class FileHandler {
   }
 
   rejectPendingFile(fileId: string): boolean {
-    return this.database.rejectPendingIncomingFileOffer(fileId);
+    const rejected = this.database.rejectPendingIncomingFileOffer(fileId);
+    if (!rejected) {
+      return false;
+    }
+
+    void this.#sendFileOfferNack(rejected.senderPeerId, rejected.offerId, 'declined');
+    return true;
   }
 
   cancelIncomingFileDownload(fileId: string): boolean {
@@ -205,7 +232,97 @@ export class FileHandler {
     };
   }
 
+  async #sendFileOfferNack(
+    targetPeerId: string,
+    offerId: string,
+    reason: FileOfferNackReason,
+  ): Promise<void> {
+    try {
+      const identity = this.messageHandler.getUserIdentity();
+      if (!identity) {
+        throw new Error('No user identity available');
+      }
+      const unsignedNack = {
+        type: 'file_offer_nack' as const,
+        offerId,
+        reason,
+      };
+      const signature = identity.sign(
+        JSON.stringify(createFileOfferNackSignaturePayload(unsignedNack)),
+      );
+      await this.messageHandler.sendApplicationMessage(
+        { type: 'direct', peerId: targetPeerId },
+        {
+          message: {
+            cid: randomUUID(),
+            kind: 'file_offer_nack',
+            payload: {
+              ...unsignedNack,
+              signature: Buffer.from(signature).toString('base64'),
+            },
+          },
+          persistence: { owner: 'none' },
+        },
+      );
+      this.trace('SEND', targetPeerId, null, 'OFFER_NACK_SENT', `offer=${offerId} reason=${reason}`);
+    } catch (error: unknown) {
+      console.warn(
+        `[FILE][NACK][DELIVERY_FAILED] peer=*${targetPeerId.slice(-8)} `
+        + `offer=${offerId} reason=${reason} err=${errStr(error, 'unknown')}`,
+      );
+    }
+  }
+
+  #handleFileOfferNack(
+    context: InboundApplicationMessageContext,
+    nack: FileOfferNackApplicationPayload,
+  ): boolean {
+    if (context.route !== 'direct_online' && context.route !== 'direct_offline') {
+      return false;
+    }
+    const chat = this.database.getChatByPeerId(context.senderPeerId);
+    const sender = this.database.getUserByPeerId(context.senderPeerId);
+    if (!chat || chat.type !== 'direct' || !sender) {
+      return true;
+    }
+    if (!validateFileOfferNack({
+      nack,
+      verifySignature: (signature, payload) => EncryptedUserIdentity.verifyKeyExchangeSignature(
+        signature,
+        payload,
+        sender.signing_public_key,
+      ),
+    })) {
+      return true;
+    }
+
+    const { status, error } = getFileOfferNackOutcome(nack.reason);
+    const terminalized = this.database.terminalizeOutgoingFileOfferFromNack({
+      offerId: nack.offerId,
+      chatId: chat.id,
+      localPeerId: this.node.peerId.toString(),
+      status,
+      error,
+    });
+    if (!terminalized) {
+      return true;
+    }
+
+    this.onOutgoingFileOfferTerminal({
+      chatId: chat.id,
+      messageId: terminalized.messageId,
+      filename: terminalized.filename,
+      status,
+      error,
+    });
+    this.trace('RECV', context.senderPeerId, terminalized.messageId, 'OFFER_NACK_APPLIED', `offer=${nack.offerId} reason=${nack.reason}`);
+    return true;
+  }
+
   async handleApplicationMessage(context: InboundApplicationMessageContext): Promise<boolean> {
+    if (context.message.kind === 'file_offer_nack') {
+      return this.#handleFileOfferNack(context, context.message.payload);
+    }
     if (context.message.kind !== 'file_offer') {
       return false;
     }
@@ -216,7 +333,7 @@ export class FileHandler {
     const offer = context.message.payload;
     const chat = this.database.getChatByPeerId(context.senderPeerId);
     const sender = this.database.getUserByPeerId(context.senderPeerId);
-    if (!chat || chat.type !== 'direct' || chat.id !== context.chatId || !sender) {
+    if (!chat || chat.type !== 'direct' || !sender) {
       return true;
     }
 
@@ -225,16 +342,31 @@ export class FileHandler {
       return true;
     }
     const pending = this.database.getPendingIncomingFileOffers();
-    if (pending.length >= this.getMaxPendingFilesTotal()) {
-      return true;
-    }
-    if (
-      pending.filter((message) => message.sender_peer_id === context.senderPeerId).length
-      >= this.getMaxPendingFilesPerPeer()
-    ) {
-      return true;
-    }
+    const pendingCapacityFull =
+      pending.length >= this.getMaxPendingFilesTotal()
+      || pending.filter((message) => message.sender_peer_id === context.senderPeerId).length
+        >= this.getMaxPendingFilesPerPeer();
     if (this.isFileOfferRateLimitExceeded(context.senderPeerId)) {
+      if (this.shouldAttemptRateLimitNack(context.senderPeerId)) {
+        const validation = validateIncomingFileOffer({
+          envelopeCid: context.message.cid,
+          offer,
+          maxFileSize: this.getMaxFileSize(),
+          now: Date.now(),
+          verifySignature: (signature, payload) => EncryptedUserIdentity.verifyKeyExchangeSignature(
+            signature,
+            payload,
+            sender.signing_public_key,
+          ),
+        });
+        if (validation.ok) {
+          void this.#sendFileOfferNack(
+            context.senderPeerId,
+            offer.offerId,
+            pendingCapacityFull ? 'inbox_full' : 'rate_limited',
+          );
+        }
+      }
       return true;
     }
     this.trackFileOffer(context.senderPeerId);
@@ -251,6 +383,11 @@ export class FileHandler {
       ),
     });
     if (!validation.ok) {
+      return true;
+    }
+
+    if (pendingCapacityFull) {
+      void this.#sendFileOfferNack(context.senderPeerId, offer.offerId, 'inbox_full');
       return true;
     }
 
@@ -355,7 +492,9 @@ export class FileHandler {
           persistence: { owner: 'caller' },
         },
       );
-      this.onOutgoingFileOfferPending({ chatId: chat.id, messageId: fileId });
+      if (this.database.getFileMessageById(fileId)?.transfer_status === 'awaiting_acceptance') {
+        this.onOutgoingFileOfferPending({ chatId: chat.id, messageId: fileId });
+      }
       this.trace('SEND', user.peer_id, fileId, 'OFFER_MESSAGE_SENT', `offer=${offerId}`);
     } catch (error: unknown) {
       const errorText = errStr(error, 'Unknown error');

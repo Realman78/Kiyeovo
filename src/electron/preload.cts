@@ -195,6 +195,7 @@ const kiyeovoAPI: KiyeovoAPI = {
   onFileTransferComplete: (callback) => subscribe(IPC_CHANNELS.FILE_TRANSFER_COMPLETE, callback),
   onFileTransferFailed: (callback) => subscribe(IPC_CHANNELS.FILE_TRANSFER_FAILED, callback),
   onOutgoingFileOfferPending: (callback) => subscribe(IPC_CHANNELS.OUTGOING_FILE_OFFER_PENDING, callback),
+  onOutgoingFileOfferTerminal: (callback) => subscribe(IPC_CHANNELS.OUTGOING_FILE_OFFER_TERMINAL, callback),
   onPendingFileReceived: (callback) => subscribe(IPC_CHANNELS.PENDING_FILE_RECEIVED, callback),
 
   getContacts: () => invoke(IPC_CHANNELS.GET_CONTACTS),
