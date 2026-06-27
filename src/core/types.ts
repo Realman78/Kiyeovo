@@ -743,7 +743,7 @@ export type CallSignalType =
   | 'CALL_SCREEN_SHARE_STARTED'
   | 'CALL_SCREEN_SHARE_STOPPED';
 
-export type CallMediaType = 'audio' | 'video';
+export type CallMediaType = 'audio';
 export type ScreenShareStopReason = 'manual' | 'track-ended' | 'call-ended' | 'failed';
 
 type BaseCallSignal = {

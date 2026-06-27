@@ -168,9 +168,7 @@ Trusted profile import/export is also supported for out-of-band onboarding:
 
 Direct and group text messages are limited to 2,048 characters. The
 renderer rejects oversized sends, IPC validation enforces the same core limit,
-and inbound envelope decoding defensively clamps text to that limit. During a
-mixed-version rollout, a peer still using the previous 1,024-character limit
-will silently clamp longer inbound messages until it updates.
+and inbound typed-envelope validation rejects oversized text payloads.
 
 Inbound first-contact behavior depends on contact mode:
 - `active` - emits a pending contact request to UI and waits for accept/reject/timeout
@@ -212,13 +210,15 @@ Cross-peer identity:
 - message row IDs are minted independently per peer, so replies anchor to a **`client_msg_id` (cid)** — a stable id that is the *same value on both sides* of a message. The sender mints it; it rides inside the encrypted body and the recipient persists the same value. File/image rows reuse the shared `fileId` as their cid (so files are reply-/jump-able too).
 - a reply stores only `reply_to_client_id` (the target cid). **No quoted-content snapshot is kept** — the quote is resolved by live lookup, so deleting the original leaves no recoverable copy. When the target can't be resolved (deleted, or never received — e.g. a group reply to a message that predates your join), the quote renders a neutral, non-interactive *"Original message unavailable."*
 
-Wire format — the plaintext that gets encrypted is a small versioned **envelope** rather than a bare string: `{ v, cid, text, reply_to? }`. This keeps the cid + reply linkage private on the transport **and** in the offline DHT-at-rest payload. The recipient decodes and validates it (bounded cid shape/length, clamped text) and falls back to plain text for any non-envelope body. The envelope + cid are built **once per send** and reused across every delivery route (online, non-blocking offline queue, synchronous offline fallback), so the same cid arrives regardless of path.
+Wire format — the plaintext that gets encrypted is a strict version-1 **application-message envelope** rather than a bare string: `{ v: 1, cid, kind, payload }`. Supported kinds are `text`, `file_offer`, `file_offer_cancel`, and `file_offer_nack`; a text payload contains `{ text, reply_to? }`. This keeps the cid, message kind, payload, and reply linkage private on the transport **and** in offline DHT-at-rest payloads. Payloads are shape- and bounds-validated before dispatch. Bare text, missing/unknown kinds, unsupported versions, and malformed envelopes are ignored and never rendered as text. Kiyeovo has no pre-1.0 peer compatibility path.
+
+One shared codec/dispatcher is used by direct realtime, direct offline, group GossipSub, and group offline catch-up/late-gap repair. The envelope + cid are built **once per send** and reused across delivery routes, so online/offline overlap dedupes on the same id. The outbound application-message API requires a caller-supplied id and encodes persistence ownership in its request type: text is transport-owned, a file offer is caller-owned (the file subsystem persists its row), and cancel/nack controls own no visible row. Direct application messages reuse the established direct session or existing offline bucket; group application messages retain the normal GossipSub + signed offline-backup behavior. Caller-owned rows must exist before transport begins, while invisible controls never create a `messages` row.
 
 Direct file replies use the file-transfer protocol rather than the text envelope. A signed `file_offer` may carry optional `replyToCid` metadata, validated with the same cid shape/length rules and included in the signed offer payload. When present, both outgoing file rows and incoming pending-offer rows persist it as `reply_to_client_id`; the live pending-file event carries the same value so the renderer can show the quote before acceptance.
 
 Dedup: a `UNIQUE(chat_id, client_msg_id)` index makes the same logical message delivered over two channels (online + offline) collapse to one row. Inbound inserts (`tryCreateMessage`) skip the "received" event when no row was inserted; outbound inserts use a plain insert that **throws** on a cid collision (an invariant violation, never expected). This complements the pre-existing offline-message-UUID dedup.
 
-Groups: a group content message's `messageId` is already identical on every member, so it doubles as the shared cid — **`client_msg_id = messageId`** (no separate mint), and a reply just carries the target `messageId` inside the same envelope (`cid = messageId`), encrypted into `encryptedContent`. Both receive paths — gossip realtime and offline catch-up / late-gap repair — decode the envelope (text only; hidden call-hint system bodies stay raw), validate `messageId` (`isValidCid`, enforced in `isGroupChatMessage` for gossip and at the offline parse gate), and persist the cid + reply ref. Because `id == messageId == client_msg_id` for groups, the inbound insert uses a **targetless `ON CONFLICT DO NOTHING`** (covers the PK), and sequence/cursor state advances even for a deduped duplicate — only unread + the "received" event are gated on insertion. The reply envelope lives inside the signed offline backup, so catch-up carries it automatically.
+Groups: a group content message's `messageId` is already identical on every member, so it doubles as the shared cid — **`client_msg_id = messageId`** (no separate mint), and a reply carries the target `messageId` inside the text payload (`cid = messageId`), encrypted into `encryptedContent`. Both receive paths — gossip realtime and offline catch-up / late-gap repair — run the shared application-message dispatcher; hidden call-hint system bodies remain on the separate system path. They validate `messageId` (`isValidCid`, enforced in `isGroupChatMessage` for gossip and at the offline parse gate), require a typed envelope's `cid` to match that outer `messageId`, and persist text cid + reply data only after dispatch. Because `id == messageId == client_msg_id` for groups, the inbound insert uses a **targetless `ON CONFLICT DO NOTHING`** (covers the PK), and sequence/cursor state advances even for a deduped, rejected, or currently unhandled application message — only unread + the "received" event are gated on insertion. The envelope lives inside the signed offline backup, so catch-up carries it automatically.
 
 UI: a hover **Reply** action (available in direct and group chats; hidden on un-settled/failed sends, and on files until transfer completes) opens a composer reply bar, transfers focus to the composer, and survives chat switches (`Esc`/✕ cancels). The quote renders above the bubble; clicking it scrolls to the original, waits until the target is visible and scrolling has settled, then starts a 2.5-second accent **highlight pulse**. If the target is not loaded, the renderer first requests one bottom-anchored jump window: the database locates the target cid, counts newer messages, and returns the latest history through the target plus 20 older context rows in one transaction/IPC round-trip. The window is capped at 200 rows to keep that single synchronous (non-virtualized) DOM render cheap; targets deeper than the cap report `too_deep` and fall back to the older page-by-page paging instead. Replacing the history window preserves messages that arrived during the request and resets the database pagination offset to the returned row count. Jump ownership remains scoped to the active chat and a request generation, so chat switches or newer jumps cancel stale work; only confirmed absence/exhaustion reports that the original is unavailable.
 
@@ -290,6 +290,8 @@ Bucket nudges are best-effort acceleration hints (not a correctness dependency):
 
 File transfer uses dedicated `fileTransferProtocol`.
 
+File-sharing-v2 Phase 0 is implemented as transport groundwork only: typed `file_offer`, `file_offer_cancel`, and `file_offer_nack` application payloads are validated and routable through the shared direct/group dispatcher, and the outbound API already enforces caller-owned offer rows versus rowless controls. Until the pull-model phase lands, those typed file handlers are intentionally unregistered and the current file-transfer flow below remains authoritative.
+
 Flow:
 1. sender emits signed `file_offer` with timeout and optional signed reply metadata
 2. receiver accepts/rejects
@@ -357,7 +359,7 @@ Architecture:
 
 Behavior highlights:
 - direct 1:1 calls are a single `Call` product; new outgoing offers are audio-only
-- incoming legacy start-time `video` offers are explicitly rejected as unsupported (`policy`)
+- call offers must use the audio-start signaling schema; camera is enabled later through call-control signals
 - pre-check for direct contact and active connectivity before offer
 - outgoing ring timeout (30s)
 - busy/reject/end handling with local cleanup on both sides
@@ -438,10 +440,9 @@ Core tables include:
 - `group_pending_info_publishes`
 - `group_invite_delivery_acks`
 - `group_sender_seq`, `group_member_seq`, `group_epoch_boundaries`
-- `file_transfers`
 - `bootstrap_nodes`
 
-Reply feature adds two columns to `messages`: `client_msg_id` (cross-peer stable id / cid, defaults to the row id; file rows use `fileId`) and `reply_to_client_id` (the cid a reply points at). A `UNIQUE(chat_id, client_msg_id)` index backs cross-channel (online + offline) dedup. Migrations follow the repo's `ensureColumnExists` + `CREATE INDEX IF NOT EXISTS` pattern (no formal migration framework).
+File transfer rows live in `messages`; there is no separate `file_transfers` table. Reply support adds two columns to `messages`: `client_msg_id` (cross-peer stable id / cid, defaults to the row id; file rows use `fileId`) and `reply_to_client_id` (the cid a reply points at). A `UNIQUE(chat_id, client_msg_id)` index backs cross-channel (online + offline) dedup. Migrations follow the repo's `ensureColumnExists` + `CREATE INDEX IF NOT EXISTS` pattern (no formal migration framework).
 
 Conversation search adds a full-text index, `messages_fts`: an **external-content** FTS5 table (`content='messages'`, no duplicated content column) over `content` + `file_name`, keyed on the `messages` integer `rowid`, using the **`trigram`** tokenizer for case-insensitive substring matching. Three triggers keep it in sync — `AFTER INSERT`, `AFTER DELETE`, and `AFTER UPDATE OF content, file_name` (guarded by a value-change `WHEN` so routine `transfer_status`/`local_send_state`/receipt writes don't churn the index). It is created idempotently with a one-time `'rebuild'` backfill on first creation only. The trigram tokenizer keeps an indexed copy of derived 3-gram posting data in shadow tables (`messages_fts_data`/`_idx`/`_docsize`/`_config`); this lives in the same plaintext DB file under the same OS-disk-encryption trust model. Search itself is exposed via `searchChatMessages(chatId, query, { limit, snapshotMaxRowid, cursor })` (IPC `messages:searchInChat`), scoped to one chat, excluding system messages, newest-first. Column scope: text messages match `content`, file/image messages match `file_name` only. Queries ≥3 chars use the indexed trigram MATCH (refined by a type-scoped LIKE); 1–2 char queries fall back to a chat-scoped LIKE (trigram cannot index <3-char terms). Pagination is **keyset** on `(timestamp, rowid)` — not OFFSET — so a message deleted mid-search cannot shift later pages; `snapshotMaxRowid` additionally freezes the searchable universe and total for the life of one query.
 

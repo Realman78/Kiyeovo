@@ -71,7 +71,17 @@ import {
 import { triggerFastRelayRefresh } from '../network/relay-keepalive.js';
 import { SessionManager } from '../direct/session-manager.js';
 import { MessageEncryption } from '../direct/message-encryption.js';
-import { encodeEnvelope, decodeEnvelope, isValidCid } from '../protocol/message-envelope.js';
+import {
+  dispatchEnvelope,
+  encodeApplicationEnvelope,
+  encodeEnvelope,
+  isValidCid,
+} from '../protocol/message-envelope.js';
+import type {
+  ApplicationMessageSendResult,
+  InboundApplicationMessageContext,
+  SendApplicationMessageRequest,
+} from '../protocol/application-message.js';
 import { PeerConnectionHandler } from '../direct/peer-connection-handler.js';
 import { StreamHandler } from '../transport/stream-handler.js';
 import { KeyExchange } from '../direct/key-exchange.js';
@@ -316,6 +326,7 @@ export class MessageHandler {
       userIdentity,
       myPeerId: this.node.peerId.toString(),
       onMessageReceived: this.onMessageReceived,
+      onApplicationMessage: this.handleIncomingApplicationMessage.bind(this),
       onGroupCallHint: async ({ groupId }) => {
         await this.groupCallHintHandler?.(groupId);
       },
@@ -336,6 +347,7 @@ export class MessageHandler {
       myPeerId: this.node.peerId.toString(),
       myUsername: this.database.getUserByPeerId(this.node.peerId.toString())?.username || `user_${this.node.peerId.toString().slice(-8)}`,
       onMessageReceived: this.onMessageReceived,
+      onApplicationMessage: this.handleIncomingApplicationMessage.bind(this),
       groupOfflineManager: this.groupOfflineManager,
       nudgeGroupRefetch: this.nudgePeerGroupRefetch.bind(this),
     });
@@ -809,10 +821,6 @@ export class MessageHandler {
           return;
         }
         const decryptedContent = MessageEncryption.decryptMessage(message, session);
-        // Reply feature: the body may be a versioned envelope carrying the shared
-        // cid + reply ref. decodeEnvelope falls back to plain text (no cid) for
-        // anything that isn't a well-formed envelope.
-        const envelope = decodeEnvelope(decryptedContent);
         this.reactivateRetiredPendingAcksForPeer(remoteId);
 
         // Process ACK if included - clear acknowledged messages from our bucket
@@ -827,53 +835,15 @@ export class MessageHandler {
           return;
         }
 
-        try {
-          const chat = this.database.getChatByPeerId(remoteId);
-          if (!chat) {
-            throw new Error('Chat not found');
-          }
-          const messageId = crypto.randomUUID();
-          // Persist the sender's shared cid (mint a local one only if the body
-          // wasn't an envelope), the reply ref, and the plain body text.
-          const clientMsgId = envelope.cid ?? crypto.randomUUID();
-          const { inserted } = await this.database.tryCreateMessage({
-            id: messageId,
-            chat_id: chat.id,
-            sender_peer_id: remoteId,
-            content: envelope.text,
-            message_type: 'text',
-            timestamp: new Date(),
-            client_msg_id: clientMsgId,
-            reply_to_client_id: envelope.replyToCid ?? null,
-          });
-
-          // Duplicate delivery (same cid already stored, e.g. online + offline
-          // overlap): the row exists — do not emit a phantom event.
-          if (!inserted) {
-            log(`Skipped duplicate message cid=${clientMsgId.slice(0, 8)} from ${remoteId.slice(-8)}`);
-          } else {
-            log(`Saved message with ID: ${messageId}`);
-
-            // Get sender username for the event
-            const sender = this.database.getUserByPeerId(remoteId);
-            const senderUsername = sender?.username || 'Unknown';
-
-            // Fire message received event
-            this.onMessageReceived({
-              chatId: chat.id,
-              messageId: messageId,
-              content: envelope.text,
-              senderPeerId: remoteId,
-              senderUsername: senderUsername,
-              timestamp: Date.now(),
-              messageSentStatus: 'online',
-              clientMsgId,
-              replyToClientId: envelope.replyToCid,
-            });
-          }
-        } catch (error: unknown) {
-          generalErrorHandler(error, `Error saving message to database`);
-        }
+        const sender = this.database.getUserByPeerId(remoteId);
+        await this.dispatchIncomingDirectApplicationMessage({
+          plaintext: decryptedContent,
+          senderPeerId: remoteId,
+          senderUsername: sender?.username || 'Unknown',
+          timestamp: Date.now(),
+          messageSentStatus: 'online',
+          transportMessageId: crypto.randomUUID(),
+        });
         this.sessionManager.incrementMessageCount(remoteId);
         this.sessionManager.updateSessionUsage(remoteId);
       } catch (error: unknown) {
@@ -1118,7 +1088,7 @@ export class MessageHandler {
       case 'CALL_OFFER':
         return typeof signal.offerSdp === 'string'
           && signal.offerSdp.length > 0
-          && (signal.mediaType === 'audio' || signal.mediaType === 'video');
+          && signal.mediaType === 'audio';
       case 'CALL_ANSWER':
         return typeof signal.answerSdp === 'string' && signal.answerSdp.length > 0;
       case 'CALL_ICE':
@@ -1513,19 +1483,6 @@ export class MessageHandler {
         } catch (error: unknown) {
           generalErrorHandler(error, '[CALL] Failed to send busy response');
         }
-        return;
-      }
-
-      if (signal.mediaType === 'video') {
-        log(
-          `[CALL] Rejecting unsupported legacy video offer from ${remoteId.slice(-8)} callId=${signal.callId.slice(0, 8)}`,
-        );
-        this.sendCallSignal({
-          type: 'CALL_REJECT',
-          callId: signal.callId,
-          toPeerId: remoteId,
-          reason: 'policy',
-        }).catch(error => generalErrorHandler(error, '[CALL] Failed to send legacy video offer rejection'));
         return;
       }
 
@@ -2753,6 +2710,172 @@ export class MessageHandler {
     }
   }
 
+  async sendApplicationMessage(
+    destination: { type: 'direct'; peerId: string } | { type: 'group'; groupId: string },
+    request: SendApplicationMessageRequest,
+  ): Promise<ApplicationMessageSendResult> {
+    if (destination.type === 'group') {
+      return this.groupMessaging.sendApplicationMessage(destination.groupId, request);
+    }
+    return this.sendDirectApplicationMessage(destination.peerId, request);
+  }
+
+  private async sendDirectApplicationMessage(
+    peerId: string,
+    request: SendApplicationMessageRequest,
+  ): Promise<ApplicationMessageSendResult> {
+    const user = this.database.getUserByPeerId(peerId);
+    const chat = this.database.getChatByPeerId(peerId);
+    if (!user || !chat || chat.type !== 'direct') {
+      throw new Error('Direct application messages require an established direct chat');
+    }
+    if (
+      request.persistence.owner === 'caller'
+      && !this.database.messageExistsInChat(chat.id, request.message.cid)
+    ) {
+      throw new Error('Caller-owned application message row was not persisted before send');
+    }
+
+    const transportBody = encodeApplicationEnvelope(request.message);
+    let messageSentStatus: 'online' | 'offline';
+    try {
+      const { session, peerId: targetPeerId } = await this.ensureUserSession(
+        peerId,
+        '',
+        true,
+        user,
+      );
+      const lastRead = this.database.getOfflineLastReadTimestampByPeerId(peerId);
+      const lastAckSent = this.database.getOfflineLastAckSentByPeerId(peerId);
+      const ackTimestamp = lastRead > lastAckSent ? lastRead : undefined;
+      await Promise.race([
+        this.writeMessageOnline(targetPeerId, transportBody, session, ackTimestamp),
+        new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error('Message timeout')), MESSAGE_TIMEOUT);
+        }),
+      ]);
+      if (ackTimestamp !== undefined) {
+        this.database.updateOfflineLastAckSentByPeerId(peerId, ackTimestamp);
+      }
+      messageSentStatus = 'online';
+    } catch (error: unknown) {
+      const errorText = this.getSendMessageErrorText(error);
+      if (!this.shouldFallbackOfflineSend(errorText)) {
+        throw error;
+      }
+      messageSentStatus = await this.storeDirectApplicationMessageOffline(
+        user,
+        transportBody,
+        request.message.cid,
+      );
+    }
+
+    const timestamp = Date.now();
+    await this.persistTransportOwnedDirectApplicationMessage(
+      chat.id,
+      request,
+      messageSentStatus,
+      timestamp,
+    );
+    return {
+      chatId: chat.id,
+      messageId: request.message.cid,
+      timestamp,
+      messageSentStatus,
+      warning: null,
+      offlineBackupRetry: null,
+    };
+  }
+
+  private async storeDirectApplicationMessageOffline(
+    user: User,
+    transportBody: string,
+    messageId: string,
+  ): Promise<'offline'> {
+    if (this.node.getConnections().length === 0) {
+      throw new Error(`Offline delivery unavailable: ${OFFLINE_DHT_UNAVAILABLE_MARKER}`);
+    }
+    const bucketSecret = this.database.getOfflineBucketSecretByPeerId(user.peer_id);
+    if (!bucketSecret) {
+      throw new Error('Offline fallback unavailable right now');
+    }
+    const identity = this.usernameRegistry.getUserIdentity();
+    if (!identity) {
+      throw new Error('User identity not available');
+    }
+
+    await this.pruneUnreachablePeerConnections(user.peer_id);
+    const writeBucketKey = this.keyExchange.constructWriteBucketKey(bucketSecret);
+    const myPeerId = this.node.peerId.toString();
+    const myUsername = this.database.getUserByPeerId(myPeerId)?.username || `user_${myPeerId.slice(-8)}`;
+    const lastRead = this.database.getOfflineLastReadTimestampByPeerId(user.peer_id);
+    const lastAckSent = this.database.getOfflineLastAckSentByPeerId(user.peer_id);
+    const ackTimestamp = lastRead > lastAckSent ? lastRead : undefined;
+    const offlineMessage = OfflineMessageManager.createOfflineMessage(
+      myPeerId,
+      myUsername,
+      transportBody,
+      Buffer.from(user.offline_public_key, 'base64').toString(),
+      identity.signingPrivateKey,
+      writeBucketKey,
+      ackTimestamp,
+      messageId,
+    );
+    await OfflineMessageManager.storeOfflineMessage(
+      this.node,
+      writeBucketKey,
+      offlineMessage,
+      identity.signingPrivateKey,
+      this.database,
+      { category: 'regular' },
+    );
+    if (ackTimestamp !== undefined) {
+      this.database.updateOfflineLastAckSentByPeerId(user.peer_id, ackTimestamp);
+    }
+    this.notifyOfflineInboxCapacityChangedForPeer(user.peer_id);
+    return 'offline';
+  }
+
+  private async persistTransportOwnedDirectApplicationMessage(
+    chatId: number,
+    request: SendApplicationMessageRequest,
+    messageSentStatus: 'online' | 'offline',
+    timestamp: number,
+  ): Promise<void> {
+    if (request.persistence.owner === 'caller') {
+      return;
+    }
+    if (request.persistence.owner === 'none') {
+      return;
+    }
+
+    await this.database.createMessage({
+      id: request.message.cid,
+      chat_id: chatId,
+      sender_peer_id: this.node.peerId.toString(),
+      content: request.persistence.content,
+      message_type: request.persistence.messageType,
+      timestamp: new Date(timestamp),
+      client_msg_id: request.message.cid,
+      reply_to_client_id: request.persistence.replyToCid ?? null,
+    });
+
+    const myPeerId = this.node.peerId.toString();
+    const senderUsername = this.database.getUserByPeerId(myPeerId)?.username || `user_${myPeerId.slice(-8)}`;
+    this.onMessageReceived({
+      chatId,
+      messageId: request.message.cid,
+      content: request.persistence.content,
+      senderPeerId: myPeerId,
+      senderUsername,
+      timestamp,
+      messageSentStatus,
+      messageType: request.persistence.messageType,
+      clientMsgId: request.message.cid,
+      replyToClientId: request.persistence.replyToCid,
+    });
+  }
+
   async sendMessage(targetUsernameOrPeerId: string, message: string, replyToCid?: string): Promise<SendMessageResponse> {
     let user: User | null = null;
     // Reply feature: mint the cross-peer cid + build the transport envelope ONCE so
@@ -3784,49 +3907,104 @@ export class MessageHandler {
     decryptedContent: string,
   ): Promise<{ chatId: number; inserted: boolean }> {
     log(`Processing offline message from ${senderInfo.username} (${senderInfo.peer_id})`);
-
-    const chat = this.database.getChatByPeerId(senderInfo.peer_id);
-    if (!chat) {
-      throw new Error('Chat not found');
-    }
-
-    // The body may be a versioned envelope carrying the shared cid + reply ref;
-    // decodeEnvelope falls back to plain text (mint a local cid) otherwise.
-    const envelope = decodeEnvelope(decryptedContent);
-    const clientMsgId = envelope.cid ?? crypto.randomUUID();
-
-    const { inserted } = await this.database.tryCreateMessage({
-      id: msg.id,
-      chat_id: chat.id,
-      sender_peer_id: senderInfo.peer_id,
-      content: envelope.text,
-      message_type: 'text',
-      timestamp: new Date(msg.timestamp),
-      client_msg_id: clientMsgId,
-      reply_to_client_id: envelope.replyToCid ?? null,
-    });
-
-    // Duplicate of a message already stored (e.g. same logical message delivered
-    // online and via the offline bucket): row exists — no phantom event.
-    if (!inserted) {
-      log(`Skipped duplicate offline message cid=${clientMsgId.slice(0, 8)} from ${senderInfo.peer_id.slice(-8)}`);
-      return { chatId: chat.id, inserted: false };
-    }
-    log(`Saved offline message with ID: ${msg.id}`);
-
-    this.onMessageReceived({
-      chatId: chat.id,
-      messageId: msg.id,
-      content: envelope.text,
+    return this.dispatchIncomingDirectApplicationMessage({
+      plaintext: decryptedContent,
       senderPeerId: senderInfo.peer_id,
       senderUsername: senderInfo.username,
       timestamp: msg.timestamp,
       messageSentStatus: 'offline',
-      clientMsgId,
-      replyToClientId: envelope.replyToCid,
+      transportMessageId: msg.id,
+    });
+  }
+
+  private async dispatchIncomingDirectApplicationMessage(input: {
+    plaintext: string;
+    senderPeerId: string;
+    senderUsername: string;
+    timestamp: number;
+    messageSentStatus: MessageSentStatus;
+    transportMessageId: string;
+  }): Promise<{ chatId: number; inserted: boolean }> {
+    const chat = this.database.getChatByPeerId(input.senderPeerId);
+    if (!chat) {
+      throw new Error('Chat not found');
+    }
+
+    const routeNonText = (
+      message: InboundApplicationMessageContext['message'],
+    ): boolean | Promise<boolean> => this.handleIncomingApplicationMessage({
+      message,
+      chatId: chat.id,
+      senderPeerId: input.senderPeerId,
+      senderUsername: input.senderUsername,
+      timestamp: input.timestamp,
+      transportMessageId: input.transportMessageId,
+      route: input.messageSentStatus === 'online' ? 'direct_online' : 'direct_offline',
+    });
+    const dispatched = await dispatchEnvelope(input.plaintext, {
+      text: async ({ cid, payload }) => {
+        const clientMsgId = cid;
+        const { inserted } = await this.database.tryCreateMessage({
+          id: input.transportMessageId,
+          chat_id: chat.id,
+          sender_peer_id: input.senderPeerId,
+          content: payload.text,
+          message_type: 'text',
+          timestamp: new Date(input.timestamp),
+          client_msg_id: clientMsgId,
+          reply_to_client_id: payload.reply_to ?? null,
+        });
+
+        if (!inserted) {
+          log(`Skipped duplicate message cid=${clientMsgId.slice(0, 8)} from ${input.senderPeerId.slice(-8)}`);
+          return false;
+        }
+
+        this.onMessageReceived({
+          chatId: chat.id,
+          messageId: input.transportMessageId,
+          content: payload.text,
+          senderPeerId: input.senderPeerId,
+          senderUsername: input.senderUsername,
+          timestamp: input.timestamp,
+          messageSentStatus: input.messageSentStatus,
+          clientMsgId,
+          replyToClientId: payload.reply_to,
+        });
+        return true;
+      },
+      file_offer: routeNonText,
+      file_offer_cancel: routeNonText,
+      file_offer_nack: routeNonText,
     });
 
-    return { chatId: chat.id, inserted: true };
+    if (dispatched.status === 'handled') {
+      return { chatId: chat.id, inserted: dispatched.value };
+    }
+    if (dispatched.status === 'rejected') {
+      log(
+        `[APP-MESSAGE][DIRECT][DROP] from=${input.senderPeerId.slice(-8)} ` +
+        `transportId=${input.transportMessageId} reason=${dispatched.reason}`,
+      );
+    } else {
+      log(
+        `[APP-MESSAGE][DIRECT][DROP] from=${input.senderPeerId.slice(-8)} ` +
+        `transportId=${input.transportMessageId} reason=unhandled_kind kind=${dispatched.message.kind}`,
+      );
+    }
+    return { chatId: chat.id, inserted: false };
+  }
+
+  private handleIncomingApplicationMessage(
+    context: InboundApplicationMessageContext,
+  ): boolean {
+    // Phase 0 installs the shared route; Phase 1 binds these kinds to FileHandler.
+    log(
+      `[APP-MESSAGE][UNHANDLED] route=${context.route} kind=${context.message.kind} ` +
+      `chatId=${context.chatId} from=${context.senderPeerId.slice(-8)} ` +
+      `transportId=${context.transportMessageId}`,
+    );
+    return false;
   }
 
   private async endActiveCallForShutdown(): Promise<void> {
