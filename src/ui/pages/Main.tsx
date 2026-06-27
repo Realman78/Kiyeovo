@@ -512,8 +512,7 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
     const unsubOutgoingFileOfferPending = window.kiyeovoAPI.onOutgoingFileOfferPending((data) => {
       dispatch(updateFileTransferStatus({
         messageId: data.messageId,
-        status: 'awaiting_acceptance',
-        transferExpiresAt: data.expiresAt
+        status: 'awaiting_acceptance'
       }));
     });
 
@@ -534,7 +533,6 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
         fileSize: data.size,
         transferStatus: 'incoming_pending_user',
         transferProgress: 0,
-        transferExpiresAt: data.expiresAt,
         ...(data.replyToClientId ? { replyToClientId: data.replyToClientId } : {}),
       }));
       dispatch(updateChat({
@@ -547,26 +545,6 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
       // Unread count is handled by addMessage reducer for non-active chats.
       dispatch(setPendingFileStatus({ chatId: data.chatId, hasPendingFile: true }));
       toast.info(`${data.senderUsername} wants to send you a file: ${data.filename}`);
-
-      const msUntilExpire = Math.max(0, data.expiresAt - Date.now());
-      setTimeout(() => {
-        const state = store.getState();
-        const message = state.chat.messages.find(m => m.id === data.fileId);
-        if (message && (message.transferStatus === 'incoming_pending_user' || message.transferStatus === 'pending')) {
-          dispatch(updateFileTransferStatus({
-            messageId: data.fileId,
-            status: 'expired',
-            transferError: 'Offer expired'
-          }));
-          const hasOtherPending = state.chat.messages.some(
-            (m) =>
-              m.chatId === data.chatId &&
-              m.id !== data.fileId &&
-              (m.transferStatus === 'incoming_pending_user' || m.transferStatus === 'pending'),
-          );
-          dispatch(setPendingFileStatus({ chatId: data.chatId, hasPendingFile: hasOtherPending }));
-        }
-      }, msUntilExpire);
     });
 
     const unsubCallIncoming = window.kiyeovoAPI.onCallIncoming((data) => {

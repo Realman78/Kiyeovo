@@ -21,7 +21,6 @@ interface FileMessageProps {
   transferStatus: FileTransferStatus;
   transferProgress?: number;
   transferError?: string;
-  transferExpiresAt?: number;
   isFromCurrentUser: boolean;
 }
 
@@ -149,54 +148,14 @@ export const FileMessage: React.FC<FileMessageProps> = ({
   transferStatus,
   transferProgress = 0,
   transferError,
-  transferExpiresAt,
   isFromCurrentUser
 }) => {
   const dispatch = useDispatch();
   const messages = useSelector((state: RootState) => state.chat.messages);
-  const isAwaitingApproval =
-    transferStatus === 'awaiting_acceptance' ||
-    (transferStatus === 'pending' && isFromCurrentUser);
-  const isIncomingPendingDecision =
-    transferStatus === 'incoming_pending_user' ||
-    (transferStatus === 'pending' && !isFromCurrentUser);
-  const showsDecisionDeadline = isAwaitingApproval || isIncomingPendingDecision;
-  const [timeLeftMs, setTimeLeftMs] = useState(() => {
-    if (showsDecisionDeadline && transferExpiresAt) {
-      return Math.max(0, transferExpiresAt - Date.now());
-    }
-    return 0;
-  });
+  const isAwaitingApproval = transferStatus === 'awaiting_acceptance';
+  const isIncomingPendingDecision = transferStatus === 'incoming_pending_user';
+  const showsDecisionStatus = isAwaitingApproval || isIncomingPendingDecision;
   const [isCancelling, setIsCancelling] = useState(false);
-
-  useEffect(() => {
-    if (!showsDecisionDeadline || !transferExpiresAt) {
-      return;
-    }
-
-    const tick = () => {
-      const remaining = Math.max(0, transferExpiresAt - Date.now());
-      setTimeLeftMs(remaining);
-      if (remaining === 0 && isIncomingPendingDecision) {
-        dispatch(updateFileTransferStatus({
-          messageId: fileId,
-          status: 'expired',
-          transferError: 'Offer expired'
-        }));
-        const hasOtherPending = messages.some(
-          (m) =>
-            m.chatId === chatId &&
-            m.id !== fileId &&
-            (m.transferStatus === 'incoming_pending_user' || m.transferStatus === 'pending'),
-        );
-        dispatch(setPendingFileStatus({ chatId, hasPendingFile: hasOtherPending }));
-      }
-    };
-
-    tick();
-    const intervalId = setInterval(tick, 1000);
-    return () => clearInterval(intervalId);
-  }, [showsDecisionDeadline, transferExpiresAt, isIncomingPendingDecision, fileId, chatId, messages, dispatch]);
 
   const formatFileSize = (bytes: number): string => {
     if (bytes === 0) return '0 B';
@@ -204,13 +163,6 @@ export const FileMessage: React.FC<FileMessageProps> = ({
     const sizes = ['B', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
-  };
-
-  const formatTimeLeft = (ms: number): string => {
-    const totalSeconds = Math.ceil(ms / 1000);
-    const minutes = Math.floor(totalSeconds / 60);
-    const seconds = totalSeconds % 60;
-    return `${minutes}:${seconds.toString().padStart(2, '0')}`;
   };
 
   const handleAccept = async () => {
@@ -225,14 +177,24 @@ export const FileMessage: React.FC<FileMessageProps> = ({
           (m) =>
             m.chatId === chatId &&
             m.id !== fileId &&
-            (m.transferStatus === 'incoming_pending_user' || m.transferStatus === 'pending'),
+            m.transferStatus === 'incoming_pending_user',
         );
         dispatch(setPendingFileStatus({ chatId, hasPendingFile: hasOtherPending }));
       } else {
         console.error('Failed to accept file:', result.error);
+        dispatch(updateFileTransferStatus({
+          messageId: fileId,
+          status: 'incoming_pending_user',
+          transferError: result.error || 'Failed to accept file'
+        }));
       }
     } catch (error) {
       console.error('Error accepting file:', error);
+      dispatch(updateFileTransferStatus({
+        messageId: fileId,
+        status: 'incoming_pending_user',
+        transferError: error instanceof Error ? error.message : 'Failed to accept file'
+      }));
     }
   };
 
@@ -249,7 +211,7 @@ export const FileMessage: React.FC<FileMessageProps> = ({
           (m) =>
             m.chatId === chatId &&
             m.id !== fileId &&
-            (m.transferStatus === 'incoming_pending_user' || m.transferStatus === 'pending'),
+            m.transferStatus === 'incoming_pending_user',
         );
         dispatch(setPendingFileStatus({ chatId, hasPendingFile: hasOtherPending }));
       } else {
@@ -318,8 +280,6 @@ export const FileMessage: React.FC<FileMessageProps> = ({
         return 'Waiting for approval';
       case 'incoming_pending_user':
         return 'Waiting for your decision';
-      case 'pending':
-        return isFromCurrentUser ? 'Waiting for approval' : 'Waiting for your decision';
       case 'in_progress':
         if (isFromCurrentUser && transferProgress >= 100) {
           return 'Awaiting recipient confirmation';
@@ -329,8 +289,6 @@ export const FileMessage: React.FC<FileMessageProps> = ({
         return 'Completed';
       case 'failed':
         return 'Failed';
-      case 'expired':
-        return 'Offer expired';
       case 'rejected':
         return 'Offer rejected';
       default:
@@ -404,7 +362,7 @@ export const FileMessage: React.FC<FileMessageProps> = ({
         </div>
       )}
 
-      {(transferStatus === 'expired' || transferStatus === 'rejected') && (
+      {transferStatus === 'rejected' && (
         <div className="text-xs opacity-70">
           {getStatusText()}
         </div>
@@ -416,11 +374,11 @@ export const FileMessage: React.FC<FileMessageProps> = ({
         </div>
       )}
 
-      {showsDecisionDeadline && (
+      {showsDecisionStatus && (
         <div className="text-xs opacity-70">
           <div>{getStatusText()}</div>
-          {transferExpiresAt && (
-            <div>Expires in {formatTimeLeft(timeLeftMs)}</div>
+          {isIncomingPendingDecision && transferError && (
+            <div className="mt-1">{specificErrorText()}</div>
           )}
         </div>
       )}

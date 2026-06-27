@@ -308,7 +308,6 @@ export const OFFLINE_MESSAGE_LIMIT = 50; // 50 messages
 export const OFFLINE_MESSAGE_CHECK_INTERVAL = 5 * MINUTE; // 5 minutes
 export const KEY_ROTATION_TIMEOUT = 30 * SECOND; // 30 seconds
 export const PENDING_KEY_EXCHANGE_EXPIRATION = 5 * MINUTE; // 5 minutes
-export const FILE_ACCEPTANCE_TIMEOUT = 5 * MINUTE; // 5 minutes
 export const DATABASE_CLEANUP_INTERVAL = 30 * MINUTE; // 30 minutes
 export const MAX_MESSAGES_PER_STORE = 41; // Hard cap for one offline DHT store payload (incl. ack reserve)
 export const OFFLINE_CONTROL_MESSAGE_RESERVE = 10; // Slots reserved for offline control traffic
@@ -322,9 +321,6 @@ export const PROFILE_SCRYPT_N = 2 ** 17; // slightly less because of less sensit
 /**
  * Other
  */
-export const FILE_OFFER = 'file_offer';
-export const FILE_OFFER_RESPONSE = 'file_offer_response';
-export const FILE_TRANSFER_CONFIRM = 'file_transfer_confirm';
 export const CHUNK_SIZE = 32 * 1024; // 32KB
 export const DOWNLOADS_DIR = 'kiyeovo-downloads';
 export const UPLOADS_DIR = 'kiyeovo-uploads';
@@ -338,7 +334,6 @@ export const FILE_OFFER_RATE_LIMIT = 5; // Max file offers per peer in time wind
 export const FILE_OFFER_RATE_LIMIT_WINDOW = 1 * MINUTE; // 1 minute
 export const MAX_PENDING_FILES_PER_PEER = 5; // Max unanswered file offers per peer
 export const MAX_PENDING_FILES_TOTAL = 10; // Max unanswered file offers globally
-export const FILE_REJECTION_COUNTER_RESET_INTERVAL = 10 * MINUTE; // Reset rejection counters every 10 minutes
 export const SILENT_REJECTION_THRESHOLD_GLOBAL = 20; // After N global rejections, stop responding (bandwidth optimization)
 export const SILENT_REJECTION_THRESHOLD_PER_PEER = 5; // After N rejections to same peer, stop responding (bandwidth optimization)
 export const CHATS_TO_CHECK_FOR_OFFLINE_MESSAGES = 10; // Max chats scanned per offline-message check pass

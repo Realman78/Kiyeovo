@@ -36,7 +36,6 @@ export interface ChatMessage {
   transferStatus?: FileTransferStatus;
   transferProgress?: number; // Percentage 0-100
   transferError?: string;
-  transferExpiresAt?: number;
   localSendState?: 'queued' | 'sending' | 'failed';
   // 'offline_backup' = delivered online, only the DHT backup failed (retry re-stores, not re-sends)
   failedReason?: 'group_rekeying' | 'other' | 'offline_backup';
@@ -556,7 +555,7 @@ const chatSlice = createSlice({
     updateFileTransferProgress: (state, action: PayloadAction<{ messageId: string; progress: number; chatId: number; filename: string; size: number }>) => {
       const message = state.messages.find((m) => m.id === action.payload.messageId);
       if (message) {
-        if (message.transferStatus === 'completed' || message.transferStatus === 'failed' || message.transferStatus === 'expired' || message.transferStatus === 'rejected') {
+        if (message.transferStatus === 'completed' || message.transferStatus === 'failed' || message.transferStatus === 'rejected') {
           return;
         }
         message.fileName = action.payload.filename;
@@ -572,14 +571,10 @@ const chatSlice = createSlice({
       status: FileTransferStatus;
       filePath?: string;
       transferError?: string;
-      transferExpiresAt?: number;
     }>) => {
       const message = state.messages.find((m) => m.id === action.payload.messageId);
       if (message) {
         message.transferStatus = action.payload.status;
-        if (action.payload.transferExpiresAt !== undefined) {
-          message.transferExpiresAt = action.payload.transferExpiresAt;
-        }
         if (action.payload.status === 'completed' && action.payload.filePath) {
           message.filePath = action.payload.filePath;
         }

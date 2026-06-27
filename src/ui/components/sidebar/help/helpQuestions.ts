@@ -229,7 +229,7 @@ export const HELP_QUESTIONS: HelpQuestion[] = [
       'When you hit send, Kiyeovo first tries to reach the recipient live. If they\'re there, great - it\'s on its way.',
       'If they\'re not reachable, a text message can fall back to offline delivery: it gets encrypted and parked for them to pick up later. That\'s the "offline" state - not an error, just "waiting in the drop-box."',
       '"Failed" means none of the paths worked right now - the peer\'s unreachable, your outbox to them is full, or the network\'s still waking up. Retries are manual on purpose, so you stay in control: fix the situation, hit retry, done.',
-      'Files and calls don\'t get the offline cushion - they need everyone involved to be online - so they fail fast instead of waiting around.',
+      'File offers can use offline delivery, but the actual download waits until both people are online. Calls still need everyone online.',
     ],
     icon: Send,
   },
@@ -240,7 +240,7 @@ export const HELP_QUESTIONS: HelpQuestion[] = [
     summary: 'Text caps at 2,048 characters. In a 1:1 chat, going over offers to send it as a .txt file instead.',
     answer: [
       'Messages are capped at 2,048 characters. It keeps chat feeling like chat instead of turning the message channel into a document pipe.',
-      'Paste something huge into a direct chat and Kiyeovo offers a graceful exit: ship it as a .txt file instead. Since that\'s a file, the other person needs to be online to receive it.',
+      'Paste something huge into a direct chat and Kiyeovo offers a graceful exit: ship it as a .txt file instead. The offer can arrive while the other person is offline; downloading waits until both of you are online.',
       'Groups don\'t get that escape hatch - there\'s no group file transfer - so an over-long group message just asks you to trim it down.',
       'Why even have a limit? Well, imagine what the DHT and network would look like if one-million-character messages were allowed.',
     ],

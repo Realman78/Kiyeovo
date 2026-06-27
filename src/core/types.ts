@@ -279,54 +279,13 @@ export interface OfflineMessageStore {
 
 // File Transfer Types
 export type FileTransferStatus =
-  | 'pending'
   | 'connecting'
   | 'awaiting_acceptance'
   | 'incoming_pending_user'
   | 'in_progress'
   | 'completed'
   | 'failed'
-  | 'expired'
   | 'rejected';
-
-export interface FileOffer {
-  type: 'file_offer'
-  fileId: string
-  filename: string
-  mimeType: string
-  size: number
-  checksum: string      // BLAKE3 of full file
-  totalChunks: number
-  replyToCid?: string
-  timestamp?: number
-  expiresAt?: number
-  signature?: string
-}
-
-export interface FileOfferResponse {
-  type: 'file_offer_response'
-  fileId: string
-  accepted: boolean
-  reason?: string
-}
-
-export interface FileChunk {
-  type: 'file_chunk'
-  fileId: string
-  index: number
-  nonce: string         // base64
-  data: string          // base64 encrypted
-  hash: string          // BLAKE3 of plaintext chunk
-}
-
-export interface FileTransferConfirm {
-  type: 'file_transfer_confirm'
-  fileId: string
-  success: boolean
-  error?: string
-}
-
-export type FileTransferMessage = FileOffer | FileOfferResponse | FileChunk | FileTransferConfirm
 
 export type ContactMode = 'active' | 'silent' | 'block'
 
@@ -717,7 +676,6 @@ export interface FileTransferFailedEvent {
 export interface OutgoingFileOfferPendingEvent {
   chatId: number;
   messageId: string;
-  expiresAt: number;
 }
 
 export interface PendingFileReceivedEvent {
@@ -727,7 +685,6 @@ export interface PendingFileReceivedEvent {
   size: number;
   senderId: string;
   senderUsername: string;
-  expiresAt: number;
   replyToClientId?: string;
 }
 

@@ -183,7 +183,6 @@ export const IPC_CHANNELS = {
   ACCEPT_FILE: 'file:accept',
   REJECT_FILE: 'file:reject',
   CANCEL_FILE_DOWNLOAD: 'file:cancelDownload',
-  GET_PENDING_FILES: 'file:getPending',
   OPEN_FILE_LOCATION: 'file:openLocation',
 
   // File transfer events

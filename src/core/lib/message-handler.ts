@@ -3997,14 +3997,8 @@ export class MessageHandler {
 
   private handleIncomingApplicationMessage(
     context: InboundApplicationMessageContext,
-  ): boolean {
-    // Phase 0 installs the shared route; Phase 1 binds these kinds to FileHandler.
-    log(
-      `[APP-MESSAGE][UNHANDLED] route=${context.route} kind=${context.message.kind} ` +
-      `chatId=${context.chatId} from=${context.senderPeerId.slice(-8)} ` +
-      `transportId=${context.transportMessageId}`,
-    );
-    return false;
+  ): Promise<boolean> {
+    return this.fileHandler.handleApplicationMessage(context);
   }
 
   private async endActiveCallForShutdown(): Promise<void> {

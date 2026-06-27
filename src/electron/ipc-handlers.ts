@@ -3467,7 +3467,10 @@ function setupFileTransferHandlers(
       }
 
       log(`[IPC] Rejecting file: ${fileId}`);
-      p2pCore.messageHandler.getFileHandler().rejectPendingFile(fileId);
+      const rejected = p2pCore.messageHandler.getFileHandler().rejectPendingFile(fileId);
+      if (!rejected) {
+        return { success: false, error: 'Pending file offer not found' };
+      }
 
       return { success: true, error: null };
     } catch (error) {
@@ -3493,24 +3496,6 @@ function setupFileTransferHandlers(
     } catch (error) {
       console.error("[IPC] Failed to cancel file download:", error);
       return { success: false, error: errStr(error, "Failed to cancel file download") };
-    }
-  });
-
-  // Get pending files
-  ipcMain.handle(IPC_CHANNELS.GET_PENDING_FILES, async (_event) => {
-    try {
-      const p2pCore = getP2PCore();
-      if (!p2pCore) {
-        return { success: false, files: [], error: 'P2P core not initialized' };
-      }
-
-      const files = p2pCore.messageHandler.getFileHandler().getPendingFiles();
-      log(`[IPC] Get pending files: ${files.length} files`);
-
-      return { success: true, files, error: null };
-    } catch (error) {
-      console.error('[IPC] Failed to get pending files:', error);
-      return { success: false, files: [], error: errStr(error, 'Failed to get pending files') };
     }
   });
 

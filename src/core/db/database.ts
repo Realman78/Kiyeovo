@@ -137,6 +137,10 @@ export interface Message {
     file_name?: string
     file_size?: number
     file_path?: string
+    file_offer_id?: string
+    file_checksum?: string
+    file_total_chunks?: number
+    file_protocol_version?: number
     transfer_status?: FileTransferStatus
     transfer_progress?: number
     transfer_error?: string
@@ -442,6 +446,10 @@ export class ChatDatabase {
                 file_name TEXT,
                 file_size INTEGER,
                 file_path TEXT,
+                file_offer_id TEXT,
+                file_checksum TEXT,
+                file_total_chunks INTEGER,
+                file_protocol_version INTEGER,
                 transfer_status TEXT,
                 transfer_progress INTEGER,
                 transfer_error TEXT,
@@ -787,6 +795,7 @@ export class ChatDatabase {
       CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages (chat_id);
       CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages (created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_messages_sender_peer_id ON messages (sender_peer_id);
+      CREATE INDEX IF NOT EXISTS idx_messages_file_offer_id ON messages (file_offer_id);
       CREATE INDEX IF NOT EXISTS idx_users_mode_username ON users (network_mode, username);
       CREATE INDEX IF NOT EXISTS idx_users_mode_peer_id ON users (network_mode, peer_id);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_users_unique_mode_peer ON users(network_mode, peer_id);
@@ -943,6 +952,10 @@ export class ChatDatabase {
         // Reply feature: cross-peer stable id + reply reference
         this.ensureColumnExists('messages', 'client_msg_id', 'TEXT');
         this.ensureColumnExists('messages', 'reply_to_client_id', 'TEXT');
+        this.ensureColumnExists('messages', 'file_offer_id', 'TEXT');
+        this.ensureColumnExists('messages', 'file_checksum', 'TEXT');
+        this.ensureColumnExists('messages', 'file_total_chunks', 'INTEGER');
+        this.ensureColumnExists('messages', 'file_protocol_version', 'INTEGER');
         this.db.prepare(`UPDATE messages SET client_msg_id = id WHERE client_msg_id IS NULL`).run();
         this.db.prepare(`UPDATE bootstrap_nodes SET network_mode = ? WHERE address LIKE '%/onion%'`).run(NETWORK_MODES.ANONYMOUS);
         this.db.prepare(`UPDATE bootstrap_nodes SET network_mode = ? WHERE address NOT LIKE '%/onion%'`).run(NETWORK_MODES.FAST);
@@ -2213,6 +2226,71 @@ export class ChatDatabase {
         return !!row;
     }
 
+    getFileMessageById(messageId: string): Message | null {
+        const row = this.db.prepare(`
+            SELECT m.*
+            FROM messages m
+            JOIN chats c ON c.id = m.chat_id
+            WHERE m.id = ?
+              AND c.network_mode = ?
+              AND m.message_type = 'file'
+            LIMIT 1
+        `).get(messageId, this.sessionNetworkMode) as (Omit<Message, 'timestamp' | 'event_timestamp' | 'created_at'> & {
+            timestamp: string;
+            event_timestamp: string | null;
+            created_at: string;
+        }) | undefined;
+        if (!row) return null;
+        return {
+            ...row,
+            timestamp: new Date(row.timestamp),
+            event_timestamp: row.event_timestamp ? new Date(row.event_timestamp) : null,
+            created_at: new Date(row.created_at),
+        };
+    }
+
+    getPendingIncomingFileOffers(): Array<Message & { sender_username?: string }> {
+        const rows = this.db.prepare(`
+            SELECT m.*, u.username AS sender_username
+            FROM messages m
+            JOIN chats c ON c.id = m.chat_id
+            LEFT JOIN users u
+              ON u.peer_id = m.sender_peer_id
+             AND u.network_mode = c.network_mode
+            WHERE c.network_mode = ?
+              AND m.message_type = 'file'
+              AND m.transfer_status = 'incoming_pending_user'
+            ORDER BY m.timestamp ASC
+        `).all(this.sessionNetworkMode) as Array<Omit<Message, 'timestamp' | 'event_timestamp' | 'created_at'> & {
+            timestamp: string;
+            event_timestamp: string | null;
+            created_at: string;
+            sender_username?: string;
+        }>;
+        return rows.map((row) => ({
+            ...row,
+            timestamp: new Date(row.timestamp),
+            event_timestamp: row.event_timestamp ? new Date(row.event_timestamp) : null,
+            created_at: new Date(row.created_at),
+        }));
+    }
+
+    rejectPendingIncomingFileOffer(messageId: string): boolean {
+        const result = this.db.prepare(`
+            UPDATE messages
+            SET transfer_status = 'rejected',
+                transfer_progress = 0,
+                transfer_error = 'Offer rejected'
+            WHERE id = ?
+              AND message_type = 'file'
+              AND transfer_status = 'incoming_pending_user'
+              AND chat_id IN (
+                SELECT id FROM chats WHERE network_mode = ?
+              )
+        `).run(messageId, this.sessionNetworkMode);
+        return result.changes === 1;
+    }
+
     getCompletedFileMediaById(messageId: string): {
         filePath: string;
         fileName: string;
@@ -2322,11 +2400,12 @@ export class ChatDatabase {
         const info = this.db.prepare(`
             INSERT INTO messages (
                 id, chat_id, sender_peer_id, content, message_type, timestamp,
-                file_name, file_size, file_path, transfer_status, transfer_progress,
+                file_name, file_size, file_path, file_offer_id, file_checksum,
+                file_total_chunks, file_protocol_version, transfer_status, transfer_progress,
                 transfer_error, local_send_state, failed_reason, retry_after_ts, event_timestamp,
                 client_msg_id, reply_to_client_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ${conflictClause}
         `).run(
             message.id,
@@ -2338,6 +2417,10 @@ export class ChatDatabase {
             message.file_name ?? null,
             message.file_size ?? null,
             message.file_path ?? null,
+            message.file_offer_id ?? null,
+            message.file_checksum ?? null,
+            message.file_total_chunks ?? null,
+            message.file_protocol_version ?? null,
             message.transfer_status ?? null,
             message.transfer_progress ?? null,
             message.transfer_error ?? null,
@@ -2474,47 +2557,24 @@ export class ChatDatabase {
         );
     }
 
-    expirePendingFileOffers(timeoutMs: number): number {
-        const cutoff = new Date(Date.now() - timeoutMs).toISOString();
-        const stmt = this.db.prepare(`
-            UPDATE messages
-            SET transfer_status = 'expired', transfer_error = 'Offer expired'
-            WHERE message_type = 'file'
-              AND transfer_status IN ('pending', 'awaiting_acceptance', 'incoming_pending_user')
-              AND timestamp < ?
-        `);
-        const result = stmt.run(cutoff);
-        return result.changes ?? 0;
-    }
-
-    failInProgressFileTransfers(): number {
-        const stmt = this.db.prepare(`
-            UPDATE messages
-            SET transfer_status = 'failed', transfer_error = 'Transfer interrupted'
-            WHERE message_type = 'file'
-              AND transfer_status = 'in_progress'
-        `);
-        const result = stmt.run();
-        return result.changes ?? 0;
-    }
-
     failNonTerminalFileTransfers(reason: string = 'Transfer interrupted'): number {
         const stmt = this.db.prepare(`
             UPDATE messages
             SET transfer_status = 'failed', transfer_error = ?
             WHERE message_type = 'file'
+              AND chat_id IN (
+                SELECT id FROM chats WHERE network_mode = ?
+              )
               AND transfer_status IN (
-                'pending',
                 'in_progress',
                 'connecting',
                 'awaiting_acceptance',
                 'uploading',
                 'awaiting_confirmation',
-                'incoming_pending_user',
                 'downloading'
               )
         `);
-        const result = stmt.run(reason);
+        const result = stmt.run(reason, this.sessionNetworkMode);
         return result.changes ?? 0;
     }
 
@@ -2880,7 +2940,7 @@ export class ChatDatabase {
                 )
                 || (
                     (row.message_type === 'file' || row.message_type === 'image')
-                    && !['completed', 'failed', 'expired', 'rejected'].includes(row.transfer_status ?? '')
+                    && !['completed', 'failed', 'rejected'].includes(row.transfer_status ?? '')
                 )
             );
             if (hasIneligibleRow) {

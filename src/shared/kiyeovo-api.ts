@@ -529,19 +529,6 @@ export interface KiyeovoAPI {
   acceptFile: (fileId: string) => Promise<{ success: boolean; error: string | null }>;
   rejectFile: (fileId: string) => Promise<{ success: boolean; error: string | null }>;
   cancelFileDownload: (fileId: string) => Promise<{ success: boolean; error: string | null }>;
-  getPendingFiles: () => Promise<{
-    success: boolean;
-    files: Array<{
-      fileId: string;
-      filename: string;
-      size: number;
-      senderId: string;
-      senderUsername: string;
-      expiresAt: number;
-      replyToClientId?: string;
-    }>;
-    error: string | null;
-  }>;
   openFileLocation: (filePath: string) => Promise<{ success: boolean; error: string | null }>;
   onFileTransferProgress: (callback: (data: FileTransferProgressEvent) => void) => Unsubscribe;
   onFileTransferComplete: (callback: (data: FileTransferCompleteEvent) => void) => Unsubscribe;

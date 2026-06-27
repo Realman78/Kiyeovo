@@ -543,10 +543,9 @@ export const MessageRow = memo(({
                   fileSize={message.fileSize || 0}
                   filePath={message.filePath}
                   previewMediaToken={message.filePreviewToken}
-                  transferStatus={message.transferStatus || 'pending'}
+                  transferStatus={message.transferStatus || 'completed'}
                   transferProgress={message.transferProgress}
                   transferError={message.transferError}
-                  transferExpiresAt={message.transferExpiresAt}
                   isFromCurrentUser={message.senderPeerId === myPeerId}
                 />
               ) : (
