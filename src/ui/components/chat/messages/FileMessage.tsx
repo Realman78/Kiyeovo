@@ -290,7 +290,7 @@ export const FileMessage: React.FC<FileMessageProps> = ({
       case 'failed':
         return 'Failed';
       case 'rejected':
-        return isFromCurrentUser ? 'Recipient declined' : 'Offer rejected';
+        return 'Offer rejected';
       default:
         return '';
     }

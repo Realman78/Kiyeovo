@@ -6,8 +6,9 @@ import { basename } from "path";
 import { blake3 } from "@napi-rs/blake-hash";
 import { randomUUID } from "crypto";
 import mime from "mime-types";
-import { CHUNK_SIZE, MAX_FILE_SIZE, FILE_OFFER_RATE_LIMIT, FILE_OFFER_RATE_LIMIT_WINDOW, MAX_PENDING_FILES_PER_PEER, MAX_PENDING_FILES_TOTAL } from "../constants.js";
+import { CHUNK_SIZE, MAX_FILE_SIZE, FILE_OFFER_RATE_LIMIT, FILE_OFFER_RATE_LIMIT_WINDOW, MAX_PENDING_FILES_PER_PEER, MAX_PENDING_FILES_TOTAL, MAX_ACTIVE_FILE_OFFERS_PER_CHAT } from "../constants.js";
 import { MessageHandler } from "./message-handler.js";
+import { ServedFileRegistry } from "./served-file-registry.js";
 import { errStr, generalErrorHandler } from "../utils/general-error.js";
 import { EncryptedUserIdentity } from "../identity/encrypted-user-identity.js";
 import { isDebugModeEnabled, log } from "../../shared/logger.js";
@@ -45,6 +46,7 @@ export class FileHandler {
   private database: ChatDatabase;
   private fileOfferTimestamps = new Map<string, number[]>();
   private fileOfferRateLimitNackAt = new Map<string, number>();
+  private servedFiles = new ServedFileRegistry(MAX_ACTIVE_FILE_OFFERS_PER_CHAT);
   private activeTransfersByPeer = new Map<string, { fileId: string; direction: 'send' | 'receive' }>();
   private activeTransferStreams = new Map<string, Stream>();
   private onFileTransferProgress: (data: FileTransferProgressEvent) => void;
@@ -131,14 +133,26 @@ export class FileHandler {
     this.fileOfferTimestamps.set(peerId, timestamps);
   }
 
-  private shouldAttemptRateLimitNack(peerId: string): boolean {
+  /**
+   * Claim the single rate-limit-NACK attempt allowed per window for this peer. Marking *before*
+   * signature validation is deliberate and load-bearing: it bounds the expensive Ed25519 verify to
+   * once per window, so an over-limit peer flooding malformed offers cannot force a verify per
+   * offer. The cost is that a forged offer can burn that window's courtesy NACK — an acceptable
+   * trade against the CPU-DoS. (Do not move the claim after validation.)
+   */
+  private claimRateLimitNackSlot(peerId: string): boolean {
     const now = Date.now();
-    const lastAttempt = this.fileOfferRateLimitNackAt.get(peerId) ?? 0;
-    if (now - lastAttempt < FILE_OFFER_RATE_LIMIT_WINDOW) {
+    const lastClaim = this.fileOfferRateLimitNackAt.get(peerId) ?? 0;
+    if (now - lastClaim < FILE_OFFER_RATE_LIMIT_WINDOW) {
       return false;
     }
     this.fileOfferRateLimitNackAt.set(peerId, now);
     return true;
+  }
+
+  /** True while this peer is still serving the given offer (slot occupied). */
+  hasActiveOffer(offerId: string): boolean {
+    return this.servedFiles.has(offerId);
   }
 
   acceptPendingFile(fileId: string): void {
@@ -308,6 +322,9 @@ export class FileHandler {
       return true;
     }
 
+    // A direct offer is consumed by this terminal NACK; free its sender slot.
+    this.servedFiles.release(nack.offerId);
+
     this.onOutgoingFileOfferTerminal({
       chatId: chat.id,
       messageId: terminalized.messageId,
@@ -347,7 +364,7 @@ export class FileHandler {
       || pending.filter((message) => message.sender_peer_id === context.senderPeerId).length
         >= this.getMaxPendingFilesPerPeer();
     if (this.isFileOfferRateLimitExceeded(context.senderPeerId)) {
-      if (this.shouldAttemptRateLimitNack(context.senderPeerId)) {
+      if (this.claimRateLimitNackSlot(context.senderPeerId)) {
         const validation = validateIncomingFileOffer({
           envelopeCid: context.message.cid,
           offer,
@@ -435,35 +452,53 @@ export class FileHandler {
     if (!chat || chat.type !== 'direct') {
       throw new Error('Direct chat not found');
     }
-
-    const fileStats = await stat(filePath);
-    const maxFileSize = this.getMaxFileSize();
-    if (fileStats.size <= 0 || fileStats.size > maxFileSize) {
-      throw new Error(
-        fileStats.size <= 0
-          ? 'File is empty'
-          : `File too large (${fileStats.size} bytes, max ${maxFileSize} bytes)`,
-      );
-    }
-
-    const metadata = await this.#loadFileMetadata(filePath);
-    if (metadata.size <= 0 || metadata.size > maxFileSize) {
-      throw new Error('File changed while preparing the offer');
-    }
     if (providedFileId !== undefined && !isValidCid(providedFileId)) {
       throw new Error('Invalid file message id');
     }
     const fileId = providedFileId ?? randomUUID();
     const offerId = randomUUID();
-    const replyToCid = isValidCid(replyToCidInput) ? replyToCidInput : undefined;
-    const offer = this.#createApplicationFileOffer({
-      offerId,
-      fileId,
-      metadata,
-      ...(replyToCid ? { replyToCid } : {}),
-    });
+
+    // Atomic sender-cap reservation: synchronous count-and-insert before any await, so two
+    // concurrent sends cannot both pass the check and exceed MAX_ACTIVE_FILE_OFFERS_PER_CHAT.
+    if (!this.servedFiles.reserve(offerId, chat.id)) {
+      throw new Error(`Too many active file offers in this chat (max ${this.servedFiles.maxPerChat})`);
+    }
+
     let rowPersisted = false;
     try {
+      const fileStats = await stat(filePath);
+      const maxFileSize = this.getMaxFileSize();
+      if (fileStats.size <= 0 || fileStats.size > maxFileSize) {
+        throw new Error(
+          fileStats.size <= 0
+            ? 'File is empty'
+            : `File too large (${fileStats.size} bytes, max ${maxFileSize} bytes)`,
+        );
+      }
+
+      const metadata = await this.#loadFileMetadata(filePath);
+      if (metadata.size <= 0 || metadata.size > maxFileSize) {
+        throw new Error('File changed while preparing the offer');
+      }
+      const replyToCid = isValidCid(replyToCidInput) ? replyToCidInput : undefined;
+      const offer = this.#createApplicationFileOffer({
+        offerId,
+        fileId,
+        metadata,
+        ...(replyToCid ? { replyToCid } : {}),
+      });
+
+      // Register the served file (snapshot the recipient's app signing key) before persistence and
+      // transport, so the offer is pullable the moment the recipient receives it.
+      this.servedFiles.finalize(offerId, {
+        fileId,
+        filePath,
+        size: metadata.size,
+        checksum: metadata.checksum,
+        authorizedPullers: new Map([[user.peer_id, user.signing_public_key]]),
+        isGroup: false,
+      });
+
       await this.database.createMessage({
         id: fileId,
         client_msg_id: fileId,
@@ -497,6 +532,8 @@ export class FileHandler {
       }
       this.trace('SEND', user.peer_id, fileId, 'OFFER_MESSAGE_SENT', `offer=${offerId}`);
     } catch (error: unknown) {
+      // Roll back the reservation/registry entry so a failed send never leaks a sender slot.
+      this.servedFiles.release(offerId);
       const errorText = errStr(error, 'Unknown error');
       if (rowPersisted) {
         this.database.updateMessageTransfer(fileId, {
@@ -524,6 +561,7 @@ export class FileHandler {
       }
     }
     this.activeTransfersByPeer.clear();
+    this.servedFiles.clear();
 
     const failed = this.database.failNonTerminalFileTransfers('Transfer interrupted (app shutdown)');
     if (failed > 0) {

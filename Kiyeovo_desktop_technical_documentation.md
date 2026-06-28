@@ -293,10 +293,22 @@ File transfer reserves dedicated `fileTransferProtocol` for the recipient-initia
 File-sharing-v2 Phase 1 is in progress. Its first validated seam replaces the direct offer delivery path: the sender persists a caller-owned file row containing `file_offer_id`, checksum, chunk count, and protocol version, then sends a signed typed `file_offer` through the ordinary direct online/offline transport. The recipient routes that non-text kind into `FileHandler`, validates the sender, signature, ids, portable basename, size, checksum, chunk count, rate/pending limits, and persists an `incoming_pending_user` row. Acceptance countdowns are removed and recipient pending rows survive restart. Reject conditionally changes that row to terminal `rejected` and best-effort sends a domain-separated, app-key-signed `file_offer_nack` with `reason:'declined'`; a verified NACK changes only the sender's matching `awaiting_acceptance` row to `rejected`. Accepting currently returns an explicit not-yet-available error and leaves the offer pending. The pull stream and ephemeral sender registry are the next increment, so this milestone does not start file bytes.
 
 Target Phase-1 flow:
-1. sender persists serving metadata in an ephemeral registry and emits a signed typed `file_offer`
+1. sender atomically reserves one of five per-chat live-offer slots in an ephemeral registry,
+   persists serving metadata, and emits a signed typed `file_offer`; a sixth live offer fails
+   locally without evicting an older offer or creating a message row
 2. receiver persists the offer notification and independently chooses whether to download
 3. acceptance opens a pull stream and authenticates with an app-key challenge-response
 4. sender streams plaintext application chunks over Noise; progress/completion/failure update UI and DB
+
+The sender cap and recipient caps are deliberately independent. `ServedFileRegistry` owns the
+sender's `MAX_ACTIVE_FILE_OFFERS_PER_CHAT = 5` limit (a group offer counts once for its chat, not
+once per authorized member), reserving the slot synchronously before any file I/O, and releases it
+only when that serving authority is removed: by sender withdrawal, failed-send rollback, lifecycle
+cleanup, or process exit, and additionally — for a direct offer — on terminal NACK or successful
+consumption, or — for a group offer — only once every authorized puller has pulled or declined
+(never on the first). The recipient continues to enforce five pending offers per sender and ten total
+for every realtime and offline-catch-up offer, because remote clients are untrusted. Neither side
+automatically evicts the oldest offer.
 
 Current Phase-1 milestone behavior:
 - direct offers can be delivered in realtime or through the existing offline bucket
@@ -305,7 +317,8 @@ Current Phase-1 milestone behavior:
 - rejecting a direct offer is locally terminal and immediately frees the recipient pending slot; a signed best-effort decline NACK updates the sender when delivery succeeds
 - unknown, duplicate, wrongly signed, cross-chat, and late decline NACKs cannot change an outgoing row
 - sender rows in `awaiting_acceptance` become `failed` on restart/close because the sender-side serving authority is intentionally ephemeral
-- there is currently no registered file stream handler; acceptance, download cancellation, per-peer transfer limits, and collision-safe destination allocation become active with the pull increment
+- sending a direct offer reserves one of five per-chat live slots in the in-RAM `ServedFileRegistry` **synchronously, before any file I/O or persistence**, snapshotting the recipient's app signing key into the entry's `authorizedPullers`; the sixth concurrent offer to a chat fails locally with no message row or network message, and a failed send rolls the reservation back so no slot leaks. A terminal decline NACK frees the offer's slot through the existing NACK handler. Registry entries are process-bound and cleared on shutdown
+- the pull challenge/authorization primitives exist as pure, unit-tested logic — a domain-separated (`kiyeovo-file-pull-v2`) challenge-response that verifies a pull against the snapshotted app key, plus strict pull frame schemas — but no file stream handler is registered yet; acceptance, download cancellation, per-peer transfer limits, and collision-safe destination allocation become active with the pull-transfer increment. No file bytes move and Accept stays unavailable
 - completed image files render inline for both sender and receiver; receivers retain the existing file card until completion, and non-previewable transfer states also remain cards
 - outgoing image sends keep the sender's trusted selection/upload capability in renderer state, so the sender sees the image immediately with connecting/approval/progress/failure status beneath it; receivers still see the file-offer card until the transfer completes
 - clicking an inline image opens a viewport-sized preview dialog using the same capability-backed media URL; Escape, the close control, and backdrop clicks close it
