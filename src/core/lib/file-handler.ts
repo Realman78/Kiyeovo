@@ -1,5 +1,6 @@
 import { ChatNode, FileTransferProgressEvent, FileTransferCompleteEvent, FileTransferFailedEvent, OutgoingFileOfferPendingEvent, OutgoingFileOfferTerminalEvent, PendingFileReceivedEvent, StreamHandlerContext } from "../types";
 import type { Stream } from "@libp2p/interface";
+import { peerIdFromString } from "@libp2p/peer-id";
 import { ChatDatabase } from "../db/database";
 import { readFile, stat } from "fs/promises";
 import { basename } from "path";
@@ -19,8 +20,10 @@ import { MessageHandler } from "./message-handler.js";
 import { ServedFileRegistry } from "./served-file-registry.js";
 import { LeasePool, type Lease } from "./lease-pool.js";
 import { FrameStreamReader } from "./frame-stream.js";
-import { createFileChunks, encodePullFrame } from "./file-transfer.js";
+import { ChunkReassembler, createFileChunks, encodePullFrame } from "./file-transfer.js";
+import { resolveConfiguredDownloadsDirectory, writeFileWithCopySuffix } from "./file-storage.js";
 import { StreamHandler } from "../transport/stream-handler.js";
+import { dialProtocolWithRelayFallback } from "../transport/protocol-dialer.js";
 import { errStr, generalErrorHandler } from "../utils/general-error.js";
 import { EncryptedUserIdentity } from "../identity/encrypted-user-identity.js";
 import { isDebugModeEnabled, log } from "../../shared/logger.js";
@@ -43,10 +46,15 @@ import {
 } from "../protocol/file-offer-control.js";
 import {
   PullChallengeStore,
+  createFilePullAuthSignaturePayload,
   evaluateFilePullAuth,
+  isFileChunk,
   isFilePullAuth,
+  isFilePullChallenge,
   isFilePullInit,
+  isFilePullReject,
   isFileTransferConfirm,
+  type FileTransferConfirmReason,
   type FilePullRejectReason,
 } from "../protocol/file-pull-protocol.js";
 
@@ -71,6 +79,28 @@ type ServeGateDecision =
     totalChunks: number;
   };
 
+type IncomingPullClaim = NonNullable<ReturnType<ChatDatabase['claimIncomingFilePull']>>;
+
+type PullAuthFrame =
+  | {
+    type: 'file_pull_auth';
+    offerId: string;
+    senderPeerId: string;
+    requesterPeerId: string;
+    challenge: string;
+    signature: string;
+  }
+  | null;
+
+type PullConfirmFrame =
+  | {
+    type: 'file_transfer_confirm';
+    offerId: string;
+    success: boolean;
+    reason?: FileTransferConfirmReason;
+  }
+  | null;
+
 export class FileHandler {
   private static readonly TRACE_ENABLED = isDebugModeEnabled();
   private node: ChatNode;
@@ -89,6 +119,7 @@ export class FileHandler {
   private readonly fileTransferProtocol: string;
   private activeTransfersByPeer = new Map<string, { fileId: string; direction: 'send' | 'receive' }>();
   private activeTransferStreams = new Map<string, Stream>();
+  private canceledIncomingDownloads = new Set<string>();
   private onFileTransferProgress: (data: FileTransferProgressEvent) => void;
   private onFileTransferComplete: (data: FileTransferCompleteEvent) => void;
   private onFileTransferFailed: (data: FileTransferFailedEvent) => void;
@@ -437,12 +468,16 @@ export class FileHandler {
   }
 
   acceptPendingFile(fileId: string): void {
-    const message = this.database.getFileMessageById(fileId);
-    if (!message || message.transfer_status !== 'incoming_pending_user') {
+    const claim = this.database.claimIncomingFilePull(fileId);
+    if (!claim) {
+      const message = this.database.getFileMessageById(fileId);
+      if (message?.transfer_status === 'in_progress') {
+        throw new Error('File download already in progress');
+      }
       throw new Error('Pending file offer not found');
     }
 
-    throw new Error('File download is not available until pull transfer is enabled');
+    void this.#pullIncomingFile(claim);
   }
 
   rejectPendingFile(fileId: string): boolean {
@@ -466,10 +501,10 @@ export class FileHandler {
       return false;
     }
 
-    this.database.updateMessageTransfer(fileId, {
-      transfer_status: 'failed',
-      transfer_error: 'Download canceled by user',
-    });
+    if (!this.database.cancelIncomingFilePull(fileId, 'Download canceled by user')) {
+      return false;
+    }
+    this.canceledIncomingDownloads.add(fileId);
 
     try {
       stream.abort(new Error('Download canceled by user'));
@@ -478,6 +513,266 @@ export class FileHandler {
     } catch (error: unknown) {
       this.trace('RECV', '', fileId, 'CANCEL_ABORT_FAILED', 'err=' + (errStr(error, 'unknown')));
       return false;
+    }
+  }
+
+  async #pullIncomingFile(claim: IncomingPullClaim): Promise<void> {
+    const isAnon = this.database.getSessionNetworkMode() === NETWORK_MODES.ANONYMOUS;
+    const transferKey = `receive:${claim.messageId}`;
+    let stream: Stream | null = null;
+    let sinkDone: Promise<void> | null = null;
+    let totalTimer: ReturnType<typeof setTimeout> | undefined;
+    let outcomeApplied = false;
+
+    let authSettled = false;
+    let resolveAuthGate: (frame: PullAuthFrame) => void = () => {};
+    const authGate = new Promise<PullAuthFrame>((resolve) => { resolveAuthGate = resolve; });
+    const settleAuth = (frame: PullAuthFrame): void => {
+      if (!authSettled) {
+        authSettled = true;
+        resolveAuthGate(frame);
+      }
+    };
+
+    let confirmSettled = false;
+    let resolveConfirmGate: (frame: PullConfirmFrame) => void = () => {};
+    const confirmGate = new Promise<PullConfirmFrame>((resolve) => { resolveConfirmGate = resolve; });
+    const settleConfirm = (frame: PullConfirmFrame): void => {
+      if (!confirmSettled) {
+        confirmSettled = true;
+        resolveConfirmGate(frame);
+      }
+    };
+
+    try {
+      if (claim.size <= 0 || claim.totalChunks <= 0) {
+        outcomeApplied = true;
+        this.#failIncomingPull(claim, 'Invalid file offer metadata');
+        return;
+      }
+
+      try {
+        stream = await dialProtocolWithRelayFallback({
+          node: this.node,
+          database: this.database,
+          targetPeerId: peerIdFromString(claim.senderPeerId),
+          protocol: this.fileTransferProtocol,
+          context: 'file_pull',
+        });
+      } catch (error: unknown) {
+        outcomeApplied = true;
+        this.#resetIncomingPullToPending(claim, 'Sender offline');
+        this.trace('RECV', claim.senderPeerId, claim.messageId, 'PULL_DIAL_FAILED', `err=${errStr(error, 'unknown')}`);
+        return;
+      }
+
+      if (this.canceledIncomingDownloads.has(claim.messageId)) {
+        outcomeApplied = true;
+        return;
+      }
+
+      this.activeTransferStreams.set(claim.messageId, stream);
+      this.activeTransfersByPeer.set(transferKey, { fileId: claim.messageId, direction: 'receive' });
+
+      const reader = new FrameStreamReader(stream);
+      sinkDone = stream.sink((async function* () {
+        yield encodePullFrame({ type: 'file_pull_init', offerId: claim.offerId });
+        const authFrame = await authGate;
+        if (!authFrame) {
+          return;
+        }
+        yield encodePullFrame(authFrame);
+        const confirmFrame = await confirmGate;
+        if (!confirmFrame) {
+          return;
+        }
+        yield encodePullFrame(confirmFrame);
+      })());
+      sinkDone.catch(() => undefined);
+
+      const challengeFrame = await reader.readFrame(
+        isAnon ? FILE_PULL_AUTH_TIMEOUT_ANON : FILE_PULL_AUTH_TIMEOUT_FAST,
+      );
+      if (!isFilePullChallenge(challengeFrame) || challengeFrame.offerId !== claim.offerId) {
+        outcomeApplied = true;
+        this.#failIncomingPull(claim, 'Invalid file transfer challenge');
+        return;
+      }
+
+      const identity = this.messageHandler.getUserIdentity();
+      if (!identity) {
+        outcomeApplied = true;
+        this.#resetIncomingPullToPending(claim, 'No user identity available');
+        return;
+      }
+      const requesterPeerId = this.node.peerId.toString();
+      const unsignedAuth = {
+        offerId: claim.offerId,
+        senderPeerId: claim.senderPeerId,
+        requesterPeerId,
+        challenge: challengeFrame.challenge,
+      };
+      const signature = identity.sign(JSON.stringify(createFilePullAuthSignaturePayload(unsignedAuth)));
+      settleAuth({
+        type: 'file_pull_auth',
+        ...unsignedAuth,
+        signature: Buffer.from(signature).toString('base64'),
+      });
+
+      totalTimer = setTimeout(() => {
+        try { stream?.abort(new Error('total transfer timeout')); } catch { /* best-effort */ }
+      }, CHUNK_RECEIVE_TIMEOUT);
+
+      const reassembler = new ChunkReassembler({
+        offerId: claim.offerId,
+        totalChunks: claim.totalChunks,
+        size: claim.size,
+        checksum: claim.checksum,
+      });
+
+      for (;;) {
+        const frame = await reader.readFrame(CHUNK_IDLE_TIMEOUT);
+        if (isFilePullReject(frame)) {
+          outcomeApplied = true;
+          this.#applyPullReject(claim, frame.offerId === claim.offerId ? frame.reason : 'unauthorized');
+          settleConfirm(null);
+          await sinkDone.catch(() => undefined);
+          return;
+        }
+        if (!isFileChunk(frame)) {
+          await this.#sendPullConfirm(settleConfirm, sinkDone, { type: 'file_transfer_confirm', offerId: claim.offerId, success: false, reason: 'integrity' });
+          outcomeApplied = true;
+          this.#failIncomingPull(claim, 'Invalid file transfer frame');
+          return;
+        }
+
+        const accepted = reassembler.accept(frame);
+        if (!accepted.ok) {
+          await this.#sendPullConfirm(settleConfirm, sinkDone, { type: 'file_transfer_confirm', offerId: claim.offerId, success: false, reason: 'integrity' });
+          outcomeApplied = true;
+          this.#failIncomingPull(claim, `File integrity check failed (${accepted.reason})`);
+          return;
+        }
+
+        const current = frame.index + 1;
+        this.database.updateIncomingFilePullProgress(
+          claim.messageId,
+          Math.min(99, Math.floor((current / claim.totalChunks) * 100)),
+        );
+        this.onFileTransferProgress({
+          chatId: claim.chatId,
+          messageId: claim.messageId,
+          current,
+          total: claim.totalChunks,
+          filename: claim.fileName,
+          size: claim.size,
+        });
+
+        if (accepted.complete) {
+          break;
+        }
+      }
+
+      const finalized = reassembler.finalize();
+      if (!finalized.ok) {
+        await this.#sendPullConfirm(settleConfirm, sinkDone, { type: 'file_transfer_confirm', offerId: claim.offerId, success: false, reason: 'integrity' });
+        outcomeApplied = true;
+        this.#failIncomingPull(claim, `File integrity check failed (${finalized.reason})`);
+        return;
+      }
+
+      let savedPath: string;
+      try {
+        const downloadsDir = resolveConfiguredDownloadsDirectory(this.database.getSetting('downloads_directory'));
+        savedPath = await writeFileWithCopySuffix(downloadsDir, claim.fileName, finalized.buffer);
+      } catch (error: unknown) {
+        await this.#sendPullConfirm(settleConfirm, sinkDone, { type: 'file_transfer_confirm', offerId: claim.offerId, success: false, reason: 'disk' });
+        outcomeApplied = true;
+        this.#resetIncomingPullToPending(claim, `Could not save file, retry: ${errStr(error, 'unknown')}`);
+        return;
+      }
+
+      await this.#sendPullConfirm(settleConfirm, sinkDone, { type: 'file_transfer_confirm', offerId: claim.offerId, success: true });
+      outcomeApplied = true;
+      this.#completeIncomingPull(claim, savedPath);
+      this.trace('RECV', claim.senderPeerId, claim.messageId, 'PULL_COMPLETED', `offer=${claim.offerId}`);
+    } catch (error: unknown) {
+      if (this.canceledIncomingDownloads.has(claim.messageId)) {
+        outcomeApplied = true;
+        return;
+      }
+      if (!outcomeApplied) {
+        this.#resetIncomingPullToPending(claim, 'Transfer interrupted');
+      }
+      this.trace('RECV', claim.senderPeerId, claim.messageId, 'PULL_FAILED', `offer=${claim.offerId} err=${errStr(error, 'unknown')}`);
+    } finally {
+      if (totalTimer) { clearTimeout(totalTimer); }
+      settleAuth(null);
+      settleConfirm(null);
+      this.activeTransferStreams.delete(claim.messageId);
+      this.activeTransfersByPeer.delete(transferKey);
+      this.canceledIncomingDownloads.delete(claim.messageId);
+      if (stream) {
+        try { await stream.close(); } catch { /* best-effort */ }
+      }
+    }
+  }
+
+  async #sendPullConfirm(
+    settleConfirm: (frame: PullConfirmFrame) => void,
+    sinkDone: Promise<void> | null,
+    frame: Exclude<PullConfirmFrame, null>,
+  ): Promise<void> {
+    settleConfirm(frame);
+    await sinkDone?.catch(() => undefined);
+  }
+
+  #applyPullReject(claim: IncomingPullClaim, reason: FilePullRejectReason): void {
+    switch (reason) {
+      case 'busy':
+        this.#resetIncomingPullToPending(claim, 'Offerer is busy currently, try again soon');
+        return;
+      case 'unavailable':
+        this.#failIncomingPull(claim, 'File offer is no longer available');
+        return;
+      case 'source_changed':
+        this.#failIncomingPull(claim, 'File no longer available');
+        return;
+      case 'unauthorized':
+        this.#failIncomingPull(claim, 'File offer authorization failed');
+        return;
+    }
+  }
+
+  #resetIncomingPullToPending(claim: IncomingPullClaim, error: string): void {
+    if (this.database.resetIncomingFilePullToPending(claim.messageId, error)) {
+      this.onFileTransferFailed({
+        chatId: claim.chatId,
+        messageId: claim.messageId,
+        error,
+        status: 'incoming_pending_user',
+      });
+    }
+  }
+
+  #failIncomingPull(claim: IncomingPullClaim, error: string): void {
+    if (this.database.failIncomingFilePull(claim.messageId, error)) {
+      this.onFileTransferFailed({
+        chatId: claim.chatId,
+        messageId: claim.messageId,
+        error,
+        status: 'failed',
+      });
+    }
+  }
+
+  #completeIncomingPull(claim: IncomingPullClaim, filePath: string): void {
+    if (this.database.completeIncomingFilePull(claim.messageId, filePath)) {
+      this.onFileTransferComplete({
+        chatId: claim.chatId,
+        messageId: claim.messageId,
+        filePath,
+      });
     }
   }
 

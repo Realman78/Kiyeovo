@@ -671,6 +671,7 @@ export interface FileTransferFailedEvent {
   chatId: number;
   messageId: string;
   error: string;
+  status?: FileTransferStatus;
 }
 
 export interface OutgoingFileOfferPendingEvent {

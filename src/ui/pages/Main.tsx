@@ -496,17 +496,28 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
 
     const unsubFileTransferFailed = window.kiyeovoAPI.onFileTransferFailed((data) => {
       const errorText = data.error || 'Unknown error';
-      dispatch(updateFileTransferError({
-        messageId: data.messageId,
-        error: errorText
-      }));
+      if (data.status && data.status !== 'failed') {
+        dispatch(updateFileTransferStatus({
+          messageId: data.messageId,
+          status: data.status,
+          transferError: errorText,
+        }));
+        if (data.status === 'incoming_pending_user') {
+          dispatch(setPendingFileStatus({ chatId: data.chatId, hasPendingFile: true }));
+        }
+      } else {
+        dispatch(updateFileTransferError({
+          messageId: data.messageId,
+          error: errorText
+        }));
+      }
 
       if (errorText.toLowerCase().includes('download canceled by user')) {
         toast.info('File transfer canceled');
         return;
       }
 
-      toast.error('File transfer failed: ' + errorText);
+      toast.error((data.status && data.status !== 'failed' ? 'File download not completed: ' : 'File transfer failed: ') + errorText);
     });
 
     const unsubOutgoingFileOfferPending = window.kiyeovoAPI.onOutgoingFileOfferPending((data) => {

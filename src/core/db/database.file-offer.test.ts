@@ -213,3 +213,136 @@ test('startup reconciliation fails sender authority but preserves recipient offe
   assert.equal(database.getFileMessageById('incoming_file')?.transfer_status, 'incoming_pending_user');
   assert.equal(database.getFileMessageById('outgoing_file')?.transfer_status, 'failed');
 });
+
+test('recipient pull claim is single-flight and can reset to pending for retry', async (t) => {
+  const { database, chatId } = await createFileOfferDatabase();
+  t.after(() => database.close());
+  await database.createMessage({
+    id: 'incoming_file',
+    client_msg_id: 'incoming_file',
+    chat_id: chatId,
+    sender_peer_id: 'sender_peer',
+    content: 'incoming.pdf (10 bytes)',
+    message_type: 'file',
+    file_name: 'incoming.pdf',
+    file_size: 10,
+    file_offer_id: 'incoming_offer',
+    file_checksum: 'a'.repeat(64),
+    file_total_chunks: 1,
+    transfer_status: 'incoming_pending_user',
+    transfer_progress: 0,
+    timestamp: new Date(),
+  });
+
+  assert.deepEqual(database.claimIncomingFilePull('incoming_file'), {
+    messageId: 'incoming_file',
+    chatId,
+    senderPeerId: 'sender_peer',
+    offerId: 'incoming_offer',
+    fileName: 'incoming.pdf',
+    size: 10,
+    checksum: 'a'.repeat(64),
+    totalChunks: 1,
+  });
+  assert.equal(database.getFileMessageById('incoming_file')?.transfer_status, 'in_progress');
+  assert.equal(database.claimIncomingFilePull('incoming_file'), null);
+
+  assert.equal(database.updateIncomingFilePullProgress('incoming_file', 50), true);
+  assert.equal(database.getFileMessageById('incoming_file')?.transfer_progress, 50);
+
+  assert.equal(database.resetIncomingFilePullToPending('incoming_file', 'Sender offline'), true);
+  const row = database.getFileMessageById('incoming_file');
+  assert.equal(row?.transfer_status, 'incoming_pending_user');
+  assert.equal(row?.transfer_progress, 0);
+  assert.equal(row?.transfer_error, 'Sender offline');
+
+  assert.notEqual(database.claimIncomingFilePull('incoming_file'), null);
+});
+
+test('recipient pull terminal transitions only apply while in progress', async (t) => {
+  const { database, chatId } = await createFileOfferDatabase();
+  t.after(() => database.close());
+  await database.createMessage({
+    id: 'incoming_file',
+    client_msg_id: 'incoming_file',
+    chat_id: chatId,
+    sender_peer_id: 'sender_peer',
+    content: 'incoming.pdf (10 bytes)',
+    message_type: 'file',
+    file_name: 'incoming.pdf',
+    file_size: 10,
+    file_offer_id: 'incoming_offer',
+    file_checksum: 'a'.repeat(64),
+    file_total_chunks: 1,
+    transfer_status: 'incoming_pending_user',
+    transfer_progress: 0,
+    timestamp: new Date(),
+  });
+
+  assert.equal(database.completeIncomingFilePull('incoming_file', '/tmp/incoming.pdf'), false);
+  assert.notEqual(database.claimIncomingFilePull('incoming_file'), null);
+  assert.equal(database.completeIncomingFilePull('incoming_file', '/tmp/incoming.pdf'), true);
+  let row = database.getFileMessageById('incoming_file');
+  assert.equal(row?.transfer_status, 'completed');
+  assert.equal(row?.transfer_progress, 100);
+  assert.equal(row?.file_path, '/tmp/incoming.pdf');
+  assert.equal(database.failIncomingFilePull('incoming_file', 'late failure'), false);
+  assert.equal(database.resetIncomingFilePullToPending('incoming_file', 'late retry'), false);
+  assert.equal(database.cancelIncomingFilePull('incoming_file', 'Download canceled by user'), false);
+  assert.equal(database.getFileMessageById('incoming_file')?.transfer_status, 'completed');
+
+  await database.createMessage({
+    id: 'incoming_rejected',
+    client_msg_id: 'incoming_rejected',
+    chat_id: chatId,
+    sender_peer_id: 'sender_peer',
+    content: 'rejected.pdf (10 bytes)',
+    message_type: 'file',
+    file_name: 'rejected.pdf',
+    file_size: 10,
+    file_offer_id: 'rejected_offer',
+    file_checksum: 'b'.repeat(64),
+    file_total_chunks: 1,
+    transfer_status: 'incoming_pending_user',
+    transfer_progress: 0,
+    timestamp: new Date(),
+  });
+  assert.notEqual(database.claimIncomingFilePull('incoming_rejected'), null);
+  assert.equal(database.rejectPendingIncomingFileOffer('incoming_rejected'), null);
+  assert.equal(database.failIncomingFilePull('incoming_rejected', 'integrity'), true);
+  row = database.getFileMessageById('incoming_rejected');
+  assert.equal(row?.transfer_status, 'failed');
+  assert.equal(row?.transfer_error, 'integrity');
+});
+
+test('recipient cancel is guarded by the active in-progress state', async (t) => {
+  const { database, chatId } = await createFileOfferDatabase();
+  t.after(() => database.close());
+  await database.createMessage({
+    id: 'incoming_file',
+    client_msg_id: 'incoming_file',
+    chat_id: chatId,
+    sender_peer_id: 'sender_peer',
+    content: 'incoming.pdf (10 bytes)',
+    message_type: 'file',
+    file_name: 'incoming.pdf',
+    file_size: 10,
+    file_offer_id: 'incoming_offer',
+    file_checksum: 'a'.repeat(64),
+    file_total_chunks: 1,
+    transfer_status: 'incoming_pending_user',
+    transfer_progress: 0,
+    timestamp: new Date(),
+  });
+
+  assert.equal(database.cancelIncomingFilePull('incoming_file', 'Download canceled by user'), false);
+  assert.equal(database.getFileMessageById('incoming_file')?.transfer_status, 'incoming_pending_user');
+
+  assert.notEqual(database.claimIncomingFilePull('incoming_file'), null);
+  assert.equal(database.cancelIncomingFilePull('incoming_file', 'Download canceled by user'), true);
+  const row = database.getFileMessageById('incoming_file');
+  assert.equal(row?.transfer_status, 'failed');
+  assert.equal(row?.transfer_progress, 0);
+  assert.equal(row?.transfer_error, 'Download canceled by user');
+  assert.equal(database.completeIncomingFilePull('incoming_file', '/tmp/incoming.pdf'), false);
+});

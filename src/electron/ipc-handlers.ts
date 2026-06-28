@@ -32,9 +32,9 @@ import {
   serializeFastRelayAddressList,
 } from '../core/network/node-relays.js';
 import { DEFAULT_WEBRTC_ICE_SERVERS } from '../core/network/default-infrastructure.js';
-import { ensureAppDataDir, formatCopyTimestamp } from '../core/utils/miscellaneous.js';
-import { basename, dirname, extname, isAbsolute, join, resolve as resolvePath } from 'path';
-import { copyFile, lstat, mkdir, readdir, realpath, rm, stat, writeFile } from 'fs/promises';
+import { ensureAppDataDir } from '../core/utils/miscellaneous.js';
+import { basename, dirname, isAbsolute, join, resolve as resolvePath } from 'path';
+import { copyFile, lstat, mkdir, readdir, realpath, rm, stat } from 'fs/promises';
 import { log } from '../shared/logger.js';
 import { isImageFile } from '../shared/file-types.js';
 import { errStr } from '../core/utils/general-error.js';
@@ -44,6 +44,7 @@ import { scheduleAppRelaunch } from './relaunch.js';
 import { createTrustedIpcMainHandle, type IpcMainHandleRegistrar } from './trusted-ipc.js';
 import { mintMediaToken } from './app-protocol.js';
 import { prepareTextUpload } from './text-upload.js';
+import { writeFileWithCopySuffix } from '../core/lib/file-storage.js';
 import type { InitialSetupStatus, SaveTextUploadResponse } from '../shared/kiyeovo-api.js';
 
 function requestAppRestart(): void {
@@ -85,26 +86,7 @@ async function writeUploadAtomically(
   fileName: string,
   bytes: Buffer,
 ): Promise<string> {
-  const extension = extname(fileName);
-  const nameWithoutExtension = basename(fileName, extension);
-
-  for (let attempt = 0; attempt < 1000; attempt += 1) {
-    const candidateName = attempt === 0
-      ? fileName
-      : `${nameWithoutExtension}_copy_${formatCopyTimestamp(new Date())}${attempt > 1 ? `_${attempt - 1}` : ''}${extension}`;
-    const candidatePath = join(uploadsDir, candidateName);
-
-    try {
-      await writeFile(candidatePath, bytes, { flag: 'wx' });
-      return candidatePath;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
-        throw error;
-      }
-    }
-  }
-
-  throw new Error('Unable to allocate a unique upload filename');
+  return writeFileWithCopySuffix(uploadsDir, fileName, bytes);
 }
 
 async function getFlatDirectorySize(directoryPath: string): Promise<number> {

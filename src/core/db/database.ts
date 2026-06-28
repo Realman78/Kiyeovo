@@ -2631,6 +2631,121 @@ export class ChatDatabase {
         return result.changes === 1;
     }
 
+    claimIncomingFilePull(messageId: string): {
+        messageId: string;
+        chatId: number;
+        senderPeerId: string;
+        offerId: string;
+        fileName: string;
+        size: number;
+        checksum: string;
+        totalChunks: number;
+    } | null {
+        const row = this.db.prepare(`
+            UPDATE messages
+            SET transfer_status = 'in_progress',
+                transfer_progress = 0,
+                transfer_error = NULL
+            WHERE id = ?
+              AND message_type = 'file'
+              AND transfer_status = 'incoming_pending_user'
+              AND file_offer_id IS NOT NULL
+              AND file_name IS NOT NULL
+              AND file_size IS NOT NULL
+              AND file_checksum IS NOT NULL
+              AND file_total_chunks IS NOT NULL
+              AND chat_id IN (SELECT id FROM chats WHERE network_mode = ?)
+            RETURNING
+              id AS messageId,
+              chat_id AS chatId,
+              sender_peer_id AS senderPeerId,
+              file_offer_id AS offerId,
+              file_name AS fileName,
+              file_size AS size,
+              file_checksum AS checksum,
+              file_total_chunks AS totalChunks
+        `).get(messageId, this.sessionNetworkMode) as {
+            messageId: string;
+            chatId: number;
+            senderPeerId: string;
+            offerId: string;
+            fileName: string;
+            size: number;
+            checksum: string;
+            totalChunks: number;
+        } | undefined;
+        return row ?? null;
+    }
+
+    updateIncomingFilePullProgress(messageId: string, progress: number): boolean {
+        const result = this.db.prepare(`
+            UPDATE messages
+            SET transfer_progress = ?
+            WHERE id = ?
+              AND message_type = 'file'
+              AND transfer_status = 'in_progress'
+              AND chat_id IN (SELECT id FROM chats WHERE network_mode = ?)
+        `).run(progress, messageId, this.sessionNetworkMode);
+        return result.changes === 1;
+    }
+
+    resetIncomingFilePullToPending(messageId: string, error: string): boolean {
+        const result = this.db.prepare(`
+            UPDATE messages
+            SET transfer_status = 'incoming_pending_user',
+                transfer_progress = 0,
+                transfer_error = ?
+            WHERE id = ?
+              AND message_type = 'file'
+              AND transfer_status = 'in_progress'
+              AND chat_id IN (SELECT id FROM chats WHERE network_mode = ?)
+        `).run(error, messageId, this.sessionNetworkMode);
+        return result.changes === 1;
+    }
+
+    failIncomingFilePull(messageId: string, error: string): boolean {
+        const result = this.db.prepare(`
+            UPDATE messages
+            SET transfer_status = 'failed',
+                transfer_progress = 0,
+                transfer_error = ?
+            WHERE id = ?
+              AND message_type = 'file'
+              AND transfer_status = 'in_progress'
+              AND chat_id IN (SELECT id FROM chats WHERE network_mode = ?)
+        `).run(error, messageId, this.sessionNetworkMode);
+        return result.changes === 1;
+    }
+
+    cancelIncomingFilePull(messageId: string, error: string): boolean {
+        const result = this.db.prepare(`
+            UPDATE messages
+            SET transfer_status = 'failed',
+                transfer_progress = 0,
+                transfer_error = ?
+            WHERE id = ?
+              AND message_type = 'file'
+              AND transfer_status = 'in_progress'
+              AND chat_id IN (SELECT id FROM chats WHERE network_mode = ?)
+        `).run(error, messageId, this.sessionNetworkMode);
+        return result.changes === 1;
+    }
+
+    completeIncomingFilePull(messageId: string, filePath: string): boolean {
+        const result = this.db.prepare(`
+            UPDATE messages
+            SET transfer_status = 'completed',
+                transfer_progress = 100,
+                transfer_error = NULL,
+                file_path = ?
+            WHERE id = ?
+              AND message_type = 'file'
+              AND transfer_status = 'in_progress'
+              AND chat_id IN (SELECT id FROM chats WHERE network_mode = ?)
+        `).run(filePath, messageId, this.sessionNetworkMode);
+        return result.changes === 1;
+    }
+
     failNonTerminalFileTransfers(reason: string = 'Transfer interrupted'): number {
         const stmt = this.db.prepare(`
             UPDATE messages
