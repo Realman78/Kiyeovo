@@ -3422,6 +3422,28 @@ function setupFileTransferHandlers(
     }
   });
 
+  // Send file to a group chat
+  ipcMain.handle(IPC_CHANNELS.SEND_GROUP_FILE_REQUEST, async (_event, chatId: number, filePath: string, fileId?: string, replyToCid?: string) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { success: false, error: 'P2P core not initialized' };
+      }
+      if (!Number.isInteger(chatId) || chatId <= 0) {
+        return { success: false, error: 'Invalid group chat' };
+      }
+
+      log(`[IPC] Sending file ${filePath} to group chat ${chatId}`);
+
+      await p2pCore.messageHandler.getFileHandler().sendGroupFile(chatId, filePath, fileId, replyToCid);
+
+      return { success: true, error: null };
+    } catch (error) {
+      console.error('[IPC] Failed to send group file:', error);
+      return { success: false, error: errStr(error, 'Failed to send group file') };
+    }
+  });
+
   // Accept file
   ipcMain.handle(IPC_CHANNELS.ACCEPT_FILE, async (_event, fileId: string) => {
     try {

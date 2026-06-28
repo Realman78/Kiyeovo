@@ -20,6 +20,7 @@ const LOCAL_PEER = 'local_peer';
 const RECIPIENT_PEER = 'recipient_peer';
 
 const localPrivateKey = new Uint8Array(32).fill(3);
+const localPublicKey = Buffer.from(ed25519.getPublicKey(localPrivateKey)).toString('base64');
 const recipientPrivateKey = new Uint8Array(32).fill(9);
 const recipientPublicKey = Buffer.from(ed25519.getPublicKey(recipientPrivateKey)).toString('base64');
 
@@ -31,9 +32,22 @@ async function createHarness(t: { after: (fn: () => void) => void }): Promise<{
   database: ChatDatabase;
   fileHandler: FileHandler;
   chatId: number;
-  sentApplicationMessages: Array<{ peerId: string; kind: string; payload: unknown }>;
+  sentApplicationMessages: Array<{
+    target: { type: 'direct'; peerId: string } | { type: 'group'; groupId: string };
+    kind: string;
+    cid: string;
+    payload: unknown;
+  }>;
+  pendingFileEvents: Array<{ chatId: number; fileId: string; filename: string; senderId: string }>;
 }> {
   const database = new ChatDatabase(':memory:');
+  await database.createUser({
+    peer_id: LOCAL_PEER,
+    signing_public_key: localPublicKey,
+    offline_public_key: 'local_offline_key',
+    signature: 'local_signature',
+    username: 'local',
+  });
   await database.createUser({
     peer_id: RECIPIENT_PEER,
     signing_public_key: recipientPublicKey,
@@ -61,13 +75,22 @@ async function createHarness(t: { after: (fn: () => void) => void }): Promise<{
     peerId: { toString: () => LOCAL_PEER },
     handle: async () => undefined, // serve-handler registration is a no-op in unit tests
   } as unknown as ChatNode;
-  const sentApplicationMessages: Array<{ peerId: string; kind: string; payload: unknown }> = [];
+  const sentApplicationMessages: Array<{
+    target: { type: 'direct'; peerId: string } | { type: 'group'; groupId: string };
+    kind: string;
+    cid: string;
+    payload: unknown;
+  }> = [];
   const messageHandler = {
     getUserIdentity: () => ({ sign: (message: string) => sign(localPrivateKey, message) }),
-    sendApplicationMessage: async (target: { type: 'direct'; peerId: string }, request: { message: { kind: string; payload: unknown } }) => {
+    sendApplicationMessage: async (
+      target: { type: 'direct'; peerId: string } | { type: 'group'; groupId: string },
+      request: { message: { cid: string; kind: string; payload: unknown } },
+    ) => {
       sentApplicationMessages.push({
-        peerId: target.peerId,
+        target,
         kind: request.message.kind,
+        cid: request.message.cid,
         payload: request.message.payload,
       });
       return {
@@ -81,11 +104,36 @@ async function createHarness(t: { after: (fn: () => void) => void }): Promise<{
     },
   } as unknown as MessageHandler;
   const noop = () => {};
+  const pendingFileEvents: Array<{ chatId: number; fileId: string; filename: string; senderId: string }> = [];
   const fileHandler = new FileHandler(
-    node, messageHandler, database, noop, noop, noop, noop, noop, noop,
+    node, messageHandler, database, noop, noop, noop, noop, noop, (event) => pendingFileEvents.push(event),
   );
   t.after(() => database.close());
-  return { database, fileHandler, chatId, sentApplicationMessages };
+  return { database, fileHandler, chatId, sentApplicationMessages, pendingFileEvents };
+}
+
+async function createGroupChat(database: ChatDatabase, groupId = `group-${randomUUID()}`): Promise<number> {
+  const chatId = await database.createChat({
+    type: 'group',
+    name: 'test group',
+    created_by: LOCAL_PEER,
+    offline_bucket_secret: 'group_bucket_secret',
+    notifications_bucket_key: 'group_notifications_key',
+    status: 'active',
+    group_id: groupId,
+    group_key: Buffer.alloc(32, 1).toString('base64'),
+    permanent_key: 'group_permanent_key',
+    trusted_out_of_band: false,
+    muted: false,
+    key_version: 1,
+    group_creator_peer_id: LOCAL_PEER,
+    offline_last_read_timestamp: 0,
+    offline_last_ack_sent: 0,
+    created_at: new Date(),
+    participants: [LOCAL_PEER, RECIPIENT_PEER],
+  });
+  database.updateChatGroupStatus(chatId, 'active');
+  return chatId;
 }
 
 function nackContext(offerId: string, chatId: number): InboundApplicationMessageContext {
@@ -132,6 +180,7 @@ function offerContext(input: {
   offerId: string;
   fileId: string;
   chatId: number;
+  route?: InboundApplicationMessageContext['route'];
 }): InboundApplicationMessageContext {
   const unsignedOffer = {
     type: 'file_offer' as const,
@@ -158,7 +207,7 @@ function offerContext(input: {
     senderUsername: 'recipient',
     timestamp: Date.now(),
     transportMessageId: 'offer_transport',
-    route: 'direct_online',
+    route: input.route ?? 'direct_online',
   };
 }
 
@@ -222,7 +271,7 @@ test('cancelOutgoingFileOffer terminalizes the sender row, releases the slot, an
 
   const cancelMessage = sentApplicationMessages.find((message) => message.kind === 'file_offer_cancel');
   assert.ok(cancelMessage);
-  assert.equal(cancelMessage.peerId, RECIPIENT_PEER);
+  assert.deepEqual(cancelMessage.target, { type: 'direct', peerId: RECIPIENT_PEER });
 });
 
 test('cancelOutgoingFileOffer refuses an offer that is already being served', async (t) => {
@@ -319,6 +368,99 @@ test('recipient capacity ignores retryable errored pending offers', async (t) =>
 
   const inserted = database.getFileMessageById('new_file_after_errors');
   assert.equal(inserted?.transfer_status, 'incoming_pending_user');
+  assert.equal(
+    sentApplicationMessages.some((message) => message.kind === 'file_offer_nack'),
+    false,
+  );
+});
+
+test('sendGroupFile persists a caller-owned group offer and snapshots authorized pullers', async (t) => {
+  const { database, fileHandler, sentApplicationMessages } = await createHarness(t);
+  const groupId = `group-${randomUUID()}`;
+  const groupChatId = await createGroupChat(database, groupId);
+  const filePath = join(tmpdir(), `kiyeovo-group-test-${randomUUID()}.txt`);
+  await writeFile(filePath, 'hello group file sharing');
+  t.after(() => rm(filePath, { force: true }));
+
+  await fileHandler.sendGroupFile(groupChatId, filePath, 'group_file_1');
+
+  const row = database.getFileMessageById('group_file_1');
+  assert.ok(row);
+  assert.equal(row.chat_id, groupChatId);
+  assert.equal(row.sender_peer_id, LOCAL_PEER);
+  assert.equal(row.transfer_status, 'awaiting_acceptance');
+  assert.equal(row.file_path, filePath);
+  assert.ok(row.file_offer_id);
+  assert.equal(fileHandler.hasActiveOffer(row.file_offer_id), true);
+
+  const registry = (fileHandler as unknown as {
+    servedFiles: { getAuthorizedKey: (offerId: string, peerId: string) => string | undefined };
+  }).servedFiles;
+  assert.equal(registry.getAuthorizedKey(row.file_offer_id, RECIPIENT_PEER), recipientPublicKey);
+  assert.equal(registry.getAuthorizedKey(row.file_offer_id, LOCAL_PEER), undefined);
+
+  const sentOffer = sentApplicationMessages.find((message) => message.kind === 'file_offer');
+  assert.ok(sentOffer);
+  assert.deepEqual(sentOffer.target, { type: 'group', groupId });
+  assert.equal(sentOffer.cid, 'group_file_1');
+});
+
+test('incoming group file offers persist as pending group file rows', async (t) => {
+  const { database, fileHandler, pendingFileEvents } = await createHarness(t);
+  const groupChatId = await createGroupChat(database);
+
+  const handled = await fileHandler.handleApplicationMessage(offerContext({
+    offerId: 'group_offer_in',
+    fileId: 'group_file_in',
+    chatId: groupChatId,
+    route: 'group_realtime',
+  }));
+
+  assert.equal(handled, true);
+  const row = database.getFileMessageById('group_file_in');
+  assert.ok(row);
+  assert.equal(row.chat_id, groupChatId);
+  assert.equal(row.sender_peer_id, RECIPIENT_PEER);
+  assert.equal(row.transfer_status, 'incoming_pending_user');
+  assert.equal(row.file_offer_id, 'group_offer_in');
+  assert.equal(pendingFileEvents.length, 1);
+  const event = pendingFileEvents[0];
+  assert.ok(event);
+  assert.equal(event.chatId, groupChatId);
+  assert.equal(event.fileId, 'group_file_in');
+});
+
+test('group file offer capacity rejection is silent', async (t) => {
+  const { database, fileHandler, chatId, sentApplicationMessages } = await createHarness(t);
+  const groupChatId = await createGroupChat(database);
+
+  for (let i = 0; i < 5; i++) {
+    await database.createMessage({
+      id: `full_pending_${i}`,
+      client_msg_id: `full_pending_${i}`,
+      chat_id: chatId,
+      sender_peer_id: RECIPIENT_PEER,
+      content: `full_pending_${i}.txt (5 bytes)`,
+      message_type: 'file',
+      file_name: `full_pending_${i}.txt`,
+      file_size: 5,
+      file_offer_id: `full_offer_${i}`,
+      file_checksum: 'a'.repeat(64),
+      file_total_chunks: 1,
+      transfer_status: 'incoming_pending_user',
+      transfer_progress: 0,
+      timestamp: new Date(Date.now() + i),
+    });
+  }
+
+  assert.equal(await fileHandler.handleApplicationMessage(offerContext({
+    offerId: 'silent_group_full',
+    fileId: 'silent_group_file',
+    chatId: groupChatId,
+    route: 'group_offline',
+  })), true);
+
+  assert.equal(database.getFileMessageById('silent_group_file'), null);
   assert.equal(
     sentApplicationMessages.some((message) => message.kind === 'file_offer_nack'),
     false,

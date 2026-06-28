@@ -180,6 +180,7 @@ export const IPC_CHANNELS = {
   SAVE_UPLOAD: 'file:saveUpload',
   SAVE_TEXT_UPLOAD: 'file:saveTextUpload',
   SEND_FILE_REQUEST: 'file:send',
+  SEND_GROUP_FILE_REQUEST: 'file:sendGroup',
   ACCEPT_FILE: 'file:accept',
   REJECT_FILE: 'file:reject',
   CANCEL_FILE_DOWNLOAD: 'file:cancelDownload',

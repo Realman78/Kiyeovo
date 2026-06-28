@@ -527,6 +527,7 @@ export interface KiyeovoAPI {
     fileName: string,
   ) => Promise<SaveTextUploadResponse>;
   sendFile: (peerId: string, filePath: string, fileId?: string, replyToCid?: string) => Promise<{ success: boolean; error: string | null }>;
+  sendGroupFile: (chatId: number, filePath: string, fileId?: string, replyToCid?: string) => Promise<{ success: boolean; error: string | null }>;
   acceptFile: (fileId: string) => Promise<{ success: boolean; error: string | null }>;
   rejectFile: (fileId: string) => Promise<{ success: boolean; error: string | null }>;
   cancelFileDownload: (fileId: string) => Promise<{ success: boolean; error: string | null }>;

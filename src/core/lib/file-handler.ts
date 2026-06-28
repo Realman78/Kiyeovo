@@ -542,6 +542,14 @@ export class FileHandler {
   }
 
   acceptPendingFile(fileId: string): void {
+    const current = this.database.getFileMessageById(fileId);
+    if (current?.transfer_status === 'incoming_pending_user') {
+      const chat = this.database.getChats([current.chat_id])[0];
+      if (chat?.type === 'group') {
+        throw new Error('Group file downloads are not available yet');
+      }
+    }
+
     const claim = this.database.claimIncomingFilePull(fileId);
     if (!claim) {
       const message = this.database.getFileMessageById(fileId);
@@ -560,7 +568,10 @@ export class FileHandler {
       return false;
     }
 
-    void this.#sendFileOfferNack(rejected.senderPeerId, rejected.offerId, 'declined');
+    const chat = this.database.getChats([rejected.chatId])[0];
+    if (chat?.type === 'direct') {
+      void this.#sendFileOfferNack(rejected.senderPeerId, rejected.offerId, 'declined');
+    }
     return true;
   }
 
@@ -1156,14 +1167,33 @@ export class FileHandler {
     if (context.message.kind !== 'file_offer') {
       return false;
     }
-    if (context.route !== 'direct_online' && context.route !== 'direct_offline') {
+    const isDirectRoute = context.route === 'direct_online' || context.route === 'direct_offline';
+    const isGroupRoute = context.route === 'group_realtime' || context.route === 'group_offline';
+    if (!isDirectRoute && !isGroupRoute) {
       return false;
     }
 
     const offer = context.message.payload;
-    const chat = this.database.getChatByPeerId(context.senderPeerId);
+    const chat = isDirectRoute
+      ? this.database.getChatByPeerId(context.senderPeerId)
+      : this.database.getChats([context.chatId])[0] ?? null;
     const sender = this.database.getUserByPeerId(context.senderPeerId);
-    if (!chat || chat.type !== 'direct' || !sender) {
+    if (!chat || !sender) {
+      return true;
+    }
+    if (isDirectRoute && chat.type !== 'direct') {
+      return true;
+    }
+    if (isGroupRoute && chat.type !== 'group') {
+      return true;
+    }
+    if (isGroupRoute) {
+      const participants = this.database.getChatParticipants(chat.id);
+      if (!participants.some((participant) => participant.peer_id === context.senderPeerId)) {
+        return true;
+      }
+    }
+    if (chat.id !== context.chatId && isGroupRoute) {
       return true;
     }
 
@@ -1178,7 +1208,7 @@ export class FileHandler {
       || pending.filter((message) => message.sender_peer_id === context.senderPeerId).length
         >= this.getMaxPendingFilesPerPeer();
     if (this.isFileOfferRateLimitExceeded(context.senderPeerId)) {
-      if (this.claimRateLimitNackSlot(context.senderPeerId)) {
+      if (isDirectRoute && this.claimRateLimitNackSlot(context.senderPeerId)) {
         const validation = validateIncomingFileOffer({
           envelopeCid: context.message.cid,
           offer,
@@ -1231,7 +1261,9 @@ export class FileHandler {
     }
 
     if (pendingCapacityFull) {
-      void this.#sendFileOfferNack(context.senderPeerId, offer.offerId, 'inbox_full');
+      if (isDirectRoute) {
+        void this.#sendFileOfferNack(context.senderPeerId, offer.offerId, 'inbox_full');
+      }
       return true;
     }
 
@@ -1268,6 +1300,125 @@ export class FileHandler {
     });
     this.trace('RECV', context.senderPeerId, offer.fileId, 'OFFER_MESSAGE_PERSISTED', `offer=${offer.offerId}`);
     return true;
+  }
+
+  async sendGroupFile(chatId: number, filePath: string, providedFileId?: string, replyToCidInput?: string): Promise<void> {
+    const chat = this.database.getChats([chatId])[0];
+    if (!chat || chat.type !== 'group' || !chat.group_id) {
+      throw new Error('Group chat not found');
+    }
+    if (chat.status !== 'active' || chat.group_status !== 'active') {
+      throw new Error('Group chat is not active');
+    }
+    if (providedFileId !== undefined && !isValidCid(providedFileId)) {
+      throw new Error('Invalid file message id');
+    }
+
+    const localPeerId = this.node.peerId.toString();
+    const authorizedPullers = new Map<string, string>();
+    for (const participant of this.database.getChatParticipants(chat.id)) {
+      if (participant.peer_id === localPeerId) {
+        continue;
+      }
+      const user = this.database.getUserByPeerId(participant.peer_id);
+      if (!user) {
+        throw new Error('Group member identity not found');
+      }
+      authorizedPullers.set(user.peer_id, user.signing_public_key);
+    }
+    if (authorizedPullers.size === 0) {
+      throw new Error('Cannot send file: group has no other members');
+    }
+
+    const fileId = providedFileId ?? randomUUID();
+    const offerId = randomUUID();
+
+    // Atomic sender-cap reservation for the group chat before any file I/O.
+    if (!this.servedFiles.reserve(offerId, chat.id)) {
+      throw new Error(`Too many active file offers in this chat (max ${this.servedFiles.maxPerChat})`);
+    }
+
+    let rowPersisted = false;
+    try {
+      const fileStats = await stat(filePath);
+      const maxFileSize = this.getMaxFileSize();
+      if (fileStats.size <= 0 || fileStats.size > maxFileSize) {
+        throw new Error(
+          fileStats.size <= 0
+            ? 'File is empty'
+            : `File too large (${fileStats.size} bytes, max ${maxFileSize} bytes)`,
+        );
+      }
+
+      const metadata = await this.#loadFileMetadata(filePath);
+      if (metadata.size <= 0 || metadata.size > maxFileSize) {
+        throw new Error('File changed while preparing the offer');
+      }
+      const replyToCid = isValidCid(replyToCidInput) ? replyToCidInput : undefined;
+      const offer = this.#createApplicationFileOffer({
+        offerId,
+        fileId,
+        metadata,
+        ...(replyToCid ? { replyToCid } : {}),
+      });
+
+      // Snapshot the offer-time group roster's app signing keys. Later membership changes must
+      // not silently widen or narrow this offer's authorization set.
+      this.servedFiles.finalize(offerId, {
+        fileId,
+        filePath,
+        size: metadata.size,
+        checksum: metadata.checksum,
+        authorizedPullers,
+        isGroup: true,
+      });
+
+      await this.database.createMessage({
+        id: fileId,
+        client_msg_id: fileId,
+        reply_to_client_id: replyToCid ?? null,
+        chat_id: chat.id,
+        sender_peer_id: localPeerId,
+        content: `${metadata.filename} (${metadata.size} bytes)`,
+        message_type: 'file',
+        file_name: metadata.filename,
+        file_size: metadata.size,
+        file_path: filePath,
+        file_offer_id: offerId,
+        file_checksum: metadata.checksum,
+        file_total_chunks: metadata.totalChunks,
+        file_protocol_version: MESSAGE_ENVELOPE_VERSION,
+        transfer_status: 'awaiting_acceptance',
+        transfer_progress: 0,
+        timestamp: new Date(),
+      });
+      rowPersisted = true;
+
+      await this.messageHandler.sendApplicationMessage(
+        { type: 'group', groupId: chat.group_id },
+        {
+          message: { cid: fileId, kind: 'file_offer', payload: offer },
+          persistence: { owner: 'caller' },
+        },
+      );
+      if (this.database.getFileMessageById(fileId)?.transfer_status === 'awaiting_acceptance') {
+        this.onOutgoingFileOfferPending({ chatId: chat.id, messageId: fileId });
+      }
+      this.trace('SEND', chat.group_id, fileId, 'GROUP_OFFER_MESSAGE_SENT', `offer=${offerId}`);
+    } catch (error: unknown) {
+      this.servedFiles.release(offerId);
+      const errorText = errStr(error, 'Unknown error');
+      if (rowPersisted) {
+        this.database.updateMessageTransfer(fileId, {
+          transfer_status: 'failed',
+          transfer_progress: 0,
+          transfer_error: errorText,
+        });
+        this.onFileTransferFailed({ chatId: chat.id, messageId: fileId, error: errorText });
+      }
+      generalErrorHandler(error);
+      throw error;
+    }
   }
 
   async sendFile(targetUsername: string, filePath: string, providedFileId?: string, replyToCidInput?: string): Promise<void> {

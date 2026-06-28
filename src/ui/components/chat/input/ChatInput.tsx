@@ -46,7 +46,7 @@ type FileSendOutcome =
 
 type FileSendTarget = {
     chatId: number;
-    peerId: string;
+    peerId?: string;
 };
 
 type FileSendOptions = {
@@ -196,12 +196,15 @@ export const ChatInput: FC<ChatInputProps> = ({
     hasActiveFileTransferRef.current = hasActiveFileTransfer;
 
     const createCurrentFileDialogSource = (): FileDialogSource | null => {
-        if (!activeChat || activeChat.type !== 'direct' || !activeChat.peerId) {
+        if (!activeChat) {
+            return null;
+        }
+        if (activeChat.type === 'direct' && !activeChat.peerId) {
             return null;
         }
         return {
             chatId: activeChat.id,
-            peerId: activeChat.peerId,
+            ...(activeChat.peerId ? { peerId: activeChat.peerId } : {}),
             ...(replyTarget ? { replyTarget } : {}),
         };
     };
@@ -741,10 +744,11 @@ export const ChatInput: FC<ChatInputProps> = ({
     const handleComposerPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
         if (
             !activeChat ||
-            activeChat.type !== 'direct' ||
-            !activeChat.peerId ||
             isDisabled
         ) {
+            return;
+        }
+        if (activeChat.type === 'direct' && !activeChat.peerId) {
             return;
         }
 
@@ -812,16 +816,17 @@ export const ChatInput: FC<ChatInputProps> = ({
         const targetChat = target
             ? chats.find((chat) => chat.id === target.chatId)
             : activeChat;
-        const targetPeerId = target?.peerId ?? targetChat?.peerId;
 
-        if (
-            !targetChat
-            || targetChat.type !== 'direct'
-            || !targetPeerId
-            || targetChat.peerId !== targetPeerId
-        ) {
+        if (!targetChat) {
             toast.error('No active chat selected');
             return { completed: false, reason: 'invalid_target' };
+        }
+        if (targetChat.type === 'direct') {
+            const targetPeerId = target?.peerId ?? targetChat.peerId;
+            if (!targetPeerId || targetChat.peerId !== targetPeerId) {
+                toast.error('No active chat selected');
+                return { completed: false, reason: 'invalid_target' };
+            }
         }
 
         const chatId = targetChat.id;
@@ -849,7 +854,9 @@ export const ChatInput: FC<ChatInputProps> = ({
             }));
             clearReplyTargetIfUnchanged(chatId, replyTargetForSend);
 
-            const result = await window.kiyeovoAPI.sendFile(targetPeerId, filePath, pendingMessageId, replyToCid);
+            const result = targetChat.type === 'group'
+                ? await window.kiyeovoAPI.sendGroupFile(targetChat.id, filePath, pendingMessageId, replyToCid)
+                : await window.kiyeovoAPI.sendFile(targetChat.peerId!, filePath, pendingMessageId, replyToCid);
             if (!result.success) {
                 console.error(result.error);
                 toast.error(result.error || 'Failed to send file');
@@ -943,7 +950,7 @@ export const ChatInput: FC<ChatInputProps> = ({
                 className={`flex min-h-20 items-end justify-between gap-4 px-4 py-3 ${replyTarget ? '' : 'border-t border-border'}`}
             >
                 <div ref={emojiPickerRef} className="relative flex shrink-0 items-center gap-2 self-end">
-                    {activeChat?.type !== 'group' && <Button
+                    <Button
                         type="button"
                         variant="ghost"
                         size="icon"
@@ -958,7 +965,7 @@ export const ChatInput: FC<ChatInputProps> = ({
                         title="Files"
                     >
                         <Paperclip className="w-4 h-4" />
-                    </Button>}
+                    </Button>
                     <Button
                         type="button"
                         variant="ghost"
@@ -1043,7 +1050,7 @@ export const ChatInput: FC<ChatInputProps> = ({
                         ? {
                             target: {
                                 chatId: fileDialogSource.chatId,
-                                peerId: fileDialogSource.peerId,
+                                ...(fileDialogSource.peerId ? { peerId: fileDialogSource.peerId } : {}),
                             },
                             ...(fileDialogSource.replyTarget ? { replyTarget: fileDialogSource.replyTarget } : {}),
                         }

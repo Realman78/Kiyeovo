@@ -551,13 +551,15 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
         status: data.status,
         transferError: data.error,
       }));
-      toast.info(
+      const toastMessage =
         data.status === 'rejected'
           ? `${data.filename} was declined`
           : data.status === 'cancelled'
             ? `${data.filename} offer cancelled`
-            : `File offer failed: ${data.error}`,
-      );
+            : data.error === 'Recipient file inbox is full'
+              ? 'Recipient file inbox is full. They need to accept, reject, or clear older pending file offers before you can send more.'
+              : `File offer failed: ${data.error}`;
+      toast.info(toastMessage);
     });
 
     const unsubPendingFileReceived = window.kiyeovoAPI.onPendingFileReceived((data) => {

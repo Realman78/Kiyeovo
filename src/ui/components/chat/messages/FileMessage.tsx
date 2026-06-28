@@ -152,6 +152,8 @@ export const FileMessage: React.FC<FileMessageProps> = ({
 }) => {
   const dispatch = useDispatch();
   const messages = useSelector((state: RootState) => state.chat.messages);
+  const chat = useSelector((state: RootState) => state.chat.chats.find((item) => item.id === chatId));
+  const isGroupChat = chat?.type === 'group';
   const isAwaitingApproval = transferStatus === 'awaiting_acceptance';
   const isIncomingPendingDecision = transferStatus === 'incoming_pending_user';
   const isOutgoingPendingOffer = isFromCurrentUser && isAwaitingApproval;
@@ -301,8 +303,11 @@ export const FileMessage: React.FC<FileMessageProps> = ({
       case 'connecting':
         return 'Connecting...';
       case 'awaiting_acceptance':
-        return 'File offered';
+        return isGroupChat ? 'Group file offered' : 'File offered';
       case 'incoming_pending_user':
+        if (isGroupChat) {
+          return 'Group download not available yet';
+        }
         return 'Waiting for your decision';
       case 'in_progress':
         if (isFromCurrentUser && transferProgress >= 100) {
@@ -414,13 +419,15 @@ export const FileMessage: React.FC<FileMessageProps> = ({
 
       {isIncomingPendingDecision && (
         <div className="flex gap-2">
-          <Button
-            onClick={handleAccept}
-            size="sm"
-            className="flex-1"
-          >
-            Accept
-          </Button>
+          {!isGroupChat && (
+            <Button
+              onClick={handleAccept}
+              size="sm"
+              className="flex-1"
+            >
+              Accept
+            </Button>
+          )}
           <Button
             onClick={handleReject}
             size="sm"
@@ -432,7 +439,7 @@ export const FileMessage: React.FC<FileMessageProps> = ({
         </div>
       )}
 
-      {isOutgoingPendingOffer && (
+      {isOutgoingPendingOffer && !isGroupChat && (
         <Button
           onClick={handleCancelOffer}
           size="sm"
