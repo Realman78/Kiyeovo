@@ -307,14 +307,14 @@ once per authorized member), reserving the slot synchronously before any file I/
 only when that serving authority is removed: by sender withdrawal, failed-send rollback, lifecycle
 cleanup, or process exit, and additionally — for a direct offer — on terminal NACK or successful
 consumption, or — for a group offer (group decline is silent, so there is no decline signal) — only
-once every still-authorized member has pulled, or via membership revocation, never on the first. The recipient continues to enforce five pending offers per sender and ten total
-for every realtime and offline-catch-up offer, because remote clients are untrusted. Neither side
+once every still-authorized member has pulled, or via membership revocation, never on the first. The recipient continues to enforce five fresh pending offers per sender and ten fresh pending offers total
+for every realtime and offline-catch-up offer, because remote clients are untrusted. Retryable/error pending rows stay visible for retry or rejection but no longer consume the recipient capacity budget. Neither side
 automatically evicts the oldest offer.
 
 Current Phase-1 milestone behavior:
 - direct offers can be delivered in realtime or through the existing offline bucket
 - recipient pending offers are persisted and survive app restart/close
-- a valid direct offer that exceeds the pending capacity receives an `inbox_full` NACK; a rate-limited peer receives at most one signed rejection attempt per rate window and later excess traffic is dropped silently
+- a valid direct offer that exceeds fresh pending capacity receives an `inbox_full` NACK; retryable pending rows with `transfer_error` are ignored by this capacity check. A rate-limited peer receives at most one signed rejection attempt per rate window and later excess traffic is dropped silently
 - rejecting a direct offer is locally terminal and immediately frees the recipient pending slot; a signed best-effort decline NACK updates the sender when delivery succeeds
 - unknown, duplicate, wrongly signed, cross-chat, and late decline NACKs cannot change an outgoing row
 - sender rows in `awaiting_acceptance` become `failed` on restart/close because the sender-side serving authority is intentionally ephemeral

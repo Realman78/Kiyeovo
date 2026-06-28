@@ -287,3 +287,40 @@ test('a cancel that arrives before its offer tombstones and suppresses the late 
   })), true);
   assert.equal(database.getFileMessageById('late_file'), null);
 });
+
+test('recipient capacity ignores retryable errored pending offers', async (t) => {
+  const { database, fileHandler, chatId, sentApplicationMessages } = await createHarness(t);
+
+  for (let i = 0; i < 5; i++) {
+    await database.createMessage({
+      id: `pending_${i}`,
+      client_msg_id: `pending_${i}`,
+      chat_id: chatId,
+      sender_peer_id: RECIPIENT_PEER,
+      content: `pending_${i}.txt (5 bytes)`,
+      message_type: 'file',
+      file_name: `pending_${i}.txt`,
+      file_size: 5,
+      file_offer_id: `pending_offer_${i}`,
+      file_checksum: 'a'.repeat(64),
+      file_total_chunks: 1,
+      transfer_status: 'incoming_pending_user',
+      transfer_progress: 0,
+      ...(i < 2 ? { transfer_error: 'Transfer interrupted' } : {}),
+      timestamp: new Date(Date.now() + i),
+    });
+  }
+
+  assert.equal(await fileHandler.handleApplicationMessage(offerContext({
+    offerId: 'new_offer_after_errors',
+    fileId: 'new_file_after_errors',
+    chatId,
+  })), true);
+
+  const inserted = database.getFileMessageById('new_file_after_errors');
+  assert.equal(inserted?.transfer_status, 'incoming_pending_user');
+  assert.equal(
+    sentApplicationMessages.some((message) => message.kind === 'file_offer_nack'),
+    false,
+  );
+});

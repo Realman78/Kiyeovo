@@ -1171,7 +1171,8 @@ export class FileHandler {
     if (existing) {
       return true;
     }
-    const pending = this.database.getPendingIncomingFileOffers();
+    const pending = this.database.getPendingIncomingFileOffers()
+      .filter((message) => !message.transfer_error);
     const pendingCapacityFull =
       pending.length >= this.getMaxPendingFilesTotal()
       || pending.filter((message) => message.sender_peer_id === context.senderPeerId).length
