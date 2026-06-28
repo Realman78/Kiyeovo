@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { ed25519 } from '@noble/curves/ed25519';
-import type { FileOfferNackApplicationPayload } from './message-envelope.js';
+import type { FileOfferCancelApplicationPayload, FileOfferNackApplicationPayload } from './message-envelope.js';
 import {
+  createFileOfferCancelSignaturePayload,
   createFileOfferNackSignaturePayload,
   getFileOfferNackOutcome,
+  validateFileOfferCancel,
   validateFileOfferNack,
 } from './file-offer-control.js';
 
@@ -27,6 +29,20 @@ function createSignedNack(): FileOfferNackApplicationPayload {
   };
 }
 
+function createSignedCancel(): FileOfferCancelApplicationPayload {
+  const unsigned = {
+    type: 'file_offer_cancel' as const,
+    offerId: 'offer_1',
+  };
+  const encoded = new TextEncoder().encode(
+    JSON.stringify(createFileOfferCancelSignaturePayload(unsigned)),
+  );
+  return {
+    ...unsigned,
+    signature: Buffer.from(ed25519.sign(encoded, recipientPrivateKey)).toString('base64'),
+  };
+}
+
 function verifyWith(publicKey: Uint8Array) {
   return (signature: string, payload: object): boolean => ed25519.verify(
     Buffer.from(signature, 'base64'),
@@ -34,6 +50,27 @@ function verifyWith(publicKey: Uint8Array) {
     publicKey,
   );
 }
+
+test('validates a domain-separated file-offer cancel signature', () => {
+  assert.equal(validateFileOfferCancel({
+    cancel: createSignedCancel(),
+    verifySignature: verifyWith(recipientPublicKey),
+  }), true);
+});
+
+test('rejects a cancel signed by a different application identity', () => {
+  assert.equal(validateFileOfferCancel({
+    cancel: createSignedCancel(),
+    verifySignature: verifyWith(wrongPublicKey),
+  }), false);
+});
+
+test('rejects a cancel whose signed offer id was changed', () => {
+  assert.equal(validateFileOfferCancel({
+    cancel: { ...createSignedCancel(), offerId: 'offer_2' },
+    verifySignature: verifyWith(recipientPublicKey),
+  }), false);
+});
 
 test('validates a domain-separated file-offer decline signature', () => {
   assert.equal(validateFileOfferNack({

@@ -31,6 +31,7 @@ import {
   MESSAGE_ENVELOPE_VERSION,
   isValidCid,
   type FileOfferApplicationPayload,
+  type FileOfferCancelApplicationPayload,
   type FileOfferNackApplicationPayload,
   type FileOfferNackReason,
 } from "../protocol/message-envelope.js";
@@ -40,8 +41,10 @@ import {
   validateIncomingFileOffer,
 } from "../protocol/file-offer-validation.js";
 import {
+  createFileOfferCancelSignaturePayload,
   createFileOfferNackSignaturePayload,
   getFileOfferNackOutcome,
+  validateFileOfferCancel,
   validateFileOfferNack,
 } from "../protocol/file-offer-control.js";
 import {
@@ -561,6 +564,32 @@ export class FileHandler {
     return true;
   }
 
+  async cancelOutgoingFileOffer(fileId: string): Promise<boolean> {
+    const current = this.database.getFileMessageById(fileId);
+    if (!current?.file_offer_id || this.servingOffers.has(current.file_offer_id)) {
+      return false;
+    }
+
+    const cancelled = this.database.cancelOutgoingFileOffer({
+      fileId,
+      localPeerId: this.node.peerId.toString(),
+    });
+    if (!cancelled) {
+      return false;
+    }
+
+    this.servedFiles.release(cancelled.offerId);
+    void this.#sendFileOfferCancel(cancelled.targetPeerId, cancelled.offerId);
+    this.onOutgoingFileOfferTerminal({
+      chatId: cancelled.chatId,
+      messageId: fileId,
+      filename: cancelled.filename,
+      status: 'cancelled',
+      error: 'Offer cancelled',
+    });
+    return true;
+  }
+
   async cancelIncomingFileDownload(fileId: string): Promise<boolean> {
     const stream = this.activeTransferStreams.get(fileId);
     if (!stream) {
@@ -985,6 +1014,89 @@ export class FileHandler {
     }
   }
 
+  async #sendFileOfferCancel(targetPeerId: string, offerId: string): Promise<void> {
+    try {
+      const identity = this.messageHandler.getUserIdentity();
+      if (!identity) {
+        throw new Error('No user identity available');
+      }
+      const unsignedCancel = {
+        type: 'file_offer_cancel' as const,
+        offerId,
+      };
+      const signature = identity.sign(
+        JSON.stringify(createFileOfferCancelSignaturePayload(unsignedCancel)),
+      );
+      await this.messageHandler.sendApplicationMessage(
+        { type: 'direct', peerId: targetPeerId },
+        {
+          message: {
+            cid: randomUUID(),
+            kind: 'file_offer_cancel',
+            payload: {
+              ...unsignedCancel,
+              signature: Buffer.from(signature).toString('base64'),
+            },
+          },
+          persistence: { owner: 'none' },
+        },
+      );
+      this.trace('SEND', targetPeerId, null, 'OFFER_CANCEL_SENT', `offer=${offerId}`);
+    } catch (error: unknown) {
+      console.warn(
+        `[FILE][CANCEL][DELIVERY_FAILED] peer=*${targetPeerId.slice(-8)} `
+        + `offer=${offerId} err=${errStr(error, 'unknown')}`,
+      );
+    }
+  }
+
+  #handleFileOfferCancel(
+    context: InboundApplicationMessageContext,
+    cancel: FileOfferCancelApplicationPayload,
+  ): boolean {
+    if (context.route !== 'direct_online' && context.route !== 'direct_offline') {
+      return false;
+    }
+    const chat = this.database.getChatByPeerId(context.senderPeerId);
+    const sender = this.database.getUserByPeerId(context.senderPeerId);
+    if (!chat || chat.type !== 'direct' || !sender) {
+      return true;
+    }
+    if (!validateFileOfferCancel({
+      cancel,
+      verifySignature: (signature, payload) => EncryptedUserIdentity.verifyKeyExchangeSignature(
+        signature,
+        payload,
+        sender.signing_public_key,
+      ),
+    })) {
+      return true;
+    }
+
+    this.database.recordFileOfferCancellationTombstone({
+      offerId: cancel.offerId,
+      senderPeerId: context.senderPeerId,
+    });
+
+    const cancelled = this.database.cancelPendingIncomingFileOfferByOfferId({
+      offerId: cancel.offerId,
+      chatId: chat.id,
+      senderPeerId: context.senderPeerId,
+    });
+    if (!cancelled) {
+      return true;
+    }
+
+    this.onFileTransferFailed({
+      chatId: chat.id,
+      messageId: cancelled.messageId,
+      error: 'Offer cancelled',
+      status: 'cancelled',
+    });
+    this.trace('RECV', context.senderPeerId, cancelled.messageId, 'OFFER_CANCEL_APPLIED', `offer=${cancel.offerId}`);
+    return true;
+  }
+
   #handleFileOfferNack(
     context: InboundApplicationMessageContext,
     nack: FileOfferNackApplicationPayload,
@@ -1035,6 +1147,9 @@ export class FileHandler {
   }
 
   async handleApplicationMessage(context: InboundApplicationMessageContext): Promise<boolean> {
+    if (context.message.kind === 'file_offer_cancel') {
+      return this.#handleFileOfferCancel(context, context.message.payload);
+    }
     if (context.message.kind === 'file_offer_nack') {
       return this.#handleFileOfferNack(context, context.message.payload);
     }
@@ -1075,6 +1190,12 @@ export class FileHandler {
           ),
         });
         if (validation.ok) {
+          if (this.database.hasFileOfferCancellationTombstone({
+            offerId: offer.offerId,
+            senderPeerId: context.senderPeerId,
+          })) {
+            return true;
+          }
           void this.#sendFileOfferNack(
             context.senderPeerId,
             offer.offerId,
@@ -1098,6 +1219,13 @@ export class FileHandler {
       ),
     });
     if (!validation.ok) {
+      return true;
+    }
+
+    if (this.database.hasFileOfferCancellationTombstone({
+      offerId: offer.offerId,
+      senderPeerId: context.senderPeerId,
+    })) {
       return true;
     }
 

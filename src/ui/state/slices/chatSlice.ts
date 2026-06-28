@@ -555,7 +555,7 @@ const chatSlice = createSlice({
     updateFileTransferProgress: (state, action: PayloadAction<{ messageId: string; progress: number; chatId: number; filename: string; size: number }>) => {
       const message = state.messages.find((m) => m.id === action.payload.messageId);
       if (message) {
-        if (message.transferStatus === 'completed' || message.transferStatus === 'failed' || message.transferStatus === 'rejected') {
+        if (message.transferStatus === 'completed' || message.transferStatus === 'failed' || message.transferStatus === 'rejected' || message.transferStatus === 'cancelled') {
           return;
         }
         message.fileName = action.payload.filename;

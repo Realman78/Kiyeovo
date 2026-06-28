@@ -505,6 +505,15 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
         if (data.status === 'incoming_pending_user') {
           dispatch(setPendingFileStatus({ chatId: data.chatId, hasPendingFile: true }));
         }
+        if (data.status === 'cancelled' || data.status === 'rejected') {
+          const hasOtherPending = store.getState().chat.messages.some(
+            (message) =>
+              message.chatId === data.chatId &&
+              message.id !== data.messageId &&
+              message.transferStatus === 'incoming_pending_user',
+          );
+          dispatch(setPendingFileStatus({ chatId: data.chatId, hasPendingFile: hasOtherPending }));
+        }
       } else {
         dispatch(updateFileTransferError({
           messageId: data.messageId,
@@ -518,6 +527,11 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
       }
 
       if (data.status === 'awaiting_acceptance') {
+        return;
+      }
+
+      if (data.status === 'cancelled') {
+        toast.info('File offer cancelled');
         return;
       }
 
@@ -537,9 +551,13 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
         status: data.status,
         transferError: data.error,
       }));
-      toast.info(data.status === 'rejected'
-        ? `${data.filename} was declined`
-        : `File offer failed: ${data.error}`);
+      toast.info(
+        data.status === 'rejected'
+          ? `${data.filename} was declined`
+          : data.status === 'cancelled'
+            ? `${data.filename} offer cancelled`
+            : `File offer failed: ${data.error}`,
+      );
     });
 
     const unsubPendingFileReceived = window.kiyeovoAPI.onPendingFileReceived((data) => {

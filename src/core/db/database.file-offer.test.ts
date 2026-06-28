@@ -29,6 +29,33 @@ async function createFileOfferDatabase(): Promise<{ database: ChatDatabase; chat
   return { database, chatId };
 }
 
+async function createOutgoingOfferDatabase(): Promise<{ database: ChatDatabase; chatId: number }> {
+  const database = new ChatDatabase(':memory:');
+  await database.createUser({
+    peer_id: 'recipient_peer',
+    signing_public_key: 'signing_key',
+    offline_public_key: 'offline_key',
+    signature: 'signature',
+    username: 'recipient',
+  });
+  const chatId = await database.createChat({
+    type: 'direct',
+    name: 'recipient',
+    created_by: 'recipient_peer',
+    offline_bucket_secret: 'bucket_secret',
+    notifications_bucket_key: 'notifications_key',
+    status: 'active',
+    offline_last_read_timestamp: 0,
+    offline_last_ack_sent: 0,
+    trusted_out_of_band: false,
+    muted: false,
+    key_version: 0,
+    created_at: new Date(),
+    participants: ['recipient_peer'],
+  });
+  return { database, chatId };
+}
+
 test('rejects a persisted pending incoming offer exactly once', async (t) => {
   const { database, chatId } = await createFileOfferDatabase();
   t.after(() => database.close());
@@ -55,6 +82,101 @@ test('rejects a persisted pending incoming offer exactly once', async (t) => {
   });
   assert.equal(database.getFileMessageById('incoming_file')?.transfer_status, 'rejected');
   assert.equal(database.rejectPendingIncomingFileOffer('incoming_file'), null);
+});
+
+test('cancels an active outgoing offer exactly once and resolves the target peer', async (t) => {
+  const { database, chatId } = await createOutgoingOfferDatabase();
+  t.after(() => database.close());
+  await database.createMessage({
+    id: 'outgoing_file',
+    client_msg_id: 'outgoing_file',
+    chat_id: chatId,
+    sender_peer_id: 'local_peer',
+    content: 'report.pdf (10 bytes)',
+    message_type: 'file',
+    file_name: 'report.pdf',
+    file_size: 10,
+    file_offer_id: 'offer_1',
+    transfer_status: 'awaiting_acceptance',
+    transfer_progress: 0,
+    timestamp: new Date(),
+  });
+
+  assert.deepEqual(database.cancelOutgoingFileOffer({
+    fileId: 'outgoing_file',
+    localPeerId: 'local_peer',
+  }), {
+    offerId: 'offer_1',
+    chatId,
+    targetPeerId: 'recipient_peer',
+    filename: 'report.pdf',
+  });
+  const row = database.getFileMessageById('outgoing_file');
+  assert.equal(row?.transfer_status, 'cancelled');
+  assert.equal(row?.transfer_error, 'Offer cancelled');
+  assert.equal(database.cancelOutgoingFileOffer({
+    fileId: 'outgoing_file',
+    localPeerId: 'local_peer',
+  }), null);
+});
+
+test('cancels a pending incoming offer by offer id exactly once', async (t) => {
+  const { database, chatId } = await createFileOfferDatabase();
+  t.after(() => database.close());
+  await database.createMessage({
+    id: 'incoming_file',
+    client_msg_id: 'incoming_file',
+    chat_id: chatId,
+    sender_peer_id: 'sender_peer',
+    content: 'report.pdf (10 bytes)',
+    message_type: 'file',
+    file_name: 'report.pdf',
+    file_size: 10,
+    file_offer_id: 'offer_1',
+    transfer_status: 'incoming_pending_user',
+    transfer_progress: 0,
+    timestamp: new Date(),
+  });
+
+  assert.deepEqual(database.cancelPendingIncomingFileOfferByOfferId({
+    offerId: 'offer_1',
+    chatId,
+    senderPeerId: 'sender_peer',
+  }), {
+    messageId: 'incoming_file',
+    filename: 'report.pdf',
+  });
+  const row = database.getFileMessageById('incoming_file');
+  assert.equal(row?.transfer_status, 'cancelled');
+  assert.equal(row?.transfer_error, 'Offer cancelled');
+  assert.equal(database.cancelPendingIncomingFileOfferByOfferId({
+    offerId: 'offer_1',
+    chatId,
+    senderPeerId: 'sender_peer',
+  }), null);
+});
+
+test('file offer cancellation tombstones are scoped by offer and sender', async (t) => {
+  const { database } = await createFileOfferDatabase();
+  t.after(() => database.close());
+
+  database.recordFileOfferCancellationTombstone({
+    offerId: 'offer_1',
+    senderPeerId: 'sender_peer',
+  });
+
+  assert.equal(database.hasFileOfferCancellationTombstone({
+    offerId: 'offer_1',
+    senderPeerId: 'sender_peer',
+  }), true);
+  assert.equal(database.hasFileOfferCancellationTombstone({
+    offerId: 'offer_2',
+    senderPeerId: 'sender_peer',
+  }), false);
+  assert.equal(database.hasFileOfferCancellationTombstone({
+    offerId: 'offer_1',
+    senderPeerId: 'other_peer',
+  }), false);
 });
 
 test('applies a NACK only to the matching active outgoing offer', async (t) => {

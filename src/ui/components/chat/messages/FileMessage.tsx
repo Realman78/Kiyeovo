@@ -154,6 +154,7 @@ export const FileMessage: React.FC<FileMessageProps> = ({
   const messages = useSelector((state: RootState) => state.chat.messages);
   const isAwaitingApproval = transferStatus === 'awaiting_acceptance';
   const isIncomingPendingDecision = transferStatus === 'incoming_pending_user';
+  const isOutgoingPendingOffer = isFromCurrentUser && isAwaitingApproval;
   const showsDecisionStatus = isAwaitingApproval || isIncomingPendingDecision;
   const [isCancelling, setIsCancelling] = useState(false);
 
@@ -245,6 +246,29 @@ export const FileMessage: React.FC<FileMessageProps> = ({
     }
   };
 
+  const handleCancelOffer = async () => {
+    if (isCancelling) return;
+
+    setIsCancelling(true);
+    try {
+      const result = await window.kiyeovoAPI.cancelFileOffer(fileId);
+      if (!result.success) {
+        console.error('Failed to cancel file offer:', result.error);
+        return;
+      }
+
+      dispatch(updateFileTransferStatus({
+        messageId: fileId,
+        status: 'cancelled',
+        transferError: 'Offer cancelled'
+      }));
+    } catch (error) {
+      console.error('Error canceling file offer:', error);
+    } finally {
+      setIsCancelling(false);
+    }
+  };
+
   const handleOpenFile = async () => {
     if (filePath && transferStatus === 'completed') {
       const result = await window.kiyeovoAPI.openFileLocation(filePath);
@@ -291,6 +315,8 @@ export const FileMessage: React.FC<FileMessageProps> = ({
         return 'Failed';
       case 'rejected':
         return 'Offer rejected';
+      case 'cancelled':
+        return 'Offer cancelled';
       default:
         return '';
     }
@@ -323,6 +349,9 @@ export const FileMessage: React.FC<FileMessageProps> = ({
     }
     if (transferError?.toLowerCase().includes('download canceled by user')) {
       return 'Download canceled';
+    }
+    if (transferError?.toLowerCase().includes('offer cancelled')) {
+      return 'Offer cancelled';
     }
     return transferError;
   };
@@ -362,7 +391,7 @@ export const FileMessage: React.FC<FileMessageProps> = ({
         </div>
       )}
 
-      {transferStatus === 'rejected' && (
+      {(transferStatus === 'rejected' || transferStatus === 'cancelled') && (
         <div className="text-xs opacity-70">
           {getStatusText()}
         </div>
@@ -401,6 +430,17 @@ export const FileMessage: React.FC<FileMessageProps> = ({
             Reject
           </Button>
         </div>
+      )}
+
+      {isOutgoingPendingOffer && (
+        <Button
+          onClick={handleCancelOffer}
+          size="sm"
+          variant="outline"
+          disabled={isCancelling}
+        >
+          Cancel offer
+        </Button>
       )}
     </>
   );

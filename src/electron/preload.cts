@@ -190,6 +190,7 @@ const kiyeovoAPI: KiyeovoAPI = {
   acceptFile: (fileId) => invoke(IPC_CHANNELS.ACCEPT_FILE, fileId),
   rejectFile: (fileId) => invoke(IPC_CHANNELS.REJECT_FILE, fileId),
   cancelFileDownload: (fileId) => invoke(IPC_CHANNELS.CANCEL_FILE_DOWNLOAD, fileId),
+  cancelFileOffer: (fileId) => invoke(IPC_CHANNELS.CANCEL_FILE_OFFER, fileId),
   openFileLocation: (filePath) => invoke(IPC_CHANNELS.OPEN_FILE_LOCATION, filePath),
   onFileTransferProgress: (callback) => subscribe(IPC_CHANNELS.FILE_TRANSFER_PROGRESS, callback),
   onFileTransferComplete: (callback) => subscribe(IPC_CHANNELS.FILE_TRANSFER_COMPLETE, callback),

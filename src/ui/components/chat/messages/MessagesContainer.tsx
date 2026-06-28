@@ -53,6 +53,7 @@ const TERMINAL_FILE_TRANSFER_STATUSES = new Set<FileTransferStatus>([
   'completed',
   'failed',
   'rejected',
+  'cancelled',
 ]);
 
 function mapDbMessage(msg: Message & { sender_username?: string }): ChatMessage {

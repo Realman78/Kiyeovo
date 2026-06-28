@@ -285,7 +285,8 @@ export type FileTransferStatus =
   | 'in_progress'
   | 'completed'
   | 'failed'
-  | 'rejected';
+  | 'rejected'
+  | 'cancelled';
 
 export type ContactMode = 'active' | 'silent' | 'block'
 
@@ -683,7 +684,7 @@ export interface OutgoingFileOfferTerminalEvent {
   chatId: number;
   messageId: string;
   filename: string;
-  status: 'rejected' | 'failed';
+  status: 'rejected' | 'failed' | 'cancelled';
   error: string;
 }
 

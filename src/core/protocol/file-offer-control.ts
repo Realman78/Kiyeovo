@@ -1,9 +1,30 @@
 import type {
+  FileOfferCancelApplicationPayload,
   FileOfferNackApplicationPayload,
   FileOfferNackReason,
 } from './message-envelope.js';
 
+export const FILE_OFFER_CANCEL_SIGNATURE_DOMAIN = 'kiyeovo-file-cancel-v2';
 export const FILE_OFFER_NACK_SIGNATURE_DOMAIN = 'kiyeovo-file-nack-v2';
+
+export function createFileOfferCancelSignaturePayload(input: {
+  offerId: string;
+}): object {
+  return {
+    domain: FILE_OFFER_CANCEL_SIGNATURE_DOMAIN,
+    offerId: input.offerId,
+  };
+}
+
+export function validateFileOfferCancel(input: {
+  cancel: FileOfferCancelApplicationPayload;
+  verifySignature: (signature: string, payload: object) => boolean;
+}): boolean {
+  return input.verifySignature(
+    input.cancel.signature,
+    createFileOfferCancelSignaturePayload(input.cancel),
+  );
+}
 
 export function createFileOfferNackSignaturePayload(input: {
   offerId: string;

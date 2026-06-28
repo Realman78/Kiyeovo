@@ -3481,6 +3481,26 @@ function setupFileTransferHandlers(
     }
   });
 
+  // Withdraw an outgoing, still-pending file offer
+  ipcMain.handle(IPC_CHANNELS.CANCEL_FILE_OFFER, async (_event, fileId: string) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { success: false, error: "P2P core not initialized" };
+      }
+
+      const cancelled = await p2pCore.messageHandler.getFileHandler().cancelOutgoingFileOffer(fileId);
+      if (!cancelled) {
+        return { success: false, error: "Active outgoing file offer not found" };
+      }
+
+      return { success: true, error: null };
+    } catch (error) {
+      console.error("[IPC] Failed to cancel file offer:", error);
+      return { success: false, error: errStr(error, "Failed to cancel file offer") };
+    }
+  });
+
   // Open file location
   ipcMain.handle(IPC_CHANNELS.OPEN_FILE_LOCATION, async (_event, filePath: string) => {
     try {
