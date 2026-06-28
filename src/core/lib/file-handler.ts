@@ -101,13 +101,6 @@ type PullConfirmFrame =
   }
   | null;
 
-type SuccessfulPullConfirmFrame = Exclude<PullConfirmFrame, null> & { success: true };
-
-type ServeConfirmReadResult =
-  | { kind: 'success'; frame: SuccessfulPullConfirmFrame }
-  | { kind: 'applied' }
-  | { kind: 'missing' };
-
 const FILE_PULL_INTERRUPTED_CONFIRM_GRACE_MS = 1500;
 
 export class FileHandler {
@@ -300,11 +293,6 @@ export class FileHandler {
     // Rearmed each time a chunk is accepted by the sink (i.e. drained); the one-shot idle watchdog
     // fires exactly CHUNK_IDLE_TIMEOUT after the last drained chunk (set up in the serve phase).
     const idle: { rearm: () => void } = { rearm: () => {} };
-    let serveStopped = false;
-    const stopServe = (reason: string): void => {
-      serveStopped = true;
-      try { stream.abort(new Error(reason)); } catch { /* best-effort */ }
-    };
 
     const sinkDone = stream.sink((async function* () {
       yield encodePullFrame({ type: 'file_pull_challenge', offerId, challenge });
@@ -315,13 +303,7 @@ export class FileHandler {
       }
       let index = 0;
       for (const chunk of createFileChunks(decision.buffer, offerId)) {
-        if (serveStopped) {
-          return;
-        }
         yield encodePullFrame(chunk);
-        if (serveStopped) {
-          return;
-        }
         idle.rearm();
         index += 1;
         onProgress({
@@ -419,43 +401,33 @@ export class FileHandler {
         size: meta.size,
         totalChunks: Math.ceil(meta.size / CHUNK_SIZE),
       });
-      const confirmRead = this.#readServeConfirmDuringTransfer(
-        reader,
-        offerId,
-        meta,
-        stopServe,
-      );
       try {
         await sinkDone;
       } catch (error: unknown) {
-        const confirmResult = await confirmRead;
-        if (confirmResult.kind === 'applied') {
-          return;
-        }
-        if (confirmResult.kind === 'missing' || confirmResult.kind === 'success') {
+        const applied = await this.#readAndApplyServeConfirm(
+          reader,
+          offerId,
+          meta,
+          FILE_PULL_INTERRUPTED_CONFIRM_GRACE_MS,
+        );
+        if (!applied) {
           this.#resetServedOfferToAwaitingAcceptance(
             offerId,
             meta,
             'Recipient disconnected before confirming the transfer',
           );
+          throw error;
         }
-        throw error;
+        return;
       }
 
-      const confirmResult = await this.#waitForServeConfirmAfterChunks(confirmRead, stream);
-      switch (confirmResult.kind) {
-        case 'success':
-          this.#applyServeConfirm(offerId, meta, confirmResult.frame);
-          break;
-        case 'applied':
-          break;
-        case 'missing':
-          this.#resetServedOfferToAwaitingAcceptance(
-            offerId,
-            meta,
-            'Recipient did not confirm the transfer',
-          );
-          break;
+      const applied = await this.#readAndApplyServeConfirm(reader, offerId, meta, FILE_PULL_CONFIRM_TIMEOUT);
+      if (!applied) {
+        this.#resetServedOfferToAwaitingAcceptance(
+          offerId,
+          meta,
+          'Recipient did not confirm the transfer',
+        );
       }
     } finally {
       if (totalTimer) { clearTimeout(totalTimer); }
@@ -536,54 +508,17 @@ export class FileHandler {
     return true;
   }
 
-  async #readServeConfirmDuringTransfer(
+  async #readAndApplyServeConfirm(
     reader: FrameStreamReader,
     offerId: string,
     meta: { fileId: string; chatId: number; filePath: string },
-    stopServe: (reason: string) => void,
-  ): Promise<ServeConfirmReadResult> {
+    timeoutMs: number,
+  ): Promise<boolean> {
     try {
-      const confirmFrame = await reader.readFrame(CHUNK_RECEIVE_TIMEOUT);
-      if (!isFileTransferConfirm(confirmFrame) || confirmFrame.offerId !== offerId) {
-        stopServe('invalid transfer confirmation');
-        this.#resetServedOfferToAwaitingAcceptance(
-          offerId,
-          meta,
-          'Recipient sent an invalid transfer confirmation',
-        );
-        return { kind: 'applied' };
-      }
-      if (confirmFrame.success) {
-        return { kind: 'success', frame: confirmFrame as SuccessfulPullConfirmFrame };
-      }
-      stopServe('recipient did not complete transfer');
-      this.#applyServeConfirm(offerId, meta, confirmFrame);
-      return { kind: 'applied' };
+      const confirmFrame = await reader.readFrame(timeoutMs);
+      return this.#applyServeConfirm(offerId, meta, confirmFrame);
     } catch {
-      stopServe('transfer confirmation unavailable');
-      return { kind: 'missing' };
-    }
-  }
-
-  async #waitForServeConfirmAfterChunks(
-    confirmRead: Promise<ServeConfirmReadResult>,
-    stream: Stream,
-  ): Promise<ServeConfirmReadResult> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      return await Promise.race([
-        confirmRead,
-        new Promise<ServeConfirmReadResult>((resolve) => {
-          timer = setTimeout(() => {
-            try { stream.abort(new Error('confirm wait timeout')); } catch { /* best-effort */ }
-            resolve({ kind: 'missing' });
-          }, FILE_PULL_CONFIRM_TIMEOUT);
-        }),
-      ]);
-    } finally {
-      if (timer) {
-        clearTimeout(timer);
-      }
+      return false;
     }
   }
 

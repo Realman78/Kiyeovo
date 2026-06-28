@@ -59,6 +59,9 @@ import {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const FILE_TRANSFER_PROGRESS_FLUSH_MS = 100;
+const pendingFileTransferProgress = new Map<string, FileTransferProgressEvent>();
+let fileTransferProgressTimer: ReturnType<typeof setTimeout> | null = null;
 
 // Temporary diagnostic: prefix all main-process console output with a timestamp. 
 function installLogTimestamps(): void {
@@ -406,15 +409,46 @@ function sendRestoreUsername(username: string) {
   }
 }
 
-function sendFileTransferProgress(data: FileTransferProgressEvent) {
-  if (mainWindow && !mainWindow.isDestroyed()) {
+function flushFileTransferProgress(): void {
+  fileTransferProgressTimer = null;
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    pendingFileTransferProgress.clear();
+    return;
+  }
+
+  const progressEvents = Array.from(pendingFileTransferProgress.values());
+  pendingFileTransferProgress.clear();
+  for (const data of progressEvents) {
     log(`[Electron] File transfer progress: ${data.current}/${data.total} for ${data.filename}`);
     mainWindow.webContents.send(IPC_CHANNELS.FILE_TRANSFER_PROGRESS, data);
   }
 }
 
+function scheduleFileTransferProgressFlush(): void {
+  if (fileTransferProgressTimer) {
+    return;
+  }
+  fileTransferProgressTimer = setTimeout(flushFileTransferProgress, FILE_TRANSFER_PROGRESS_FLUSH_MS);
+}
+
+function clearPendingFileTransferProgress(messageId: string): void {
+  pendingFileTransferProgress.delete(messageId);
+  if (pendingFileTransferProgress.size === 0 && fileTransferProgressTimer) {
+    clearTimeout(fileTransferProgressTimer);
+    fileTransferProgressTimer = null;
+  }
+}
+
+function sendFileTransferProgress(data: FileTransferProgressEvent) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    pendingFileTransferProgress.set(data.messageId, data);
+    scheduleFileTransferProgressFlush();
+  }
+}
+
 function sendFileTransferComplete(data: FileTransferCompleteEvent) {
   if (mainWindow && !mainWindow.isDestroyed()) {
+    clearPendingFileTransferProgress(data.messageId);
     log(`[Electron] File transfer complete: ${data.filePath}`);
     mainWindow.webContents.send(IPC_CHANNELS.FILE_TRANSFER_COMPLETE, data);
   }
@@ -422,6 +456,7 @@ function sendFileTransferComplete(data: FileTransferCompleteEvent) {
 
 function sendFileTransferFailed(data: FileTransferFailedEvent) {
   if (mainWindow && !mainWindow.isDestroyed()) {
+    clearPendingFileTransferProgress(data.messageId);
     log(`[Electron] File transfer failed: ${data.error}`);
     mainWindow.webContents.send(IPC_CHANNELS.FILE_TRANSFER_FAILED, data);
   }
@@ -436,6 +471,7 @@ function sendOutgoingFileOfferPending(data: OutgoingFileOfferPendingEvent) {
 
 function sendOutgoingFileOfferTerminal(data: OutgoingFileOfferTerminalEvent) {
   if (mainWindow && !mainWindow.isDestroyed()) {
+    clearPendingFileTransferProgress(data.messageId);
     log(`[Electron] Outgoing file offer terminal: ${data.messageId} status=${data.status}`);
     mainWindow.webContents.send(IPC_CHANNELS.OUTGOING_FILE_OFFER_TERMINAL, data);
   }
