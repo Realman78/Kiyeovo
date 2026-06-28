@@ -62,6 +62,15 @@ export interface FileChunk {
   hash: string; // per-chunk BLAKE3
 }
 
+export type FileTransferConfirmReason = 'integrity' | 'disk' | 'other';
+
+export interface FileTransferConfirm {
+  type: 'file_transfer_confirm';
+  offerId: string;
+  success: boolean;
+  reason?: FileTransferConfirmReason; // present when success === false
+}
+
 /** Random per-stream challenge (base64). */
 export function createFilePullChallenge(): string {
   return randomBytes(FILE_PULL_CHALLENGE_BYTES).toString('base64');
@@ -115,6 +124,27 @@ export class PullChallengeStore {
     return true;
   }
 
+  /**
+   * Per-stream cleanup: remove only *this* stream's challenge (no-op if already consumed). Use this
+   * in the serve handler's `finally` so a timed-out/disconnected stream drops its own challenge
+   * without disturbing other concurrent streams pulling the same offer.
+   */
+  discard(offerId: string, challenge: string): void {
+    const set = this.byOffer.get(offerId);
+    if (!set) {
+      return;
+    }
+    set.delete(challenge);
+    if (set.size === 0) {
+      this.byOffer.delete(offerId);
+    }
+  }
+
+  /**
+   * Offer-level teardown: drop *every* outstanding challenge for an offer at once. Correct only
+   * when the offer itself is gone (withdrawal/cancel/`source_changed`) — never for per-stream
+   * cleanup, where it would wrongly invalidate concurrent streams for the same offer.
+   */
   dropOffer(offerId: string): void {
     this.byOffer.delete(offerId);
   }
@@ -222,6 +252,16 @@ export function isFileChunk(value: unknown): value is FileChunk {
     && typeof value.data === 'string'
     && value.data.length <= MAX_FILE_CHUNK_DATA_LENGTH
     && isBoundedString(value.hash, MAX_CHUNK_HASH_LENGTH);
+}
+
+export function isFileTransferConfirm(value: unknown): value is FileTransferConfirm {
+  if (!isRecord(value) || value.type !== 'file_transfer_confirm' || !isValidCid(value.offerId) || typeof value.success !== 'boolean') {
+    return false;
+  }
+  // success ⇒ no reason; failure ⇒ a valid reason. Reject any other combination.
+  return value.success
+    ? value.reason === undefined
+    : (value.reason === 'integrity' || value.reason === 'disk' || value.reason === 'other');
 }
 
 function isFilePullRejectReason(value: unknown): value is FilePullRejectReason {

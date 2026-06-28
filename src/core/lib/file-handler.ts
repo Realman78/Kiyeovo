@@ -1,4 +1,4 @@
-import { ChatNode, FileTransferProgressEvent, FileTransferCompleteEvent, FileTransferFailedEvent, OutgoingFileOfferPendingEvent, OutgoingFileOfferTerminalEvent, PendingFileReceivedEvent } from "../types";
+import { ChatNode, FileTransferProgressEvent, FileTransferCompleteEvent, FileTransferFailedEvent, OutgoingFileOfferPendingEvent, OutgoingFileOfferTerminalEvent, PendingFileReceivedEvent, StreamHandlerContext } from "../types";
 import type { Stream } from "@libp2p/interface";
 import { ChatDatabase } from "../db/database";
 import { readFile, stat } from "fs/promises";
@@ -6,9 +6,21 @@ import { basename } from "path";
 import { blake3 } from "@napi-rs/blake-hash";
 import { randomUUID } from "crypto";
 import mime from "mime-types";
-import { CHUNK_SIZE, MAX_FILE_SIZE, FILE_OFFER_RATE_LIMIT, FILE_OFFER_RATE_LIMIT_WINDOW, MAX_PENDING_FILES_PER_PEER, MAX_PENDING_FILES_TOTAL, MAX_ACTIVE_FILE_OFFERS_PER_CHAT } from "../constants.js";
+import {
+  CHUNK_SIZE, MAX_FILE_SIZE, FILE_OFFER_RATE_LIMIT, FILE_OFFER_RATE_LIMIT_WINDOW,
+  MAX_PENDING_FILES_PER_PEER, MAX_PENDING_FILES_TOTAL, MAX_ACTIVE_FILE_OFFERS_PER_CHAT,
+  MAX_CONCURRENT_FILE_SERVES, MAX_CONCURRENT_FILE_SERVES_PER_PEER,
+  MAX_PREAUTH_STREAMS_GLOBAL, MAX_PREAUTH_STREAMS_PER_PEER,
+  FILE_PULL_FIRST_FRAME_TIMEOUT_FAST, FILE_PULL_FIRST_FRAME_TIMEOUT_ANON,
+  FILE_PULL_AUTH_TIMEOUT_FAST, FILE_PULL_AUTH_TIMEOUT_ANON, FILE_PULL_CONFIRM_TIMEOUT,
+  CHUNK_RECEIVE_TIMEOUT, CHUNK_IDLE_TIMEOUT, NETWORK_MODES, getNetworkModeRuntime,
+} from "../constants.js";
 import { MessageHandler } from "./message-handler.js";
 import { ServedFileRegistry } from "./served-file-registry.js";
+import { LeasePool, type Lease } from "./lease-pool.js";
+import { FrameStreamReader } from "./frame-stream.js";
+import { createFileChunks, encodePullFrame } from "./file-transfer.js";
+import { StreamHandler } from "../transport/stream-handler.js";
 import { errStr, generalErrorHandler } from "../utils/general-error.js";
 import { EncryptedUserIdentity } from "../identity/encrypted-user-identity.js";
 import { isDebugModeEnabled, log } from "../../shared/logger.js";
@@ -29,6 +41,14 @@ import {
   getFileOfferNackOutcome,
   validateFileOfferNack,
 } from "../protocol/file-offer-control.js";
+import {
+  PullChallengeStore,
+  evaluateFilePullAuth,
+  isFilePullAuth,
+  isFilePullInit,
+  isFileTransferConfirm,
+  type FilePullRejectReason,
+} from "../protocol/file-pull-protocol.js";
 
 interface FileMetadata {
   buffer: Buffer
@@ -39,6 +59,18 @@ interface FileMetadata {
   totalChunks: number
 }
 
+type ServeGateDecision =
+  | { kind: 'reject'; reason: FilePullRejectReason }
+  | {
+    kind: 'serve';
+    buffer: Buffer;
+    chatId: number;
+    fileId: string;
+    filename: string;
+    size: number;
+    totalChunks: number;
+  };
+
 export class FileHandler {
   private static readonly TRACE_ENABLED = isDebugModeEnabled();
   private node: ChatNode;
@@ -47,6 +79,14 @@ export class FileHandler {
   private fileOfferTimestamps = new Map<string, number[]>();
   private fileOfferRateLimitNackAt = new Map<string, number>();
   private servedFiles = new ServedFileRegistry(MAX_ACTIVE_FILE_OFFERS_PER_CHAT);
+  private pullChallenges = new PullChallengeStore();
+  private preAuthLeases = new LeasePool(MAX_PREAUTH_STREAMS_GLOBAL, MAX_PREAUTH_STREAMS_PER_PEER);
+  private serveLeases = new LeasePool(MAX_CONCURRENT_FILE_SERVES, MAX_CONCURRENT_FILE_SERVES_PER_PEER);
+  private servingOffers = new Set<string>(); // offerIds with a serve in flight (one serve per offer)
+  private activeServeStreams = new Set<Stream>();
+  private activeServeTasks = new Set<Promise<void>>();
+  private shuttingDown = false;
+  private readonly fileTransferProtocol: string;
   private activeTransfersByPeer = new Map<string, { fileId: string; direction: 'send' | 'receive' }>();
   private activeTransferStreams = new Map<string, Stream>();
   private onFileTransferProgress: (data: FileTransferProgressEvent) => void;
@@ -76,10 +116,12 @@ export class FileHandler {
     this.onOutgoingFileOfferPending = onOutgoingFileOfferPending;
     this.onOutgoingFileOfferTerminal = onOutgoingFileOfferTerminal;
     this.onPendingFileReceived = onPendingFileReceived;
+    this.fileTransferProtocol = getNetworkModeRuntime(this.database.getSessionNetworkMode()).config.fileTransferProtocol;
     const failedCount = this.database.failNonTerminalFileTransfers('Transfer interrupted (app restart/close)');
     if (failedCount > 0) {
       console.log(`[FileHandler] Marked ${failedCount} non-terminal file transfer(s) as failed on startup`);
     }
+    this.#registerServeHandler();
   }
 
   // Get configuration values from database with fallback to constants
@@ -153,6 +195,245 @@ export class FileHandler {
   /** True while this peer is still serving the given offer (slot occupied). */
   hasActiveOffer(offerId: string): boolean {
     return this.servedFiles.has(offerId);
+  }
+
+  // ── Sender serve handler (pull model) ──────────────────────────────────────────────────────
+
+  #registerServeHandler(): void {
+    void this.node.handle(this.fileTransferProtocol, (context: StreamHandlerContext) => {
+      const { remoteId, stream } = StreamHandler.getRemotePeerInfo(context);
+      if (this.shuttingDown || this.database.isBlocked(remoteId)) {
+        try { stream.abort(new Error('serve unavailable')); } catch { /* best-effort */ }
+        return;
+      }
+      // Pre-auth gate: bound concurrent unauthenticated handshake streams (global + per peer).
+      const preAuthLease = this.preAuthLeases.tryAcquire(remoteId);
+      if (!preAuthLease) {
+        try { stream.abort(new Error('pull handshake capacity reached')); } catch { /* best-effort */ }
+        return;
+      }
+      // Track the serve so cleanup() can abort it and wait for it to unwind before the DB closes.
+      const task = (async () => {
+        try {
+          await this.#serveStream(remoteId, stream, preAuthLease);
+        } catch (error: unknown) {
+          this.trace('SEND', remoteId, null, 'SERVE_STREAM_FAILED', `err=${errStr(error, 'unknown')}`);
+        } finally {
+          preAuthLease.release(); // idempotent — already released at the auth hand-off on the serve path
+          try { await stream.close(); } catch { /* best-effort */ }
+        }
+      })();
+      this.activeServeStreams.add(stream);
+      this.activeServeTasks.add(task);
+      void task.finally(() => {
+        this.activeServeStreams.delete(stream);
+        this.activeServeTasks.delete(task);
+      });
+    }, { runOnLimitedConnection: true });
+  }
+
+  async #serveStream(remoteId: string, stream: Stream, preAuthLease: Lease): Promise<void> {
+    const isAnon = this.database.getSessionNetworkMode() === NETWORK_MODES.ANONYMOUS;
+    const reader = new FrameStreamReader(stream);
+    const onProgress = this.onFileTransferProgress;
+
+    const initFrame = await reader.readFrame(
+      isAnon ? FILE_PULL_FIRST_FRAME_TIMEOUT_ANON : FILE_PULL_FIRST_FRAME_TIMEOUT_FAST,
+    );
+    if (!isFilePullInit(initFrame)) {
+      try { stream.abort(new Error('expected file_pull_init')); } catch { /* best-effort */ }
+      return;
+    }
+    const offerId = initFrame.offerId;
+    const challenge = this.pullChallenges.issue(offerId);
+
+    // The sink is driven by a single generator so chunks are pulled lazily (real backpressure):
+    // it sends the challenge, parks on `gate` until auth is decided, then yields either a reject
+    // frame or the chunks one at a time.
+    let resolveGate: (decision: ServeGateDecision) => void = () => {};
+    let gateSettled = false;
+    const gate = new Promise<ServeGateDecision>((resolve) => { resolveGate = resolve; });
+    const settle = (decision: ServeGateDecision): void => {
+      if (!gateSettled) { gateSettled = true; resolveGate(decision); }
+    };
+    // Rearmed each time a chunk is accepted by the sink (i.e. drained); the one-shot idle watchdog
+    // fires exactly CHUNK_IDLE_TIMEOUT after the last drained chunk (set up in the serve phase).
+    const idle: { rearm: () => void } = { rearm: () => {} };
+
+    const sinkDone = stream.sink((async function* () {
+      yield encodePullFrame({ type: 'file_pull_challenge', offerId, challenge });
+      const decision = await gate;
+      if (decision.kind === 'reject') {
+        yield encodePullFrame({ type: 'file_pull_reject', offerId, reason: decision.reason });
+        return;
+      }
+      let index = 0;
+      for (const chunk of createFileChunks(decision.buffer, offerId)) {
+        yield encodePullFrame(chunk);
+        idle.rearm();
+        index += 1;
+        onProgress({
+          chatId: decision.chatId,
+          messageId: decision.fileId,
+          current: index,
+          total: decision.totalChunks,
+          filename: decision.filename,
+          size: decision.size,
+        });
+      }
+    })());
+    sinkDone.catch(() => undefined);
+
+    let serveLease: Lease | null = null;
+    let servingThisOffer = false;
+    let totalTimer: ReturnType<typeof setTimeout> | undefined;
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const authFrame = await reader.readFrame(isAnon ? FILE_PULL_AUTH_TIMEOUT_ANON : FILE_PULL_AUTH_TIMEOUT_FAST);
+      if (!isFilePullAuth(authFrame)) {
+        settle({ kind: 'reject', reason: 'unauthorized' });
+        await sinkDone;
+        return;
+      }
+      const decision = this.#decidePull(authFrame, remoteId, offerId, challenge);
+      if (!decision.ok) {
+        settle({ kind: 'reject', reason: decision.reason });
+        await sinkDone;
+        return;
+      }
+
+      // Auth passed: take a serve slot. One serve per offer (a second concurrent pull of the same
+      // offer is rejected `busy`), and at most MAX_CONCURRENT_FILE_SERVES_PER_PEER different offers
+      // per peer.
+      if (this.servingOffers.has(offerId)) {
+        settle({ kind: 'reject', reason: 'busy' });
+        await sinkDone;
+        return;
+      }
+      serveLease = this.serveLeases.tryAcquire(remoteId);
+      if (!serveLease) {
+        settle({ kind: 'reject', reason: 'busy' });
+        await sinkDone;
+        return;
+      }
+      this.servingOffers.add(offerId);
+      servingThisOffer = true;
+      preAuthLease.release();
+
+      const meta = this.servedFiles.getMeta(offerId);
+      if (!meta) {
+        settle({ kind: 'reject', reason: 'unavailable' });
+        await sinkDone;
+        return;
+      }
+
+      // Lazy re-read + verify against the offer-time snapshot.
+      let buffer: Buffer;
+      try {
+        buffer = await readFile(meta.filePath);
+      } catch {
+        this.#failServedOffer(offerId, meta.fileId, meta.chatId, 'File no longer available');
+        settle({ kind: 'reject', reason: 'source_changed' });
+        await sinkDone;
+        return;
+      }
+      if (buffer.length !== meta.size || blake3(buffer).toString('hex') !== meta.checksum) {
+        this.#failServedOffer(offerId, meta.fileId, meta.chatId, 'File no longer available');
+        settle({ kind: 'reject', reason: 'source_changed' });
+        await sinkDone;
+        return;
+      }
+
+      // Bound the serve two ways: a hard total cap, and a resettable one-shot chunk-idle watchdog
+      // that fires CHUNK_IDLE_TIMEOUT after the last drained chunk (rearmed per chunk by the sink),
+      // so a stalled puller is cut off at the idle bound — not after up to ~2× a polling interval.
+      totalTimer = setTimeout(() => {
+        try { stream.abort(new Error('total transfer timeout')); } catch { /* best-effort */ }
+      }, CHUNK_RECEIVE_TIMEOUT);
+      idle.rearm = (): void => {
+        if (idleTimer) { clearTimeout(idleTimer); }
+        idleTimer = setTimeout(() => {
+          try { stream.abort(new Error('chunk idle timeout')); } catch { /* best-effort */ }
+        }, CHUNK_IDLE_TIMEOUT);
+      };
+      idle.rearm(); // arm before the first chunk so an immediate stall is still bounded
+
+      settle({
+        kind: 'serve',
+        buffer,
+        chatId: meta.chatId,
+        fileId: meta.fileId,
+        filename: basename(meta.filePath),
+        size: meta.size,
+        totalChunks: Math.ceil(meta.size / CHUNK_SIZE),
+      });
+      await sinkDone;
+      const confirmFrame = await reader.readFrame(FILE_PULL_CONFIRM_TIMEOUT);
+      this.#applyServeConfirm(offerId, meta, confirmFrame);
+    } finally {
+      if (totalTimer) { clearTimeout(totalTimer); }
+      if (idleTimer) { clearTimeout(idleTimer); }
+      idle.rearm = () => {}; // a late sink rearm after teardown must not resurrect the timer
+      settle({ kind: 'reject', reason: 'unavailable' }); // unblock the generator if we errored pre-settle
+      this.pullChallenges.discard(offerId, challenge);
+      if (servingThisOffer) { this.servingOffers.delete(offerId); }
+      serveLease?.release();
+      preAuthLease.release();
+    }
+  }
+
+  #decidePull(
+    auth: { offerId: string; requesterPeerId: string; challenge: string; signature: string; senderPeerId: string },
+    remoteId: string,
+    offerId: string,
+    streamChallenge: string,
+  ): { ok: true } | { ok: false; reason: FilePullRejectReason } {
+    // Bind to THIS stream's exact challenge, not merely any outstanding one for the offer.
+    if (auth.challenge !== streamChallenge) {
+      return { ok: false, reason: 'unauthorized' };
+    }
+    const decision = evaluateFilePullAuth({
+      auth: { type: 'file_pull_auth', ...auth },
+      offerExists: !!this.servedFiles.getMeta(offerId),
+      authorizedSigningKey: this.servedFiles.getAuthorizedKey(offerId, auth.requesterPeerId),
+      localSenderPeerId: this.node.peerId.toString(),
+      remotePeerId: remoteId,
+      consumeChallenge: (oId, c) => this.pullChallenges.consume(oId, c),
+      verifySignature: (sig, payload, key) => EncryptedUserIdentity.verifyKeyExchangeSignature(sig, payload, key),
+    });
+    return decision.ok ? { ok: true } : { ok: false, reason: decision.reason };
+  }
+
+  #failServedOffer(offerId: string, fileId: string, chatId: number, error: string): void {
+    this.servedFiles.release(offerId);
+    // CAS: only emit/transition if the row is still serving — a prior NACK terminal state wins.
+    if (this.database.terminalizeServedFileIfActive(fileId, 'failed', 0, error)) {
+      this.onFileTransferFailed({ chatId, messageId: fileId, error });
+    }
+  }
+
+  #applyServeConfirm(
+    offerId: string,
+    meta: { fileId: string; chatId: number; filePath: string },
+    confirmFrame: unknown,
+  ): void {
+    // The confirm must name THIS offer, with the success/reason invariant the guard enforces.
+    if (!isFileTransferConfirm(confirmFrame) || confirmFrame.offerId !== offerId) {
+      return; // malformed/absent/cross-offer confirm: keep the offer (slot released in finally)
+    }
+    if (confirmFrame.success) {
+      this.servedFiles.release(offerId);
+      if (this.database.terminalizeServedFileIfActive(meta.fileId, 'completed', 100, null)) {
+        this.onFileTransferComplete({ chatId: meta.chatId, messageId: meta.fileId, filePath: meta.filePath });
+      }
+      return;
+    }
+    if (confirmFrame.reason === 'integrity') {
+      // The file itself is bad → the offer is dead.
+      this.#failServedOffer(offerId, meta.fileId, meta.chatId, 'Recipient integrity check failed');
+      return;
+    }
+    // disk/other failure: the recipient's local problem; keep the offer for a re-pull.
   }
 
   acceptPendingFile(fileId: string): void {
@@ -550,7 +831,21 @@ export class FileHandler {
     }
   }
 
-  cleanup(): void {
+  async cleanup(): Promise<void> {
+    this.shuttingDown = true;
+    // Stop accepting new serve streams, then abort and DRAIN in-flight serves before returning —
+    // the caller closes the database immediately after cleanup(), so a still-running serve handler
+    // must not be left able to touch a closed DB.
+    try {
+      await this.node.unhandle(this.fileTransferProtocol);
+    } catch {
+      // best-effort: node may already be stopping
+    }
+    for (const stream of this.activeServeStreams) {
+      try { stream.abort(new Error('application shutdown')); } catch { /* best-effort */ }
+    }
+    await Promise.allSettled([...this.activeServeTasks]);
+
     for (const [fileId, stream] of this.activeTransferStreams.entries()) {
       try {
         stream.abort(new Error('File transfer interrupted: application shutdown'));
@@ -562,6 +857,7 @@ export class FileHandler {
     }
     this.activeTransfersByPeer.clear();
     this.servedFiles.clear();
+    this.pullChallenges.clear();
 
     const failed = this.database.failNonTerminalFileTransfers('Transfer interrupted (app shutdown)');
     if (failed > 0) {

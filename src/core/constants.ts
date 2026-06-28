@@ -335,6 +335,18 @@ export const FILE_OFFER_RATE_LIMIT_WINDOW = 1 * MINUTE; // 1 minute
 export const MAX_PENDING_FILES_PER_PEER = 5; // Max unanswered file offers per peer
 export const MAX_PENDING_FILES_TOTAL = 10; // Max unanswered file offers globally
 export const MAX_ACTIVE_FILE_OFFERS_PER_CHAT = 5; // Sender cap: live served-file offers per chat (in-RAM registry)
+
+// Pull-transfer (1d) operational bounds.
+export const MAX_CONCURRENT_FILE_SERVES = 15; // Global concurrent serve leases (bound to 10MB MAX_FILE_SIZE → ~150MB RAM)
+export const MAX_CONCURRENT_FILE_SERVES_PER_PEER = 5; // …and per peer; matches MAX_ACTIVE_FILE_OFFERS_PER_CHAT so a peer can pull all their offers at once without a gratuitous busy
+export const MAX_PREAUTH_STREAMS_GLOBAL = 32; // Concurrent unauthenticated inbound pull streams, globally
+export const MAX_PREAUTH_STREAMS_PER_PEER = 2; // …and per peer, so one peer can't consume all handshake capacity
+export const FILE_PULL_FIRST_FRAME_TIMEOUT_FAST = 10 * SECOND; // Stream opened but no FilePullInit (fast mode)
+export const FILE_PULL_FIRST_FRAME_TIMEOUT_ANON = 30 * SECOND; // …anonymous mode (higher latency)
+export const FILE_PULL_AUTH_TIMEOUT_FAST = 10 * SECOND; // FilePullChallenge sent, awaiting FilePullAuth (fast mode)
+export const FILE_PULL_AUTH_TIMEOUT_ANON = 30 * SECOND; // …anonymous mode
+export const FILE_PULL_CONFIRM_TIMEOUT = 30 * SECOND; // Last chunk sent, awaiting FileTransferConfirm
+// Chunk idle (CHUNK_IDLE_TIMEOUT) and total-transfer (CHUNK_RECEIVE_TIMEOUT) bounds are reused.
 export const SILENT_REJECTION_THRESHOLD_GLOBAL = 20; // After N global rejections, stop responding (bandwidth optimization)
 export const SILENT_REJECTION_THRESHOLD_PER_PEER = 5; // After N rejections to same peer, stop responding (bandwidth optimization)
 export const CHATS_TO_CHECK_FOR_OFFLINE_MESSAGES = 10; // Max chats scanned per offline-message check pass

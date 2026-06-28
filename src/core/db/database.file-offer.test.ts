@@ -115,6 +115,72 @@ test('applies a NACK only to the matching active outgoing offer', async (t) => {
   }), null);
 });
 
+test('a prior NACK wins over a later serve completion or source-change (CAS, first terminal wins)', async (t) => {
+  const { database, chatId } = await createFileOfferDatabase();
+  t.after(() => database.close());
+  await database.createMessage({
+    id: 'outgoing_file',
+    client_msg_id: 'outgoing_file',
+    chat_id: chatId,
+    sender_peer_id: 'sender_peer',
+    content: 'report.pdf (10 bytes)',
+    message_type: 'file',
+    file_name: 'report.pdf',
+    file_offer_id: 'offer_1',
+    transfer_status: 'awaiting_acceptance',
+    transfer_progress: 0,
+    timestamp: new Date(),
+  });
+
+  // A signed NACK lands first and moves the row to a terminal 'rejected'.
+  assert.deepEqual(database.terminalizeOutgoingFileOfferFromNack({
+    offerId: 'offer_1',
+    chatId,
+    localPeerId: 'sender_peer',
+    status: 'rejected',
+    error: 'Recipient declined',
+  }), { messageId: 'outgoing_file', filename: 'report.pdf' });
+
+  // A later (lost-confirm racing) serve completion must NOT overwrite the decline.
+  assert.equal(database.terminalizeServedFileIfActive('outgoing_file', 'completed', 100, null), false);
+  // …nor a later source-change failure.
+  assert.equal(database.terminalizeServedFileIfActive('outgoing_file', 'failed', 0, 'File no longer available'), false);
+  assert.equal(database.getFileMessageById('outgoing_file')?.transfer_status, 'rejected');
+});
+
+test('serve completion wins when no terminal state preceded it, and a late NACK then no-ops', async (t) => {
+  const { database, chatId } = await createFileOfferDatabase();
+  t.after(() => database.close());
+  await database.createMessage({
+    id: 'outgoing_file',
+    client_msg_id: 'outgoing_file',
+    chat_id: chatId,
+    sender_peer_id: 'sender_peer',
+    content: 'report.pdf (10 bytes)',
+    message_type: 'file',
+    file_name: 'report.pdf',
+    file_offer_id: 'offer_1',
+    transfer_status: 'awaiting_acceptance',
+    transfer_progress: 0,
+    timestamp: new Date(),
+  });
+
+  // Completion lands first on the still-active row.
+  assert.equal(database.terminalizeServedFileIfActive('outgoing_file', 'completed', 100, null), true);
+  assert.equal(database.getFileMessageById('outgoing_file')?.transfer_status, 'completed');
+  // A second CAS (e.g. duplicate confirm) is a no-op.
+  assert.equal(database.terminalizeServedFileIfActive('outgoing_file', 'completed', 100, null), false);
+  // A NACK arriving after completion cannot revert it (its own active-state guard fails).
+  assert.equal(database.terminalizeOutgoingFileOfferFromNack({
+    offerId: 'offer_1',
+    chatId,
+    localPeerId: 'sender_peer',
+    status: 'rejected',
+    error: 'Recipient declined',
+  }), null);
+  assert.equal(database.getFileMessageById('outgoing_file')?.transfer_status, 'completed');
+});
+
 test('startup reconciliation fails sender authority but preserves recipient offers', async (t) => {
   const { database, chatId } = await createFileOfferDatabase();
   t.after(() => database.close());

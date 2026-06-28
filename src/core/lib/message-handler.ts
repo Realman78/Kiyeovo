@@ -4044,7 +4044,7 @@ export class MessageHandler {
 
   async cleanup(): Promise<void> {
     await this.endActiveCallForShutdown();
-    this.fileHandler.cleanup();
+    await this.fileHandler.cleanup(); // drains in-flight serves before the DB is closed
     this.groupMessaging.cleanup();
 
     if (this.groupAckStartupTimer) {

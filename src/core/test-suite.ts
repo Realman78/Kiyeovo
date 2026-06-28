@@ -3,5 +3,8 @@ import './protocol/file-offer-validation.test.js';
 import './protocol/file-offer-control.test.js';
 import './protocol/file-pull-protocol.test.js';
 import './lib/served-file-registry.test.js';
+import './lib/lease-pool.test.js';
+import './lib/file-transfer.test.js';
+import './lib/frame-stream.test.js';
 import './lib/file-handler.test.js';
 import './db/database.file-offer.test.js';

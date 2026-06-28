@@ -52,7 +52,10 @@ async function createHarness(t: { after: (fn: () => void) => void }): Promise<{
     participants: [RECIPIENT_PEER],
   });
 
-  const node = { peerId: { toString: () => LOCAL_PEER } } as unknown as ChatNode;
+  const node = {
+    peerId: { toString: () => LOCAL_PEER },
+    handle: async () => undefined, // serve-handler registration is a no-op in unit tests
+  } as unknown as ChatNode;
   const messageHandler = {
     getUserIdentity: () => ({ sign: (message: string) => sign(localPrivateKey, message) }),
     sendApplicationMessage: async () => ({

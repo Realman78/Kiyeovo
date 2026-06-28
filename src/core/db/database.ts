@@ -2608,6 +2608,29 @@ export class ChatDatabase {
         );
     }
 
+    /**
+     * Compare-and-set terminal transition for an outgoing served file: applies only while the row
+     * is still in the active serving state (`awaiting_acceptance`), so the first terminal state
+     * wins and a serve completion can never overwrite an already-applied NACK (rejected/failed).
+     * Returns true iff this call performed the transition.
+     */
+    terminalizeServedFileIfActive(
+        fileId: string,
+        status: 'completed' | 'failed',
+        progress: number,
+        error: string | null,
+    ): boolean {
+        const result = this.db.prepare(`
+            UPDATE messages
+            SET transfer_status = ?, transfer_progress = ?, transfer_error = ?
+            WHERE id = ?
+              AND message_type = 'file'
+              AND transfer_status = 'awaiting_acceptance'
+              AND chat_id IN (SELECT id FROM chats WHERE network_mode = ?)
+        `).run(status, progress, error, fileId, this.sessionNetworkMode);
+        return result.changes === 1;
+    }
+
     failNonTerminalFileTransfers(reason: string = 'Transfer interrupted'): number {
         const stmt = this.db.prepare(`
             UPDATE messages

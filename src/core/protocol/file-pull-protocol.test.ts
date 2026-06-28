@@ -10,6 +10,7 @@ import {
   isFileChunk,
   isFilePullAuth,
   isFilePullInit,
+  isFileTransferConfirm,
   type FilePullAuth,
 } from './file-pull-protocol.js';
 
@@ -143,6 +144,24 @@ test('a challenge issued for one offer cannot authorize another', () => {
   );
 });
 
+test('discard removes only one stream\'s challenge; concurrent same-offer streams survive', () => {
+  const store = new PullChallengeStore();
+  const streamA = store.issue(OFFER);
+  const streamB = store.issue(OFFER);
+
+  // Stream A times out and discards its own challenge.
+  store.discard(OFFER, streamA);
+  assert.equal(store.consume(OFFER, streamA), false); // A is gone
+  assert.equal(store.consume(OFFER, streamB), true);  // B still pullable
+
+  // dropOffer, by contrast, would invalidate every concurrent stream for the offer.
+  const streamC = store.issue(OFFER);
+  const streamD = store.issue(OFFER);
+  store.dropOffer(OFFER);
+  assert.equal(store.consume(OFFER, streamC), false);
+  assert.equal(store.consume(OFFER, streamD), false);
+});
+
 test('strict frame guards reject malformed and oversized frames', () => {
   assert.equal(isFilePullInit({ type: 'file_pull_init', offerId: OFFER }), true);
   assert.equal(isFilePullInit({ type: 'file_pull_init', offerId: '../bad' }), false);
@@ -156,4 +175,16 @@ test('strict frame guards reject malformed and oversized frames', () => {
   assert.equal(isFileChunk(chunk), true);
   assert.equal(isFileChunk({ ...chunk, index: -1 }), false);
   assert.equal(isFileChunk({ ...chunk, data: 'a'.repeat(MAX_FILE_CHUNK_DATA_LENGTH + 1) }), false);
+});
+
+test('confirm guard enforces the success/reason invariant', () => {
+  assert.equal(isFileTransferConfirm({ type: 'file_transfer_confirm', offerId: OFFER, success: true }), true);
+  assert.equal(isFileTransferConfirm({ type: 'file_transfer_confirm', offerId: OFFER, success: false, reason: 'integrity' }), true);
+  assert.equal(isFileTransferConfirm({ type: 'file_transfer_confirm', offerId: OFFER, success: false, reason: 'disk' }), true);
+  // success must NOT carry a reason…
+  assert.equal(isFileTransferConfirm({ type: 'file_transfer_confirm', offerId: OFFER, success: true, reason: 'integrity' }), false);
+  // …and failure MUST carry a valid one.
+  assert.equal(isFileTransferConfirm({ type: 'file_transfer_confirm', offerId: OFFER, success: false }), false);
+  assert.equal(isFileTransferConfirm({ type: 'file_transfer_confirm', offerId: OFFER, success: false, reason: 'nope' }), false);
+  assert.equal(isFileTransferConfirm({ type: 'file_transfer_confirm', offerId: '../bad', success: true }), false);
 });
