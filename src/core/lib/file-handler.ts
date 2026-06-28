@@ -620,6 +620,10 @@ export class FileHandler {
       });
 
       totalTimer = setTimeout(() => {
+        console.warn(
+          `[FILE][PULL][RECV][TOTAL_TIMEOUT] peer=${claim.senderPeerId.slice(-8)} ` +
+          `file=${claim.messageId} offer=${claim.offerId}`,
+        );
         try { stream?.abort(new Error('total transfer timeout')); } catch { /* best-effort */ }
       }, CHUNK_RECEIVE_TIMEOUT);
 
@@ -702,6 +706,10 @@ export class FileHandler {
         return;
       }
       if (!outcomeApplied) {
+        console.warn(
+          `[FILE][PULL][RECV][INTERRUPTED] peer=${claim.senderPeerId.slice(-8)} ` +
+          `file=${claim.messageId} offer=${claim.offerId} err=${errStr(error, 'unknown')}`,
+        );
         this.#resetIncomingPullToPending(claim, 'Transfer interrupted');
       }
       this.trace('RECV', claim.senderPeerId, claim.messageId, 'PULL_FAILED', `offer=${claim.offerId} err=${errStr(error, 'unknown')}`);

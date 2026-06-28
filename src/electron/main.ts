@@ -278,6 +278,11 @@ function createMainWindow() {
     enforceWindowTitle();
   });
   win.webContents.on('did-finish-load', enforceWindowTitle);
+  win.webContents.on('render-process-gone', (_event, details) => {
+    console.error(
+      `[Electron][RENDERER][GONE] reason=${details.reason} exitCode=${details.exitCode}`,
+    );
+  });
   applyWindowSecurityPolicies(win, { appEntryUrl, isDevelopment });
   setupTextContextMenu(win);
 
@@ -860,9 +865,11 @@ async function initializeApp() {
   }
 }
 
-app.whenReady().then(async () => {
-  await initializeApp();
-});
+if (gotTheLock) {
+  app.whenReady().then(async () => {
+    await initializeApp();
+  });
+}
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

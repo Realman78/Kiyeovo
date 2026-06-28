@@ -108,17 +108,18 @@ Mode switch is done in settings and requires app restart (no hot stack replaceme
 
 ### 3. Startup and lifecycle flow
 
-1. Electron app starts and creates the window.
+1. Electron app acquires the single-instance lock. A secondary process exits before window/core initialization.
+2. Electron app starts and creates the window.
    - privileged application and local-media URL schemes are registered before Electron becomes ready
-2. Main process reads DB settings (`network_mode`, onboarding flag).
-3. If onboarding requires explicit mode selection, initialization is gated until user picks mode.
-4. Tor manager starts only for `anonymous` mode.
-5. Encrypted identity for active mode is loaded/unlocked.
-6. Libp2p node is created with mode-specific stack and validators.
-7. Bootstrap/relay connectivity is established.
-8. DHT status checker and periodic maintenance start.
-9. Username registry, message/group/file/call handlers activate.
-10. UI hydrates from init state and live IPC events.
+3. Main process reads DB settings (`network_mode`, onboarding flag).
+4. If onboarding requires explicit mode selection, initialization is gated until user picks mode.
+5. Tor manager starts only for `anonymous` mode.
+6. Encrypted identity for active mode is loaded/unlocked.
+7. Libp2p node is created with mode-specific stack and validators.
+8. Bootstrap/relay connectivity is established.
+9. DHT status checker and periodic maintenance start.
+10. Username registry, message/group/file/call handlers activate.
+11. UI hydrates from init state and live IPC events.
 
 ---
 
@@ -732,6 +733,7 @@ Current resilience layers:
 - durable offline-send / group-backup queues with crash-safe (transactional) state and manual retry
 - group offline check orchestration with single-flight style guards
 - startup cleanup of interrupted file transfers (and reconciliation of interrupted offline sends → `failed`)
+- main-process logging for renderer process termination (`render-process-gone`) so renderer crashes are visible in operational logs
 
 ---
 
