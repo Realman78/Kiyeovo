@@ -1108,6 +1108,13 @@ export class GroupMessaging {
           file_offer_cancel: routeNonText,
           file_offer_nack: routeNonText,
         }, { expectedCid: parsed.messageId });
+        // TEMP_LOG: temporary group application-message dispatch diagnostics; remove after Phase 2a delivery debugging.
+        log(
+          `[TEMP_LOG][APP-MESSAGE][GROUP][DISPATCH] ${msgTag} status=${dispatched.status} `
+          + `value=${dispatched.status === 'handled' ? String(dispatched.value) : 'n/a'}`
+          + `${dispatched.status === 'unhandled' ? ` kind=${dispatched.message.kind}` : ''}`
+          + `${dispatched.status === 'rejected' ? ` reason=${dispatched.reason}` : ''}`,
+        );
         inserted = dispatched.status === 'handled' && dispatched.value;
         if (dispatched.status === 'rejected') {
           log(`[APP-MESSAGE][GROUP][DROP] ${msgTag} reason=${dispatched.reason}`);

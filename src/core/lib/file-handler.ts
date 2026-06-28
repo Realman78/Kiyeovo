@@ -190,6 +190,11 @@ export class FileHandler {
     log(`[FILE][TRACE][${scope}] peer=*${peerSuffix} file=${fileLabel} event=${event}${details}`);
   }
 
+  private tempOfferDiag(event: string, details: string): void {
+    // TEMP_LOG: temporary inbound file-offer diagnostics; remove after Phase 2a delivery debugging.
+    log(`[TEMP_LOG][FILE-OFFER][RECV] event=${event} ${details}`);
+  }
+
 
   // Check if peer has exceeded file offer rate limit
   private isFileOfferRateLimitExceeded(peerId: string): boolean {
@@ -1170,43 +1175,85 @@ export class FileHandler {
     const isDirectRoute = context.route === 'direct_online' || context.route === 'direct_offline';
     const isGroupRoute = context.route === 'group_realtime' || context.route === 'group_offline';
     if (!isDirectRoute && !isGroupRoute) {
+      this.tempOfferDiag(
+        'drop_invalid_route',
+        `route=${context.route} cid=${context.message.cid} peer=${context.senderPeerId.slice(-8)}`,
+      );
       return false;
     }
 
     const offer = context.message.payload;
+    this.tempOfferDiag(
+      'start',
+      `route=${context.route} chatId=${context.chatId} peer=${context.senderPeerId.slice(-8)} `
+      + `cid=${context.message.cid} fileId=${offer.fileId} offer=${offer.offerId} `
+      + `name=${offer.filename} size=${offer.size} chunks=${offer.totalChunks}`,
+    );
     const chat = isDirectRoute
       ? this.database.getChatByPeerId(context.senderPeerId)
       : this.database.getChats([context.chatId])[0] ?? null;
     const sender = this.database.getUserByPeerId(context.senderPeerId);
     if (!chat || !sender) {
+      this.tempOfferDiag(
+        'drop_missing_context',
+        `route=${context.route} cid=${context.message.cid} chatFound=${!!chat} senderFound=${!!sender}`,
+      );
       return true;
     }
     if (isDirectRoute && chat.type !== 'direct') {
+      this.tempOfferDiag(
+        'drop_direct_chat_type_mismatch',
+        `route=${context.route} cid=${context.message.cid} chatId=${chat.id} chatType=${chat.type}`,
+      );
       return true;
     }
     if (isGroupRoute && chat.type !== 'group') {
+      this.tempOfferDiag(
+        'drop_group_chat_type_mismatch',
+        `route=${context.route} cid=${context.message.cid} chatId=${chat.id} chatType=${chat.type}`,
+      );
       return true;
     }
     if (isGroupRoute) {
       const participants = this.database.getChatParticipants(chat.id);
       if (!participants.some((participant) => participant.peer_id === context.senderPeerId)) {
+        this.tempOfferDiag(
+          'drop_sender_not_participant',
+          `route=${context.route} cid=${context.message.cid} chatId=${chat.id} participants=${participants.length}`,
+        );
         return true;
       }
     }
     if (chat.id !== context.chatId && isGroupRoute) {
+      this.tempOfferDiag(
+        'drop_group_chat_id_mismatch',
+        `route=${context.route} cid=${context.message.cid} contextChatId=${context.chatId} resolvedChatId=${chat.id}`,
+      );
       return true;
     }
 
     const existing = this.database.getFileMessageById(offer.fileId);
     if (existing) {
+      this.tempOfferDiag(
+        'drop_existing_row',
+        `route=${context.route} cid=${context.message.cid} fileId=${offer.fileId} `
+        + `existingChatId=${existing.chat_id} existingStatus=${existing.transfer_status ?? 'n/a'}`,
+      );
       return true;
     }
     const pending = this.database.getPendingIncomingFileOffers()
       .filter((message) => !message.transfer_error);
+    const pendingFromSender = pending.filter((message) => message.sender_peer_id === context.senderPeerId).length;
+    const maxPendingTotal = this.getMaxPendingFilesTotal();
+    const maxPendingPerPeer = this.getMaxPendingFilesPerPeer();
     const pendingCapacityFull =
-      pending.length >= this.getMaxPendingFilesTotal()
-      || pending.filter((message) => message.sender_peer_id === context.senderPeerId).length
-        >= this.getMaxPendingFilesPerPeer();
+      pending.length >= maxPendingTotal
+      || pendingFromSender >= maxPendingPerPeer;
+    this.tempOfferDiag(
+      'capacity_snapshot',
+      `route=${context.route} cid=${context.message.cid} pendingTotal=${pending.length}/${maxPendingTotal} `
+      + `pendingFromSender=${pendingFromSender}/${maxPendingPerPeer} full=${pendingCapacityFull}`,
+    );
     if (this.isFileOfferRateLimitExceeded(context.senderPeerId)) {
       if (isDirectRoute && this.claimRateLimitNackSlot(context.senderPeerId)) {
         const validation = validateIncomingFileOffer({
@@ -1225,6 +1272,10 @@ export class FileHandler {
             offerId: offer.offerId,
             senderPeerId: context.senderPeerId,
           })) {
+            this.tempOfferDiag(
+              'drop_rate_limited_tombstone',
+              `route=${context.route} cid=${context.message.cid} offer=${offer.offerId}`,
+            );
             return true;
           }
           void this.#sendFileOfferNack(
@@ -1232,7 +1283,22 @@ export class FileHandler {
             offer.offerId,
             pendingCapacityFull ? 'inbox_full' : 'rate_limited',
           );
+          this.tempOfferDiag(
+            'drop_rate_limited_nack_sent',
+            `route=${context.route} cid=${context.message.cid} offer=${offer.offerId} `
+            + `reason=${pendingCapacityFull ? 'inbox_full' : 'rate_limited'}`,
+          );
+        } else {
+          this.tempOfferDiag(
+            'drop_rate_limited_invalid_offer',
+            `route=${context.route} cid=${context.message.cid} offer=${offer.offerId} reason=${validation.reason}`,
+          );
         }
+      } else {
+        this.tempOfferDiag(
+          'drop_rate_limited_silent',
+          `route=${context.route} cid=${context.message.cid} offer=${offer.offerId} isDirect=${isDirectRoute}`,
+        );
       }
       return true;
     }
@@ -1250,6 +1316,11 @@ export class FileHandler {
       ),
     });
     if (!validation.ok) {
+      this.tempOfferDiag(
+        'drop_validation_failed',
+        `route=${context.route} cid=${context.message.cid} fileId=${offer.fileId} offer=${offer.offerId} `
+        + `reason=${validation.reason} size=${offer.size} maxFileSize=${this.getMaxFileSize()}`,
+      );
       return true;
     }
 
@@ -1257,6 +1328,10 @@ export class FileHandler {
       offerId: offer.offerId,
       senderPeerId: context.senderPeerId,
     })) {
+      this.tempOfferDiag(
+        'drop_tombstone',
+        `route=${context.route} cid=${context.message.cid} offer=${offer.offerId}`,
+      );
       return true;
     }
 
@@ -1264,6 +1339,12 @@ export class FileHandler {
       if (isDirectRoute) {
         void this.#sendFileOfferNack(context.senderPeerId, offer.offerId, 'inbox_full');
       }
+      this.tempOfferDiag(
+        'drop_capacity_full',
+        `route=${context.route} cid=${context.message.cid} offer=${offer.offerId} `
+        + `directNack=${isDirectRoute} pendingTotal=${pending.length}/${maxPendingTotal} `
+        + `pendingFromSender=${pendingFromSender}/${maxPendingPerPeer}`,
+      );
       return true;
     }
 
@@ -1286,6 +1367,10 @@ export class FileHandler {
       timestamp: new Date(context.timestamp),
     }, { dedupe: 'any' });
     if (!inserted) {
+      this.tempOfferDiag(
+        'drop_insert_dedupe',
+        `route=${context.route} cid=${context.message.cid} fileId=${offer.fileId} chatId=${chat.id}`,
+      );
       return true;
     }
 
@@ -1298,6 +1383,10 @@ export class FileHandler {
       senderUsername: sender.username,
       ...(offer.replyToCid ? { replyToClientId: offer.replyToCid } : {}),
     });
+    this.tempOfferDiag(
+      'persisted_and_emitted',
+      `route=${context.route} cid=${context.message.cid} fileId=${offer.fileId} offer=${offer.offerId} chatId=${chat.id}`,
+    );
     this.trace('RECV', context.senderPeerId, offer.fileId, 'OFFER_MESSAGE_PERSISTED', `offer=${offer.offerId}`);
     return true;
   }

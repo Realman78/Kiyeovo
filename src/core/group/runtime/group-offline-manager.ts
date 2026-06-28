@@ -818,6 +818,15 @@ export class GroupOfflineManager {
       file_offer_nack: routeNonText,
     }, { expectedCid: message.messageId });
 
+    // TEMP_LOG: temporary group offline application-message dispatch diagnostics; remove after Phase 2a delivery debugging.
+    log(
+      `[TEMP_LOG][APP-MESSAGE][GROUP-OFFLINE][DISPATCH] group=${message.groupId.slice(0, 8)} `
+      + `msgId=${message.messageId} sender=${message.senderPeerId.slice(-8)} status=${dispatched.status} `
+      + `value=${dispatched.status === 'handled' ? String(dispatched.value) : 'n/a'}`
+      + `${dispatched.status === 'unhandled' ? ` kind=${dispatched.message.kind}` : ''}`
+      + `${dispatched.status === 'rejected' ? ` reason=${dispatched.reason}` : ''}`,
+    );
+
     if (dispatched.status === 'handled') {
       return dispatched.value;
     }
