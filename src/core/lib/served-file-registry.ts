@@ -35,6 +35,7 @@ export type ServedFileMeta = {
   checksum: string;
   chatId: number;
   isGroup: boolean;
+  authorizedPullerCount: number;
 };
 
 type RegistryEntry =
@@ -125,6 +126,7 @@ export class ServedFileRegistry {
       checksum: served.checksum,
       chatId: served.chatId,
       isGroup: served.isGroup,
+      authorizedPullerCount: served.authorizedPullers.size,
     };
   }
 

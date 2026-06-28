@@ -17,7 +17,7 @@ import {
   CHUNK_RECEIVE_TIMEOUT, CHUNK_IDLE_TIMEOUT, NETWORK_MODES, getNetworkModeRuntime,
 } from "../constants.js";
 import { MessageHandler } from "./message-handler.js";
-import { ServedFileRegistry } from "./served-file-registry.js";
+import { ServedFileRegistry, type ServedFileMeta } from "./served-file-registry.js";
 import { LeasePool, type Lease } from "./lease-pool.js";
 import { FrameStreamReader } from "./frame-stream.js";
 import { ChunkReassembler, createFileChunks, encodePullFrame } from "./file-transfer.js";
@@ -80,6 +80,7 @@ type ServeGateDecision =
     filename: string;
     size: number;
     totalChunks: number;
+    isGroup: boolean;
   };
 
 type IncomingPullClaim = NonNullable<ReturnType<ChatDatabase['claimIncomingFilePull']>>;
@@ -117,7 +118,8 @@ export class FileHandler {
   private pullChallenges = new PullChallengeStore();
   private preAuthLeases = new LeasePool(MAX_PREAUTH_STREAMS_GLOBAL, MAX_PREAUTH_STREAMS_PER_PEER);
   private serveLeases = new LeasePool(MAX_CONCURRENT_FILE_SERVES, MAX_CONCURRENT_FILE_SERVES_PER_PEER);
-  private servingOffers = new Set<string>(); // offerIds with a serve in flight (one serve per offer)
+  private servingDirectOffers = new Set<string>(); // direct offerIds with a serve in flight
+  private servingGroupOfferPullers = new Map<string, Set<string>>(); // offerId -> requester peerIds
   private activeServeStreams = new Set<Stream>();
   private activeServeTasks = new Set<Promise<void>>();
   private shuttingDown = false;
@@ -193,6 +195,56 @@ export class FileHandler {
   private tempOfferDiag(event: string, details: string): void {
     // TEMP_LOG: temporary inbound file-offer diagnostics; remove after Phase 2a delivery debugging.
     log(`[TEMP_LOG][FILE-OFFER][RECV] event=${event} ${details}`);
+  }
+
+  private isOfferBeingServed(offerId: string): boolean {
+    return this.servingDirectOffers.has(offerId)
+      || ((this.servingGroupOfferPullers.get(offerId)?.size ?? 0) > 0);
+  }
+
+  private tryAcquireOfferServeLock(
+    offerId: string,
+    requesterPeerId: string,
+    isGroup: boolean,
+  ): { release: () => void } | null {
+    let released = false;
+
+    if (!isGroup) {
+      if (this.servingDirectOffers.has(offerId)) {
+        return null;
+      }
+      this.servingDirectOffers.add(offerId);
+      return {
+        release: () => {
+          if (released) return;
+          released = true;
+          this.servingDirectOffers.delete(offerId);
+        },
+      };
+    }
+
+    let servingPullers = this.servingGroupOfferPullers.get(offerId);
+    if (!servingPullers) {
+      servingPullers = new Set<string>();
+      this.servingGroupOfferPullers.set(offerId, servingPullers);
+    }
+    if (servingPullers.has(requesterPeerId)) {
+      return null;
+    }
+    servingPullers.add(requesterPeerId);
+
+    return {
+      release: () => {
+        if (released) return;
+        released = true;
+        const current = this.servingGroupOfferPullers.get(offerId);
+        if (!current) return;
+        current.delete(requesterPeerId);
+        if (current.size === 0) {
+          this.servingGroupOfferPullers.delete(offerId);
+        }
+      },
+    };
   }
 
 
@@ -314,20 +366,22 @@ export class FileHandler {
         yield encodePullFrame(chunk);
         idle.rearm();
         index += 1;
-        onProgress({
-          chatId: decision.chatId,
-          messageId: decision.fileId,
-          current: index,
-          total: decision.totalChunks,
-          filename: decision.filename,
-          size: decision.size,
-        });
+        if (!decision.isGroup) {
+          onProgress({
+            chatId: decision.chatId,
+            messageId: decision.fileId,
+            current: index,
+            total: decision.totalChunks,
+            filename: decision.filename,
+            size: decision.size,
+          });
+        }
       }
     })());
     sinkDone.catch(() => undefined);
 
     let serveLease: Lease | null = null;
-    let servingThisOffer = false;
+    let offerServeLock: { release: () => void } | null = null;
     let totalTimer: ReturnType<typeof setTimeout> | undefined;
     let idleTimer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -344,30 +398,31 @@ export class FileHandler {
         return;
       }
 
-      // Auth passed: take a serve slot. One serve per offer (a second concurrent pull of the same
-      // offer is rejected `busy`), and at most MAX_CONCURRENT_FILE_SERVES_PER_PEER different offers
-      // per peer.
-      if (this.servingOffers.has(offerId)) {
-        settle({ kind: 'reject', reason: 'busy' });
-        await sinkDone;
-        return;
-      }
-      serveLease = this.serveLeases.tryAcquire(remoteId);
-      if (!serveLease) {
-        settle({ kind: 'reject', reason: 'busy' });
-        await sinkDone;
-        return;
-      }
-      this.servingOffers.add(offerId);
-      servingThisOffer = true;
-      preAuthLease.release();
-
       const meta = this.servedFiles.getMeta(offerId);
       if (!meta) {
         settle({ kind: 'reject', reason: 'unavailable' });
         await sinkDone;
         return;
       }
+
+      // Auth passed: take an offer serve lock plus a global/per-peer serve slot. Direct offers stay
+      // single-serve; group offers allow concurrent different requesters but reject a duplicate
+      // same-recipient pull for the same offer as `busy`.
+      offerServeLock = this.tryAcquireOfferServeLock(offerId, authFrame.requesterPeerId, meta.isGroup);
+      if (!offerServeLock) {
+        settle({ kind: 'reject', reason: 'busy' });
+        await sinkDone;
+        return;
+      }
+      serveLease = this.serveLeases.tryAcquire(remoteId);
+      if (!serveLease) {
+        offerServeLock.release();
+        offerServeLock = null;
+        settle({ kind: 'reject', reason: 'busy' });
+        await sinkDone;
+        return;
+      }
+      preAuthLease.release();
 
       // Lazy re-read + verify against the offer-time snapshot.
       let buffer: Buffer;
@@ -408,6 +463,7 @@ export class FileHandler {
         filename: basename(meta.filePath),
         size: meta.size,
         totalChunks: Math.ceil(meta.size / CHUNK_SIZE),
+        isGroup: meta.isGroup,
       });
       try {
         await sinkDone;
@@ -416,6 +472,7 @@ export class FileHandler {
           reader,
           offerId,
           meta,
+          authFrame.requesterPeerId,
           FILE_PULL_INTERRUPTED_CONFIRM_GRACE_MS,
         );
         if (!applied) {
@@ -429,7 +486,13 @@ export class FileHandler {
         return;
       }
 
-      const applied = await this.#readAndApplyServeConfirm(reader, offerId, meta, FILE_PULL_CONFIRM_TIMEOUT);
+      const applied = await this.#readAndApplyServeConfirm(
+        reader,
+        offerId,
+        meta,
+        authFrame.requesterPeerId,
+        FILE_PULL_CONFIRM_TIMEOUT,
+      );
       if (!applied) {
         this.#resetServedOfferToAwaitingAcceptance(
           offerId,
@@ -443,7 +506,7 @@ export class FileHandler {
       idle.rearm = () => {}; // a late sink rearm after teardown must not resurrect the timer
       settle({ kind: 'reject', reason: 'unavailable' }); // unblock the generator if we errored pre-settle
       this.pullChallenges.discard(offerId, challenge);
-      if (servingThisOffer) { this.servingOffers.delete(offerId); }
+      offerServeLock?.release();
       serveLease?.release();
       preAuthLease.release();
     }
@@ -481,7 +544,8 @@ export class FileHandler {
 
   #applyServeConfirm(
     offerId: string,
-    meta: { fileId: string; chatId: number; filePath: string },
+    meta: ServedFileMeta,
+    requesterPeerId: string,
     confirmFrame: unknown,
   ): boolean {
     // The confirm must name THIS offer, with the success/reason invariant the guard enforces.
@@ -489,10 +553,7 @@ export class FileHandler {
       return false; // malformed/absent/cross-offer confirm: keep the offer (slot released in finally)
     }
     if (confirmFrame.success) {
-      this.servedFiles.release(offerId);
-      if (this.database.terminalizeServedFileIfActive(meta.fileId, 'completed', 100, null)) {
-        this.onFileTransferComplete({ chatId: meta.chatId, messageId: meta.fileId, filePath: meta.filePath });
-      }
+      this.applySuccessfulServedPull(offerId, meta, requesterPeerId);
       return true;
     }
     if (confirmFrame.reason === 'integrity') {
@@ -501,8 +562,7 @@ export class FileHandler {
       return true;
     }
     if (confirmFrame.reason === 'canceled') {
-      // User intent on the recipient side is terminal for this offer.
-      this.#failServedOffer(offerId, meta.fileId, meta.chatId, 'Recipient canceled the download');
+      this.applyCanceledServedPull(offerId, meta, requesterPeerId);
       return true;
     }
     // disk/other failure: the recipient's local problem; keep the offer for a re-pull.
@@ -519,15 +579,115 @@ export class FileHandler {
   async #readAndApplyServeConfirm(
     reader: FrameStreamReader,
     offerId: string,
-    meta: { fileId: string; chatId: number; filePath: string },
+    meta: ServedFileMeta,
+    requesterPeerId: string,
     timeoutMs: number,
   ): Promise<boolean> {
     try {
       const confirmFrame = await reader.readFrame(timeoutMs);
-      return this.#applyServeConfirm(offerId, meta, confirmFrame);
+      return this.#applyServeConfirm(offerId, meta, requesterPeerId, confirmFrame);
     } catch {
       return false;
     }
+  }
+
+  private applySuccessfulServedPull(
+    offerId: string,
+    meta: ServedFileMeta,
+    requesterPeerId: string,
+  ): void {
+    if (!meta.isGroup) {
+      this.servedFiles.release(offerId);
+      if (this.database.terminalizeServedFileIfActive(meta.fileId, 'completed', 100, null)) {
+        this.onFileTransferComplete({ chatId: meta.chatId, messageId: meta.fileId, filePath: meta.filePath });
+      }
+      return;
+    }
+
+    const result = this.servedFiles.removePuller(offerId, requesterPeerId);
+    if (!result.removed) {
+      return;
+    }
+    const counts = this.database.recordGroupServedFileDownloadIfActive(meta.fileId);
+    if (result.emptied) {
+      const completed = counts?.completed ?? meta.authorizedPullerCount ?? 0;
+      const total = counts?.total ?? meta.authorizedPullerCount ?? completed;
+      const status = completed >= total ? 'completed' : 'partially_completed';
+      if (this.database.terminalizeServedFileIfActive(meta.fileId, status, 100, null)) {
+        this.onFileTransferComplete({
+          chatId: meta.chatId,
+          messageId: meta.fileId,
+          filePath: meta.filePath,
+          status,
+          groupDownloadTotal: total,
+          groupDownloadCompleted: completed,
+        });
+      }
+      return;
+    }
+
+    this.onOutgoingFileOfferPending({
+      chatId: meta.chatId,
+      messageId: meta.fileId,
+      ...(counts ? {
+        groupDownloadTotal: counts.total,
+        groupDownloadCompleted: counts.completed,
+      } : {}),
+    });
+  }
+
+  private applyCanceledServedPull(
+    offerId: string,
+    meta: ServedFileMeta,
+    requesterPeerId: string,
+  ): void {
+    if (!meta.isGroup) {
+      // User intent on the recipient side is terminal for a direct offer.
+      this.#failServedOffer(offerId, meta.fileId, meta.chatId, 'Recipient canceled the download');
+      return;
+    }
+
+    const result = this.servedFiles.removePuller(offerId, requesterPeerId);
+    if (!result.removed) {
+      return;
+    }
+    if (result.emptied) {
+      const row = this.database.getFileMessageById(meta.fileId);
+      const completed = row?.file_group_download_completed ?? 0;
+      const total = row?.file_group_download_total ?? meta.authorizedPullerCount ?? completed;
+      if (completed > 0) {
+        if (this.database.terminalizeServedFileIfActive(meta.fileId, 'partially_completed', 100, null)) {
+          this.onFileTransferComplete({
+            chatId: meta.chatId,
+            messageId: meta.fileId,
+            filePath: meta.filePath,
+            status: 'partially_completed',
+            groupDownloadTotal: total,
+            groupDownloadCompleted: completed,
+          });
+        }
+        return;
+      }
+      if (this.database.terminalizeServedFileIfActive(meta.fileId, 'cancelled', 0, 'Recipient canceled the download')) {
+        this.onFileTransferFailed({
+          chatId: meta.chatId,
+          messageId: meta.fileId,
+          error: 'Recipient canceled the download',
+          status: 'cancelled',
+        });
+      }
+      return;
+    }
+
+    const row = this.database.getFileMessageById(meta.fileId);
+    this.onOutgoingFileOfferPending({
+      chatId: meta.chatId,
+      messageId: meta.fileId,
+      ...(row?.file_group_download_total !== undefined && row.file_group_download_total !== null ? {
+        groupDownloadTotal: row.file_group_download_total,
+        groupDownloadCompleted: row.file_group_download_completed ?? 0,
+      } : {}),
+    });
   }
 
   #resetServedOfferToAwaitingAcceptance(
@@ -547,14 +707,6 @@ export class FileHandler {
   }
 
   acceptPendingFile(fileId: string): void {
-    const current = this.database.getFileMessageById(fileId);
-    if (current?.transfer_status === 'incoming_pending_user') {
-      const chat = this.database.getChats([current.chat_id])[0];
-      if (chat?.type === 'group') {
-        throw new Error('Group file downloads are not available yet');
-      }
-    }
-
     const claim = this.database.claimIncomingFilePull(fileId);
     if (!claim) {
       const message = this.database.getFileMessageById(fileId);
@@ -582,7 +734,7 @@ export class FileHandler {
 
   async cancelOutgoingFileOffer(fileId: string): Promise<boolean> {
     const current = this.database.getFileMessageById(fileId);
-    if (!current?.file_offer_id || this.servingOffers.has(current.file_offer_id)) {
+    if (!current?.file_offer_id || this.isOfferBeingServed(current.file_offer_id)) {
       return false;
     }
 
@@ -1477,6 +1629,8 @@ export class FileHandler {
         file_checksum: metadata.checksum,
         file_total_chunks: metadata.totalChunks,
         file_protocol_version: MESSAGE_ENVELOPE_VERSION,
+        file_group_download_total: authorizedPullers.size,
+        file_group_download_completed: 0,
         transfer_status: 'awaiting_acceptance',
         transfer_progress: 0,
         timestamp: new Date(),
@@ -1491,7 +1645,12 @@ export class FileHandler {
         },
       );
       if (this.database.getFileMessageById(fileId)?.transfer_status === 'awaiting_acceptance') {
-        this.onOutgoingFileOfferPending({ chatId: chat.id, messageId: fileId });
+        this.onOutgoingFileOfferPending({
+          chatId: chat.id,
+          messageId: fileId,
+          groupDownloadTotal: authorizedPullers.size,
+          groupDownloadCompleted: 0,
+        });
       }
       this.trace('SEND', chat.group_id, fileId, 'GROUP_OFFER_MESSAGE_SENT', `offer=${offerId}`);
     } catch (error: unknown) {
@@ -1642,6 +1801,8 @@ export class FileHandler {
       }
     }
     this.activeTransfersByPeer.clear();
+    this.servingDirectOffers.clear();
+    this.servingGroupOfferPullers.clear();
     this.servedFiles.clear();
     this.pullChallenges.clear();
 

@@ -18,15 +18,43 @@ import type { InboundApplicationMessageContext } from '../protocol/application-m
 
 const LOCAL_PEER = 'local_peer';
 const RECIPIENT_PEER = 'recipient_peer';
+const SECOND_RECIPIENT_PEER = 'second_recipient_peer';
 
 const localPrivateKey = new Uint8Array(32).fill(3);
 const localPublicKey = Buffer.from(ed25519.getPublicKey(localPrivateKey)).toString('base64');
 const recipientPrivateKey = new Uint8Array(32).fill(9);
 const recipientPublicKey = Buffer.from(ed25519.getPublicKey(recipientPrivateKey)).toString('base64');
+const secondRecipientPrivateKey = new Uint8Array(32).fill(11);
+const secondRecipientPublicKey = Buffer.from(ed25519.getPublicKey(secondRecipientPrivateKey)).toString('base64');
 
 function sign(privateKey: Uint8Array, message: string): Uint8Array {
   return ed25519.sign(new TextEncoder().encode(message), privateKey);
 }
+
+type ServedFileMetaForTest = {
+  offerId: string;
+  fileId: string;
+  filePath: string;
+  size: number;
+  checksum: string;
+  chatId: number;
+  isGroup: boolean;
+  authorizedPullerCount: number;
+};
+
+type FileHandlerServeInternals = {
+  servedFiles: {
+    getMeta: (id: string) => ServedFileMetaForTest | undefined;
+    getAuthorizedKey: (id: string, peerId: string) => string | undefined;
+  };
+  applySuccessfulServedPull: (id: string, meta: ServedFileMetaForTest, peerId: string) => void;
+  applyCanceledServedPull: (id: string, meta: ServedFileMetaForTest, peerId: string) => void;
+  tryAcquireOfferServeLock: (
+    offerId: string,
+    requesterPeerId: string,
+    isGroup: boolean,
+  ) => { release: () => void } | null;
+};
 
 async function createHarness(t: { after: (fn: () => void) => void }): Promise<{
   database: ChatDatabase;
@@ -39,6 +67,21 @@ async function createHarness(t: { after: (fn: () => void) => void }): Promise<{
     payload: unknown;
   }>;
   pendingFileEvents: Array<{ chatId: number; fileId: string; filename: string; senderId: string }>;
+  outgoingPendingEvents: Array<{
+    chatId: number;
+    messageId: string;
+    groupDownloadTotal?: number;
+    groupDownloadCompleted?: number;
+  }>;
+  completeEvents: Array<{
+    chatId: number;
+    messageId: string;
+    filePath: string;
+    status?: 'completed' | 'partially_completed';
+    groupDownloadTotal?: number;
+    groupDownloadCompleted?: number;
+  }>;
+  failedEvents: Array<{ chatId: number; messageId: string; error: string; status?: string }>;
 }> {
   const database = new ChatDatabase(':memory:');
   await database.createUser({
@@ -105,14 +148,50 @@ async function createHarness(t: { after: (fn: () => void) => void }): Promise<{
   } as unknown as MessageHandler;
   const noop = () => {};
   const pendingFileEvents: Array<{ chatId: number; fileId: string; filename: string; senderId: string }> = [];
+  const outgoingPendingEvents: Array<{
+    chatId: number;
+    messageId: string;
+    groupDownloadTotal?: number;
+    groupDownloadCompleted?: number;
+  }> = [];
+  const completeEvents: Array<{
+    chatId: number;
+    messageId: string;
+    filePath: string;
+    status?: 'completed' | 'partially_completed';
+    groupDownloadTotal?: number;
+    groupDownloadCompleted?: number;
+  }> = [];
+  const failedEvents: Array<{ chatId: number; messageId: string; error: string; status?: string }> = [];
   const fileHandler = new FileHandler(
-    node, messageHandler, database, noop, noop, noop, noop, noop, (event) => pendingFileEvents.push(event),
+    node,
+    messageHandler,
+    database,
+    noop,
+    (event) => completeEvents.push(event),
+    (event) => failedEvents.push(event),
+    (event) => outgoingPendingEvents.push(event),
+    noop,
+    (event) => pendingFileEvents.push(event),
   );
   t.after(() => database.close());
-  return { database, fileHandler, chatId, sentApplicationMessages, pendingFileEvents };
+  return {
+    database,
+    fileHandler,
+    chatId,
+    sentApplicationMessages,
+    pendingFileEvents,
+    outgoingPendingEvents,
+    completeEvents,
+    failedEvents,
+  };
 }
 
-async function createGroupChat(database: ChatDatabase, groupId = `group-${randomUUID()}`): Promise<number> {
+async function createGroupChat(
+  database: ChatDatabase,
+  groupId = `group-${randomUUID()}`,
+  participants = [LOCAL_PEER, RECIPIENT_PEER],
+): Promise<number> {
   const chatId = await database.createChat({
     type: 'group',
     name: 'test group',
@@ -130,7 +209,7 @@ async function createGroupChat(database: ChatDatabase, groupId = `group-${random
     offline_last_read_timestamp: 0,
     offline_last_ack_sent: 0,
     created_at: new Date(),
-    participants: [LOCAL_PEER, RECIPIENT_PEER],
+    participants,
   });
   database.updateChatGroupStatus(chatId, 'active');
   return chatId;
@@ -284,7 +363,7 @@ test('cancelOutgoingFileOffer refuses an offer that is already being served', as
   const offerId = database.getFileMessageById('file_serving')?.file_offer_id;
   assert.ok(offerId);
 
-  (fileHandler as unknown as { servingOffers: Set<string> }).servingOffers.add(offerId);
+  (fileHandler as unknown as { servingDirectOffers: Set<string> }).servingDirectOffers.add(offerId);
   assert.equal(await fileHandler.cancelOutgoingFileOffer('file_serving'), false);
   assert.equal(database.getFileMessageById('file_serving')?.transfer_status, 'awaiting_acceptance');
   assert.equal(fileHandler.hasActiveOffer(offerId), true);
@@ -390,6 +469,8 @@ test('sendGroupFile persists a caller-owned group offer and snapshots authorized
   assert.equal(row.sender_peer_id, LOCAL_PEER);
   assert.equal(row.transfer_status, 'awaiting_acceptance');
   assert.equal(row.file_path, filePath);
+  assert.equal(row.file_group_download_total, 1);
+  assert.equal(row.file_group_download_completed, 0);
   assert.ok(row.file_offer_id);
   assert.equal(fileHandler.hasActiveOffer(row.file_offer_id), true);
 
@@ -403,6 +484,194 @@ test('sendGroupFile persists a caller-owned group offer and snapshots authorized
   assert.ok(sentOffer);
   assert.deepEqual(sentOffer.target, { type: 'group', groupId });
   assert.equal(sentOffer.cid, 'group_file_1');
+});
+
+test('a successful group pull removes only that puller and completes after the last puller', async (t) => {
+  const { database, fileHandler, outgoingPendingEvents, completeEvents } = await createHarness(t);
+  await database.createUser({
+    peer_id: SECOND_RECIPIENT_PEER,
+    signing_public_key: secondRecipientPublicKey,
+    offline_public_key: 'second_offline_key',
+    signature: 'second_signature',
+    username: 'second',
+  });
+  const groupChatId = await createGroupChat(database, `group-${randomUUID()}`, [
+    LOCAL_PEER,
+    RECIPIENT_PEER,
+    SECOND_RECIPIENT_PEER,
+  ]);
+  const filePath = join(tmpdir(), `kiyeovo-group-success-${randomUUID()}.txt`);
+  await writeFile(filePath, 'hello two group pullers');
+  t.after(() => rm(filePath, { force: true }));
+
+  await fileHandler.sendGroupFile(groupChatId, filePath, 'group_success_file');
+  const row = database.getFileMessageById('group_success_file');
+  assert.ok(row?.file_offer_id);
+  assert.equal(row.file_group_download_total, 2);
+  assert.equal(row.file_group_download_completed, 0);
+  const offerId = row.file_offer_id;
+  const internals = fileHandler as unknown as FileHandlerServeInternals;
+  const meta = internals.servedFiles.getMeta(offerId);
+  assert.ok(meta);
+  const pendingEventsBeforeFirstPull = outgoingPendingEvents.length;
+
+  internals.applySuccessfulServedPull(offerId, meta, RECIPIENT_PEER);
+
+  assert.equal(fileHandler.hasActiveOffer(offerId), true);
+  assert.equal(internals.servedFiles.getAuthorizedKey(offerId, RECIPIENT_PEER), undefined);
+  assert.equal(internals.servedFiles.getAuthorizedKey(offerId, SECOND_RECIPIENT_PEER), secondRecipientPublicKey);
+  const afterFirstPull = database.getFileMessageById('group_success_file');
+  assert.equal(afterFirstPull?.transfer_status, 'awaiting_acceptance');
+  assert.equal(afterFirstPull?.file_group_download_total, 2);
+  assert.equal(afterFirstPull?.file_group_download_completed, 1);
+  assert.equal(completeEvents.length, 0);
+  assert.equal(outgoingPendingEvents.length, pendingEventsBeforeFirstPull + 1);
+  const latestPendingEvent = outgoingPendingEvents[outgoingPendingEvents.length - 1];
+  assert.equal(latestPendingEvent?.groupDownloadTotal, 2);
+  assert.equal(latestPendingEvent?.groupDownloadCompleted, 1);
+
+  internals.applySuccessfulServedPull(offerId, meta, SECOND_RECIPIENT_PEER);
+
+  assert.equal(fileHandler.hasActiveOffer(offerId), false);
+  const afterSecondPull = database.getFileMessageById('group_success_file');
+  assert.equal(afterSecondPull?.transfer_status, 'completed');
+  assert.equal(afterSecondPull?.file_group_download_total, 2);
+  assert.equal(afterSecondPull?.file_group_download_completed, 2);
+  assert.equal(completeEvents.length, 1);
+  assert.equal(completeEvents[0]?.messageId, 'group_success_file');
+});
+
+test('group same-offer serve locks allow different recipients but reject duplicate requester pulls', async (t) => {
+  const { fileHandler } = await createHarness(t);
+  const internals = fileHandler as unknown as FileHandlerServeInternals;
+
+  const directLock = internals.tryAcquireOfferServeLock('direct_offer', RECIPIENT_PEER, false);
+  assert.ok(directLock);
+  assert.equal(internals.tryAcquireOfferServeLock('direct_offer', SECOND_RECIPIENT_PEER, false), null);
+  directLock.release();
+  const directRetry = internals.tryAcquireOfferServeLock('direct_offer', SECOND_RECIPIENT_PEER, false);
+  assert.ok(directRetry);
+  directRetry.release();
+
+  const groupFirst = internals.tryAcquireOfferServeLock('group_offer', RECIPIENT_PEER, true);
+  assert.ok(groupFirst);
+  const groupSecond = internals.tryAcquireOfferServeLock('group_offer', SECOND_RECIPIENT_PEER, true);
+  assert.ok(groupSecond);
+  assert.equal(internals.tryAcquireOfferServeLock('group_offer', RECIPIENT_PEER, true), null);
+
+  groupFirst.release();
+  const firstRetry = internals.tryAcquireOfferServeLock('group_offer', RECIPIENT_PEER, true);
+  assert.ok(firstRetry);
+  groupSecond.release();
+  firstRetry.release();
+});
+
+test('a canceled group pull removes only that puller and keeps the offer for the rest', async (t) => {
+  const { database, fileHandler, outgoingPendingEvents, failedEvents } = await createHarness(t);
+  await database.createUser({
+    peer_id: SECOND_RECIPIENT_PEER,
+    signing_public_key: secondRecipientPublicKey,
+    offline_public_key: 'second_offline_key',
+    signature: 'second_signature',
+    username: 'second',
+  });
+  const groupChatId = await createGroupChat(database, `group-${randomUUID()}`, [
+    LOCAL_PEER,
+    RECIPIENT_PEER,
+    SECOND_RECIPIENT_PEER,
+  ]);
+  const filePath = join(tmpdir(), `kiyeovo-group-cancel-${randomUUID()}.txt`);
+  await writeFile(filePath, 'hello group cancel');
+  t.after(() => rm(filePath, { force: true }));
+
+  await fileHandler.sendGroupFile(groupChatId, filePath, 'group_cancel_file');
+  const row = database.getFileMessageById('group_cancel_file');
+  assert.ok(row?.file_offer_id);
+  const offerId = row.file_offer_id;
+  const internals = fileHandler as unknown as FileHandlerServeInternals;
+  const meta = internals.servedFiles.getMeta(offerId);
+  assert.ok(meta);
+  const pendingEventsBeforeCancel = outgoingPendingEvents.length;
+
+  internals.applyCanceledServedPull(offerId, meta, RECIPIENT_PEER);
+
+  assert.equal(fileHandler.hasActiveOffer(offerId), true);
+  assert.equal(internals.servedFiles.getAuthorizedKey(offerId, RECIPIENT_PEER), undefined);
+  assert.equal(internals.servedFiles.getAuthorizedKey(offerId, SECOND_RECIPIENT_PEER), secondRecipientPublicKey);
+  assert.equal(database.getFileMessageById('group_cancel_file')?.transfer_status, 'awaiting_acceptance');
+  assert.equal(failedEvents.length, 0);
+  assert.equal(outgoingPendingEvents.length, pendingEventsBeforeCancel + 1);
+  const latestPendingEvent = outgoingPendingEvents[outgoingPendingEvents.length - 1];
+  assert.equal(latestPendingEvent?.groupDownloadTotal, 2);
+  assert.equal(latestPendingEvent?.groupDownloadCompleted, 0);
+});
+
+test('a group offer closes as partial completion when the last remaining puller cancels after successes', async (t) => {
+  const { database, fileHandler, completeEvents, failedEvents } = await createHarness(t);
+  await database.createUser({
+    peer_id: SECOND_RECIPIENT_PEER,
+    signing_public_key: secondRecipientPublicKey,
+    offline_public_key: 'second_offline_key',
+    signature: 'second_signature',
+    username: 'second',
+  });
+  const groupChatId = await createGroupChat(database, `group-${randomUUID()}`, [
+    LOCAL_PEER,
+    RECIPIENT_PEER,
+    SECOND_RECIPIENT_PEER,
+  ]);
+  const filePath = join(tmpdir(), `kiyeovo-group-partial-${randomUUID()}.txt`);
+  await writeFile(filePath, 'hello partial group completion');
+  t.after(() => rm(filePath, { force: true }));
+
+  await fileHandler.sendGroupFile(groupChatId, filePath, 'group_partial_file');
+  const row = database.getFileMessageById('group_partial_file');
+  assert.ok(row?.file_offer_id);
+  const offerId = row.file_offer_id;
+  const internals = fileHandler as unknown as FileHandlerServeInternals;
+  const meta = internals.servedFiles.getMeta(offerId);
+  assert.ok(meta);
+
+  internals.applySuccessfulServedPull(offerId, meta, RECIPIENT_PEER);
+  internals.applyCanceledServedPull(offerId, meta, SECOND_RECIPIENT_PEER);
+
+  assert.equal(fileHandler.hasActiveOffer(offerId), false);
+  const finalRow = database.getFileMessageById('group_partial_file');
+  assert.equal(finalRow?.transfer_status, 'partially_completed');
+  assert.equal(finalRow?.transfer_error, null);
+  assert.equal(finalRow?.file_group_download_total, 2);
+  assert.equal(finalRow?.file_group_download_completed, 1);
+  assert.equal(failedEvents.length, 0);
+  assert.equal(completeEvents.length, 1);
+  assert.equal(completeEvents[0]?.messageId, 'group_partial_file');
+  assert.equal(completeEvents[0]?.status, 'partially_completed');
+  assert.equal(completeEvents[0]?.groupDownloadTotal, 2);
+  assert.equal(completeEvents[0]?.groupDownloadCompleted, 1);
+});
+
+test('a canceled one-recipient group pull releases the offer and terminalizes the sender row', async (t) => {
+  const { database, fileHandler, failedEvents } = await createHarness(t);
+  const groupChatId = await createGroupChat(database);
+  const filePath = join(tmpdir(), `kiyeovo-group-cancel-last-${randomUUID()}.txt`);
+  await writeFile(filePath, 'hello last group cancel');
+  t.after(() => rm(filePath, { force: true }));
+
+  await fileHandler.sendGroupFile(groupChatId, filePath, 'group_cancel_last_file');
+  const row = database.getFileMessageById('group_cancel_last_file');
+  assert.ok(row?.file_offer_id);
+  const offerId = row.file_offer_id;
+  const internals = fileHandler as unknown as FileHandlerServeInternals;
+  const meta = internals.servedFiles.getMeta(offerId);
+  assert.ok(meta);
+
+  internals.applyCanceledServedPull(offerId, meta, RECIPIENT_PEER);
+
+  assert.equal(fileHandler.hasActiveOffer(offerId), false);
+  assert.equal(database.getFileMessageById('group_cancel_last_file')?.transfer_status, 'cancelled');
+  assert.equal(database.getFileMessageById('group_cancel_last_file')?.transfer_error, 'Recipient canceled the download');
+  assert.equal(failedEvents.length, 1);
+  assert.equal(failedEvents[0]?.messageId, 'group_cancel_last_file');
+  assert.equal(failedEvents[0]?.status, 'cancelled');
 });
 
 test('incoming group file offers persist as pending group file rows', async (t) => {

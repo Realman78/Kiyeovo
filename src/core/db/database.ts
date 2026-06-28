@@ -142,6 +142,8 @@ export interface Message {
     file_checksum?: string
     file_total_chunks?: number
     file_protocol_version?: number
+    file_group_download_total?: number
+    file_group_download_completed?: number
     transfer_status?: FileTransferStatus
     transfer_progress?: number
     transfer_error?: string
@@ -451,6 +453,8 @@ export class ChatDatabase {
                 file_checksum TEXT,
                 file_total_chunks INTEGER,
                 file_protocol_version INTEGER,
+                file_group_download_total INTEGER,
+                file_group_download_completed INTEGER,
                 transfer_status TEXT,
                 transfer_progress INTEGER,
                 transfer_error TEXT,
@@ -968,6 +972,8 @@ export class ChatDatabase {
         this.ensureColumnExists('messages', 'file_checksum', 'TEXT');
         this.ensureColumnExists('messages', 'file_total_chunks', 'INTEGER');
         this.ensureColumnExists('messages', 'file_protocol_version', 'INTEGER');
+        this.ensureColumnExists('messages', 'file_group_download_total', 'INTEGER');
+        this.ensureColumnExists('messages', 'file_group_download_completed', 'INTEGER');
         this.db.prepare(`UPDATE messages SET client_msg_id = id WHERE client_msg_id IS NULL`).run();
         this.db.prepare(`UPDATE bootstrap_nodes SET network_mode = ? WHERE address LIKE '%/onion%'`).run(NETWORK_MODES.ANONYMOUS);
         this.db.prepare(`UPDATE bootstrap_nodes SET network_mode = ? WHERE address NOT LIKE '%/onion%'`).run(NETWORK_MODES.FAST);
@@ -2599,11 +2605,12 @@ export class ChatDatabase {
             INSERT INTO messages (
                 id, chat_id, sender_peer_id, content, message_type, timestamp,
                 file_name, file_size, file_path, file_offer_id, file_checksum,
-                file_total_chunks, file_protocol_version, transfer_status, transfer_progress,
-                transfer_error, local_send_state, failed_reason, retry_after_ts, event_timestamp,
-                client_msg_id, reply_to_client_id
+                file_total_chunks, file_protocol_version, file_group_download_total,
+                file_group_download_completed, transfer_status, transfer_progress, transfer_error,
+                local_send_state, failed_reason, retry_after_ts, event_timestamp, client_msg_id,
+                reply_to_client_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ${conflictClause}
         `).run(
             message.id,
@@ -2619,6 +2626,8 @@ export class ChatDatabase {
             message.file_checksum ?? null,
             message.file_total_chunks ?? null,
             message.file_protocol_version ?? null,
+            message.file_group_download_total ?? null,
+            message.file_group_download_completed ?? null,
             message.transfer_status ?? null,
             message.transfer_progress ?? null,
             message.transfer_error ?? null,
@@ -2763,7 +2772,7 @@ export class ChatDatabase {
      */
     terminalizeServedFileIfActive(
         fileId: string,
-        status: 'completed' | 'failed',
+        status: 'completed' | 'partially_completed' | 'failed' | 'cancelled',
         progress: number,
         error: string | null,
     ): boolean {
@@ -2776,6 +2785,36 @@ export class ChatDatabase {
               AND chat_id IN (SELECT id FROM chats WHERE network_mode = ?)
         `).run(status, progress, error, fileId, this.sessionNetworkMode);
         return result.changes === 1;
+    }
+
+    recordGroupServedFileDownloadIfActive(fileId: string): {
+        completed: number;
+        total: number;
+        completedAll: boolean;
+    } | null {
+        const row = this.db.prepare(`
+            UPDATE messages
+            SET file_group_download_completed = COALESCE(file_group_download_completed, 0) + 1,
+                transfer_error = NULL
+            WHERE id = ?
+              AND message_type = 'file'
+              AND transfer_status = 'awaiting_acceptance'
+              AND file_group_download_total IS NOT NULL
+              AND file_group_download_total > 0
+              AND COALESCE(file_group_download_completed, 0) < file_group_download_total
+              AND chat_id IN (SELECT id FROM chats WHERE network_mode = ?)
+            RETURNING
+              file_group_download_completed AS completed,
+              file_group_download_total AS total
+        `).get(fileId, this.sessionNetworkMode) as { completed: number; total: number } | undefined;
+        if (!row) {
+            return null;
+        }
+        return {
+            completed: row.completed,
+            total: row.total,
+            completedAll: row.completed >= row.total,
+        };
     }
 
     claimIncomingFilePull(messageId: string): {
@@ -3276,7 +3315,7 @@ export class ChatDatabase {
                 )
                 || (
                     (row.message_type === 'file' || row.message_type === 'image')
-                    && !['completed', 'failed', 'rejected', 'cancelled'].includes(row.transfer_status ?? '')
+                    && !['completed', 'partially_completed', 'failed', 'rejected', 'cancelled'].includes(row.transfer_status ?? '')
                 )
             );
             if (hasIneligibleRow) {

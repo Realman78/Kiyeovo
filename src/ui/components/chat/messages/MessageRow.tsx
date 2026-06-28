@@ -546,6 +546,8 @@ export const MessageRow = memo(({
                   transferStatus={message.transferStatus || 'completed'}
                   transferProgress={message.transferProgress}
                   transferError={message.transferError}
+                  fileGroupDownloadTotal={message.fileGroupDownloadTotal}
+                  fileGroupDownloadCompleted={message.fileGroupDownloadCompleted}
                   isFromCurrentUser={message.senderPeerId === myPeerId}
                 />
               ) : (

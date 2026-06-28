@@ -21,6 +21,8 @@ interface FileMessageProps {
   transferStatus: FileTransferStatus;
   transferProgress?: number;
   transferError?: string;
+  fileGroupDownloadTotal?: number;
+  fileGroupDownloadCompleted?: number;
   isFromCurrentUser: boolean;
 }
 
@@ -148,6 +150,8 @@ export const FileMessage: React.FC<FileMessageProps> = ({
   transferStatus,
   transferProgress = 0,
   transferError,
+  fileGroupDownloadTotal,
+  fileGroupDownloadCompleted,
   isFromCurrentUser
 }) => {
   const dispatch = useDispatch();
@@ -157,7 +161,18 @@ export const FileMessage: React.FC<FileMessageProps> = ({
   const isAwaitingApproval = transferStatus === 'awaiting_acceptance';
   const isIncomingPendingDecision = transferStatus === 'incoming_pending_user';
   const isOutgoingPendingOffer = isFromCurrentUser && isAwaitingApproval;
+  const isGroupSenderOffer = isFromCurrentUser
+    && isGroupChat
+    && fileGroupDownloadTotal !== undefined
+    && fileGroupDownloadTotal > 0;
   const showsDecisionStatus = isAwaitingApproval || isIncomingPendingDecision;
+  const showsGroupSenderStandaloneStatus = isGroupSenderOffer
+    && (
+      transferStatus === 'in_progress'
+      || transferStatus === 'completed'
+      || transferStatus === 'partially_completed'
+      || transferStatus === 'cancelled'
+    );
   const [isCancelling, setIsCancelling] = useState(false);
 
   const formatFileSize = (bytes: number): string => {
@@ -299,15 +314,29 @@ export const FileMessage: React.FC<FileMessageProps> = ({
   };
 
   const getStatusText = () => {
+    if (isGroupSenderOffer) {
+      if (transferStatus === 'completed') {
+        return 'Completed';
+      }
+      if (transferStatus === 'cancelled') {
+        return 'Cancelled';
+      }
+      if (
+        transferStatus === 'awaiting_acceptance'
+        || transferStatus === 'in_progress'
+        || transferStatus === 'partially_completed'
+      ) {
+        const completed = Math.max(0, Math.min(fileGroupDownloadCompleted ?? 0, fileGroupDownloadTotal));
+        return `Downloaded by ${completed}/${fileGroupDownloadTotal}`;
+      }
+    }
+
     switch (transferStatus) {
       case 'connecting':
         return 'Connecting...';
       case 'awaiting_acceptance':
         return isGroupChat ? 'Group file offered' : 'File offered';
       case 'incoming_pending_user':
-        if (isGroupChat) {
-          return 'Group download not available yet';
-        }
         return 'Waiting for your decision';
       case 'in_progress':
         if (isFromCurrentUser && transferProgress >= 100) {
@@ -316,6 +345,8 @@ export const FileMessage: React.FC<FileMessageProps> = ({
         return `${transferProgress}%`;
       case 'completed':
         return 'Completed';
+      case 'partially_completed':
+        return 'Partially completed';
       case 'failed':
         return 'Failed';
       case 'rejected':
@@ -363,7 +394,7 @@ export const FileMessage: React.FC<FileMessageProps> = ({
 
   const transferStatusContent = (
     <>
-      {transferStatus === 'in_progress' && (
+      {transferStatus === 'in_progress' && !isGroupSenderOffer && (
         <div className="w-full">
           <div className="flex items-center gap-2">
             <div className="flex-1 bg-background/20 rounded-full h-1.5 overflow-hidden">
@@ -390,13 +421,19 @@ export const FileMessage: React.FC<FileMessageProps> = ({
         </div>
       )}
 
+      {showsGroupSenderStandaloneStatus && (
+        <div className="text-xs opacity-70">
+          {getStatusText()}
+        </div>
+      )}
+
       {transferStatus === 'failed' && (
         <div className="text-xs">
           {specificErrorText() || 'Transfer failed'}
         </div>
       )}
 
-      {(transferStatus === 'rejected' || transferStatus === 'cancelled') && (
+      {(transferStatus === 'rejected' || (transferStatus === 'cancelled' && !isGroupSenderOffer)) && (
         <div className="text-xs opacity-70">
           {getStatusText()}
         </div>
@@ -419,15 +456,13 @@ export const FileMessage: React.FC<FileMessageProps> = ({
 
       {isIncomingPendingDecision && (
         <div className="flex gap-2">
-          {!isGroupChat && (
-            <Button
-              onClick={handleAccept}
-              size="sm"
-              className="flex-1"
-            >
-              Accept
-            </Button>
-          )}
+          <Button
+            onClick={handleAccept}
+            size="sm"
+            className="flex-1"
+          >
+            Accept
+          </Button>
           <Button
             onClick={handleReject}
             size="sm"

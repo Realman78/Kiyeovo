@@ -51,6 +51,7 @@ export type MessageJumpOutcome = 'completed' | 'unavailable' | 'cancelled' | 'er
 type LoadMoreResult = 'loaded' | 'exhausted' | 'cancelled' | 'error';
 const TERMINAL_FILE_TRANSFER_STATUSES = new Set<FileTransferStatus>([
   'completed',
+  'partially_completed',
   'failed',
   'rejected',
   'cancelled',
@@ -88,6 +89,8 @@ function mapDbMessage(msg: Message & { sender_username?: string }): ChatMessage 
     transferStatus: inferredTransferStatus as FileTransferStatus | undefined,
     transferProgress: msg.transfer_progress,
     transferError: msg.transfer_error,
+    fileGroupDownloadTotal: msg.file_group_download_total ?? undefined,
+    fileGroupDownloadCompleted: msg.file_group_download_completed ?? undefined,
     // Restore outbound send lifecycle (incl. the retry cooldown, so a
     // group-rekey block survives a restart instead of becoming immediately
     // retryable).

@@ -284,6 +284,7 @@ export type FileTransferStatus =
   | 'incoming_pending_user'
   | 'in_progress'
   | 'completed'
+  | 'partially_completed'
   | 'failed'
   | 'rejected'
   | 'cancelled';
@@ -593,6 +594,8 @@ export interface MessageReceivedEvent {
   transferStatus?: FileTransferStatus;
   transferProgress?: number;
   transferError?: string;
+  fileGroupDownloadTotal?: number;
+  fileGroupDownloadCompleted?: number;
 }
 
 export type MessageSentStatus = 'online' | 'offline' | null;
@@ -666,6 +669,9 @@ export interface FileTransferCompleteEvent {
   chatId: number;
   messageId: string;
   filePath: string;
+  status?: 'completed' | 'partially_completed';
+  groupDownloadTotal?: number;
+  groupDownloadCompleted?: number;
 }
 
 export interface FileTransferFailedEvent {
@@ -678,6 +684,8 @@ export interface FileTransferFailedEvent {
 export interface OutgoingFileOfferPendingEvent {
   chatId: number;
   messageId: string;
+  groupDownloadTotal?: number;
+  groupDownloadCompleted?: number;
 }
 
 export interface OutgoingFileOfferTerminalEvent {

@@ -299,7 +299,9 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
         filePath: data.filePath,
         transferStatus: data.transferStatus,
         transferProgress: data.transferProgress,
-        transferError: data.transferError
+        transferError: data.transferError,
+        fileGroupDownloadTotal: data.fileGroupDownloadTotal,
+        fileGroupDownloadCompleted: data.fileGroupDownloadCompleted,
       }));
     });
 
@@ -488,9 +490,14 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
     const unsubFileTransferComplete = window.kiyeovoAPI.onFileTransferComplete((data) => {
       dispatch(updateFileTransferStatus({
         messageId: data.messageId,
-        status: 'completed',
-        filePath: data.filePath
+        status: data.status ?? 'completed',
+        filePath: data.filePath,
+        fileGroupDownloadTotal: data.groupDownloadTotal,
+        fileGroupDownloadCompleted: data.groupDownloadCompleted,
       }));
+      if (data.status === 'partially_completed') {
+        return;
+      }
       toast.success('File transfer completed');
     });
 
@@ -541,7 +548,9 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
     const unsubOutgoingFileOfferPending = window.kiyeovoAPI.onOutgoingFileOfferPending((data) => {
       dispatch(updateFileTransferStatus({
         messageId: data.messageId,
-        status: 'awaiting_acceptance'
+        status: 'awaiting_acceptance',
+        fileGroupDownloadTotal: data.groupDownloadTotal,
+        fileGroupDownloadCompleted: data.groupDownloadCompleted,
       }));
     });
 
