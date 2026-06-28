@@ -9,10 +9,8 @@ import { isValidCid } from './message-envelope.js';
  * signing key. This module is the *pure* layer: frame shapes, strict guards, the challenge
  * generator, the domain-separated signature payload, and the stateless authorization decision.
  *
- * NOTE (provisional): the wire frame shapes below are consumed by the direct pull state machine in
- * the next increment (1d). Field layout may still change once that handler is written; the
- * challenge/signature helper and `evaluateFilePullAuth` are stable (they anchor the offer-time app
- * key snapshot, which is this increment's core).
+ * The wire frame shapes below are consumed by the direct pull state machine. The
+ * challenge/signature helper and `evaluateFilePullAuth` anchor the offer-time app-key snapshot.
  */
 
 export const FILE_PULL_SIGNATURE_DOMAIN = 'kiyeovo-file-pull-v2';
@@ -62,7 +60,7 @@ export interface FileChunk {
   hash: string; // per-chunk BLAKE3
 }
 
-export type FileTransferConfirmReason = 'integrity' | 'disk' | 'other';
+export type FileTransferConfirmReason = 'integrity' | 'disk' | 'other' | 'canceled';
 
 export interface FileTransferConfirm {
   type: 'file_transfer_confirm';
@@ -261,7 +259,12 @@ export function isFileTransferConfirm(value: unknown): value is FileTransferConf
   // success ⇒ no reason; failure ⇒ a valid reason. Reject any other combination.
   return value.success
     ? value.reason === undefined
-    : (value.reason === 'integrity' || value.reason === 'disk' || value.reason === 'other');
+    : (
+      value.reason === 'integrity'
+      || value.reason === 'disk'
+      || value.reason === 'other'
+      || value.reason === 'canceled'
+    );
 }
 
 function isFilePullRejectReason(value: unknown): value is FilePullRejectReason {

@@ -181,6 +181,7 @@ test('confirm guard enforces the success/reason invariant', () => {
   assert.equal(isFileTransferConfirm({ type: 'file_transfer_confirm', offerId: OFFER, success: true }), true);
   assert.equal(isFileTransferConfirm({ type: 'file_transfer_confirm', offerId: OFFER, success: false, reason: 'integrity' }), true);
   assert.equal(isFileTransferConfirm({ type: 'file_transfer_confirm', offerId: OFFER, success: false, reason: 'disk' }), true);
+  assert.equal(isFileTransferConfirm({ type: 'file_transfer_confirm', offerId: OFFER, success: false, reason: 'canceled' }), true);
   // success must NOT carry a reason…
   assert.equal(isFileTransferConfirm({ type: 'file_transfer_confirm', offerId: OFFER, success: true, reason: 'integrity' }), false);
   // …and failure MUST carry a valid one.

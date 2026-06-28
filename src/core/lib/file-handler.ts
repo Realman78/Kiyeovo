@@ -101,6 +101,8 @@ type PullConfirmFrame =
   }
   | null;
 
+const FILE_PULL_INTERRUPTED_CONFIRM_GRACE_MS = 1500;
+
 export class FileHandler {
   private static readonly TRACE_ENABLED = isDebugModeEnabled();
   private node: ChatNode;
@@ -119,6 +121,7 @@ export class FileHandler {
   private readonly fileTransferProtocol: string;
   private activeTransfersByPeer = new Map<string, { fileId: string; direction: 'send' | 'receive' }>();
   private activeTransferStreams = new Map<string, Stream>();
+  private activeIncomingCancelSignals = new Map<string, () => Promise<boolean>>();
   private canceledIncomingDownloads = new Set<string>();
   private onFileTransferProgress: (data: FileTransferProgressEvent) => void;
   private onFileTransferComplete: (data: FileTransferCompleteEvent) => void;
@@ -398,9 +401,34 @@ export class FileHandler {
         size: meta.size,
         totalChunks: Math.ceil(meta.size / CHUNK_SIZE),
       });
-      await sinkDone;
-      const confirmFrame = await reader.readFrame(FILE_PULL_CONFIRM_TIMEOUT);
-      this.#applyServeConfirm(offerId, meta, confirmFrame);
+      try {
+        await sinkDone;
+      } catch (error: unknown) {
+        const applied = await this.#readAndApplyServeConfirm(
+          reader,
+          offerId,
+          meta,
+          FILE_PULL_INTERRUPTED_CONFIRM_GRACE_MS,
+        );
+        if (!applied) {
+          this.#resetServedOfferToAwaitingAcceptance(
+            offerId,
+            meta,
+            'Recipient disconnected before confirming the transfer',
+          );
+          throw error;
+        }
+        return;
+      }
+
+      const applied = await this.#readAndApplyServeConfirm(reader, offerId, meta, FILE_PULL_CONFIRM_TIMEOUT);
+      if (!applied) {
+        this.#resetServedOfferToAwaitingAcceptance(
+          offerId,
+          meta,
+          'Recipient did not confirm the transfer',
+        );
+      }
     } finally {
       if (totalTimer) { clearTimeout(totalTimer); }
       if (idleTimer) { clearTimeout(idleTimer); }
@@ -447,24 +475,67 @@ export class FileHandler {
     offerId: string,
     meta: { fileId: string; chatId: number; filePath: string },
     confirmFrame: unknown,
-  ): void {
+  ): boolean {
     // The confirm must name THIS offer, with the success/reason invariant the guard enforces.
     if (!isFileTransferConfirm(confirmFrame) || confirmFrame.offerId !== offerId) {
-      return; // malformed/absent/cross-offer confirm: keep the offer (slot released in finally)
+      return false; // malformed/absent/cross-offer confirm: keep the offer (slot released in finally)
     }
     if (confirmFrame.success) {
       this.servedFiles.release(offerId);
       if (this.database.terminalizeServedFileIfActive(meta.fileId, 'completed', 100, null)) {
         this.onFileTransferComplete({ chatId: meta.chatId, messageId: meta.fileId, filePath: meta.filePath });
       }
-      return;
+      return true;
     }
     if (confirmFrame.reason === 'integrity') {
       // The file itself is bad → the offer is dead.
       this.#failServedOffer(offerId, meta.fileId, meta.chatId, 'Recipient integrity check failed');
-      return;
+      return true;
+    }
+    if (confirmFrame.reason === 'canceled') {
+      // User intent on the recipient side is terminal for this offer.
+      this.#failServedOffer(offerId, meta.fileId, meta.chatId, 'Recipient canceled the download');
+      return true;
     }
     // disk/other failure: the recipient's local problem; keep the offer for a re-pull.
+    this.#resetServedOfferToAwaitingAcceptance(
+      offerId,
+      meta,
+      confirmFrame.reason === 'disk'
+        ? 'Recipient could not save the file'
+        : 'Recipient did not complete the transfer',
+    );
+    return true;
+  }
+
+  async #readAndApplyServeConfirm(
+    reader: FrameStreamReader,
+    offerId: string,
+    meta: { fileId: string; chatId: number; filePath: string },
+    timeoutMs: number,
+  ): Promise<boolean> {
+    try {
+      const confirmFrame = await reader.readFrame(timeoutMs);
+      return this.#applyServeConfirm(offerId, meta, confirmFrame);
+    } catch {
+      return false;
+    }
+  }
+
+  #resetServedOfferToAwaitingAcceptance(
+    offerId: string,
+    meta: { fileId: string; chatId: number },
+    error: string,
+  ): void {
+    if (!this.servedFiles.has(offerId)) {
+      return;
+    }
+    this.onFileTransferFailed({
+      chatId: meta.chatId,
+      messageId: meta.fileId,
+      error,
+      status: 'awaiting_acceptance',
+    });
   }
 
   acceptPendingFile(fileId: string): void {
@@ -490,7 +561,7 @@ export class FileHandler {
     return true;
   }
 
-  cancelIncomingFileDownload(fileId: string): boolean {
+  async cancelIncomingFileDownload(fileId: string): Promise<boolean> {
     const stream = this.activeTransferStreams.get(fileId);
     if (!stream) {
       return false;
@@ -506,13 +577,18 @@ export class FileHandler {
     }
     this.canceledIncomingDownloads.add(fileId);
 
+    const sendCancelSignal = this.activeIncomingCancelSignals.get(fileId);
+    if (sendCancelSignal) {
+      await sendCancelSignal();
+    }
+
     try {
       stream.abort(new Error('Download canceled by user'));
       this.trace('RECV', '', fileId, 'CANCEL_REQUESTED_BY_USER');
       return true;
     } catch (error: unknown) {
       this.trace('RECV', '', fileId, 'CANCEL_ABORT_FAILED', 'err=' + (errStr(error, 'unknown')));
-      return false;
+      return true;
     }
   }
 
@@ -589,6 +665,17 @@ export class FileHandler {
         yield encodePullFrame(confirmFrame);
       })());
       sinkDone.catch(() => undefined);
+      this.activeIncomingCancelSignals.set(claim.messageId, async () => {
+        if (confirmSettled) {
+          return false;
+        }
+        return this.#sendPullConfirmBestEffort(
+          settleConfirm,
+          sinkDone,
+          { type: 'file_transfer_confirm', offerId: claim.offerId, success: false, reason: 'canceled' },
+          FILE_PULL_INTERRUPTED_CONFIRM_GRACE_MS,
+        );
+      });
 
       const challengeFrame = await reader.readFrame(
         isAnon ? FILE_PULL_AUTH_TIMEOUT_ANON : FILE_PULL_AUTH_TIMEOUT_FAST,
@@ -717,6 +804,7 @@ export class FileHandler {
       if (totalTimer) { clearTimeout(totalTimer); }
       settleAuth(null);
       settleConfirm(null);
+      this.activeIncomingCancelSignals.delete(claim.messageId);
       this.activeTransferStreams.delete(claim.messageId);
       this.activeTransfersByPeer.delete(transferKey);
       this.canceledIncomingDownloads.delete(claim.messageId);
@@ -733,6 +821,32 @@ export class FileHandler {
   ): Promise<void> {
     settleConfirm(frame);
     await sinkDone?.catch(() => undefined);
+  }
+
+  async #sendPullConfirmBestEffort(
+    settleConfirm: (frame: PullConfirmFrame) => void,
+    sinkDone: Promise<void> | null,
+    frame: Exclude<PullConfirmFrame, null>,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+    try {
+      await Promise.race([
+        this.#sendPullConfirm(settleConfirm, sinkDone, frame),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(() => {
+            timedOut = true;
+            resolve();
+          }, timeoutMs);
+        }),
+      ]);
+      return !timedOut;
+    } finally {
+      if (timer) {
+        clearTimeout(timer);
+      }
+    }
   }
 
   #applyPullReject(claim: IncomingPullClaim, reason: FilePullRejectReason): void {

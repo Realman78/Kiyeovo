@@ -3469,7 +3469,7 @@ function setupFileTransferHandlers(
         return { success: false, error: "P2P core not initialized" };
       }
 
-      const canceled = p2pCore.messageHandler.getFileHandler().cancelIncomingFileDownload(fileId);
+      const canceled = await p2pCore.messageHandler.getFileHandler().cancelIncomingFileDownload(fileId);
       if (!canceled) {
         return { success: false, error: "No active incoming download found" };
       }

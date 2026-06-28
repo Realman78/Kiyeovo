@@ -517,6 +517,10 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
         return;
       }
 
+      if (data.status === 'awaiting_acceptance') {
+        return;
+      }
+
       toast.error((data.status && data.status !== 'failed' ? 'File download not completed: ' : 'File transfer failed: ') + errorText);
     });
 
