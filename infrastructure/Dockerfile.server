@@ -1,0 +1,70 @@
+# syntax=docker/dockerfile:1
+
+# Kiyeovo server image (bootstrap + relay), amd64 only.
+# One image; the role (bootstrap|relay) is selected by the entrypoint argument.
+#
+# Multi-stage:
+#   builder  installs prod deps, applies the kad-dht patch, compiles the
+#            server-only TS graph, and strips desktop-only native modules;
+#   runtime  carries only the compiled output + patched prod node_modules,
+#            no compilers or install tooling, and runs as a non-root user.
+#
+# The digest pins node:22-bookworm-slim (glibc, so classic-level's linux-x64
+# prebuild loads without a toolchain). Re-pin deliberately when bumping.
+
+ARG NODE_IMAGE=node:22-bookworm-slim@sha256:813a7480f28fdadac1f7f5c824bcdad435b5bc1322a5968bbbdef8d058f9dff4
+
+# ---------- builder ----------
+FROM --platform=linux/amd64 ${NODE_IMAGE} AS builder
+WORKDIR /app
+
+# Install deps without running any lifecycle scripts. This skips the desktop
+# electron-rebuild, the better-sqlite3/keytar native builds, and the electron
+# binary download. classic-level (the only native module the server graph
+# needs) ships a linux-x64 prebuild that loads at runtime, so no toolchain is
+# required. patch-package is then run explicitly to apply the kad-dht patch.
+COPY package.json package-lock.json ./
+COPY patches ./patches
+RUN npm ci --ignore-scripts \
+ && ./node_modules/.bin/patch-package
+
+# Compile the server-only TypeScript graph to plain Node ESM (dist-server/).
+COPY tsconfig.server.json ./
+COPY src ./src
+RUN npm run build:server
+
+# Reduce node_modules to the runtime set: drop dev deps, then remove the
+# desktop-only native modules the server provably never imports.
+#
+# KNOWN PHASE 2 DEBT: the root package.json lists React/Redux/Radix/Tailwind and
+# other UI deps under "dependencies", so they survive `prune --omit=dev` and ship
+# as dead (never-imported) JS in the image. Harmless at runtime, but not yet
+# "truly server-only". The real fix (a dedicated server dependency manifest) is
+# deferred to Phase 5 release prep, before any image is published to GHCR.
+RUN npm prune --omit=dev \
+ && rm -rf node_modules/better-sqlite3 node_modules/keytar
+
+# ---------- runtime ----------
+FROM --platform=linux/amd64 ${NODE_IMAGE} AS runtime
+WORKDIR /app
+ENV NODE_ENV=production
+
+# gosu lets the entrypoint fix bind-mount ownership as root, then drop to the
+# unprivileged service user before exec-ing the server.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends gosu \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd --system --gid 10001 kiyeovo \
+ && useradd --system --uid 10001 --gid kiyeovo --home-dir /app --shell /usr/sbin/nologin kiyeovo
+
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/dist-server ./dist-server
+COPY --from=builder /app/package.json ./package.json
+COPY infrastructure/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY infrastructure/healthcheck.mjs /usr/local/bin/healthcheck.mjs
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Starts as root only to chown the data/runtime mounts, then drops to `kiyeovo`.
+# Role (bootstrap|relay) comes from CMD / compose `command`.
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["bootstrap"]

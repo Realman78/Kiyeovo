@@ -700,6 +700,61 @@ Server build target:
   (which applies the required `@libp2p/kad-dht` patch the servers depend on) is a
   runtime dependency so a production `npm ci --omit=dev` install still applies it.
 
+#### 11.7 Containerised deployment (Docker Compose, Fast mode)
+
+`infrastructure/` holds the Docker artefacts for self-hosting Fast bootstrap +
+relay. Docker Compose owns the service lifecycle (start/stop/restart/auto-restart);
+the future `kiyeovo-infra` CLI is a thin front-end over this, never a second
+supervisor.
+
+Image (`infrastructure/Dockerfile.server`):
+- One `amd64` image, role (`bootstrap`|`relay`) selected by the entrypoint
+  argument. Base is `node:22-bookworm-slim` pinned by digest (glibc, so
+  `classic-level`'s bundled `linux-x64` prebuild loads without a toolchain).
+- Multi-stage: the builder installs deps with `--ignore-scripts` (skipping the
+  desktop electron-rebuild and the `better-sqlite3`/`keytar` native builds),
+  applies the kad-dht patch, compiles `dist-server`, prunes dev deps, and removes
+  the desktop-only natives `better-sqlite3` and `keytar`. The runtime stage copies
+  only the patched production `node_modules` + `dist-server`, with no compilers or
+  install tooling.
+- Known Phase 2 debt: UI/desktop JS deps (React, Redux, Radix, Tailwind, …) live
+  under root `dependencies`, so they survive `prune --omit=dev` and ship as dead,
+  never-imported JS in the image (harmless at runtime, not security-relevant). The
+  real "server-only" dependency boundary (a dedicated server manifest) is deferred
+  to Phase 5 release prep, before any image is published to GHCR.
+
+Ownership boundary (`infrastructure/docker-entrypoint.sh`):
+- The container starts as root **only** to `mkdir`/`chown` the bind-mounted data
+  and runtime directories, then `gosu`-drops to the unprivileged `kiyeovo` user and
+  `exec`s the server. The long-running process is never root. The image `USER`
+  stays root (so the entrypoint can chown), so the Compose healthcheck explicitly
+  re-drops via `gosu kiyeovo:kiyeovo`.
+
+Compose (`infrastructure/compose.yaml`):
+- Two services from the one image, differing only by `command` (role) and env. Both
+  set `KIYEOVO_DEPLOY_MODE=1`, so the fail-closed identity, fail-fast announce, and
+  required runtime-metadata behaviours of 11.6 are active.
+- **Bind mounts** (not named volumes) under the deployment dir: `./data/<role>` →
+  `/data` (identity file + datastore) and `./run/<role>` → `/run/kiyeovo` (the
+  runtime JSON the CLI reads). Bind mounts keep state on the host across recreation
+  and image changes, and let the host-side CLI read the runtime metadata directly.
+- `restart: unless-stopped` (crash/boot auto-restart with `systemctl enable
+  docker`), `json-file` log rotation (`max-size`/`max-file`), published ports
+  `9000` (bootstrap) and `4002` (relay), and **no** Docker socket mounted.
+- Announce addresses are required (deploy mode); they come from
+  `infrastructure/.env` (`BOOTSTRAP_ANNOUNCE_ADDRS`, `RELAY_ANNOUNCE_ADDRS`).
+
+Healthcheck (`infrastructure/healthcheck.mjs`):
+- "Healthy" = process running + the runtime JSON present and well-formed
+  (`schemaVersion`, `role`, non-empty `peerId` and `clientAddrs`) + the local TCP
+  listener accepting a connection. It deliberately does **not** test external
+  reachability (a node behind a closed firewall/NAT is a network config issue, not
+  an unhealthy container).
+
+`down` preserves state: stopping/removing the containers leaves the bind-mounted
+`./data` and `./run` directories (identity, datastore, last runtime JSON) intact;
+Peer IDs survive `restart`, recreation, and image changes.
+
 ---
 
 ### 12. UI and state management

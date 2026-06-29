@@ -36,6 +36,11 @@ relay-peer-id.bin
 # Server runtime metadata (public, regenerated each start)
 *.runtime.json
 
+# Local infra deployment data (identities, datastores, runtime output)
+infrastructure/.env
+infrastructure/data
+infrastructure/run
+
 .claude
 .codex
 

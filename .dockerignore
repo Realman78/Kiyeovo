@@ -1,0 +1,35 @@
+# Keep the server image build context small and free of host secrets/state.
+# The Dockerfile only needs package.json, package-lock.json, patches/,
+# tsconfig.server.json and src/.
+
+.git
+node_modules
+dist
+dist-ui
+dist-electron
+dist-server
+
+# Secrets, identities, local datastores, runtime output
+.env
+*.bin
+bootstrap-datastore
+*.runtime.json
+chat.db*
+
+# Logs and local app data
+*.log
+logs
+logs*
+kiyeovo-downloads
+kiyeovo-uploads
+
+# Tooling / editor
+.claude
+.codex
+.vscode
+.idea
+
+# Local infra test data
+infrastructure/.env
+infrastructure/data
+infrastructure/run

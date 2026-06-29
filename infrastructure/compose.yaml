@@ -1,0 +1,93 @@
+# Kiyeovo infrastructure — Fast mode (bootstrap + relay).
+#
+# One server image, two services differing only by the role argument and env.
+# Lifecycle (start/stop/restart/auto-restart) is owned by Compose; the future
+# kiyeovo-infra CLI is a thin front-end over this file, not a second supervisor.
+#
+# Required before `up` (deploy mode aborts without them) — set in infrastructure/.env:
+#   BOOTSTRAP_ANNOUNCE_ADDRS=/ip4/<public-ip>/tcp/9000
+#   RELAY_ANNOUNCE_ADDRS=/ip4/<public-ip>/tcp/4002
+#
+# Bind mounts keep identity + datastore + runtime metadata on the host so they
+# survive recreation/image changes and the CLI can read the runtime JSON. The
+# entrypoint fixes their ownership and drops to a non-root user. `down` does not
+# remove bind-mounted data.
+
+name: kiyeovo-infra
+
+services:
+  bootstrap:
+    image: ghcr.io/realman78/kiyeovo-server:0.1.0
+    build:
+      context: ..
+      dockerfile: infrastructure/Dockerfile.server
+    platform: linux/amd64
+    command: ["bootstrap"]
+    restart: unless-stopped
+    environment:
+      KIYEOVO_DEPLOY_MODE: "1"
+      KIYEOVO_SERVER_VERSION: "0.1.0"
+      BOOTSTRAP_NETWORK_MODE: fast
+      BOOTSTRAP_LISTEN_ADDRESS: /ip4/0.0.0.0/tcp/9000
+      BOOTSTRAP_ANNOUNCE_ADDRS: ${BOOTSTRAP_ANNOUNCE_ADDRS:?set in infrastructure/.env, e.g. /ip4/<public-ip>/tcp/9000}
+      BOOTSTRAP_PEER_ID_FILE: /data/bootstrap-peer-id.bin
+      BOOTSTRAP_DATASTORE_PATH: /data/datastore
+      KIYEOVO_RUNTIME_FILE: /run/kiyeovo/bootstrap.runtime.json
+      KIYEOVO_DATA_DIR: /data
+      KIYEOVO_RUNTIME_DIR: /run/kiyeovo
+      KIYEOVO_HEALTHCHECK_PORT: "9000"
+    ports:
+      - "9000:9000"
+    volumes:
+      - ./data/bootstrap:/data
+      - ./run/bootstrap:/run/kiyeovo
+    healthcheck:
+      # Run as the non-root service user (the image USER stays root so the
+      # entrypoint can chown bind mounts), matching the server's own privileges.
+      test: ["CMD", "gosu", "kiyeovo:kiyeovo", "node", "/usr/local/bin/healthcheck.mjs"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  relay:
+    image: ghcr.io/realman78/kiyeovo-server:0.1.0
+    build:
+      context: ..
+      dockerfile: infrastructure/Dockerfile.server
+    platform: linux/amd64
+    command: ["relay"]
+    restart: unless-stopped
+    environment:
+      KIYEOVO_DEPLOY_MODE: "1"
+      KIYEOVO_SERVER_VERSION: "0.1.0"
+      RELAY_LISTEN_ADDRESS: /ip4/0.0.0.0/tcp/4002
+      RELAY_ANNOUNCE_ADDRS: ${RELAY_ANNOUNCE_ADDRS:?set in infrastructure/.env, e.g. /ip4/<public-ip>/tcp/4002}
+      RELAY_PEER_ID_FILE: /data/relay-peer-id.bin
+      KIYEOVO_RUNTIME_FILE: /run/kiyeovo/relay.runtime.json
+      KIYEOVO_DATA_DIR: /data
+      KIYEOVO_RUNTIME_DIR: /run/kiyeovo
+      KIYEOVO_HEALTHCHECK_PORT: "4002"
+    ports:
+      - "4002:4002"
+    volumes:
+      - ./data/relay:/data
+      - ./run/relay:/run/kiyeovo
+    healthcheck:
+      # Run as the non-root service user (the image USER stays root so the
+      # entrypoint can chown bind mounts), matching the server's own privileges.
+      test: ["CMD", "gosu", "kiyeovo:kiyeovo", "node", "/usr/local/bin/healthcheck.mjs"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
