@@ -653,6 +653,7 @@ Composer behavior:
 - completed inline image messages expose **Copy image** through the hover/focus/right-click row menu and the fullscreen preview dialog
 - messages can be **replied to**: a hover reply affordance and the message row dropdown's **Reply** action quote a specific message and focus the composer; the composer shows a cancelable reply bar (survives chat switches, `Esc`/✕ to cancel); the quote renders as a full-width header enclosed inside the reply bubble (resolved by live lookup, shows *"Original message unavailable."* if the original is gone), so the quote and reply share the width of whichever is wider. Clicking the quote jumps to the original before starting a 2.5-second highlight pulse once the target is visible, paging older history in if needed. Reply works in both direct and group chats; it is hidden only on un-settled/failed sends (and on files until transfer completes). When the viewport is away from the latest message, a floating down-chevron returns it to the bottom. See §5.4.
 - inbound message notifications are batched over a short renderer-side window so offline/startup bursts produce one sound and one summary desktop notification instead of one per message
+- pending-file offer toasts are also batched over a short renderer-side window so login/offline catch-up bursts produce one in-app toast instead of one toast per offer
 
 UI is event-driven while core remains authoritative.
 
@@ -665,7 +666,7 @@ Offline inbox capacity panel behavior:
 
 Pending file manager behavior:
 - the pending-file manager is separate from the offline inbox capacity panel because it reflects local recipient-side file-offer slots, not DHT bucket slots
-- it appears in every chat when fresh pending file-offer capacity is full globally; when only one sender is full, it appears in that sender's direct chat; and when a group file offer was locally deferred because capacity was full, it appears in that group as a recovery hint
+- it appears in every chat when fresh pending file-offer capacity is full globally; when only one sender is full, it appears in that sender's direct chat and in groups containing that sender; and when a group file offer was locally deferred because capacity was full, it appears in that group as a recovery hint
 - the manager lists pending incoming file offers grouped by sender and supports Accept, Reject, and Reject all from sender; Reject all is intentionally provided for slot cleanup, while Accept all is intentionally absent to avoid starting multiple pulls at once
 - a capacity-full group deferral is local and recoverable: the sender is not NACKed, no chat-history system message is persisted, and after clearing older offers the user can run missed-message recovery to reprocess skipped group offers
 

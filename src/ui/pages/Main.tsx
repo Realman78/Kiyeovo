@@ -251,6 +251,47 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
   }, [dispatch, incomingCall?.callId, incomingCall?.peerId, toast]);
 
   useEffect(() => {
+    const pendingFileToastBuffer: Array<{
+      senderId: string;
+      senderUsername: string;
+      filename: string;
+    }> = [];
+    let pendingFileToastTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const flushPendingFileToast = () => {
+      pendingFileToastTimer = null;
+      const items = pendingFileToastBuffer.splice(0);
+      if (items.length === 0) {
+        return;
+      }
+
+      if (items.length === 1) {
+        const item = items[0];
+        toast.info(`${item.senderUsername} wants to send you a file: ${item.filename}`);
+        return;
+      }
+
+      const senderIds = new Set(items.map((item) => item.senderId));
+      if (senderIds.size === 1) {
+        toast.info(`${items[0].senderUsername} sent ${items.length} file offers`);
+        return;
+      }
+
+      toast.info(`${items.length} pending file offers received`);
+    };
+
+    const enqueuePendingFileToast = (item: {
+      senderId: string;
+      senderUsername: string;
+      filename: string;
+    }) => {
+      pendingFileToastBuffer.push(item);
+      if (pendingFileToastTimer) {
+        return;
+      }
+      pendingFileToastTimer = setTimeout(flushPendingFileToast, 800);
+    };
+
     const markPendingFileInboxAttentionIfRelevant = async (chatId: number, senderId: string) => {
       try {
         const result = await window.kiyeovoAPI.getPendingFileInbox();
@@ -623,7 +664,11 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
       }));
       // Unread count is handled by addMessage reducer for non-active chats.
       dispatch(setPendingFileStatus({ chatId: data.chatId, hasPendingFile: true }));
-      toast.info(`${data.senderUsername} wants to send you a file: ${data.filename}`);
+      enqueuePendingFileToast({
+        senderId: data.senderId,
+        senderUsername: data.senderUsername,
+        filename: data.filename,
+      });
       void markPendingFileInboxAttentionIfRelevant(data.chatId, data.senderId);
     });
 
@@ -813,6 +858,9 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
       unsubGroupCallService();
       callService.dispose();
       groupCallService.dispose();
+      if (pendingFileToastTimer) {
+        clearTimeout(pendingFileToastTimer);
+      }
     };
   }, [])
 

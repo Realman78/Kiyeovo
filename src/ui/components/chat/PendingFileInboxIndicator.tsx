@@ -249,11 +249,18 @@ export const PendingFileInboxIndicator = ({
       : null,
     [chatType, groupMemberPeerIds, snapshot],
   );
-  const visible = attention || expanded || manageOpen || !!snapshot?.full || !!directChatFullSender || !!groupMemberFullSender;
+  const isRelevant = attention || !!snapshot?.full || !!directChatFullSender || !!groupMemberFullSender;
+  const visible = isRelevant || expanded || manageOpen;
   const fullSender = directChatFullSender ?? groupMemberFullSender ?? (snapshot?.full
     ? snapshot.senders.find((sender) => sender.full) ?? null
     : null);
   const oldestAge = snapshot ? getOldestOfferAge(snapshot.offers) : null;
+
+  useEffect(() => {
+    if (!loading && expanded && !manageOpen && !isRelevant && snapshot) {
+      onToggle();
+    }
+  }, [expanded, isRelevant, loading, manageOpen, onToggle, snapshot]);
 
   const handleToggle = () => {
     if (!expanded) {
@@ -306,8 +313,8 @@ export const PendingFileInboxIndicator = ({
     }
   };
 
-  const rejectSenderOffers = async (sender: PendingFileInboxSenderSummary) => {
-    setBusyKey(`reject-sender:${sender.senderPeerId}`);
+  const rejectSenderOffers = async (sender: PendingFileInboxSenderSummary, actionKey: string) => {
+    setBusyKey(actionKey);
     try {
       for (const offer of sender.offers) {
         const result = await window.kiyeovoAPI.rejectFile(offer.fileId);
@@ -451,50 +458,53 @@ export const PendingFileInboxIndicator = ({
                   Capacity: {snapshot.total} / {snapshot.totalLimit} total
                   {snapshot.hasFullSender && " • at least one sender is full"}
                 </div>
-                {snapshot.senders.map((sender) => (
-                  <div key={sender.senderPeerId} className="space-y-2">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="truncate text-sm font-medium text-foreground">
-                          {sender.senderUsername}
+                {snapshot.senders.map((sender, senderIndex) => {
+                  const rejectAllActionKey = `reject-sender:${sender.senderPeerId}:${senderIndex}`;
+                  return (
+                    <div key={`${sender.senderPeerId}:${senderIndex}`} className="space-y-2">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-medium text-foreground">
+                            {sender.senderUsername}
+                          </div>
+                          <div className="text-[11px] text-muted-foreground">
+                            {sender.count} / {sender.limit} slots used
+                            {sender.full && <span className="ml-2 text-destructive">full</span>}
+                          </div>
                         </div>
-                        <div className="text-[11px] text-muted-foreground">
-                          {sender.count} / {sender.limit} slots used
-                          {sender.full && <span className="ml-2 text-destructive">full</span>}
-                        </div>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="destructive"
+                          onClick={() => {
+                            void rejectSenderOffers(sender, rejectAllActionKey);
+                          }}
+                          disabled={busyKey !== null || sender.offers.length === 0}
+                        >
+                          {busyKey === rejectAllActionKey
+                            ? <Loader2 className="h-4 w-4 animate-spin" />
+                            : <Trash2 className="h-4 w-4" />}
+                          Reject all
+                        </Button>
                       </div>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="destructive"
-                        onClick={() => {
-                          void rejectSenderOffers(sender);
-                        }}
-                        disabled={busyKey !== null || sender.offers.length === 0}
-                      >
-                        {busyKey === `reject-sender:${sender.senderPeerId}`
-                          ? <Loader2 className="h-4 w-4 animate-spin" />
-                          : <Trash2 className="h-4 w-4" />}
-                        Reject all
-                      </Button>
+                      <div className="space-y-2">
+                        {sender.offers.map((offer) => (
+                          <OfferRow
+                            key={offer.fileId}
+                            offer={offer}
+                            busyKey={busyKey}
+                            onAccept={(nextOffer) => {
+                              void acceptOffer(nextOffer);
+                            }}
+                            onReject={(nextOffer) => {
+                              void rejectOffer(nextOffer);
+                            }}
+                          />
+                        ))}
+                      </div>
                     </div>
-                    <div className="space-y-2">
-                      {sender.offers.map((offer) => (
-                        <OfferRow
-                          key={offer.fileId}
-                          offer={offer}
-                          busyKey={busyKey}
-                          onAccept={(nextOffer) => {
-                            void acceptOffer(nextOffer);
-                          }}
-                          onReject={(nextOffer) => {
-                            void rejectOffer(nextOffer);
-                          }}
-                        />
-                      ))}
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </DialogBody>
