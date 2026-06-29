@@ -665,7 +665,7 @@ Offline inbox capacity panel behavior:
 
 Pending file manager behavior:
 - the pending-file manager is separate from the offline inbox capacity panel because it reflects local recipient-side file-offer slots, not DHT bucket slots
-- it appears when fresh pending file-offer capacity is full globally or for at least one sender, or when a group file offer was locally deferred because capacity was full
+- it appears in every chat when fresh pending file-offer capacity is full globally; when only one sender is full, it appears in that sender's direct chat; and when a group file offer was locally deferred because capacity was full, it appears in that group as a recovery hint
 - the manager lists pending incoming file offers grouped by sender and supports Accept, Reject, and Reject all from sender; Reject all is intentionally provided for slot cleanup, while Accept all is intentionally absent to avoid starting multiple pulls at once
 - a capacity-full group deferral is local and recoverable: the sender is not NACKed, no chat-history system message is persisted, and after clearing older offers the user can run missed-message recovery to reprocess skipped group offers
 

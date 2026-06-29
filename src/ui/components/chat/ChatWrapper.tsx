@@ -908,6 +908,8 @@ const ChatWrapper = ({ active = true }: { active?: boolean }) => {
                     />
                     <PendingFileInboxIndicator
                       chatId={activeChat.id}
+                      chatType={activeChat.type}
+                      peerId={activeChat.peerId}
                       attention={!!activeChat.pendingFileInboxAttention}
                       expanded={isPendingFileInboxExpanded}
                       onToggle={togglePendingFileInbox}

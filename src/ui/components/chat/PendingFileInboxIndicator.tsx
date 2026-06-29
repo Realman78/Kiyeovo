@@ -22,6 +22,8 @@ import { useToast } from "../ui/use-toast";
 
 type PendingFileInboxIndicatorProps = {
   chatId: number;
+  chatType: 'direct' | 'group';
+  peerId?: string;
   attention: boolean;
   expanded: boolean;
   onToggle: () => void;
@@ -147,6 +149,8 @@ const OfferRow = ({
 
 export const PendingFileInboxIndicator = ({
   chatId,
+  chatType,
+  peerId,
   attention,
   expanded,
   onToggle,
@@ -200,11 +204,16 @@ export const PendingFileInboxIndicator = ({
     }
   }, [attention, expanded, manageOpen, loadSnapshot]);
 
-  const visible = attention || expanded || manageOpen || !!snapshot?.full || !!snapshot?.hasFullSender;
-  const fullSender = useMemo(
-    () => snapshot?.senders.find((sender) => sender.full) ?? null,
-    [snapshot],
+  const directChatFullSender = useMemo(
+    () => chatType === "direct" && peerId
+      ? snapshot?.senders.find((sender) => sender.full && sender.senderPeerId === peerId) ?? null
+      : null,
+    [chatType, peerId, snapshot],
   );
+  const visible = attention || expanded || manageOpen || !!snapshot?.full || !!directChatFullSender;
+  const fullSender = directChatFullSender ?? (snapshot?.full
+    ? snapshot.senders.find((sender) => sender.full) ?? null
+    : null);
   const oldestAge = snapshot ? getOldestOfferAge(snapshot.offers) : null;
 
   const handleToggle = () => {
@@ -314,7 +323,7 @@ export const PendingFileInboxIndicator = ({
                 <div className="flex items-center gap-2 text-[11px] font-mono uppercase tracking-wide text-foreground">
                   Pending files
                   <Tooltip
-                    content="Pending file offers consume local slots until accepted or rejected."
+                    content="Pending file offers consume local slots across direct and group chats until accepted or rejected."
                     contentClassName="w-56"
                     align="left"
                   >
@@ -324,7 +333,7 @@ export const PendingFileInboxIndicator = ({
                   </Tooltip>
                 </div>
                 <div className="mt-1 text-[10px] leading-4 text-muted-foreground">
-                  Clear older offers, then check missed messages to recover skipped group file offers.
+                  Pending file slots are shared across direct and group chats. Clear older offers, then check missed messages to recover skipped group file offers.
                 </div>
               </div>
               <button
@@ -346,7 +355,7 @@ export const PendingFileInboxIndicator = ({
               />
               {fullSender && (
                 <CapacityBar
-                  label={`${fullSender.senderUsername}`}
+                  label={`${fullSender.senderUsername} across all chats`}
                   count={fullSender.count}
                   limit={fullSender.limit}
                 />
