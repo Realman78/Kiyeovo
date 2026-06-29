@@ -9,3 +9,6 @@ import './lib/frame-stream.test.js';
 import './lib/file-storage.test.js';
 import './lib/file-handler.test.js';
 import './db/database.file-offer.test.js';
+import './username/username-dht-validator.test.js';
+import './direct/offline-message-validator.test.js';
+import './group/dht/group-dht-validator.test.js';
