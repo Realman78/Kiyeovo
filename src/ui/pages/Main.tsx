@@ -48,6 +48,7 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
     useState<InitialSetupStatus | null>(null);
   const [initialSetupSaving, setInitialSetupSaving] = useState(false);
   const initialSetupTransitionInFlightRef = useRef(false);
+  const recentOfflineSyncGenerationRef = useRef(0);
   const dispatch = useDispatch();
   const { toast } = useToast();
   const setupReadiness = useSetupReadiness();
@@ -191,6 +192,23 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
     lastKnownActiveCallSeenAt: dbChat.last_known_active_call_seen_at ?? null,
     ...overrides,
   });
+
+  const mapDbChatsPreservingLocalUiState = (
+    dbChats: any[],
+    currentChats: Chat[] = store.getState().chat.chats,
+  ): Chat[] => {
+    const currentByChatId = new Map(currentChats.map((chat) => [chat.id, chat]));
+    return dbChats.map((dbChat: any) => {
+      const current = currentByChatId.get(dbChat.id);
+      return mapDbChatToUiChat(dbChat, {
+        unreadCount: current?.unreadCount ?? 0,
+        fetchedOffline: current?.fetchedOffline
+          ?? (dbChat.type === 'group' ? dbChat.group_status !== 'active' : false),
+        isFetchingOffline: current?.isFetchingOffline ?? false,
+        offlineFetchNeedsSync: current?.offlineFetchNeedsSync ?? false,
+      });
+    });
+  };
 
   const syncChatCallEvidenceFromDb = async (chatId: number) => {
     const result = await window.kiyeovoAPI.getChatById(chatId);
@@ -729,10 +747,11 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
       }
 
       if (data.signal.type === 'CALL_GROUP_STARTED') {
+        const existingSeenAt = chat.lastKnownActiveCallSeenAt ?? 0;
         if (
           chat.lastKnownActiveCallId
           && chat.lastKnownActiveCallId !== data.signal.callId
-          && chat.lastKnownActiveCallId < data.signal.callId
+          && existingSeenAt > data.signal.timestamp
         ) {
           return;
         }
@@ -865,14 +884,21 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
   }, [])
 
   const syncRecentOfflineMessages = useEffectEvent(async (wakeToken: number | null) => {
+    const syncGeneration = recentOfflineSyncGenerationRef.current + 1;
+    recentOfflineSyncGenerationRef.current = syncGeneration;
+    const isCurrentSync = () => recentOfflineSyncGenerationRef.current === syncGeneration;
+
     try {
       const result = await window.kiyeovoAPI.getChats();
+      if (!isCurrentSync()) {
+        return;
+      }
       if (!result.success) {
         console.error('[UI] Failed to fetch chats:', result.error);
         return;
       }
 
-      const mappedChats = result.chats.map((dbChat: any) => mapDbChatToUiChat(dbChat));
+      const mappedChats = mapDbChatsPreservingLocalUiState(result.chats);
 
       dispatch(setChats(mappedChats));
 
@@ -920,6 +946,9 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
         });
         try {
           const groupResult = await window.kiyeovoAPI.checkGroupOfflineMessages(topGroupChatIds);
+          if (!isCurrentSync()) {
+            return;
+          }
           if (!groupResult.success) {
             dispatch(markOfflineFetchFailed(topGroupChatIds));
             return;
@@ -937,6 +966,9 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
           }
 
           const refreshResult = await window.kiyeovoAPI.getChats();
+          if (!isCurrentSync()) {
+            return;
+          }
           if (refreshResult.success) {
             const currentChats = store.getState().chat.chats;
             const currentUnreadByChatId = new Map(currentChats.map((chat) => [chat.id, chat.unreadCount]));
@@ -962,6 +994,9 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
             toast.warning(`Detected ${groupResult.gapWarnings.length} group sequence gap(s); some old messages may be missing`);
           }
         } catch (error) {
+          if (!isCurrentSync()) {
+            return;
+          }
           dispatch(markOfflineFetchFailed(topGroupChatIds));
           console.error('[UI] Failed to check group offline messages:', error);
         }
@@ -978,12 +1013,18 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
 
         try {
           const result = await window.kiyeovoAPI.checkOfflineMessages(topDirectChatIds);
+          if (!isCurrentSync()) {
+            return;
+          }
           if (result.success) {
             const fetchedChatIds = result.checkedChatIds.length > 0 ? result.checkedChatIds : topDirectChatIds;
             console.log(`Offline message check complete - checked ${fetchedChatIds.length} chats`);
             dispatch(markOfflineFetched(fetchedChatIds));
 
             const refreshResult = await window.kiyeovoAPI.getChats();
+            if (!isCurrentSync()) {
+              return;
+            }
             if (refreshResult.success) {
               const currentChats = store.getState().chat.chats;
               const currentUnreadByChatId = new Map(currentChats.map((c) => [c.id, c.unreadCount]));
@@ -1003,6 +1044,9 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
             dispatch(markOfflineFetchFailed(topDirectChatIds));
           }
         } catch (error) {
+          if (!isCurrentSync()) {
+            return;
+          }
           console.error('[UI] Failed to check offline messages:', error);
           dispatch(markOfflineFetchFailed(topDirectChatIds));
         }
