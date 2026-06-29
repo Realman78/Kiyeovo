@@ -738,6 +738,8 @@ export class FileHandler {
     const chat = this.database.getChats([rejected.chatId])[0];
     if (chat?.type === 'direct') {
       void this.#sendFileOfferNack(rejected.senderPeerId, rejected.offerId, 'declined');
+    } else if (chat?.type === 'group' && chat.group_id) {
+      void this.#sendGroupFileOfferNack(chat.group_id, rejected.offerId, 'declined');
     }
     return true;
   }
@@ -1151,34 +1153,42 @@ export class FileHandler {
     };
   }
 
+  #createFileOfferNackPayload(
+    offerId: string,
+    reason: FileOfferNackReason,
+  ): FileOfferNackApplicationPayload {
+    const identity = this.messageHandler.getUserIdentity();
+    if (!identity) {
+      throw new Error('No user identity available');
+    }
+    const unsignedNack = {
+      type: 'file_offer_nack' as const,
+      offerId,
+      reason,
+    };
+    const signature = identity.sign(
+      JSON.stringify(createFileOfferNackSignaturePayload(unsignedNack)),
+    );
+    return {
+      ...unsignedNack,
+      signature: Buffer.from(signature).toString('base64'),
+    };
+  }
+
   async #sendFileOfferNack(
     targetPeerId: string,
     offerId: string,
     reason: FileOfferNackReason,
   ): Promise<void> {
     try {
-      const identity = this.messageHandler.getUserIdentity();
-      if (!identity) {
-        throw new Error('No user identity available');
-      }
-      const unsignedNack = {
-        type: 'file_offer_nack' as const,
-        offerId,
-        reason,
-      };
-      const signature = identity.sign(
-        JSON.stringify(createFileOfferNackSignaturePayload(unsignedNack)),
-      );
+      const payload = this.#createFileOfferNackPayload(offerId, reason);
       await this.messageHandler.sendApplicationMessage(
         { type: 'direct', peerId: targetPeerId },
         {
           message: {
             cid: randomUUID(),
             kind: 'file_offer_nack',
-            payload: {
-              ...unsignedNack,
-              signature: Buffer.from(signature).toString('base64'),
-            },
+            payload,
           },
           persistence: { owner: 'none' },
         },
@@ -1187,6 +1197,33 @@ export class FileHandler {
     } catch (error: unknown) {
       console.warn(
         `[FILE][NACK][DELIVERY_FAILED] peer=*${targetPeerId.slice(-8)} `
+        + `offer=${offerId} reason=${reason} err=${errStr(error, 'unknown')}`,
+      );
+    }
+  }
+
+  async #sendGroupFileOfferNack(
+    groupId: string,
+    offerId: string,
+    reason: FileOfferNackReason,
+  ): Promise<void> {
+    try {
+      const payload = this.#createFileOfferNackPayload(offerId, reason);
+      await this.messageHandler.sendApplicationMessage(
+        { type: 'group', groupId },
+        {
+          message: {
+            cid: randomUUID(),
+            kind: 'file_offer_nack',
+            payload,
+          },
+          persistence: { owner: 'none' },
+        },
+      );
+      this.trace('SEND', groupId, null, 'GROUP_OFFER_NACK_SENT', `offer=${offerId} reason=${reason}`);
+    } catch (error: unknown) {
+      console.warn(
+        `[FILE][NACK][GROUP_DELIVERY_FAILED] group=${groupId.slice(0, 8)} `
         + `offer=${offerId} reason=${reason} err=${errStr(error, 'unknown')}`,
       );
     }
@@ -1279,12 +1316,13 @@ export class FileHandler {
     context: InboundApplicationMessageContext,
     nack: FileOfferNackApplicationPayload,
   ): boolean {
-    if (context.route !== 'direct_online' && context.route !== 'direct_offline') {
+    const isDirectRoute = context.route === 'direct_online' || context.route === 'direct_offline';
+    const isGroupRoute = context.route === 'group_realtime' || context.route === 'group_offline';
+    if (!isDirectRoute && !isGroupRoute) {
       return false;
     }
-    const chat = this.database.getChatByPeerId(context.senderPeerId);
     const sender = this.database.getUserByPeerId(context.senderPeerId);
-    if (!chat || chat.type !== 'direct' || !sender) {
+    if (!sender) {
       return true;
     }
     if (!validateFileOfferNack({
@@ -1295,6 +1333,29 @@ export class FileHandler {
         sender.signing_public_key,
       ),
     })) {
+      return true;
+    }
+
+    if (isGroupRoute) {
+      if (nack.reason !== 'declined') {
+        return true;
+      }
+      const meta = this.servedFiles.getMeta(nack.offerId);
+      if (
+        !meta
+        || !meta.isGroup
+        || meta.chatId !== context.chatId
+        || !this.servedFiles.getAuthorizedKey(nack.offerId, context.senderPeerId)
+      ) {
+        return true;
+      }
+      this.applyCanceledServedPull(nack.offerId, meta, context.senderPeerId);
+      this.trace('RECV', context.senderPeerId, meta.fileId, 'GROUP_OFFER_NACK_APPLIED', `offer=${nack.offerId} reason=${nack.reason}`);
+      return true;
+    }
+
+    const chat = this.database.getChatByPeerId(context.senderPeerId);
+    if (!chat || chat.type !== 'direct') {
       return true;
     }
 

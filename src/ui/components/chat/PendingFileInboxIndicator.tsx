@@ -110,9 +110,11 @@ const OfferRow = ({
       <div className="min-w-0 flex-1">
         <div className="truncate text-sm text-foreground">{offer.filename}</div>
         <div className="mt-0.5 flex flex-wrap gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
-          <span>{formatBytes(offer.size)}</span>
-          <span>•</span>
+        {offer.chatType === "group" && <>
           <span>{offer.chatName}</span>
+          <span>•</span>
+          </>}
+          <span>{formatBytes(offer.size)}</span>
           <span>•</span>
           <span>{formatAge(offer.offeredAt)}</span>
           {!offer.countsTowardCapacity && offer.transferError && (
@@ -137,6 +139,7 @@ const OfferRow = ({
         type="button"
         size="sm"
         variant="ghost"
+        className="border-destructive border text-destructive!"
         onClick={() => onReject(offer)}
         disabled={disabled}
       >
@@ -379,7 +382,7 @@ export const PendingFileInboxIndicator = ({
                     </span>
                   </Tooltip>
                 </div>
-                <div className="mt-1 text-[10px] leading-4 text-muted-foreground">
+                <div className="mt-1 text-[10px] text-left leading-4 text-muted-foreground">
                   Pending file slots are shared across direct and group chats. Clear older offers, then check missed messages to recover skipped group file offers.
                 </div>
               </div>

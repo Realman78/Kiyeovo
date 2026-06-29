@@ -220,16 +220,24 @@ async function createGroupChat(
   return chatId;
 }
 
-function nackContext(offerId: string, chatId: number): InboundApplicationMessageContext {
-  const signaturePayload = createFileOfferNackSignaturePayload({ offerId, reason: 'declined' });
+function signedDeclineNackPayload(
+  offerId: string,
+  privateKey: Uint8Array = recipientPrivateKey,
+) {
+  const reason = 'declined' as const;
+  const signaturePayload = createFileOfferNackSignaturePayload({ offerId, reason });
   const signature = Buffer.from(
-    sign(recipientPrivateKey, JSON.stringify(signaturePayload)),
+    sign(privateKey, JSON.stringify(signaturePayload)),
   ).toString('base64');
+  return { type: 'file_offer_nack' as const, offerId, reason, signature };
+}
+
+function nackContext(offerId: string, chatId: number): InboundApplicationMessageContext {
   return {
     message: {
       cid: 'nack_cid',
       kind: 'file_offer_nack',
-      payload: { type: 'file_offer_nack', offerId, reason: 'declined', signature },
+      payload: signedDeclineNackPayload(offerId),
     },
     chatId,
     senderPeerId: RECIPIENT_PEER,
@@ -237,6 +245,27 @@ function nackContext(offerId: string, chatId: number): InboundApplicationMessage
     timestamp: Date.now(),
     transportMessageId: 'nack_transport',
     route: 'direct_online',
+  };
+}
+
+function groupNackContext(
+  offerId: string,
+  chatId: number,
+  senderPeerId = RECIPIENT_PEER,
+  privateKey = recipientPrivateKey,
+): InboundApplicationMessageContext {
+  return {
+    message: {
+      cid: `group_nack_${senderPeerId}`,
+      kind: 'file_offer_nack',
+      payload: signedDeclineNackPayload(offerId, privateKey),
+    },
+    chatId,
+    senderPeerId,
+    senderUsername: senderPeerId === SECOND_RECIPIENT_PEER ? 'second' : 'recipient',
+    timestamp: Date.now(),
+    transportMessageId: `group_nack_transport_${senderPeerId}`,
+    route: 'group_realtime',
   };
 }
 
@@ -491,6 +520,27 @@ test('sendGroupFile persists a caller-owned group offer and snapshots authorized
   assert.equal(sentOffer.cid, 'group_file_1');
 });
 
+test('rejecting an incoming group file offer emits a signed group decline NACK', async (t) => {
+  const { database, fileHandler, sentApplicationMessages } = await createHarness(t);
+  const groupId = `group-${randomUUID()}`;
+  const groupChatId = await createGroupChat(database, groupId);
+
+  assert.equal(await fileHandler.handleApplicationMessage(offerContext({
+    offerId: 'incoming_group_reject_offer',
+    fileId: 'incoming_group_reject_file',
+    chatId: groupChatId,
+    route: 'group_realtime',
+  })), true);
+  assert.equal(fileHandler.rejectPendingFile('incoming_group_reject_file'), true);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  const nack = sentApplicationMessages.find((message) => message.kind === 'file_offer_nack');
+  assert.ok(nack);
+  assert.deepEqual(nack.target, { type: 'group', groupId });
+  assert.equal((nack.payload as { offerId?: string }).offerId, 'incoming_group_reject_offer');
+  assert.equal((nack.payload as { reason?: string }).reason, 'declined');
+});
+
 test('a successful group pull removes only that puller and completes after the last puller', async (t) => {
   const { database, fileHandler, outgoingPendingEvents, completeEvents } = await createHarness(t);
   await database.createUser({
@@ -609,6 +659,57 @@ test('a canceled group pull removes only that puller and keeps the offer for the
   const latestPendingEvent = outgoingPendingEvents[outgoingPendingEvents.length - 1];
   assert.equal(latestPendingEvent?.groupDownloadTotal, 2);
   assert.equal(latestPendingEvent?.groupDownloadCompleted, 0);
+});
+
+test('group decline NACK removes that puller and cancels when nobody downloaded', async (t) => {
+  const { database, fileHandler, outgoingPendingEvents, failedEvents } = await createHarness(t);
+  await database.createUser({
+    peer_id: SECOND_RECIPIENT_PEER,
+    signing_public_key: secondRecipientPublicKey,
+    offline_public_key: 'second_offline_key',
+    signature: 'second_signature',
+    username: 'second',
+  });
+  const groupChatId = await createGroupChat(database, `group-${randomUUID()}`, [
+    LOCAL_PEER,
+    RECIPIENT_PEER,
+    SECOND_RECIPIENT_PEER,
+  ]);
+  const filePath = join(tmpdir(), `kiyeovo-group-decline-${randomUUID()}.txt`);
+  await writeFile(filePath, 'hello group decline');
+  t.after(() => rm(filePath, { force: true }));
+
+  await fileHandler.sendGroupFile(groupChatId, filePath, 'group_decline_file');
+  const row = database.getFileMessageById('group_decline_file');
+  assert.ok(row?.file_offer_id);
+  const offerId = row.file_offer_id;
+  const internals = fileHandler as unknown as FileHandlerServeInternals;
+  const pendingEventsBeforeDecline = outgoingPendingEvents.length;
+
+  assert.equal(await fileHandler.handleApplicationMessage(groupNackContext(offerId, groupChatId)), true);
+
+  assert.equal(fileHandler.hasActiveOffer(offerId), true);
+  assert.equal(internals.servedFiles.getAuthorizedKey(offerId, RECIPIENT_PEER), undefined);
+  assert.equal(internals.servedFiles.getAuthorizedKey(offerId, SECOND_RECIPIENT_PEER), secondRecipientPublicKey);
+  const afterFirstDecline = database.getFileMessageById('group_decline_file');
+  assert.equal(afterFirstDecline?.transfer_status, 'awaiting_acceptance');
+  assert.equal(afterFirstDecline?.file_group_download_total, 2);
+  assert.equal(afterFirstDecline?.file_group_download_completed, 0);
+  assert.equal(failedEvents.length, 0);
+  assert.equal(outgoingPendingEvents.length, pendingEventsBeforeDecline + 1);
+
+  assert.equal(await fileHandler.handleApplicationMessage(
+    groupNackContext(offerId, groupChatId, SECOND_RECIPIENT_PEER, secondRecipientPrivateKey),
+  ), true);
+
+  assert.equal(fileHandler.hasActiveOffer(offerId), false);
+  const finalRow = database.getFileMessageById('group_decline_file');
+  assert.equal(finalRow?.transfer_status, 'cancelled');
+  assert.equal(finalRow?.file_group_download_total, 2);
+  assert.equal(finalRow?.file_group_download_completed, 0);
+  assert.equal(failedEvents.length, 1);
+  assert.equal(failedEvents[0]?.messageId, 'group_decline_file');
+  assert.equal(failedEvents[0]?.status, 'cancelled');
 });
 
 test('a group offer closes as partial completion when the last remaining puller cancels after successes', async (t) => {
