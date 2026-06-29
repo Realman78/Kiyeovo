@@ -2524,6 +2524,101 @@ export class ChatDatabase {
         return tx() as { offerId: string; chatId: number; targetPeerId: string; filename: string } | null;
     }
 
+    cancelOutgoingGroupFileOffer(input: {
+        fileId: string;
+        localPeerId: string;
+    }): {
+        offerId: string;
+        chatId: number;
+        groupId: string;
+        filename: string;
+        status: 'cancelled' | 'partially_completed';
+        error: string | null;
+        groupDownloadTotal: number;
+        groupDownloadCompleted: number;
+    } | null {
+        const tx = this.db.transaction(() => {
+            const row = this.db.prepare(`
+                SELECT
+                  m.file_offer_id AS offerId,
+                  m.chat_id AS chatId,
+                  m.file_name AS filename,
+                  COALESCE(m.file_group_download_total, 0) AS groupDownloadTotal,
+                  COALESCE(m.file_group_download_completed, 0) AS groupDownloadCompleted,
+                  c.group_id AS groupId
+                FROM messages m
+                JOIN chats c ON c.id = m.chat_id
+                WHERE m.id = ?
+                  AND m.sender_peer_id = ?
+                  AND m.message_type = 'file'
+                  AND m.transfer_status = 'awaiting_acceptance'
+                  AND m.file_offer_id IS NOT NULL
+                  AND c.type = 'group'
+                  AND c.group_id IS NOT NULL
+                  AND c.network_mode = ?
+                LIMIT 1
+            `).get(
+                input.fileId,
+                input.localPeerId,
+                this.sessionNetworkMode,
+            ) as {
+                offerId: string;
+                chatId: number;
+                filename: string | null;
+                groupDownloadTotal: number;
+                groupDownloadCompleted: number;
+                groupId: string | null;
+            } | undefined;
+            if (!row?.groupId) {
+                return null;
+            }
+
+            const status = row.groupDownloadCompleted > 0 ? 'partially_completed' : 'cancelled';
+            const error = status === 'cancelled' ? 'Offer cancelled' : null;
+            const result = this.db.prepare(`
+                UPDATE messages
+                SET transfer_status = ?,
+                    transfer_progress = ?,
+                    transfer_error = ?
+                WHERE id = ?
+                  AND sender_peer_id = ?
+                  AND message_type = 'file'
+                  AND transfer_status = 'awaiting_acceptance'
+                  AND chat_id IN (SELECT id FROM chats WHERE network_mode = ?)
+            `).run(
+                status,
+                status === 'partially_completed' ? 100 : 0,
+                error,
+                input.fileId,
+                input.localPeerId,
+                this.sessionNetworkMode,
+            );
+            if (result.changes !== 1) {
+                return null;
+            }
+            return {
+                offerId: row.offerId,
+                chatId: row.chatId,
+                groupId: row.groupId,
+                filename: row.filename ?? 'Unknown file',
+                status,
+                error,
+                groupDownloadTotal: row.groupDownloadTotal,
+                groupDownloadCompleted: row.groupDownloadCompleted,
+            };
+        });
+        return tx() as {
+            offerId: string;
+            chatId: number;
+            groupId: string;
+            filename: string;
+            status: 'cancelled' | 'partially_completed';
+            error: string | null;
+            groupDownloadTotal: number;
+            groupDownloadCompleted: number;
+        } | null;
+    }
+
     cancelPendingIncomingFileOfferByOfferId(input: {
         offerId: string;
         chatId: number;

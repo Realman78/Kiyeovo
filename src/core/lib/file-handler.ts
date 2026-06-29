@@ -750,6 +750,39 @@ export class FileHandler {
       return false;
     }
 
+    const chat = this.database.getChats([current.chat_id])[0];
+    if (chat?.type === 'group' && chat.group_id) {
+      const cancelled = this.database.cancelOutgoingGroupFileOffer({
+        fileId,
+        localPeerId: this.node.peerId.toString(),
+      });
+      if (!cancelled) {
+        return false;
+      }
+
+      this.servedFiles.release(cancelled.offerId);
+      void this.#sendGroupFileOfferCancel(cancelled.groupId, cancelled.offerId);
+      if (cancelled.status === 'partially_completed') {
+        this.onFileTransferComplete({
+          chatId: cancelled.chatId,
+          messageId: fileId,
+          filePath: current.file_path ?? '',
+          status: 'partially_completed',
+          groupDownloadTotal: cancelled.groupDownloadTotal,
+          groupDownloadCompleted: cancelled.groupDownloadCompleted,
+        });
+      } else {
+        this.onOutgoingFileOfferTerminal({
+          chatId: cancelled.chatId,
+          messageId: fileId,
+          filename: cancelled.filename,
+          status: 'cancelled',
+          error: 'Offer cancelled',
+        });
+      }
+      return true;
+    }
+
     const cancelled = this.database.cancelOutgoingFileOffer({
       fileId,
       localPeerId: this.node.peerId.toString(),
@@ -1229,29 +1262,34 @@ export class FileHandler {
     }
   }
 
+  #createFileOfferCancelPayload(offerId: string): FileOfferCancelApplicationPayload {
+    const identity = this.messageHandler.getUserIdentity();
+    if (!identity) {
+      throw new Error('No user identity available');
+    }
+    const unsignedCancel = {
+      type: 'file_offer_cancel' as const,
+      offerId,
+    };
+    const signature = identity.sign(
+      JSON.stringify(createFileOfferCancelSignaturePayload(unsignedCancel)),
+    );
+    return {
+      ...unsignedCancel,
+      signature: Buffer.from(signature).toString('base64'),
+    };
+  }
+
   async #sendFileOfferCancel(targetPeerId: string, offerId: string): Promise<void> {
     try {
-      const identity = this.messageHandler.getUserIdentity();
-      if (!identity) {
-        throw new Error('No user identity available');
-      }
-      const unsignedCancel = {
-        type: 'file_offer_cancel' as const,
-        offerId,
-      };
-      const signature = identity.sign(
-        JSON.stringify(createFileOfferCancelSignaturePayload(unsignedCancel)),
-      );
+      const payload = this.#createFileOfferCancelPayload(offerId);
       await this.messageHandler.sendApplicationMessage(
         { type: 'direct', peerId: targetPeerId },
         {
           message: {
             cid: randomUUID(),
             kind: 'file_offer_cancel',
-            payload: {
-              ...unsignedCancel,
-              signature: Buffer.from(signature).toString('base64'),
-            },
+            payload,
           },
           persistence: { owner: 'none' },
         },
@@ -1265,16 +1303,40 @@ export class FileHandler {
     }
   }
 
+  async #sendGroupFileOfferCancel(groupId: string, offerId: string): Promise<void> {
+    try {
+      const payload = this.#createFileOfferCancelPayload(offerId);
+      await this.messageHandler.sendApplicationMessage(
+        { type: 'group', groupId },
+        {
+          message: {
+            cid: randomUUID(),
+            kind: 'file_offer_cancel',
+            payload,
+          },
+          persistence: { owner: 'none' },
+        },
+      );
+      this.trace('SEND', groupId, null, 'GROUP_OFFER_CANCEL_SENT', `offer=${offerId}`);
+    } catch (error: unknown) {
+      console.warn(
+        `[FILE][CANCEL][GROUP_DELIVERY_FAILED] group=${groupId.slice(0, 8)} `
+        + `offer=${offerId} err=${errStr(error, 'unknown')}`,
+      );
+    }
+  }
+
   #handleFileOfferCancel(
     context: InboundApplicationMessageContext,
     cancel: FileOfferCancelApplicationPayload,
   ): boolean {
-    if (context.route !== 'direct_online' && context.route !== 'direct_offline') {
+    const isDirectRoute = context.route === 'direct_online' || context.route === 'direct_offline';
+    const isGroupRoute = context.route === 'group_realtime' || context.route === 'group_offline';
+    if (!isDirectRoute && !isGroupRoute) {
       return false;
     }
-    const chat = this.database.getChatByPeerId(context.senderPeerId);
     const sender = this.database.getUserByPeerId(context.senderPeerId);
-    if (!chat || chat.type !== 'direct' || !sender) {
+    if (!sender) {
       return true;
     }
     if (!validateFileOfferCancel({
@@ -1285,6 +1347,13 @@ export class FileHandler {
         sender.signing_public_key,
       ),
     })) {
+      return true;
+    }
+
+    const chat = isDirectRoute
+      ? this.database.getChatByPeerId(context.senderPeerId)
+      : this.database.getChats([context.chatId])[0];
+    if (!chat || (isDirectRoute && chat.type !== 'direct') || (isGroupRoute && chat.type !== 'group')) {
       return true;
     }
 

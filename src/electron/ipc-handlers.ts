@@ -39,6 +39,7 @@ import { log } from '../shared/logger.js';
 import { isImageFile } from '../shared/file-types.js';
 import { errStr } from '../core/utils/general-error.js';
 import { ChatDatabase } from '../core/db/database.js';
+import type { PendingFileInboxSnapshot } from '../core/types.js';
 import { isNetworkConnected } from './network-connectivity.js';
 import { scheduleAppRelaunch } from './relaunch.js';
 import { createTrustedIpcMainHandle, type IpcMainHandleRegistrar } from './trusted-ipc.js';
@@ -3396,6 +3397,54 @@ function setupFileTransferHandlers(
   ipcMain: IpcMainHandleRegistrar,
   getP2PCore: () => P2PCore | null
 ): void {
+  let pendingFileCapacityRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const senderCountDecreased = (before: PendingFileInboxSnapshot, after: PendingFileInboxSnapshot): boolean => {
+    for (const beforeSender of before.senders) {
+      const afterSender = after.senders.find((sender) => sender.senderPeerId === beforeSender.senderPeerId);
+      if ((afterSender?.count ?? 0) < beforeSender.count) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const schedulePendingFileCapacityRecovery = (): void => {
+    if (pendingFileCapacityRecoveryTimer) {
+      clearTimeout(pendingFileCapacityRecoveryTimer);
+    }
+    pendingFileCapacityRecoveryTimer = setTimeout(() => {
+      pendingFileCapacityRecoveryTimer = null;
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return;
+      }
+      void (async () => {
+        try {
+          log('[IPC] Pending file capacity freed; checking group missed messages');
+          const result = await p2pCore.messageHandler.checkGroupOfflineMessages();
+          log(
+            `[IPC] Pending file capacity recovery complete - checked ${result.checkedChatIds.length} group chats`,
+          );
+        } catch (error) {
+          console.error('[IPC] Pending file capacity recovery failed:', error);
+        }
+      })();
+    }, 1000);
+  };
+
+  const maybeSchedulePendingFileCapacityRecovery = (
+    before: PendingFileInboxSnapshot,
+    after: PendingFileInboxSnapshot,
+  ): void => {
+    if (!(before.full || before.hasFullSender || pendingFileCapacityRecoveryTimer)) {
+      return;
+    }
+    if (after.total < before.total || senderCountDecreased(before, after)) {
+      schedulePendingFileCapacityRecovery();
+    }
+  };
+
   // Send file
   ipcMain.handle(IPC_CHANNELS.SEND_FILE_REQUEST, async (_event, peerId: string, filePath: string, fileId?: string, replyToCid?: string) => {
     try {
@@ -3453,7 +3502,11 @@ function setupFileTransferHandlers(
       }
 
       log(`[IPC] Accepting file: ${fileId}`);
-      p2pCore.messageHandler.getFileHandler().acceptPendingFile(fileId);
+      const fileHandler = p2pCore.messageHandler.getFileHandler();
+      const capacityBefore = fileHandler.getPendingFileInboxSnapshot();
+      fileHandler.acceptPendingFile(fileId);
+      const capacityAfter = fileHandler.getPendingFileInboxSnapshot();
+      maybeSchedulePendingFileCapacityRecovery(capacityBefore, capacityAfter);
 
       return { success: true, error: null };
     } catch (error) {
@@ -3471,10 +3524,14 @@ function setupFileTransferHandlers(
       }
 
       log(`[IPC] Rejecting file: ${fileId}`);
-      const rejected = p2pCore.messageHandler.getFileHandler().rejectPendingFile(fileId);
+      const fileHandler = p2pCore.messageHandler.getFileHandler();
+      const capacityBefore = fileHandler.getPendingFileInboxSnapshot();
+      const rejected = fileHandler.rejectPendingFile(fileId);
       if (!rejected) {
         return { success: false, error: 'Pending file offer not found' };
       }
+      const capacityAfter = fileHandler.getPendingFileInboxSnapshot();
+      maybeSchedulePendingFileCapacityRecovery(capacityBefore, capacityAfter);
 
       return { success: true, error: null };
     } catch (error) {

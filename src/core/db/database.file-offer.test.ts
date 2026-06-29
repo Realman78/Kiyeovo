@@ -56,6 +56,53 @@ async function createOutgoingOfferDatabase(): Promise<{ database: ChatDatabase; 
   return { database, chatId };
 }
 
+async function createOutgoingGroupOfferDatabase(): Promise<{ database: ChatDatabase; chatId: number; groupId: string }> {
+  const database = new ChatDatabase(':memory:');
+  const groupId = 'group_file_cancel';
+  await database.createUser({
+    peer_id: 'local_peer',
+    signing_public_key: 'local_signing_key',
+    offline_public_key: 'local_offline_key',
+    signature: 'local_signature',
+    username: 'local',
+  });
+  await database.createUser({
+    peer_id: 'recipient_peer',
+    signing_public_key: 'signing_key',
+    offline_public_key: 'offline_key',
+    signature: 'signature',
+    username: 'recipient',
+  });
+  await database.createUser({
+    peer_id: 'second_peer',
+    signing_public_key: 'second_signing_key',
+    offline_public_key: 'second_offline_key',
+    signature: 'second_signature',
+    username: 'second',
+  });
+  const chatId = await database.createChat({
+    type: 'group',
+    name: 'group',
+    created_by: 'local_peer',
+    offline_bucket_secret: 'group_bucket_secret',
+    notifications_bucket_key: 'group_notifications_key',
+    status: 'active',
+    group_id: groupId,
+    group_key: Buffer.alloc(32, 1).toString('base64'),
+    permanent_key: 'group_permanent_key',
+    trusted_out_of_band: false,
+    muted: false,
+    key_version: 1,
+    group_creator_peer_id: 'local_peer',
+    offline_last_read_timestamp: 0,
+    offline_last_ack_sent: 0,
+    created_at: new Date(),
+    participants: ['recipient_peer', 'second_peer'],
+  });
+  database.updateChatGroupStatus(chatId, 'active');
+  return { database, chatId, groupId };
+}
+
 test('rejects a persisted pending incoming offer exactly once', async (t) => {
   const { database, chatId } = await createFileOfferDatabase();
   t.after(() => database.close());
@@ -166,6 +213,48 @@ test('cancels an active outgoing offer exactly once and resolves the target peer
   assert.equal(row?.transfer_error, 'Offer cancelled');
   assert.equal(database.cancelOutgoingFileOffer({
     fileId: 'outgoing_file',
+    localPeerId: 'local_peer',
+  }), null);
+});
+
+test('cancels an active outgoing group offer with aggregate status', async (t) => {
+  const { database, chatId, groupId } = await createOutgoingGroupOfferDatabase();
+  t.after(() => database.close());
+  await database.createMessage({
+    id: 'group_outgoing_file',
+    client_msg_id: 'group_outgoing_file',
+    chat_id: chatId,
+    sender_peer_id: 'local_peer',
+    content: 'report.pdf (10 bytes)',
+    message_type: 'file',
+    file_name: 'report.pdf',
+    file_size: 10,
+    file_offer_id: 'group_offer_1',
+    file_group_download_total: 2,
+    file_group_download_completed: 1,
+    transfer_status: 'awaiting_acceptance',
+    transfer_progress: 0,
+    timestamp: new Date(),
+  });
+
+  assert.deepEqual(database.cancelOutgoingGroupFileOffer({
+    fileId: 'group_outgoing_file',
+    localPeerId: 'local_peer',
+  }), {
+    offerId: 'group_offer_1',
+    chatId,
+    groupId,
+    filename: 'report.pdf',
+    status: 'partially_completed',
+    error: null,
+    groupDownloadTotal: 2,
+    groupDownloadCompleted: 1,
+  });
+  const row = database.getFileMessageById('group_outgoing_file');
+  assert.equal(row?.transfer_status, 'partially_completed');
+  assert.equal(row?.transfer_error, null);
+  assert.equal(database.cancelOutgoingGroupFileOffer({
+    fileId: 'group_outgoing_file',
     localPeerId: 'local_peer',
   }), null);
 });

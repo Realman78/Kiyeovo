@@ -61,6 +61,8 @@ const getOldestOfferAge = (offers: PendingFileInboxOffer[]) => {
   return formatAge(oldest);
 };
 
+const formatOfferCount = (count: number) => `${count} offer${count === 1 ? "" : "s"}`;
+
 const CapacityBar = ({
   count,
   limit,
@@ -258,6 +260,9 @@ export const PendingFileInboxIndicator = ({
     ? snapshot.senders.find((sender) => sender.full) ?? null
     : null);
   const oldestAge = snapshot ? getOldestOfferAge(snapshot.offers) : null;
+  const retryableOfferCount = snapshot
+    ? snapshot.offers.filter((offer) => !offer.countsTowardCapacity).length
+    : 0;
 
   const handleToggle = () => {
     if (!expanded) {
@@ -459,11 +464,14 @@ export const PendingFileInboxIndicator = ({
             ) : (
               <div className="space-y-4">
                 <div className="rounded-lg border border-border/60 bg-background/60 px-3 py-2 text-xs text-muted-foreground">
-                  Capacity: {snapshot.total} / {snapshot.totalLimit} total
+                  Capacity: {snapshot.total} / {snapshot.totalLimit} slots used
+                  {snapshot.offers.length !== snapshot.total && ` • ${formatOfferCount(snapshot.offers.length)} listed`}
+                  {retryableOfferCount > 0 && ` • ${retryableOfferCount} retryable`}
                   {snapshot.hasFullSender && " • at least one sender is full"}
                 </div>
                 {snapshot.senders.map((sender, senderIndex) => {
                   const rejectAllActionKey = `reject-sender:${sender.senderPeerId}:${senderIndex}`;
+                  const retryableSenderOffers = sender.offers.length - sender.count;
                   return (
                     <div key={`${sender.senderPeerId}:${senderIndex}`} className="space-y-2">
                       <div className="flex items-center justify-between gap-3">
@@ -473,6 +481,8 @@ export const PendingFileInboxIndicator = ({
                           </div>
                           <div className="text-[11px] text-muted-foreground">
                             {sender.count} / {sender.limit} slots used
+                            {sender.offers.length !== sender.count && ` • ${formatOfferCount(sender.offers.length)} listed`}
+                            {retryableSenderOffers > 0 && ` • ${retryableSenderOffers} retryable`}
                             {sender.full && <span className="ml-2 text-destructive">full</span>}
                           </div>
                         </div>

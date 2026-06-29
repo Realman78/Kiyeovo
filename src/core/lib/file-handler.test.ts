@@ -75,6 +75,7 @@ async function createHarness(t: { after: (fn: () => void) => void }): Promise<{
     groupDownloadTotal?: number;
     groupDownloadCompleted?: number;
   }>;
+  outgoingTerminalEvents: Array<{ chatId: number; messageId: string; filename: string; status: string; error: string }>;
   completeEvents: Array<{
     chatId: number;
     messageId: string;
@@ -157,6 +158,7 @@ async function createHarness(t: { after: (fn: () => void) => void }): Promise<{
     groupDownloadTotal?: number;
     groupDownloadCompleted?: number;
   }> = [];
+  const outgoingTerminalEvents: Array<{ chatId: number; messageId: string; filename: string; status: string; error: string }> = [];
   const completeEvents: Array<{
     chatId: number;
     messageId: string;
@@ -174,7 +176,7 @@ async function createHarness(t: { after: (fn: () => void) => void }): Promise<{
     (event) => completeEvents.push(event),
     (event) => failedEvents.push(event),
     (event) => outgoingPendingEvents.push(event),
-    noop,
+    (event) => outgoingTerminalEvents.push(event),
     (event) => pendingFileEvents.push(event),
     (event) => pendingFileDeferredEvents.push(event),
   );
@@ -187,6 +189,7 @@ async function createHarness(t: { after: (fn: () => void) => void }): Promise<{
     pendingFileEvents,
     pendingFileDeferredEvents,
     outgoingPendingEvents,
+    outgoingTerminalEvents,
     completeEvents,
     failedEvents,
   };
@@ -286,6 +289,26 @@ function cancelContext(offerId: string, chatId: number): InboundApplicationMessa
     timestamp: Date.now(),
     transportMessageId: 'cancel_transport',
     route: 'direct_online',
+  };
+}
+
+function groupCancelContext(offerId: string, chatId: number): InboundApplicationMessageContext {
+  const signaturePayload = createFileOfferCancelSignaturePayload({ offerId });
+  const signature = Buffer.from(
+    sign(recipientPrivateKey, JSON.stringify(signaturePayload)),
+  ).toString('base64');
+  return {
+    message: {
+      cid: 'group_cancel_cid',
+      kind: 'file_offer_cancel',
+      payload: { type: 'file_offer_cancel', offerId, signature },
+    },
+    chatId,
+    senderPeerId: RECIPIENT_PEER,
+    senderUsername: 'recipient',
+    timestamp: Date.now(),
+    transportMessageId: 'group_cancel_transport',
+    route: 'group_realtime',
   };
 }
 
@@ -450,6 +473,40 @@ test('a cancel that arrives before its offer tombstones and suppresses the late 
   assert.equal(database.getFileMessageById('late_file'), null);
 });
 
+test('a signed group file-offer cancel terminalizes a pending incoming group offer', async (t) => {
+  const { database, fileHandler, failedEvents } = await createHarness(t);
+  const groupChatId = await createGroupChat(database);
+  await database.createMessage({
+    id: 'incoming_group_cancelled',
+    client_msg_id: 'incoming_group_cancelled',
+    chat_id: groupChatId,
+    sender_peer_id: RECIPIENT_PEER,
+    content: 'incoming.txt (5 bytes)',
+    message_type: 'file',
+    file_name: 'incoming.txt',
+    file_size: 5,
+    file_offer_id: 'group_offer_cancelled',
+    file_checksum: 'a'.repeat(64),
+    file_total_chunks: 1,
+    transfer_status: 'incoming_pending_user',
+    transfer_progress: 0,
+    timestamp: new Date(),
+  });
+
+  const handled = await fileHandler.handleApplicationMessage(groupCancelContext('group_offer_cancelled', groupChatId));
+  assert.equal(handled, true);
+  const row = database.getFileMessageById('incoming_group_cancelled');
+  assert.equal(row?.transfer_status, 'cancelled');
+  assert.equal(row?.transfer_error, 'Offer cancelled');
+  assert.equal(failedEvents.length, 1);
+  assert.equal(failedEvents[0]?.messageId, 'incoming_group_cancelled');
+  assert.equal(failedEvents[0]?.status, 'cancelled');
+  assert.equal(database.hasFileOfferCancellationTombstone({
+    offerId: 'group_offer_cancelled',
+    senderPeerId: RECIPIENT_PEER,
+  }), true);
+});
+
 test('recipient capacity ignores retryable errored pending offers', async (t) => {
   const { database, fileHandler, chatId, sentApplicationMessages } = await createHarness(t);
 
@@ -539,6 +596,84 @@ test('rejecting an incoming group file offer emits a signed group decline NACK',
   assert.deepEqual(nack.target, { type: 'group', groupId });
   assert.equal((nack.payload as { offerId?: string }).offerId, 'incoming_group_reject_offer');
   assert.equal((nack.payload as { reason?: string }).reason, 'declined');
+});
+
+test('cancelOutgoingFileOffer withdraws a group offer and emits a signed group cancel', async (t) => {
+  const { database, fileHandler, sentApplicationMessages, outgoingTerminalEvents } = await createHarness(t);
+  const groupId = `group-${randomUUID()}`;
+  const groupChatId = await createGroupChat(database, groupId);
+  const filePath = join(tmpdir(), `kiyeovo-group-withdraw-${randomUUID()}.txt`);
+  await writeFile(filePath, 'hello group withdrawal');
+  t.after(() => rm(filePath, { force: true }));
+
+  await fileHandler.sendGroupFile(groupChatId, filePath, 'group_withdraw_file');
+  const row = database.getFileMessageById('group_withdraw_file');
+  assert.ok(row?.file_offer_id);
+  const offerId = row.file_offer_id;
+
+  assert.equal(await fileHandler.cancelOutgoingFileOffer('group_withdraw_file'), true);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  const finalRow = database.getFileMessageById('group_withdraw_file');
+  assert.equal(finalRow?.transfer_status, 'cancelled');
+  assert.equal(finalRow?.transfer_error, 'Offer cancelled');
+  assert.equal(fileHandler.hasActiveOffer(offerId), false);
+  assert.equal(outgoingTerminalEvents.length, 1);
+  assert.equal(outgoingTerminalEvents[0]?.messageId, 'group_withdraw_file');
+  assert.equal(outgoingTerminalEvents[0]?.status, 'cancelled');
+
+  const cancelMessage = sentApplicationMessages.find((message) => message.kind === 'file_offer_cancel');
+  assert.ok(cancelMessage);
+  assert.deepEqual(cancelMessage.target, { type: 'group', groupId });
+  assert.equal((cancelMessage.payload as { offerId?: string }).offerId, offerId);
+});
+
+test('cancelOutgoingFileOffer preserves partial group completion when withdrawing', async (t) => {
+  const { database, fileHandler, sentApplicationMessages, completeEvents, failedEvents } = await createHarness(t);
+  await database.createUser({
+    peer_id: SECOND_RECIPIENT_PEER,
+    signing_public_key: secondRecipientPublicKey,
+    offline_public_key: 'second_offline_key',
+    signature: 'second_signature',
+    username: 'second',
+  });
+  const groupId = `group-${randomUUID()}`;
+  const groupChatId = await createGroupChat(database, groupId, [
+    LOCAL_PEER,
+    RECIPIENT_PEER,
+    SECOND_RECIPIENT_PEER,
+  ]);
+  const filePath = join(tmpdir(), `kiyeovo-group-withdraw-partial-${randomUUID()}.txt`);
+  await writeFile(filePath, 'hello partial group withdrawal');
+  t.after(() => rm(filePath, { force: true }));
+
+  await fileHandler.sendGroupFile(groupChatId, filePath, 'group_withdraw_partial_file');
+  const row = database.getFileMessageById('group_withdraw_partial_file');
+  assert.ok(row?.file_offer_id);
+  const offerId = row.file_offer_id;
+  const internals = fileHandler as unknown as FileHandlerServeInternals;
+  const meta = internals.servedFiles.getMeta(offerId);
+  assert.ok(meta);
+
+  internals.applySuccessfulServedPull(offerId, meta, RECIPIENT_PEER);
+  assert.equal(await fileHandler.cancelOutgoingFileOffer('group_withdraw_partial_file'), true);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  const finalRow = database.getFileMessageById('group_withdraw_partial_file');
+  assert.equal(finalRow?.transfer_status, 'partially_completed');
+  assert.equal(finalRow?.transfer_error, null);
+  assert.equal(finalRow?.file_group_download_total, 2);
+  assert.equal(finalRow?.file_group_download_completed, 1);
+  assert.equal(fileHandler.hasActiveOffer(offerId), false);
+  assert.equal(failedEvents.length, 0);
+  assert.equal(completeEvents.length, 1);
+  assert.equal(completeEvents[0]?.status, 'partially_completed');
+  assert.equal(completeEvents[0]?.groupDownloadTotal, 2);
+  assert.equal(completeEvents[0]?.groupDownloadCompleted, 1);
+
+  const cancelMessage = sentApplicationMessages.find((message) => message.kind === 'file_offer_cancel');
+  assert.ok(cancelMessage);
+  assert.deepEqual(cancelMessage.target, { type: 'group', groupId });
 });
 
 test('a successful group pull removes only that puller and completes after the last puller', async (t) => {

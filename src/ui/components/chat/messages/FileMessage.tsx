@@ -273,12 +273,6 @@ export const FileMessage: React.FC<FileMessageProps> = ({
         console.error('Failed to cancel file offer:', result.error);
         return;
       }
-
-      dispatch(updateFileTransferStatus({
-        messageId: fileId,
-        status: 'cancelled',
-        transferError: 'Offer cancelled'
-      }));
     } catch (error) {
       console.error('Error canceling file offer:', error);
     } finally {
@@ -474,7 +468,7 @@ export const FileMessage: React.FC<FileMessageProps> = ({
         </div>
       )}
 
-      {isOutgoingPendingOffer && !isGroupChat && (
+      {isOutgoingPendingOffer && (
         <Button
           onClick={handleCancelOffer}
           size="sm"
