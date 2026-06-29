@@ -6,10 +6,12 @@ import { useAppDispatch, useAppSelector } from '../../state/hooks';
 import { clearIncomingCall } from '../../state/slices/callSlice';
 import { callService } from '../../lib/call/callService';
 import { useCallCardAnchor } from './useCallCardAnchor';
+import { useConnectivityGuidance } from '../../hooks/useConnectivityGuidance';
 
 export const IncomingCallCard = () => {
   const dispatch = useAppDispatch();
   const { toast } = useToast();
+  const { confirmCallAttempt } = useConnectivityGuidance();
   const incomingCall = useAppSelector((state) => state.call.incomingCall);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isDraggingAnchor, setIsDraggingAnchor] = useState(false);
@@ -21,11 +23,13 @@ export const IncomingCallCard = () => {
     if (isSubmitting) return;
     setIsSubmitting(true);
     try {
+      if (!(await confirmCallAttempt())) {
+        return;
+      }
       const result = await callService.acceptIncomingCall({
         callId: incomingCall.callId,
         peerId: incomingCall.peerId,
         offerSdp: incomingCall.offerSdp,
-        mediaType: incomingCall.mediaType,
       });
       if (!result.success) {
         const currErr = result.error?.toLowerCase().includes("device not found")
@@ -107,7 +111,7 @@ export const IncomingCallCard = () => {
       </button>
       <div className="flex items-center justify-center gap-2">
         <div className="text-sm font-semibold text-foreground">
-          Incoming {incomingCall.mediaType} call from {incomingCall.peerName}...
+          Incoming call from {incomingCall.peerName}...
         </div>
       </div>
       <div className="mt-3 flex items-center justify-end gap-2">

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useSelector, useDispatch } from "react-redux";
 import type { RootState } from "../../../state/store";
-import { Shield, UserPlus, AlertCircle, Users, Clock } from "lucide-react";
+import { UserPlus, AlertCircle, Users, Clock, Phone, PhoneOff, Loader2, X } from "lucide-react";
 import { updateChat, clearMessages, removeChat, setOfflineFetchStatus, markOfflineFetched, markOfflineFetchFailed } from "../../../state/slices/chatSlice";
 import { AboutUserModal } from "./AboutUserModal";
 import { useToast } from "../../ui/use-toast";
@@ -11,6 +11,7 @@ import { INBOUND_INACTIVITY_WARNING_MS, MAX_GROUP_MEMBERS } from "../../../const
 import { getGroupStatusMessage, isGroupStatusWaiting } from "../../../utils/groupStatusMessages";
 import { getGroupCreatorLinkState } from "../../../utils/groupCreatorLinkHealth";
 import { callService } from "../../../lib/call/callService";
+import { groupCallService } from "../../../lib/call/groupCallService";
 import type { NetworkMode } from "../../../../core/types";
 import type { ChatHeaderGroupMember, GroupInfoDetails } from "./ChatHeaderDialogTypes";
 import { DeleteAllMessagesDialog } from "./DeleteAllMessagesDialog";
@@ -23,6 +24,11 @@ import { EditUsernameDialog } from "./EditUsernameDialog";
 import { ChatHeaderCallControls } from "./ChatHeaderCallControls";
 import { ChatHeaderMenu } from "./ChatHeaderMenu";
 import { errStr } from '../../../../core/utils/general-error';
+import { Button } from "../../ui/Button";
+import { useConnectivityGuidance } from "../../../hooks/useConnectivityGuidance";
+import { ConversationSearchHeader } from "./ConversationSearchHeader";
+import { formatFullDateTime } from "../../../utils/dateUtils";
+import { useHour12 } from "../../../hooks/useHour12";
 
 type ChatHeaderProps = {
   username: string;
@@ -30,15 +36,43 @@ type ChatHeaderProps = {
   chatType?: 'direct' | 'group';
   groupStatus?: string;
   chatId?: number;
+  onSelectMessages?: () => void;
+  selectionMode?: boolean;
+  onCancelSelection?: () => void;
+  searchMode?: boolean;
+  searchQuery?: string;
+  searchLoading?: boolean;
+  searchFocusRequest?: number;
+  onStartSearch?: () => void;
+  onSearchQueryChange?: (query: string) => void;
+  onCancelSearch?: () => void;
 }
 
-export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: ChatHeaderProps) => {
+export const ChatHeader = ({
+  username,
+  peerId,
+  chatType,
+  groupStatus,
+  chatId,
+  onSelectMessages,
+  selectionMode = false,
+  onCancelSelection,
+  searchMode = false,
+  searchQuery = '',
+  searchLoading = false,
+  searchFocusRequest = 0,
+  onStartSearch,
+  onSearchQueryChange,
+  onCancelSearch,
+}: ChatHeaderProps) => {
   const activeChat = useSelector((state: RootState) => state.chat.activeChat);
   const chats = useSelector((state: RootState) => state.chat.chats);
   const myPeerId = useSelector((state: RootState) => state.user.peerId);
   const activeCall = useSelector((state: RootState) => state.call.activeCall);
   const dispatch = useDispatch();
+  const hour12 = useHour12();
   const { toast } = useToast();
+  const { confirmCallAttempt } = useConnectivityGuidance();
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [isBlocked, setIsBlocked] = useState(false);
   const [aboutModalOpen, setAboutModalOpen] = useState(false);
@@ -58,6 +92,10 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
   const [groupInfoLoading, setGroupInfoLoading] = useState(false);
   const [groupInfoDetails, setGroupInfoDetails] = useState<GroupInfoDetails | null>(null);
   const [editUsernameModalOpen, setEditUsernameModalOpen] = useState(false);
+  const [isStartingGroupCall, setIsStartingGroupCall] = useState(false);
+  const [isJoiningGroupCall, setIsJoiningGroupCall] = useState(false);
+  const [isLeavingGroupCall, setIsLeavingGroupCall] = useState(false);
+  const [groupCallSnapshot, setGroupCallSnapshot] = useState(() => groupCallService.getSnapshot());
   const [newUsername, setNewUsername] = useState('');
   const [networkMode, setNetworkMode] = useState<NetworkMode | null>(null);
   const [validationError, setValidationError] = useState("");
@@ -98,6 +136,32 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    return groupCallService.subscribe((event) => {
+      if (event.type === 'state') {
+        setGroupCallSnapshot(event.snapshot);
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!isLeavingGroupCall) {
+      return;
+    }
+    if (
+      !activeChat?.groupId
+      || groupCallSnapshot.groupId !== activeChat.groupId
+      || groupCallSnapshot.state === 'idle'
+      || groupCallSnapshot.state === 'ended'
+    ) {
+      console.info(
+        `[GROUP-CALL][UI][HEADER_BUTTON][LEAVE_CLEAR] chat=${chatId ?? 'none'} activeGroup=${activeChat?.groupId ?? 'none'} ` +
+        `snapshotGroup=${groupCallSnapshot.groupId || 'none'} snapshotState=${groupCallSnapshot.state}`,
+      );
+      setIsLeavingGroupCall(false);
+    }
+  }, [activeChat?.groupId, chatId, groupCallSnapshot.groupId, groupCallSnapshot.state, isLeavingGroupCall]);
 
   useEffect(() => {
     setNewUsername('');
@@ -287,6 +351,16 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
     setDropdownOpen(false);
   };
 
+  const handleSelectMessages = () => {
+    onSelectMessages?.();
+    setDropdownOpen(false);
+  };
+
+  const handleSearchMessages = () => {
+    onStartSearch?.();
+    setDropdownOpen(false);
+  };
+
   const handleDeleteGroupChat = () => {
     setDeleteGroupChatConfirmOpen(true);
     setDropdownOpen(false);
@@ -425,12 +499,175 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
         toast.warning(`Detected ${chatWarnings.length} sequence gap(s); some old messages may be missing`);
       }
 
+      await syncGroupCallEvidence(chatId);
       await fetchGroupMembers();
     } catch (error) {
       console.error('Failed to check missed group messages:', error);
       toast.error('Failed to check missed group messages');
       dispatch(markOfflineFetchFailed(chatId));
     }
+  };
+
+  const syncGroupCallEvidence = async (targetChatId: number) => {
+    const chatResult = await window.kiyeovoAPI.getChatById(targetChatId);
+    if (!chatResult.success || !chatResult.chat) {
+      return null;
+    }
+
+    dispatch(updateChat({
+      id: targetChatId,
+      updates: {
+        lastKnownActiveCallId: chatResult.chat.last_known_active_call_id ?? null,
+        lastKnownActiveCallSeenAt: chatResult.chat.last_known_active_call_seen_at ?? null,
+      },
+    }));
+    return chatResult.chat;
+  };
+
+  const handleStartGroupCall = async () => {
+    if (!chatId) return;
+
+    setIsStartingGroupCall(true);
+    try {
+      const audioReady = await groupCallService.prepareLocalAudio();
+      if (!audioReady.success) {
+        toast.error(audioReady.error || 'Microphone access is required for group calls');
+        return;
+      }
+      const result = await window.kiyeovoAPI.startGroupCall(chatId);
+      await syncGroupCallEvidence(chatId);
+
+      if (!result.success) {
+        groupCallService.releasePreparedLocalAudio();
+        toast.error(result.error || 'Failed to start group call');
+        return;
+      }
+
+      if (result.outcome === 'existing') {
+        const snapshot = groupCallService.getSnapshot();
+        if (
+          result.callId
+          && snapshot.groupId === activeChat?.groupId
+          && snapshot.callId === result.callId
+          && snapshot.state !== 'idle'
+          && snapshot.state !== 'ended'
+        ) {
+          toast.info('You are already in this group call.');
+          return;
+        }
+
+        const joinOutcome = await handleJoinGroupCall({ suppressStaleClearedToast: true });
+        if (joinOutcome === 'stale_cleared') {
+          toast.info('This call may have ended. Try starting again.');
+        }
+        return;
+      }
+
+      toast.success('Group call started. Waiting for participants.');
+    } catch (error) {
+      groupCallService.releasePreparedLocalAudio();
+      console.error('Failed to start group call:', error);
+      toast.error('Failed to start group call');
+    } finally {
+      setIsStartingGroupCall(false);
+    }
+  };
+
+  const handleJoinGroupCall = async (
+    options?: { suppressStaleClearedToast?: boolean },
+  ): Promise<'joined' | 'existing' | 'stale_cleared' | 'failed'> => {
+    if (!chatId) return 'failed';
+
+    setIsJoiningGroupCall(true);
+    try {
+      const audioReady = await groupCallService.prepareLocalAudio();
+      if (!audioReady.success) {
+        toast.error(audioReady.error || 'Microphone access is required for group calls');
+        return 'failed';
+      }
+      const result = await window.kiyeovoAPI.joinGroupCall(chatId);
+      const refreshedChat = await syncGroupCallEvidence(chatId);
+
+      if (!result.success) {
+        groupCallService.releasePreparedLocalAudio();
+        if (result.reason === 'host_reconnecting') {
+          toast.info(result.error || 'The host is reconnecting. Please try again shortly.');
+          return 'failed';
+        }
+        if (
+          result.error === 'This call may have ended'
+          && !refreshedChat?.last_known_active_call_id
+        ) {
+          if (!options?.suppressStaleClearedToast) {
+            toast.info('Stale call info cleared. Click again to start a new call.');
+          }
+          return 'stale_cleared';
+        }
+        toast.error(result.error || 'Failed to join group call');
+        return 'failed';
+      }
+
+      if (result.outcome === 'existing') {
+        toast.info('You are already in this group call.');
+        return 'existing';
+      }
+
+      toast.success('Joined group call. Connecting audio...');
+      return 'joined';
+    } catch (error) {
+      groupCallService.releasePreparedLocalAudio();
+      console.error('Failed to join group call:', error);
+      toast.error('Failed to join group call');
+      return 'failed';
+    } finally {
+      setIsJoiningGroupCall(false);
+    }
+  };
+
+  const handleGroupCallButtonClick = async () => {
+    if (!chatId) return;
+
+    if (
+      groupCallSnapshot.groupId
+      && groupCallSnapshot.groupId === activeChat?.groupId
+      && groupCallSnapshot.state !== 'idle'
+      && groupCallSnapshot.state !== 'ended'
+    ) {
+      setIsLeavingGroupCall(true);
+      try {
+        const result = await groupCallService.leave();
+        if (!result.success) {
+          setIsLeavingGroupCall(false);
+          toast.error(result.error || 'Failed to leave group call');
+        }
+      } catch (error) {
+        setIsLeavingGroupCall(false);
+        toast.error(errStr(error, 'Failed to leave group call'));
+      }
+      return;
+    }
+
+    if (!(await confirmCallAttempt())) {
+      return;
+    }
+
+    const freshChat = await syncGroupCallEvidence(chatId);
+    const latestKnownCallId = freshChat?.last_known_active_call_id ?? null;
+
+    if (latestKnownCallId) {
+      const joinOutcome = await handleJoinGroupCall({ suppressStaleClearedToast: true });
+      if (joinOutcome === 'stale_cleared') {
+        const refreshedChat = await syncGroupCallEvidence(chatId);
+        if (refreshedChat?.last_known_active_call_id) {
+          toast.info('A group call is already active in this chat.');
+          return;
+        }
+        await handleStartGroupCall();
+      }
+      return;
+    }
+
+    await handleStartGroupCall();
   };
 
   const handleCheckMissedDirectMessages = async () => {
@@ -483,7 +720,7 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
     }
   };
 
-  const handleStartCallClick = async (callMode: 'audio' | 'video') => {
+  const handleStartCallClick = async () => {
     if (!peerId || !activeChat || activeChat.type !== 'direct') return;
     if (isBlocked) {
       toast.error('Cannot call a blocked user');
@@ -503,18 +740,17 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
       }
       return;
     }
-    const start = await callService.startOutgoingCall(peerId, callMode);
+    if (!(await confirmCallAttempt())) {
+      return;
+    }
+    const start = await callService.startOutgoingCall(peerId);
     if (!start.success) {
       toast.error(start.error || 'Failed to start call');
     }
   };
 
-  const handleAudioCallClick = () => {
-    void handleStartCallClick('audio');
-  };
-
-  const handleVideoCallClick = () => {
-    void handleStartCallClick('video');
+  const handleCallClick = () => {
+    void handleStartCallClick();
   };
 
   const confirmDeleteAllMessages = async () => {
@@ -678,18 +914,97 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
     && activeCall.peerId === peerId
   );
   const canShowCallButtons = !isGroup && networkMode === 'fast';
+  const canShowGroupCallButton = isGroup && networkMode === 'fast';
   const canStartDirectCall = !isGroup
     && activeChat?.status === 'active'
     && !isBlocked
     && Boolean(peerId);
+  const canStartGroupCall = isGroup
+    && activeChat?.status === 'active'
+    && (resolvedGroupStatus === 'active' || resolvedGroupStatus === 'rekeying')
+    && !activeCall;
+  const isGroupCallSyncBlocked = isGroup && (
+    activeChat?.fetchedOffline !== true
+    || activeChat?.isFetchingOffline === true
+    || activeChat?.offlineFetchNeedsSync === true
+  );
+  const hasKnownGroupCall = Boolean(activeChat?.lastKnownActiveCallId);
+  const isInThisGroupCall = Boolean(
+    activeChat?.groupId
+    && groupCallSnapshot.groupId === activeChat.groupId
+    && groupCallSnapshot.state !== 'idle'
+    && groupCallSnapshot.state !== 'ended',
+  );
   const hasAnotherPeerActiveCall = Boolean(activeCall) && !hasActiveCallWithThisPeer;
   const startCallDisabled = !canStartDirectCall || hasAnotherPeerActiveCall;
-  const audioCallButtonTitle = startCallDisabled
+  const groupCallActionDisabled = isInThisGroupCall
+    ? isLeavingGroupCall
+    : !canStartGroupCall || isGroupCallSyncBlocked || isStartingGroupCall || isJoiningGroupCall;
+  const callButtonTitle = startCallDisabled
     ? 'User is offline or another call is active'
-    : 'Start audio call';
-  const videoCallButtonTitle = startCallDisabled
-    ? 'User is offline or another call is active'
-    : 'Start video call';
+    : 'Start call';
+
+  const groupCallButtonTitle = groupCallActionDisabled
+    ? isLeavingGroupCall
+      ? 'Leaving group call'
+      : isStartingGroupCall
+        ? 'Starting group call'
+        : isJoiningGroupCall
+          ? 'Joining group call'
+          : isGroupCallSyncBlocked
+            ? activeChat?.offlineFetchNeedsSync
+              ? 'Sync group updates before using group calls'
+              : 'Wait for group updates to finish syncing before using group calls'
+            : 'Group call is unavailable right now'
+    : isInThisGroupCall
+      ? 'Leave group call'
+      : hasKnownGroupCall
+        ? 'Join group call'
+        : 'Start group call';
+  // const groupCallButtonLabel = isStartingGroupCall
+  //   ? 'Starting...'
+  //   : isJoiningGroupCall
+  //     ? 'Joining...'
+  //     : isInThisGroupCall
+  //       ? 'In Call'
+  //       : hasKnownGroupCall
+  //         ? 'Join Call'
+  //         : 'Start Call';
+  const groupCallStatusTone = isStartingGroupCall || isJoiningGroupCall || isLeavingGroupCall
+    ? 'text-primary'
+    : isGroupCallSyncBlocked
+      ? 'text-warning'
+      : isInThisGroupCall || hasKnownGroupCall
+        ? 'text-emerald-600'
+        : 'text-muted-foreground';
+
+  const groupCallStatusMessage = isLeavingGroupCall
+    ? 'Leaving group call...'
+    : isStartingGroupCall
+      ? 'Starting group call... wait up to 10 seconds'
+      : isJoiningGroupCall
+        ? 'Joining group call... wait up to 10 seconds'
+        : isInThisGroupCall
+          ? null
+          : isGroupCallSyncBlocked
+            ? activeChat?.offlineFetchNeedsSync
+              ? 'Sync group updates before joining a call'
+              : 'Syncing group updates...'
+            : hasKnownGroupCall
+              ? 'Group call may already be active'
+              : null;
+  const showGroupCallStatusMessage = isGroup && Boolean(groupCallStatusMessage);
+  const groupCallButtonVisualState = isLeavingGroupCall
+    ? 'leaving'
+    : isStartingGroupCall
+      ? 'starting'
+      : isJoiningGroupCall
+        ? 'joining'
+        : isInThisGroupCall
+          ? 'hangup'
+          : hasKnownGroupCall
+            ? 'join'
+            : 'start';
   const groupCreatorLinkState = activeChat
     ? getGroupCreatorLinkState(activeChat, chats, myPeerId)
     : { broken: false };
@@ -699,6 +1014,33 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
   const showDirectInactivityWarning = !isGroup
     && typeof activeChat?.lastInboundActivityTimestamp === 'number'
     && (Date.now() - activeChat.lastInboundActivityTimestamp) >= INBOUND_INACTIVITY_WARNING_MS;
+
+  useEffect(() => {
+    if (!isGroup) {
+      return;
+    }
+    console.info(
+      `[GROUP-CALL][UI][HEADER_BUTTON] chat=${chatId ?? 'none'} activeGroup=${activeChat?.groupId ?? 'none'} ` +
+      `snapshotGroup=${groupCallSnapshot.groupId || 'none'} snapshotState=${groupCallSnapshot.state} ` +
+      `inThis=${String(isInThisGroupCall)} starting=${String(isStartingGroupCall)} ` +
+      `joining=${String(isJoiningGroupCall)} leaving=${String(isLeavingGroupCall)} ` +
+      `syncBlocked=${String(isGroupCallSyncBlocked)} disabled=${String(groupCallActionDisabled)} ` +
+      `visual=${groupCallButtonVisualState}`,
+    );
+  }, [
+    activeChat?.groupId,
+    chatId,
+    groupCallActionDisabled,
+    groupCallButtonVisualState,
+    groupCallSnapshot.groupId,
+    groupCallSnapshot.state,
+    isGroup,
+    isGroupCallSyncBlocked,
+    isInThisGroupCall,
+    isJoiningGroupCall,
+    isLeavingGroupCall,
+    isStartingGroupCall,
+  ]);
 
   const memberSummary = groupMembers.length > 0
     ? groupMembers.map(m => m.status === 'pending' ? `${m.username} (invited)` : m.username).sort().join(', ')
@@ -720,7 +1062,7 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
   const groupInfoCreatorPeerId = groupInfoDetails?.createdByPeerId || activeChat?.groupCreatorPeerId || 'Unknown';
   const groupInfoStatus = groupInfoDetails?.groupStatus || groupStatus || 'unknown';
   const groupInfoCreatedAt = groupInfoDetails?.createdAt
-    ? groupInfoDetails.createdAt.toLocaleString()
+    ? formatFullDateTime(groupInfoDetails.createdAt.getTime(), hour12)
     : 'Unknown';
   const confirmedGroupMemberCount = groupMembers.filter((member) => member.status === 'confirmed').length;
   const invitedOrPendingGroupMemberCount = groupMembers.filter((member) => member.status !== 'confirmed').length;
@@ -745,6 +1087,18 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
   const canDeleteGroupChat = isGroup
     && (resolvedGroupStatus === 'disbanded' || groupCreatorLinkState.broken);
 
+  if (searchMode && onSearchQueryChange && onCancelSearch) {
+    return (
+      <ConversationSearchHeader
+        query={searchQuery}
+        loading={searchLoading}
+        focusRequest={searchFocusRequest}
+        onQueryChange={onSearchQueryChange}
+        onCancel={onCancelSearch}
+      />
+    );
+  }
+
   return <div className={`${showGroupStateMessage || showDirectInactivityWarning ? 'h-20' : 'h-16'} px-6 flex items-center justify-between border-b border-border ${activeChat?.status === 'pending' ? "" : "bg-card/50"}`}>
     <div className="flex min-w-12 flex-1 items-center gap-3">
       {isGroup ? (
@@ -758,13 +1112,16 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
       ) : null}
       <div className="min-w-4 flex-1">
         <h3 className="flex min-w-4 items-center gap-2 text-left font-medium text-foreground">
-          <span className="block min-w-4 flex-1 truncate" title={username}>{username}</span>
-          {isFetchingGroupUpdates && (
-            <span className="inline-flex shrink-0 items-center gap-1 text-[11px] font-normal text-muted-foreground">
-              <span className="w-3 h-3 border-2 border-muted-foreground border-t-transparent rounded-full animate-spin" />
-              fetching group updates
-            </span>
-          )}
+          <span className="block min-w-4 flex-1 truncate" title={username}>
+            {username}
+            {isFetchingGroupUpdates && (
+              <span className="inline-flex ml-2 shrink-0 items-center gap-1 text-[11px] font-normal text-muted-foreground">
+                <span className="w-3 h-3 border-2 border-muted-foreground border-t-transparent rounded-full animate-spin" />
+                fetching group updates
+              </span>
+            )}
+          </span>
+
         </h3>
         {isGroup ? (
           <div className="flex flex-col gap-0.5">
@@ -785,9 +1142,8 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
         ) : (
           <div className="flex flex-col gap-0.5">
             <div className="flex items-center gap-1.5">
-              <Shield className="w-3 h-3 text-primary" />
               <span className="text-xs text-muted-foreground font-mono truncate">
-                {peerId}
+                Peer ID: {peerId}
               </span>
             </div>
             {showDirectInactivityWarning && (
@@ -804,15 +1160,54 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
     </div>
 
     <div className="flex shrink-0 items-center gap-1">
+      {selectionMode ? (
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onCancelSelection}
+          aria-label="Exit message selection"
+          title="Exit selection"
+        >
+          <X className="w-4 h-4" />
+        </Button>
+      ) : (
+      <>
       <ChatHeaderCallControls
         canShowCallButtons={canShowCallButtons}
         hasActiveCallWithThisPeer={hasActiveCallWithThisPeer}
         startCallDisabled={startCallDisabled}
-        audioCallButtonTitle={audioCallButtonTitle}
-        videoCallButtonTitle={videoCallButtonTitle}
-        onAudioCallClick={handleAudioCallClick}
-        onVideoCallClick={handleVideoCallClick}
+        callButtonTitle={callButtonTitle}
+        onCallClick={handleCallClick}
       />
+      {canShowGroupCallButton && <>
+        {showGroupCallStatusMessage && (
+          <div className={`flex items-center gap-1.5 text-xs mr-2 ${groupCallStatusTone}`}>
+            {(isStartingGroupCall || isJoiningGroupCall || isLeavingGroupCall) ? (
+              <Loader2 className="w-3 h-3 animate-spin" />
+            ) : (
+              <Phone className="w-3 h-3" />
+            )}
+            <span>{groupCallStatusMessage}</span>
+          </div>
+        )}
+        <Button
+          variant={isInThisGroupCall ? "destructive" : hasKnownGroupCall ? "outline" : "ghost"}
+          size="icon"
+          className={isInThisGroupCall ? '' : 'text-muted-foreground hover:text-foreground'}
+          onClick={() => { void handleGroupCallButtonClick(); }}
+          title={groupCallButtonTitle}
+          disabled={groupCallActionDisabled}
+        >
+          {(isStartingGroupCall || isJoiningGroupCall || isLeavingGroupCall) ? (
+            <Loader2 className="w-4 h-4 animate-spin" />
+          ) : isInThisGroupCall ? (
+            <PhoneOff className="w-4 h-4" />
+          ) : (
+            <Phone className="w-4 h-4" />
+          )}
+        </Button>
+      </>
+      }
       <ChatHeaderMenu
         open={dropdownOpen}
         onOpenChange={setDropdownOpen}
@@ -827,6 +1222,8 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
         kickableMembersCount={kickableMembers.length}
         canShowLeaveOrDisband={canShowLeaveOrDisband}
         canDeleteGroupChat={canDeleteGroupChat}
+        canSelectMessages={!!activeChat && !!onSelectMessages}
+        canSearchMessages={!!activeChat && !!onStartSearch}
         onAboutGroup={handleAboutGroup}
         onAboutUser={handleAboutUser}
         onEditUsername={handleEditUsername}
@@ -839,9 +1236,13 @@ export const ChatHeader = ({ username, peerId, chatType, groupStatus, chatId }: 
         onLeaveGroup={handleLeaveGroup}
         onDeleteGroupChat={handleDeleteGroupChat}
         onToggleBlock={handleToggleBlock}
+        onSelectMessages={handleSelectMessages}
+        onSearchMessages={handleSearchMessages}
         onDeleteAllMessages={handleDeleteAllMessages}
         onDeleteChatAndUser={handleDeleteChatAndUser}
       />
+      </>
+      )}
     </div>
 
     {activeChat && (

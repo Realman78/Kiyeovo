@@ -13,6 +13,15 @@ export const IPC_CHANNELS = {
   // DHT connection status
   DHT_CONNECTION_STATUS: 'dht:connectionStatus',
   GET_DHT_CONNECTION_STATUS: 'dht:getConnectionStatus',
+  WAKE_RECOVERY_STARTED: 'power:wakeRecoveryStarted',
+  WAKE_RECOVERY_RECONNECT_SETTLED: 'power:wakeRecoveryReconnectSettled',
+
+  // OS-level network connectivity (is there a real, non-virtual interface up)
+  GET_NETWORK_CONNECTED: 'network:getConnected',
+  // Renderer tells core that OS connectivity returned, to reconnect immediately
+  NOTIFY_NETWORK_RECONNECTED: 'network:reconnected',
+  // Per-node liveness probe (pings configured bootstrap/relay addresses)
+  GET_NODES_LIVENESS: 'network:getNodesLiveness',
 
   // Register
   REGISTER_REQUEST: 'register:request',
@@ -28,6 +37,10 @@ export const IPC_CHANNELS = {
 
   // Send message
   SEND_MESSAGE_REQUEST: 'sendMessage:request',
+  CHECK_OFFLINE_CAPACITY: 'offlineSend:checkCapacity',
+  REQUEST_OFFLINE_INBOX_RECOVERY: 'offlineSend:requestRecovery',
+  RETRY_OFFLINE_SEND: 'offlineSend:retry',
+  GET_OFFLINE_INBOX_CAPACITY: 'offlineInbox:getCapacity',
 
   // Key exchange events
   KEY_EXCHANGE_SENT: 'keyExchange:sent',
@@ -47,6 +60,8 @@ export const IPC_CHANNELS = {
 
   // Message events
   MESSAGE_RECEIVED: 'message:received',
+  MESSAGE_SEND_STATE_CHANGED: 'message:sendStateChanged',
+  OFFLINE_INBOX_CAPACITY_CHANGED: 'offlineInbox:capacityChanged',
 
   // Call signaling
   CALL_START: 'call:start',
@@ -58,6 +73,15 @@ export const IPC_CHANNELS = {
   CALL_SIGNAL_RECEIVED: 'call:signalReceived',
   CALL_STATE_CHANGED: 'call:stateChanged',
   CALL_ERROR: 'call:error',
+  GROUP_CALL_START: 'groupCall:start',
+  GROUP_CALL_JOIN: 'groupCall:join',
+  GROUP_CALL_LEAVE: 'groupCall:leave',
+  GROUP_CALL_WRITER_RECOVERY_FALLBACK: 'groupCall:writerRecoveryFallback',
+  GROUP_CALL_PAIR_SIGNAL_SEND: 'groupCall:pairSignalSend',
+  GROUP_CALL_CONTROL_SIGNAL_RECEIVED: 'groupCall:controlSignalReceived',
+  GROUP_CALL_PAIR_SIGNAL_RECEIVED: 'groupCall:pairSignalReceived',
+  GROUP_CALL_STATE_CHANGED: 'groupCall:stateChanged',
+  GROUP_CALL_ERROR: 'groupCall:error',
   GET_SCREEN_SHARE_SUPPORT: 'call:getScreenShareSupport',
   SCREEN_SHARE_SOURCE_REQUEST: 'screenShare:sourceRequest',
   SCREEN_SHARE_SOURCE_SELECT: 'screenShare:sourceSelect',
@@ -89,6 +113,12 @@ export const IPC_CHANNELS = {
 
   // Messages
   GET_MESSAGES: 'messages:get',
+  GET_MESSAGE_JUMP_WINDOW: 'messages:getJumpWindow',
+  GET_MESSAGE_PREVIEW_BY_CID: 'messages:getPreviewByCid',
+  DELETE_MESSAGES_FOR_ME: 'messages:deleteForMe',
+  SEARCH_CHAT_MESSAGES: 'messages:searchInChat',
+  SET_MESSAGE_PINNED: 'messages:setPinned',
+  GET_PINNED_MESSAGE: 'messages:getPinned',
 
   // Offline messages
   CHECK_OFFLINE_MESSAGES: 'offlineMessages:check',
@@ -123,6 +153,8 @@ export const IPC_CHANNELS = {
   SET_NOTIFICATIONS_ENABLED: 'settings:setNotificationsEnabled',
   GET_NETWORK_MODE: 'settings:getNetworkMode',
   SET_NETWORK_MODE: 'settings:setNetworkMode',
+  GET_INITIAL_SETUP_STATUS: 'settings:getInitialSetupStatus',
+  SET_INITIAL_SETUP_STATUS: 'settings:setInitialSetupStatus',
   NOTIFICATIONS_ENABLED_CHANGED: 'settings:notificationsEnabledChanged',
   GET_DOWNLOADS_DIR: 'settings:getDownloadsDir',
   SET_DOWNLOADS_DIR: 'settings:setDownloadsDir',
@@ -132,6 +164,8 @@ export const IPC_CHANNELS = {
   SET_APP_CONFIG: 'settings:setAppConfig',
   GET_ICE_SERVERS: 'settings:getIceServers',
   SET_ICE_SERVERS: 'settings:setIceServers',
+  GET_MISSING_ICE_WARNING_ACKNOWLEDGED: 'settings:getMissingIceWarningAcknowledged',
+  SET_MISSING_ICE_WARNING_ACKNOWLEDGED: 'settings:setMissingIceWarningAcknowledged',
   RESTART_APP: 'app:restart',
   QUIT_APP: 'app:quit',
   DELETE_ACCOUNT_AND_DATA: 'app:deleteAccountAndData',
@@ -141,11 +175,17 @@ export const IPC_CHANNELS = {
   GET_FILE_METADATA: 'file:getMetadata',
 
   // File transfer
+  REGISTER_MESSAGE_MEDIA: 'media:registerMessage',
+  COPY_IMAGE_TO_CLIPBOARD: 'media:copyImageToClipboard',
+  SAVE_UPLOAD: 'file:saveUpload',
+  SAVE_TEXT_UPLOAD: 'file:saveTextUpload',
   SEND_FILE_REQUEST: 'file:send',
+  SEND_GROUP_FILE_REQUEST: 'file:sendGroup',
   ACCEPT_FILE: 'file:accept',
   REJECT_FILE: 'file:reject',
+  GET_PENDING_FILE_INBOX: 'file:getPendingInbox',
   CANCEL_FILE_DOWNLOAD: 'file:cancelDownload',
-  GET_PENDING_FILES: 'file:getPending',
+  CANCEL_FILE_OFFER: 'file:cancelOffer',
   OPEN_FILE_LOCATION: 'file:openLocation',
 
   // File transfer events
@@ -153,7 +193,9 @@ export const IPC_CHANNELS = {
   FILE_TRANSFER_COMPLETE: 'file:complete',
   FILE_TRANSFER_FAILED: 'file:failed',
   OUTGOING_FILE_OFFER_PENDING: 'file:outgoingOfferPending',
+  OUTGOING_FILE_OFFER_TERMINAL: 'file:outgoingOfferTerminal',
   PENDING_FILE_RECEIVED: 'file:pendingReceived',
+  PENDING_FILE_OFFER_DEFERRED: 'file:pendingOfferDeferred',
 
   // Group chats
   GET_CONTACTS: 'group:getContacts',

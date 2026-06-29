@@ -2,17 +2,24 @@ import type {
   AppConfig,
   BootstrapRetryResponse,
   CallErrorEvent,
+  CallActionResponse,
   CallIncomingEvent,
   CallSignalOutgoingInput,
   CallSignalReceivedEvent,
   CallStateChangedEvent,
   ChatCreatedEvent,
   ConnectionNodesResponse,
+  NodesLivenessResponse,
   ContactRequestCancelledEvent,
   ContactRequestEvent,
   FileTransferCompleteEvent,
   FileTransferFailedEvent,
   FileTransferProgressEvent,
+  GroupCallControlSignalReceivedEvent,
+  GroupCallErrorEvent,
+  GroupCallPairSignalOutgoingInput,
+  GroupCallPairSignalReceivedEvent,
+  GroupCallStateChangedEvent,
   GroupChatActivatedEvent,
   GroupMembersUpdatedEvent,
   GroupOfflineGapWarning,
@@ -22,16 +29,23 @@ import type {
   KeyExchangeEvent,
   KeyExchangeFailedEvent,
   MessageReceivedEvent,
+  MessageSendStateChangedEvent,
   NetworkMode,
+  OfflineInboxCapacityChangedEvent,
+  OfflineInboxCapacitySnapshot,
   OutgoingFileOfferPendingEvent,
+  OutgoingFileOfferTerminalEvent,
   PasswordRequest,
+  PendingFileInboxSnapshot,
   PendingFileReceivedEvent,
+  PendingFileOfferDeferredEvent,
   RelayRetryResponse,
   SendMessageResponse,
 } from '../core/types.js';
-import type { Chat, Message } from '../core/db/database.js';
+import type { Chat, Message, PinnedMessagePreview } from '../core/db/database.js';
 
 export type Unsubscribe = () => void;
+export type InitialSetupStatus = 'not_started' | 'in_progress' | 'completed' | 'skipped';
 
 export type KiyeovoChatListItem = Chat & {
   group_creator_username?: string;
@@ -53,6 +67,49 @@ export type KiyeovoMessage = Message & {
   sender_username?: string;
 };
 
+export type DeleteMessagesLatestRemaining = {
+  content: string;
+  timestamp: number;
+  clientMsgId: string | null;
+};
+
+export type ChatMessageSearchResult = {
+  id: string;
+  clientMsgId: string | null;
+  content: string;
+  fileName: string | null;
+  messageType: 'text' | 'file' | 'image' | 'system';
+  senderPeerId: string;
+  timestamp: number;
+};
+
+export type ChatMessageSearchCursor = {
+  timestamp: number;
+  rowid: number;
+};
+
+export type ChatMessageSearchResponse = {
+  results: ChatMessageSearchResult[];
+  total: number;
+  snapshotMaxRowid: number;
+  nextCursor: ChatMessageSearchCursor | null;
+};
+
+export type MessageJumpWindowResponse = {
+  status: 'loaded' | 'too_deep' | 'not_found';
+  messages: KiyeovoMessage[];
+  hasMoreOlder: boolean;
+};
+
+export type SaveTextUploadResponse = {
+  success: boolean;
+  filePath: string | null;
+  fileName: string | null;
+  fileSize: number;
+  uploadsDirSizeBytes: number;
+  error: string | null;
+};
+
 export type ScreenShareSupportResponse = {
   success: boolean;
   supported: boolean;
@@ -71,6 +128,24 @@ export type ScreenShareSource = {
 export type ScreenShareSourceRequest = {
   requestId: string;
   sources: ScreenShareSource[];
+};
+
+export type WakeRecoveryStartedEvent = {
+  token: number;
+  deadlineAt: number;
+  trigger: string;
+};
+
+export type WakeRecoveryReconnectSettledEvent = {
+  token: number;
+};
+
+export type GroupCallActionResult = {
+  success: boolean;
+  error: string | null;
+  reason?: string;
+  outcome?: 'created' | 'existing';
+  callId?: string;
 };
 
 export interface KiyeovoAPI {
@@ -95,8 +170,25 @@ export interface KiyeovoAPI {
 
   onDHTConnectionStatus: (callback: (status: { connected: boolean | null }) => void) => Unsubscribe;
   getDHTConnectionStatus: () => Promise<{ success: boolean; connected: boolean | null; error: string | null }>;
+  onWakeRecoveryStarted: (callback: (data: WakeRecoveryStartedEvent) => void) => Unsubscribe;
+  onWakeRecoveryReconnectSettled: (callback: (data: WakeRecoveryReconnectSettledEvent) => void) => Unsubscribe;
+  // OS-level connectivity: true if a real (non-virtual, non-internal) network interface is up.
+  isNetworkConnected: () => Promise<{ connected: boolean }>;
+  // Notify core that OS connectivity just returned, to trigger an immediate DHT reconnect.
+  notifyNetworkReconnected: () => Promise<void>;
+  // Liveness probe for the given node addresses (pings each); fills in dialog status.
+  getNodesLiveness: (addresses: string[]) => Promise<NodesLivenessResponse>;
   getNetworkMode: () => Promise<{ success: boolean; mode: NetworkMode; error: string | null }>;
   setNetworkMode: (mode: NetworkMode) => Promise<{ success: boolean; error: string | null }>;
+  getInitialSetupStatus: () => Promise<{
+    success: boolean;
+    status: InitialSetupStatus;
+    error: string | null;
+  }>;
+  setInitialSetupStatus: (status: InitialSetupStatus) => Promise<{
+    success: boolean;
+    error: string | null;
+  }>;
 
   register: (username: string, rememberMe: boolean) => Promise<{ success: boolean; error?: string }>;
   getUserState: () => Promise<{ peerId: string | null; username: string | null; isRegistered: boolean }>;
@@ -107,11 +199,19 @@ export interface KiyeovoAPI {
   onRestoreUsername: (callback: (username: string) => void) => Unsubscribe;
   unregister: () => Promise<{ usernameUnregistered: boolean; peerIdUnregistered: boolean }>;
 
-  sendMessage: (identifier: string, message: string) => Promise<SendMessageResponse>;
+  sendMessage: (identifier: string, message: string, replyToCid?: string) => Promise<SendMessageResponse>;
+  checkOfflineCapacity: (peerId: string, additional?: number) => Promise<{ hasRoom: boolean }>;
+  requestOfflineInboxRecovery: (peerId: string) => Promise<{ started: boolean }>;
+  getOfflineInboxCapacity: (chatId: number) => Promise<{
+    success: boolean;
+    snapshot: OfflineInboxCapacitySnapshot | null;
+    error: string | null;
+  }>;
+  retryOfflineSend: (messageId: string) => Promise<{ success: boolean; error: string | null }>;
   sendGroupMessage: (
     chatId: number,
     message: string,
-    options?: { rekeyRetryHint?: boolean },
+    options?: { rekeyRetryHint?: boolean; replyToCid?: string },
   ) => Promise<SendMessageResponse>;
   retryGroupOfflineBackup: (chatId: number, messageId: string) => Promise<{ success: boolean; error: string | null }>;
 
@@ -119,20 +219,24 @@ export interface KiyeovoAPI {
     peerId: string,
     callId: string,
     offerSdp: string,
-    mediaType?: 'audio' | 'video',
-  ) => Promise<{ success: boolean; error: string | null }>;
-  acceptCall: (peerId: string, callId: string, answerSdp: string) => Promise<{ success: boolean; error: string | null }>;
+  ) => Promise<CallActionResponse>;
+  acceptCall: (peerId: string, callId: string, answerSdp: string) => Promise<CallActionResponse>;
   rejectCall: (
     peerId: string,
     callId: string,
     reason?: 'rejected' | 'timeout' | 'offline' | 'policy',
-  ) => Promise<{ success: boolean; error: string | null }>;
+  ) => Promise<CallActionResponse>;
   hangupCall: (
     peerId: string,
     callId: string,
     reason?: 'hangup' | 'disconnect' | 'failed',
-  ) => Promise<{ success: boolean; error: string | null }>;
-  sendCallSignal: (signal: CallSignalOutgoingInput) => Promise<{ success: boolean; error: string | null }>;
+  ) => Promise<CallActionResponse>;
+  sendCallSignal: (signal: CallSignalOutgoingInput) => Promise<CallActionResponse>;
+  startGroupCall: (chatId: number) => Promise<GroupCallActionResult>;
+  joinGroupCall: (chatId: number) => Promise<GroupCallActionResult>;
+  leaveGroupCall: (chatId: number) => Promise<GroupCallActionResult>;
+  fallbackGroupCallWriterRecovery: (chatId: number) => Promise<GroupCallActionResult>;
+  sendGroupCallPairSignal: (signal: GroupCallPairSignalOutgoingInput) => Promise<{ success: boolean; error: string | null }>;
   getScreenShareSupport: () => Promise<ScreenShareSupportResponse>;
   onScreenShareSourceRequest: (callback: (request: ScreenShareSourceRequest) => void) => Unsubscribe;
   selectScreenShareSource: (requestId: string, sourceId: string | null) => Promise<{ success: boolean; error: string | null }>;
@@ -140,6 +244,10 @@ export interface KiyeovoAPI {
   onCallSignalReceived: (callback: (data: CallSignalReceivedEvent) => void) => Unsubscribe;
   onCallStateChanged: (callback: (data: CallStateChangedEvent) => void) => Unsubscribe;
   onCallError: (callback: (data: CallErrorEvent) => void) => Unsubscribe;
+  onGroupCallControlSignalReceived: (callback: (data: GroupCallControlSignalReceivedEvent) => void) => Unsubscribe;
+  onGroupCallPairSignalReceived: (callback: (data: GroupCallPairSignalReceivedEvent) => void) => Unsubscribe;
+  onGroupCallStateChanged: (callback: (data: GroupCallStateChangedEvent) => void) => Unsubscribe;
+  onGroupCallError: (callback: (data: GroupCallErrorEvent) => void) => Unsubscribe;
 
   onKeyExchangeSent: (callback: (data: KeyExchangeEvent) => void) => Unsubscribe;
   onKeyExchangeFailed: (callback: (data: KeyExchangeFailedEvent) => void) => Unsubscribe;
@@ -161,6 +269,15 @@ export interface KiyeovoAPI {
   reorderRelayNodes: (addresses: string[]) => Promise<{ success: boolean; error: string | null }>;
   getIceServers: () => Promise<IceServersResponse>;
   setIceServers: (servers: IceServerConfig[]) => Promise<{ success: boolean; error: string | null }>;
+  getMissingIceWarningAcknowledged: () => Promise<{
+    success: boolean;
+    acknowledged: boolean;
+    error: string | null;
+  }>;
+  setMissingIceWarningAcknowledged: (acknowledged: boolean) => Promise<{
+    success: boolean;
+    error: string | null;
+  }>;
 
   getContactAttempts: () => Promise<{
     success: boolean;
@@ -195,7 +312,54 @@ export interface KiyeovoAPI {
     messages: KiyeovoMessage[];
     error: string | null;
   }>;
+  getMessageJumpWindow: (chatId: number, clientMsgId: string) => Promise<{
+    success: boolean;
+    status: MessageJumpWindowResponse['status'];
+    messages: KiyeovoMessage[];
+    hasMoreOlder: boolean;
+    error: string | null;
+  }>;
+  getMessagePreviewByCid: (chatId: number, clientMsgId: string) => Promise<{
+    success: boolean;
+    preview: {
+      senderPeerId: string;
+      senderUsername: string | undefined;
+      content: string;
+      messageType: 'text' | 'file' | 'image' | 'system';
+      fileName: string | undefined;
+    } | null;
+    error: string | null;
+  }>;
+  deleteMessagesForMe: (chatId: number, messageIds: string[]) => Promise<{
+    success: boolean;
+    deletedCount: number;
+    latestRemaining: DeleteMessagesLatestRemaining | null;
+    error: string | null;
+  }>;
+  setMessagePinned: (chatId: number, clientMsgId: string, pinned: boolean) => Promise<{
+    success: boolean;
+    error: string | null;
+  }>;
+  getPinnedMessage: (chatId: number) => Promise<{
+    success: boolean;
+    pinned: PinnedMessagePreview | null;
+    error: string | null;
+  }>;
+  searchChatMessages: (
+    chatId: number,
+    query: string,
+    options?: { limit?: number; snapshotMaxRowid?: number; cursor?: ChatMessageSearchCursor | null },
+  ) => Promise<{
+    success: boolean;
+    results: ChatMessageSearchResult[];
+    total: number;
+    snapshotMaxRowid: number;
+    nextCursor: ChatMessageSearchCursor | null;
+    error: string | null;
+  }>;
   onMessageReceived: (callback: (data: MessageReceivedEvent) => void) => Unsubscribe;
+  onMessageSendStateChanged: (callback: (data: MessageSendStateChangedEvent) => void) => Unsubscribe;
+  onOfflineInboxCapacityChanged: (callback: (data: OfflineInboxCapacityChangedEvent) => void) => Unsubscribe;
 
   checkOfflineMessages: (chatIds?: number[]) => Promise<{
     success: boolean;
@@ -245,6 +409,8 @@ export interface KiyeovoAPI {
   exportProfile: (
     password: string,
     sharedSecret: string,
+    filename: string,
+    label: string,
   ) => Promise<{
     success: boolean;
     error?: string;
@@ -262,7 +428,7 @@ export interface KiyeovoAPI {
     title?: string;
     filters?: Array<{ name: string; extensions: string[] }>;
     properties?: Array<'openFile' | 'openDirectory'>;
-  }) => Promise<{ filePath: string | null; canceled: boolean }>;
+  }) => Promise<{ filePath: string | null; canceled: boolean; mediaToken: string | null }>;
   showSaveDialog: (options: {
     title?: string;
     defaultPath?: string;
@@ -342,28 +508,41 @@ export interface KiyeovoAPI {
   getDownloadsDir: () => Promise<{ success: boolean; path: string | null; error: string | null }>;
   setDownloadsDir: (path: string) => Promise<{ success: boolean; error: string | null }>;
 
-  sendFile: (peerId: string, filePath: string, fileId?: string) => Promise<{ success: boolean; error: string | null }>;
-  acceptFile: (fileId: string) => Promise<{ success: boolean; error: string | null }>;
-  rejectFile: (fileId: string) => Promise<{ success: boolean; error: string | null }>;
-  cancelFileDownload: (fileId: string) => Promise<{ success: boolean; error: string | null }>;
-  getPendingFiles: () => Promise<{
+  registerMessageMedia: (messageId: string) => Promise<{
     success: boolean;
-    files: Array<{
-      fileId: string;
-      filename: string;
-      size: number;
-      senderId: string;
-      senderUsername: string;
-      expiresAt: number;
-    }>;
+    token: string | null;
     error: string | null;
   }>;
+  copyImageToClipboard: (messageId: string) => Promise<{ success: boolean; error: string | null }>;
+  saveUpload: (
+    bytes: Uint8Array,
+    fileName: string,
+  ) => Promise<{
+    success: boolean;
+    filePath: string | null;
+    mediaToken: string | null;
+    uploadsDirSizeBytes: number;
+    error: string | null;
+  }>;
+  saveTextUpload: (
+    text: string,
+    fileName: string,
+  ) => Promise<SaveTextUploadResponse>;
+  sendFile: (peerId: string, filePath: string, fileId?: string, replyToCid?: string) => Promise<{ success: boolean; error: string | null }>;
+  sendGroupFile: (chatId: number, filePath: string, fileId?: string, replyToCid?: string) => Promise<{ success: boolean; error: string | null }>;
+  acceptFile: (fileId: string) => Promise<{ success: boolean; error: string | null }>;
+  rejectFile: (fileId: string) => Promise<{ success: boolean; error: string | null }>;
+  getPendingFileInbox: () => Promise<{ success: boolean; snapshot: PendingFileInboxSnapshot | null; error: string | null }>;
+  cancelFileDownload: (fileId: string) => Promise<{ success: boolean; error: string | null }>;
+  cancelFileOffer: (fileId: string) => Promise<{ success: boolean; error: string | null }>;
   openFileLocation: (filePath: string) => Promise<{ success: boolean; error: string | null }>;
   onFileTransferProgress: (callback: (data: FileTransferProgressEvent) => void) => Unsubscribe;
   onFileTransferComplete: (callback: (data: FileTransferCompleteEvent) => void) => Unsubscribe;
   onFileTransferFailed: (callback: (data: FileTransferFailedEvent) => void) => Unsubscribe;
   onOutgoingFileOfferPending: (callback: (data: OutgoingFileOfferPendingEvent) => void) => Unsubscribe;
+  onOutgoingFileOfferTerminal: (callback: (data: OutgoingFileOfferTerminalEvent) => void) => Unsubscribe;
   onPendingFileReceived: (callback: (data: PendingFileReceivedEvent) => void) => Unsubscribe;
+  onPendingFileOfferDeferred: (callback: (data: PendingFileOfferDeferredEvent) => void) => Unsubscribe;
 
   getContacts: () => Promise<{ success: boolean; contacts: Array<{ peerId: string; username: string }>; error: string | null }>;
   createGroup: (groupName: string, peerIds: string[]) => Promise<{

@@ -1,5 +1,5 @@
-import { useState, useEffect } from "react";
-import { UserPlus, AlertCircle, FileUp, Lock, AtSign, Copy, CheckCircle } from "lucide-react";
+import { useState, useEffect, useId } from "react";
+import { UserPlus, AlertCircle, FileUp, Lock, AtSign, Copy, CheckCircle, ChevronDown } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -21,6 +21,7 @@ interface ImportTrustedUserDialogProps {
 }
 
 const ImportTrustedUserDialog = ({ open, onOpenChange, onSuccess }: ImportTrustedUserDialogProps) => {
+  const helpContentId = useId();
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
   const [password, setPassword] = useState("");
   const [customName, setCustomName] = useState("");
@@ -31,6 +32,7 @@ const ImportTrustedUserDialog = ({ open, onOpenChange, onSuccess }: ImportTruste
   const [importError, setImportError] = useState("");
 
   const [isImporting, setIsImporting] = useState(false);
+  const [isHelpExpanded, setIsHelpExpanded] = useState(false);
   const [importSuccess, setImportSuccess] = useState(false);
   const [importResult, setImportResult] = useState<{
     fingerprint?: string;
@@ -149,6 +151,7 @@ const ImportTrustedUserDialog = ({ open, onOpenChange, onSuccess }: ImportTruste
       setCustomNameError("");
       setImportError("");
       setIsImporting(false);
+      setIsHelpExpanded(false);
       setImportSuccess(false);
       setImportResult(null);
       setFingerprintCopied(false);
@@ -164,9 +167,9 @@ const ImportTrustedUserDialog = ({ open, onOpenChange, onSuccess }: ImportTruste
               <UserPlus className="w-5 h-5 text-primary" />
             </div>
             <div>
-              <DialogTitle>Import Trusted User</DialogTitle>
+              <DialogTitle>Add user from file</DialogTitle>
               <DialogDescription>
-                {importSuccess ? "Verify fingerprint" : "Import an encrypted profile"}
+                {importSuccess ? "Verify fingerprint" : "Add a contact from the profile file they shared"}
               </DialogDescription>
             </div>
           </div>
@@ -175,6 +178,38 @@ const ImportTrustedUserDialog = ({ open, onOpenChange, onSuccess }: ImportTruste
         {!importSuccess ? (
           <form onSubmit={handleImport}>
             <DialogBody className="space-y-4">
+              {/* How does this work? */}
+              <div className="rounded-md border border-border bg-secondary/30">
+                <button
+                  type="button"
+                  onClick={() => setIsHelpExpanded(!isHelpExpanded)}
+                  aria-expanded={isHelpExpanded}
+                  aria-controls={helpContentId}
+                  className="flex w-full items-center justify-between px-3 py-2 text-left text-sm font-medium text-foreground"
+                >
+                  How does this work?
+                  <ChevronDown
+                    className={`w-4 h-4 text-muted-foreground transition-transform duration-300 ${isHelpExpanded ? '' : '-rotate-90'}`}
+                  />
+                </button>
+                <div
+                  id={helpContentId}
+                  aria-hidden={!isHelpExpanded}
+                  className={`overflow-hidden transition-all duration-300 ease-in-out ${isHelpExpanded ? 'max-h-80' : 'max-h-0'}`}
+                >
+                  <p className="px-3 pb-3 text-xs leading-5 text-muted-foreground">
+                    Ask your contact to{' '}
+                    <span className="font-medium text-foreground">export their profile</span>{' '}
+                    by opening their profile dialog and choosing "Export Profile." They should send
+                    you the encrypted file, then share its password separately through another
+                    trusted channel, such as in person or during a call. Select the file here and
+                    enter the password. After importing, you&apos;ll{' '}
+                    <span className="font-medium text-foreground">verify a fingerprint</span>{' '}
+                    together to confirm it&apos;s really them.
+                  </p>
+                </div>
+              </div>
+
               {/* File Input */}
               <div>
                 <label className="block text-sm font-bold text-foreground mb-2">

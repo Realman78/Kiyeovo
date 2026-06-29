@@ -9,12 +9,14 @@ import {
 } from './network/node-setup.js';
 import { UsernameRegistry } from './username/username-registry.js';
 import { MessageHandler } from './lib/message-handler.js';
+import { GroupCallOrchestrator } from './lib/group-call-orchestrator.js';
+import { CallActivityRegistry } from './lib/call-activity-registry.js';
 import { EncryptedUserIdentity } from './identity/encrypted-user-identity.js';
 import { ChatDatabase } from './db/database.js';
 import { createNetworkHealthMonitor } from './network/network-health.js';
 import { createReconnectController } from './network/reconnect-controller.js';
 import { startFastRelayKeepAlive } from './network/relay-keepalive.js';
-import { DATABASE_CLEANUP_INTERVAL, getNetworkModeConfig, MAX_BOOTSTRAP_NODES_FAST, MAX_BOOTSTRAP_NODES_TOR, SECOND } from './constants.js';
+import { DATABASE_CLEANUP_INTERVAL, getNetworkModeConfig, MAX_BOOTSTRAP_NODES_FAST, MAX_BOOTSTRAP_NODES_TOR, POST_RECONNECT_RECENT_ACTIVITY_WINDOW_MS, POST_RECONNECT_RECENT_GROUP_CAP, SECOND } from './constants.js';
 import type {
   ChatNode,
   ContactRequestEvent,
@@ -24,11 +26,15 @@ import type {
   ChatCreatedEvent,
   KeyExchangeFailedEvent,
   MessageReceivedEvent,
+  MessageSendStateChangedEvent,
+  OfflineInboxCapacityChangedEvent,
   FileTransferProgressEvent,
   FileTransferCompleteEvent,
   FileTransferFailedEvent,
   OutgoingFileOfferPendingEvent,
+  OutgoingFileOfferTerminalEvent,
   PendingFileReceivedEvent,
+  PendingFileOfferDeferredEvent,
   GroupChatActivatedEvent,
   GroupMembersUpdatedEvent,
   NetworkMode,
@@ -37,6 +43,10 @@ import type {
   CallStateChangedEvent,
   CallErrorEvent,
   BootstrapConnectResult,
+  GroupCallControlSignalReceivedEvent,
+  GroupCallPairSignalReceivedEvent,
+  GroupCallStateChangedEvent,
+  GroupCallErrorEvent,
 } from './types.js';
 import type { DhtStatusCheckSource } from './network/network-health.js';
 
@@ -48,8 +58,11 @@ export interface P2PCore {
   userIdentity: EncryptedUserIdentity;
   usernameRegistry: UsernameRegistry;
   messageHandler: MessageHandler;
+  groupCallOrchestrator: GroupCallOrchestrator;
   networkMode: NetworkMode;
   getCurrentDhtStatus: () => boolean | null;
+  // Force a close-all + redial reconnect. Used on OS wake from sleep
+  requestImmediateReconnect: () => Promise<boolean>;
   retryBootstrap: () => Promise<BootstrapConnectResult>;
   retryRelays: () => Promise<{ attempted: number; connected: number }>;
   cleanup: () => Promise<void>;
@@ -74,13 +87,17 @@ export interface P2PCoreConfig {
   onChatCreated: (data: ChatCreatedEvent) => void;
   onKeyExchangeFailed: (data: KeyExchangeFailedEvent) => void;
   onMessageReceived: (data: MessageReceivedEvent) => void;
+  onMessageSendStateChanged: (data: MessageSendStateChangedEvent) => void;
+  onOfflineInboxCapacityChanged: (data: OfflineInboxCapacityChangedEvent) => void;
   onBootstrapNodes: (nodes: string[]) => void;
   onRestoreUsername: (username: string) => void;
   onFileTransferProgress: (data: FileTransferProgressEvent) => void;
   onFileTransferComplete: (data: FileTransferCompleteEvent) => void;
   onFileTransferFailed: (data: FileTransferFailedEvent) => void;
   onOutgoingFileOfferPending: (data: OutgoingFileOfferPendingEvent) => void;
+  onOutgoingFileOfferTerminal: (data: OutgoingFileOfferTerminalEvent) => void;
   onPendingFileReceived: (data: PendingFileReceivedEvent) => void;
+  onPendingFileOfferDeferred: (data: PendingFileOfferDeferredEvent) => void;
   onGroupChatActivated: (data: GroupChatActivatedEvent) => void;
   onGroupMembersUpdated: (data: GroupMembersUpdatedEvent) => void;
   onOfflineMessagesFetchComplete: (chatIds: number[]) => void;
@@ -88,6 +105,10 @@ export interface P2PCoreConfig {
   onCallSignalReceived: (data: CallSignalReceivedEvent) => void;
   onCallStateChanged: (data: CallStateChangedEvent) => void;
   onCallError: (data: CallErrorEvent) => void;
+  onGroupCallControlSignalReceived: (data: GroupCallControlSignalReceivedEvent) => void;
+  onGroupCallPairSignalReceived: (data: GroupCallPairSignalReceivedEvent) => void;
+  onGroupCallStateChanged: (data: GroupCallStateChangedEvent) => void;
+  onGroupCallError: (data: GroupCallErrorEvent) => void;
 }
 
 /**
@@ -104,12 +125,16 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     onChatCreated,
     onKeyExchangeFailed,
     onMessageReceived,
+    onMessageSendStateChanged,
+    onOfflineInboxCapacityChanged,
     onRestoreUsername,
     onFileTransferProgress,
     onFileTransferComplete,
     onFileTransferFailed,
     onOutgoingFileOfferPending,
+    onOutgoingFileOfferTerminal,
     onPendingFileReceived,
+    onPendingFileOfferDeferred,
     onGroupChatActivated,
     onGroupMembersUpdated,
     onOfflineMessagesFetchComplete,
@@ -117,6 +142,10 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     onCallSignalReceived,
     onCallStateChanged,
     onCallError,
+    onGroupCallControlSignalReceived,
+    onGroupCallPairSignalReceived,
+    onGroupCallStateChanged,
+    onGroupCallError,
   } = config;
 
   const sendStatus = (message: string, stage: any) => {
@@ -146,6 +175,14 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
 
   const sendMessageReceived = (data: MessageReceivedEvent) => {
     onMessageReceived(data);
+  };
+
+  const sendMessageSendStateChanged = (data: MessageSendStateChangedEvent) => {
+    onMessageSendStateChanged(data);
+  };
+
+  const sendOfflineInboxCapacityChanged = (data: OfflineInboxCapacityChangedEvent) => {
+    onOfflineInboxCapacityChanged(data);
   };
 
   const sendRestoreUsername = (username: string) => {
@@ -216,6 +253,12 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     currentDhtConnected = connected;
     currentDhtReason = reason;
     sendDHTConnectionStatus({ connected });
+
+    // Fire post-reconnect hooks on the next "we're healthy" emit after a
+    // destructive reconnect was marked
+    if (connected === true && reconnectController.consumeCatchupNeeded()) {
+      reconnectController.fireReconnectSucceededHandlers();
+    }
   };
 
   const getConnectedBootstrapConnections = (
@@ -234,6 +277,58 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
   });
 
   const reconnectController = createReconnectController();
+
+  // Drop stale connections, re-dial bootstrap, and verify DHT liveness. Shared
+  // by the periodic health gate and on-demand (send-triggered) reconnects
+  const performReconnect = async (): Promise<boolean> => {
+    let succeeded = false;
+    try {
+      reconnectController.markCatchupNeeded();
+      console.log('[Core] All sampled connections appear stale; closing and reconnecting...');
+      const staleConnections = node.getConnections();
+      if (staleConnections.length > 0) {
+        await Promise.allSettled(staleConnections.map(conn => conn.close()));
+      }
+
+      const reconnectBootstrapResult = await connectToBootstrap(node, database);
+      console.log(
+        `[Core] Reconnect bootstrap status=${reconnectBootstrapResult.status} connected=${reconnectBootstrapResult.connectedCount}/${reconnectBootstrapResult.targetConnectionCount} attempts=${reconnectBootstrapResult.attempts.length}`,
+      );
+
+      // Verify immediately after reconnect attempt so UI state is up to date
+      const dhtAfterReconnect = await networkHealth.getDhtCapableConnections();
+      const aliveAfterReconnect = await networkHealth.probeAnyAliveConnection(dhtAfterReconnect, {
+        probeSource: 'dht',
+      });
+      const liveCount = aliveAfterReconnect ? dhtAfterReconnect.length : 0;
+      emitDhtStatus(liveCount > 0, 'post_reconnect_dht_probe');
+      succeeded = liveCount > 0;
+      if (succeeded) {
+        reconnectController.resetProbeFailures();
+      }
+      return succeeded;
+    } finally {
+      // A reconnect that established no connectivity (zero peers, or it threw)
+      // must not hold the full anti-thrash cooldown
+      if (!succeeded) {
+        reconnectController.noteFailedReconnect();
+      }
+      reconnectController.finishReconnect();
+    }
+  };
+
+  // On-demand reconnect: callers (e.g. a group offline write that reached zero
+  // peers) have direct evidence the connections are dead, so reconnect now
+  // instead of waiting for the periodic probe to trip the failure threshold
+  const requestImmediateReconnect = async (): Promise<boolean> => {
+    if (reconnectController.tryBeginImmediateReconnect()) {
+      return performReconnect();
+    }
+    // Cooldown active or a reconnect already running: don't stack another
+    await dhtStatusCheckInFlight?.catch(() => { });
+    const dhtConns = await networkHealth.getDhtCapableConnections();
+    return networkHealth.probeAnyAliveConnection(dhtConns, { probeSource: 'dht' });
+  };
 
   const checkDHTStatus = async (source: DhtStatusCheckSource = 'timer_30s') => {
     if (dhtStatusCheckInFlight) {
@@ -278,32 +373,8 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
           return;
         }
 
-        try {
-          console.log('[Core] All sampled connections appear stale; closing and reconnecting...');
-          const staleConnections = node.getConnections();
-          if (staleConnections.length > 0) {
-            await Promise.allSettled(staleConnections.map(conn => conn.close()));
-          }
-
-          const reconnectBootstrapResult = await connectToBootstrap(node, database);
-          console.log(
-            `[Core] Reconnect bootstrap status=${reconnectBootstrapResult.status} connected=${reconnectBootstrapResult.connectedCount}/${reconnectBootstrapResult.targetConnectionCount} attempts=${reconnectBootstrapResult.attempts.length}`,
-          );
-
-          // Verify immediately after reconnect attempt so UI state is up to date.
-          const dhtAfterReconnect = await networkHealth.getDhtCapableConnections();
-          const aliveAfterReconnect = await networkHealth.probeAnyAliveConnection(dhtAfterReconnect, {
-            probeSource: 'dht',
-          });
-          const liveCount = aliveAfterReconnect ? dhtAfterReconnect.length : 0;
-          emitDhtStatus(liveCount > 0, 'post_reconnect_dht_probe');
-          if (liveCount > 0) {
-            reconnectController.resetProbeFailures();
-          }
-          return;
-        } finally {
-          reconnectController.finishReconnect();
-        }
+        await performReconnect();
+        return;
       } catch (error) {
         console.error('[Core] Failed to check peer count:', error);
         emitDhtStatus(false, 'check_exception');
@@ -358,15 +429,27 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     onOutgoingFileOfferPending(data);
   };
 
+  const sendOutgoingFileOfferTerminal = (data: OutgoingFileOfferTerminalEvent) => {
+    onOutgoingFileOfferTerminal(data);
+  };
+
   const sendPendingFileReceived = (data: PendingFileReceivedEvent) => {
     onPendingFileReceived(data);
   };
 
+  const sendPendingFileOfferDeferred = (data: PendingFileOfferDeferredEvent) => {
+    onPendingFileOfferDeferred(data);
+  };
+
+  let groupCallOrchestrator: GroupCallOrchestrator | null = null;
+
   const sendGroupChatActivated = (data: GroupChatActivatedEvent) => {
+    void groupCallOrchestrator?.handleGroupChatActivated(data.chatId);
     onGroupChatActivated(data);
   };
 
   const sendGroupMembersUpdated = (data: GroupMembersUpdatedEvent) => {
+    groupCallOrchestrator?.handleGroupMembersUpdated(data);
     onGroupMembersUpdated(data);
   };
 
@@ -390,6 +473,38 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     onCallError(data);
   };
 
+  const sendGroupCallControlSignalReceived = (data: GroupCallControlSignalReceivedEvent) => {
+    onGroupCallControlSignalReceived(data);
+  };
+
+  const sendGroupCallPairSignalReceived = (data: GroupCallPairSignalReceivedEvent) => {
+    console.log(
+      `[GROUP-CALL][PAIR][FORWARD] type=${data.signal.type} from=${data.signal.fromPeerId.slice(-8)} to=${data.signal.toPeerId.slice(-8)} call=${data.signal.callId.slice(0, 8)} receivedAt=${data.receivedAt}`,
+    );
+    onGroupCallPairSignalReceived(data);
+  };
+
+  const sendGroupCallStateChanged = (data: GroupCallStateChangedEvent) => {
+    onGroupCallStateChanged(data);
+  };
+
+  const sendGroupCallError = (data: GroupCallErrorEvent) => {
+    onGroupCallError(data);
+  };
+
+  const callActivityRegistry = new CallActivityRegistry();
+  groupCallOrchestrator = new GroupCallOrchestrator({
+    node,
+    database,
+    userIdentity,
+    callActivityRegistry,
+    requestImmediateReconnect,
+    onControlSignalReceived: sendGroupCallControlSignalReceived,
+    onPairSignalReceived: sendGroupCallPairSignalReceived,
+    onStateChanged: sendGroupCallStateChanged,
+    onError: sendGroupCallError,
+  });
+
   const messageHandler = new MessageHandler(
     node,
     usernameRegistry,
@@ -404,7 +519,9 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     sendFileTransferComplete,
     sendFileTransferFailed,
     sendOutgoingFileOfferPending,
+    sendOutgoingFileOfferTerminal,
     sendPendingFileReceived,
+    sendPendingFileOfferDeferred,
     sendGroupChatActivated,
     sendGroupMembersUpdated,
     sendOfflineMessagesFetchComplete,
@@ -412,7 +529,29 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     sendCallSignalReceived,
     sendCallStateChanged,
     sendCallError,
+    callActivityRegistry,
+    groupCallOrchestrator,
   );
+
+  messageHandler.setRequestReconnect(requestImmediateReconnect);
+  messageHandler.setMessageSendStateEmitter(sendMessageSendStateChanged);
+  messageHandler.setOfflineInboxCapacityChangedEmitter(sendOfflineInboxCapacityChanged);
+
+  // After a destructive reconnect succeeds, start a group offline-message check
+  reconnectController.onReconnectSucceeded(() => {
+    const since = Date.now() - POST_RECONNECT_RECENT_ACTIVITY_WINDOW_MS;
+    const callChatId = groupCallOrchestrator.getActiveCallChatId();
+    void messageHandler.checkRecentlyActiveGroupOfflineMessages(
+      since,
+      POST_RECONNECT_RECENT_GROUP_CAP,
+      callChatId !== null ? [callChatId] : undefined,
+    );
+  });
+
+  groupCallOrchestrator.setDurableHintStorage((groupId: string) => messageHandler.storeGroupCallHint(groupId));
+  messageHandler.setGroupCallHintHandler((groupId: string) => {
+    void groupCallOrchestrator.handleDurableHint(groupId);
+  });
 
   // Start periodic database cleanup
   const cleanupInterval = setInterval(() => {
@@ -431,10 +570,12 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     userIdentity,
     usernameRegistry,
     messageHandler,
+    groupCallOrchestrator,
     networkMode,
     getCurrentDhtStatus: () => {
       return currentDhtConnected;
     },
+    requestImmediateReconnect,
     retryBootstrap: async () => {
       if (reconnectController.isReconnectInProgress()) {
         console.log('[Core] Reconnect already in progress, ignoring manual retry');
@@ -486,6 +627,7 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
       console.log('[Core] Shutting down...');
       try {
         await relayKeepAlive.stop();
+        groupCallOrchestrator.cleanup();
         await messageHandler.cleanup();
         reconnectController.clearPostRetryVerifyTimeout();
         clearInterval(cleanupInterval);

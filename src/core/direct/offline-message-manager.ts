@@ -8,10 +8,11 @@ import { errStr, generalErrorHandler } from '../utils/general-error.js';
 import {
     MAX_MESSAGES_PER_STORE,
     MESSAGE_TTL,
+    OFFLINE_ACK_RESERVE,
     OFFLINE_CONTROL_MESSAGE_RESERVE,
     OFFLINE_MESSAGE_MAX_FUTURE_SKEW_MS,
 } from '../constants.js';
-import type { ChatDatabase } from '../db/database.js';
+import type { ChatDatabase, OfflineMessageCategory } from '../db/database.js';
 import { QueryEvent } from '@libp2p/kad-dht';
 import { log } from '../../shared/logger.js';
 
@@ -67,32 +68,58 @@ export class OfflineMessageManager {
         database: ChatDatabase,
         options?: {
             bypassControlReserve?: boolean;
+            category?: Exclude<OfflineMessageCategory, 'ack'>;
         }
     ): Promise<void> {
+        return OfflineMessageManager.storeOfflineMessages(
+            node, bucketKey, [message], signingPrivateKey, database, options,
+        );
+    }
+
+    // Append a batch of offline messages to the bucket in a SINGLE DHT PUT
+    static async storeOfflineMessages(
+        node: ChatNode,
+        bucketKey: string,
+        newMessages: OfflineMessage[],
+        signingPrivateKey: Uint8Array,
+        database: ChatDatabase,
+        options?: {
+            bypassControlReserve?: boolean;
+            category?: Exclude<OfflineMessageCategory, 'ack'>;
+        }
+    ): Promise<void> {
+        if (newMessages.length === 0) {
+            return;
+        }
         return OfflineMessageManager.withBucketMutationLock(bucketKey, async () => {
             try {
                 const bypassControlReserve = options?.bypassControlReserve === true;
-                const userCapacityLimit = Math.max(0, MAX_MESSAGES_PER_STORE - OFFLINE_CONTROL_MESSAGE_RESERVE);
+                const userCapacityLimit = Math.max(0, MAX_MESSAGES_PER_STORE - OFFLINE_CONTROL_MESSAGE_RESERVE - OFFLINE_ACK_RESERVE);
                 const local = database.getOfflineSentMessages(bucketKey);
 
                 const messages: OfflineMessage[] = OfflineMessageManager.filterExpiredMessages(local.messages);
                 let version = local.version;
+                // User cap counts only user messages (the ack-only entry has its own
+                // reserved slot); the hard cap counts everything in the payload.
+                const userStored = messages.filter(m => m.signed_payload?.ack_only !== true).length;
+                const userProjected = userStored + newMessages.length;
+                const totalProjected = messages.length + newMessages.length;
 
-                if (!bypassControlReserve && messages.length >= userCapacityLimit) {
+                if (!bypassControlReserve && userProjected > userCapacityLimit) {
                     throw new Error(
-                        `Offline message reserve reached (${messages.length}/${userCapacityLimit}); ` +
+                        `Offline message reserve reached (${userStored}+${newMessages.length}/${userCapacityLimit}); ` +
                         `${OFFLINE_CONTROL_MESSAGE_RESERVE} slots reserved for group control messages`,
                     );
                 }
 
-                if (messages.length >= MAX_MESSAGES_PER_STORE) {
-                    throw new Error(`Offline message store full (${messages.length}/${MAX_MESSAGES_PER_STORE})`);
+                if (totalProjected > MAX_MESSAGES_PER_STORE) {
+                    throw new Error(`Offline message store full (${messages.length}+${newMessages.length}/${MAX_MESSAGES_PER_STORE})`);
                 }
 
                 log(
-                    `[OFFLINE][WRITE][START] bucket=${bucketKey.slice(-12)} appendType=${message.message_type}`
+                    `[OFFLINE][WRITE][START] bucket=${bucketKey.slice(-12)} batch=${newMessages.length}`
                 );
-                messages.push(message);
+                messages.push(...newMessages);
                 version++;
 
                 // Sign the store before putting to DHT
@@ -105,12 +132,46 @@ export class OfflineMessageManager {
 
                 await OfflineMessageManager.putToDHT(node, bucketKey, signedStore, database);
                 database.saveOfflineSentMessages(bucketKey, messages, version);
+                OfflineMessageManager.syncLocalCategoryMirror(database, bucketKey, messages, new Map(
+                    newMessages.map(message => [message.id, options?.category ?? 'regular'])
+                ));
 
                 log(`[OFFLINE][WRITE][DONE] bucket=*${bucketKey.slice(-12)} newVersion=${version} newCount=${messages.length}`);
             } catch (error: unknown) {
                 generalErrorHandler(error);
                 throw error;
             }
+        });
+    }
+
+    /**
+     * Write a standalone offline ACK into the bucket. Supersedes any prior ack-only
+     * entry (only the latest lastReadTs matters) and may use the reserved ack slot
+     * even when the bucket is otherwise full — so an ACK is always writable and never
+     * accumulates.
+     */
+    static async storeOfflineAck(
+        node: ChatNode,
+        bucketKey: string,
+        ackMessage: OfflineMessage,
+        signingPrivateKey: Uint8Array,
+        database: ChatDatabase,
+    ): Promise<void> {
+        return OfflineMessageManager.withBucketMutationLock(bucketKey, async () => {
+            const local = database.getOfflineSentMessages(bucketKey);
+            // Drop expired + any existing ACK (supersede), keep real messages.
+            const kept = OfflineMessageManager.filterExpiredMessages(local.messages)
+                .filter(m => m.signed_payload?.ack_only !== true);
+            const messages = [...kept, ackMessage];
+            if (messages.length > MAX_MESSAGES_PER_STORE) {
+                throw new Error(`Offline store full even for ACK (${messages.length}/${MAX_MESSAGES_PER_STORE})`);
+            }
+            const version = local.version + 1;
+            const signedStore = OfflineMessageManager.signStore(messages, version, bucketKey, signingPrivateKey);
+            await OfflineMessageManager.putToDHT(node, bucketKey, signedStore, database);
+            database.saveOfflineSentMessages(bucketKey, messages, version);
+            OfflineMessageManager.syncLocalCategoryMirror(database, bucketKey, messages, new Map([[ackMessage.id, 'ack']]));
+            log(`[OFFLINE][ACK][WRITE][DONE] bucket=*${bucketKey.slice(-12)} newVersion=${version} newCount=${messages.length}`);
         });
     }
 
@@ -227,6 +288,49 @@ export class OfflineMessageManager {
     }
 
     /**
+     * Live (non-expired) count of **user** messages stored in a bucket — excludes
+     * the ack-only entry, which lives in its own reserved slot (so it must not be
+     * counted against the user cap, and a lone stale ACK must not look like
+     * "pending messages"). Prunes expired entries to match the write path.
+     */
+    static liveBucketMessageCount(database: ChatDatabase, bucketKey: string): number {
+        return OfflineMessageManager.filterExpiredMessages(database.getOfflineSentMessages(bucketKey).messages)
+            .filter(m => m.signed_payload?.ack_only !== true)
+            .length;
+    }
+
+    static hasLiveBucketEntries(database: ChatDatabase, bucketKey: string): boolean {
+        return OfflineMessageManager.filterExpiredMessages(database.getOfflineSentMessages(bucketKey).messages).length > 0;
+    }
+
+    private static syncLocalCategoryMirror(
+        database: ChatDatabase,
+        bucketKey: string,
+        messages: OfflineMessage[],
+        newCategoryByMessageId?: Map<string, OfflineMessageCategory>,
+    ): void {
+        const existingCategories = new Map(
+            database.getOfflineSentMessageCategories(bucketKey).map(entry => [entry.message_id, entry.category]),
+        );
+
+        database.syncOfflineSentMessageCategories(
+            bucketKey,
+            messages.map((message) => {
+                if (message.signed_payload?.ack_only === true) {
+                    return { messageId: message.id, category: 'ack' as const };
+                }
+
+                return {
+                    messageId: message.id,
+                    category: newCategoryByMessageId?.get(message.id)
+                        ?? existingCategories.get(message.id)
+                        ?? 'regular',
+                };
+            }),
+        );
+    }
+
+    /**
      * Sign the entire store to prevent unauthorized modifications
      *
      * The signature covers: message_ids, version, timestamp, bucket_key
@@ -271,8 +375,15 @@ export class OfflineMessageManager {
             const local = database.getOfflineSentMessages(bucketKey);
             const remainingMessages = local.messages.filter(msg => msg.timestamp > ackTimestamp);
             const bucketTag = bucketKey.slice(-12);
+            const ackOnlyBefore = local.messages.filter(msg => msg.signed_payload?.ack_only === true).length;
 
             const cleanMessages = OfflineMessageManager.filterExpiredMessages(remainingMessages);
+            const ackOnlyAfter = cleanMessages.filter(msg => msg.signed_payload?.ack_only === true).length;
+
+            // TEMP_LOG: detailed sender-side mirror diff for ACK-clearing investigations.
+            log(
+                `[TEMP_LOG][OFFLINE][ACK_CLEAR][EVAL] bucket=*${bucketTag} ackTs=${ackTimestamp} before=${local.messages.length} afterCandidate=${cleanMessages.length} ackOnlyBefore=${ackOnlyBefore} ackOnlyAfter=${ackOnlyAfter}`
+            );
 
             if (cleanMessages.length === local.messages.length) {
                 log(
@@ -284,6 +395,7 @@ export class OfflineMessageManager {
             const version = local.version + 1;
             // Local save is sufficient, next outbound write will publish pruned state.
             database.saveOfflineSentMessages(bucketKey, cleanMessages, version);
+            OfflineMessageManager.syncLocalCategoryMirror(database, bucketKey, cleanMessages);
 
             log(
                 `[OFFLINE][ACK_CLEAR][DONE] bucket=*${bucketTag} removed=${local.messages.length - cleanMessages.length} newVersion=${version} newCount=${cleanMessages.length}`
@@ -307,13 +419,21 @@ export class OfflineMessageManager {
         recipientPublicKey: string,           // RSA public key of recipient (PEM format)
         senderSigningPrivateKey: Uint8Array,  // Ed25519 private key for signing
         bucketKey: string,                    // Full bucket key for signature binding
-        offlineAckTimestamp?: number          // Optional ACK for messages we've read from recipient's bucket
+        offlineAckTimestamp?: number,         // Optional ACK for messages we've read from recipient's bucket
+        // Optional stable identity for idempotent rebuilds (the background-send
+        // queue passes the chat message id + original send time). The recipient
+        // dedupes by `id`, so a retry of the same message can't deliver twice.
+        stableId?: string,
+        stableTimestamp?: number,
+        // Standalone ACK marker (signed). The recipient processes the ACK but does
+        // not display/save it or advance its lastReadTs.
+        ackOnly?: boolean,
     ): OfflineMessage {
         // RSA-OAEP (Node default) max plaintext for a 2048-bit key: 256 - 2*20 - 2 = 214 bytes
         const RSA_MAX_PLAINTEXT = 214;
 
         try {
-            const timestamp = Date.now();
+            const timestamp = stableTimestamp ?? Date.now();
 
             const contentBytes = Buffer.from(content, 'utf8');
             let encryptedContentB64: string;
@@ -359,7 +479,8 @@ export class OfflineMessageManager {
                 content_hash: Buffer.from(sha256(encryptedContentBuf)).toString('base64'),
                 sender_info_hash: Buffer.from(sha256(encryptedSenderInfo)).toString('base64'),
                 timestamp,
-                bucket_key: bucketKey
+                bucket_key: bucketKey,
+                ...(ackOnly ? { ack_only: true } : {}),
             };
 
             const payloadBytes = new TextEncoder().encode(JSON.stringify(signedPayload));
@@ -367,7 +488,7 @@ export class OfflineMessageManager {
             const signature = Buffer.from(signatureBytes).toString('base64');
 
             return {
-                id: randomUUID(),
+                id: stableId ?? randomUUID(),
                 encrypted_sender_info: encryptedSenderInfoB64,
                 content: encryptedContentB64,
                 signature,
@@ -474,35 +595,65 @@ export class OfflineMessageManager {
         log(`PUT to DHT - Key: ${key}, Original: ${jsonBytes.length} bytes`);
         log(`Compressed: ${compressedBytes.length} bytes (${Math.round((1 - compressedBytes.length / jsonBytes.length) * 100)}% reduction)`);
 
+        const putSignal = AbortSignal.timeout(timeoutMs);
+
+        // Diagnostic tally of the Kademlia walk. The put yields a stream of
+        // QueryEvents (DIALING_PEER, PEER_RESPONSE, QUERY_ERROR, FINAL_PEER, ...)
+        // as it routes toward the closest peers. On timeout the whole walk is
+        // discarded, so we record per-name counts plus when the first/last event
+        // arrived to tell apart "couldn't dial out at all" from "reached peers
+        // but storage was slow/failing".
+        const putStartedAtMs = Date.now();
+        const eventCounts: Record<string, number> = {};
+        let totalEvents = 0;
+        let firstEventAtMs: number | null = null;
+        let lastEventAtMs: number | null = null;
+
+        const formatEventTally = (): string => {
+            const names = Object.keys(eventCounts).sort();
+            const byName = names.length > 0
+                ? names.map((name) => `${name}=${eventCounts[name]}`).join(',')
+                : 'none';
+            const firstOffset = firstEventAtMs !== null ? firstEventAtMs - putStartedAtMs : -1;
+            const lastOffset = lastEventAtMs !== null ? lastEventAtMs - putStartedAtMs : -1;
+            return `total=${totalEvents} byName=${byName} firstEventMs=${firstOffset} lastEventMs=${lastOffset}`;
+        };
+
         try {
             let hadSuccess = false;
             let errorCount = 0;
-            const events: QueryEvent[] = [];
-            const putSignal = AbortSignal.timeout(timeoutMs);
 
             for await (const event of node.services.dht.put(
                 keyBytes,
                 compressedBytes,
                 { signal: putSignal },
             ) as AsyncIterable<QueryEvent>) {
-                events.push(event);
+                totalEvents++;
+                const nowMs = Date.now();
+                if (firstEventAtMs === null) firstEventAtMs = nowMs;
+                lastEventAtMs = nowMs;
+                eventCounts[event.name] = (eventCounts[event.name] ?? 0) + 1;
 
                 if (event.name === 'QUERY_ERROR') errorCount++;
                 else if (event.name === 'PEER_RESPONSE') hadSuccess = true;
             }
             if (errorCount > 0 && !hadSuccess) {
+                log(`[OFFLINE][PUT][EVENTS][FAIL] ${formatEventTally()}`);
                 throw new Error(`DHT PUT failed: All ${errorCount} peers unreachable`);
             }
 
-            log(`DHT PUT completed with ${events.length} events`);
+            log(`[OFFLINE][PUT][EVENTS][DONE] ${formatEventTally()}`);
+            log(`DHT PUT completed with ${totalEvents} events`);
 
             await new Promise(resolve => setTimeout(resolve, 1000));
         } catch (error: unknown) {
             if (error instanceof Error && error.name === 'AbortError') {
+                log(`[OFFLINE][PUT][EVENTS][TIMEOUT] ${formatEventTally()}`);
                 const timeoutError = new Error(`Offline DHT write timed out after ${timeoutMs}ms`);
                 generalErrorHandler(timeoutError, 'PUT to DHT failed');
                 throw timeoutError;
             }
+            log(`[OFFLINE][PUT][EVENTS][ERROR] ${formatEventTally()}`);
             generalErrorHandler(error, "PUT to DHT failed");
             throw error;
         }

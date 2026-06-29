@@ -5,11 +5,33 @@ import type { MessageReceivedEvent, ContactRequestEvent, CallIncomingEvent } fro
 import { setActiveChat } from '../state/slices/chatSlice';
 import { store } from '../state/store';
 
+const MESSAGE_NOTIFICATION_BATCH_WINDOW_MS = 1000;
+const MAX_NOTIFICATION_PREVIEW_LENGTH = 120;
+
+const normalizeNotificationText = (value: string): string => value.replace(/\s+/g, ' ').trim();
+
+const truncateNotificationText = (value: string): string => (
+  value.length > MAX_NOTIFICATION_PREVIEW_LENGTH
+    ? `${value.slice(0, MAX_NOTIFICATION_PREVIEW_LENGTH - 1)}…`
+    : value
+);
+
+const getMessageNotificationPreview = (message: MessageReceivedEvent): string => {
+  if (message.messageType === 'file') {
+    return message.fileName ? `File: ${message.fileName}` : 'File received';
+  }
+
+  const normalized = normalizeNotificationText(message.content);
+  return normalized || 'New message';
+};
+
 export const useNotifications = () => {
   const myPeerId = useSelector((state: RootState) => state.user.peerId);
   const dispatch = useDispatch();
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const notificationsEnabledRef = useRef(true);
+  const pendingMessageNotificationsRef = useRef<MessageReceivedEvent[]>([]);
+  const messageNotificationTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     const loadNotificationsSetting = async () => {
@@ -32,8 +54,109 @@ export const useNotifications = () => {
       notificationsEnabledRef.current = enabled;
     });
 
+    const flushMessageNotificationBatch = async () => {
+      if (messageNotificationTimerRef.current !== null) {
+        clearTimeout(messageNotificationTimerRef.current);
+        messageNotificationTimerRef.current = null;
+      }
+
+      const queuedMessages = pendingMessageNotificationsRef.current;
+      pendingMessageNotificationsRef.current = [];
+
+      if (queuedMessages.length === 0 || !notificationsEnabledRef.current) {
+        return;
+      }
+
+      const currentState = store.getState();
+      const eligibleMessages = queuedMessages.filter((message) => {
+        if (message.senderPeerId === currentState.user.peerId) {
+          return false;
+        }
+
+        const chat = currentState.chat.chats.find((candidate) => candidate.id === message.chatId);
+        if (chat?.justCreated || chat?.muted) {
+          return false;
+        }
+
+        return true;
+      });
+
+      if (eligibleMessages.length === 0) {
+        return;
+      }
+
+      try {
+        if (audioRef.current) {
+          audioRef.current.currentTime = 0;
+          await audioRef.current.play();
+        }
+      } catch (error) {
+        console.error('Failed to play notification sound:', error);
+      }
+
+      try {
+        const { focused } = await window.kiyeovoAPI.isWindowFocused();
+        if (focused) {
+          return;
+        }
+
+        const latestMessage = eligibleMessages[eligibleMessages.length - 1];
+        const latestPreview = truncateNotificationText(getMessageNotificationPreview(latestMessage));
+        const uniqueChatIds = new Set(eligibleMessages.map((message) => message.chatId));
+        const summary = (() => {
+          if (eligibleMessages.length === 1) {
+            return {
+              title: `New message from ${latestMessage.senderUsername}`,
+              body: latestMessage.content,
+              chatId: latestMessage.chatId,
+            };
+          }
+
+          if (uniqueChatIds.size === 1) {
+            const onlyChatId = latestMessage.chatId;
+            const chat = currentState.chat.chats.find((candidate) => candidate.id === onlyChatId);
+            if (chat?.type === 'group') {
+              const uniqueSenders = new Set(eligibleMessages.map((message) => message.senderUsername));
+              return {
+                title: `New messages in ${chat.name}`,
+                body: `${eligibleMessages.length} new messages from ${uniqueSenders.size} ${uniqueSenders.size === 1 ? 'person' : 'people'} • Latest: ${latestPreview}`,
+                chatId: onlyChatId,
+              };
+            }
+
+            const directChatName = chat?.name || latestMessage.senderUsername;
+            return {
+              title: `New messages from ${directChatName}`,
+              body: `${eligibleMessages.length} new messages • Latest: ${latestPreview}`,
+              chatId: onlyChatId,
+            };
+          }
+
+          return {
+            title: `${eligibleMessages.length} new messages`,
+            body: `From ${uniqueChatIds.size} chats • Latest: ${latestPreview}`,
+          };
+        })();
+
+        await window.kiyeovoAPI.showNotification(summary);
+      } catch (error) {
+        console.error('Failed to show notification:', error);
+      }
+    };
+
+    const scheduleMessageNotification = (message: MessageReceivedEvent) => {
+      pendingMessageNotificationsRef.current.push(message);
+      if (messageNotificationTimerRef.current !== null) {
+        return;
+      }
+
+      messageNotificationTimerRef.current = window.setTimeout(() => {
+        void flushMessageNotificationBatch();
+      }, MESSAGE_NOTIFICATION_BATCH_WINDOW_MS);
+    };
+
     // Listen for message received events
-    const unsubscribeMessages = window.kiyeovoAPI.onMessageReceived(async (data: MessageReceivedEvent) => {
+    const unsubscribeMessages = window.kiyeovoAPI.onMessageReceived((data: MessageReceivedEvent) => {
       if (data.senderPeerId === myPeerId) {
         return;
       }
@@ -49,29 +172,7 @@ export const useNotifications = () => {
         return;
       }
 
-      // Play sound
-      try {
-        if (audioRef.current) {
-          audioRef.current.currentTime = 0;
-          await audioRef.current.play();
-        }
-      } catch (error) {
-        console.error('Failed to play notification sound:', error);
-      }
-
-      // Show notification if window not focused
-      try {
-        const { focused } = await window.kiyeovoAPI.isWindowFocused();
-        if (!focused) {
-          await window.kiyeovoAPI.showNotification({
-            title: `New message from ${data.senderUsername}`,
-            body: data.content,
-            chatId: data.chatId,
-          });
-        }
-      } catch (error) {
-        console.error('Failed to show notification:', error);
-      }
+      scheduleMessageNotification(data);
     });
 
     // Listen for pending file offers
@@ -159,7 +260,7 @@ export const useNotifications = () => {
         const callerName = directChat?.name || `user_${data.signal.fromPeerId.slice(-8)}`;
 
         await window.kiyeovoAPI.showNotification({
-          title: `Incoming ${data.signal.mediaType} call`,
+          title: 'Incoming call',
           body: `${callerName} is calling you`,
           chatId: directChat?.id,
         });
@@ -180,6 +281,11 @@ export const useNotifications = () => {
       unsubscribeIncomingCalls();
       unsubscribeNotificationClick();
       unsubscribeNotificationsSetting();
+      if (messageNotificationTimerRef.current !== null) {
+        clearTimeout(messageNotificationTimerRef.current);
+        messageNotificationTimerRef.current = null;
+      }
+      pendingMessageNotificationsRef.current = [];
       if (audioRef.current) {
         audioRef.current.pause();
         audioRef.current = null;

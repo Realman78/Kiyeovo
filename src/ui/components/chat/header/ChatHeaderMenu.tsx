@@ -1,5 +1,5 @@
 import type { FC, ReactNode } from "react";
-import { Ban, Bell, BellOff, Info, LogOut, MoreVertical, RefreshCw, Trash2, UserCheck, UserMinus, UserPlus } from "lucide-react";
+import { Ban, Bell, BellOff, Info, ListChecks, LogOut, MoreVertical, Pencil, RefreshCw, Search, Trash2, UserCheck, UserMinus, UserPlus } from "lucide-react";
 import { Button } from "../../ui/Button";
 import { DropdownMenu, DropdownMenuItem } from "../../ui/DropdownMenu";
 
@@ -17,6 +17,8 @@ type ChatHeaderMenuProps = {
   kickableMembersCount: number;
   canShowLeaveOrDisband: boolean;
   canDeleteGroupChat: boolean;
+  canSelectMessages: boolean;
+  canSearchMessages: boolean;
   onAboutGroup: () => void;
   onAboutUser: () => void;
   onEditUsername: () => void;
@@ -29,6 +31,8 @@ type ChatHeaderMenuProps = {
   onLeaveGroup: () => void;
   onDeleteGroupChat: () => void;
   onToggleBlock: () => void;
+  onSelectMessages: () => void;
+  onSearchMessages: () => void;
   onDeleteAllMessages: () => void;
   onDeleteChatAndUser: () => void;
 };
@@ -54,6 +58,8 @@ export const ChatHeaderMenu: FC<ChatHeaderMenuProps> = ({
   kickableMembersCount,
   canShowLeaveOrDisband,
   canDeleteGroupChat,
+  canSelectMessages,
+  canSearchMessages,
   onAboutGroup,
   onAboutUser,
   onEditUsername,
@@ -66,6 +72,8 @@ export const ChatHeaderMenu: FC<ChatHeaderMenuProps> = ({
   onLeaveGroup,
   onDeleteGroupChat,
   onToggleBlock,
+  onSelectMessages,
+  onSearchMessages,
   onDeleteAllMessages,
   onDeleteChatAndUser,
 }) => {
@@ -82,6 +90,22 @@ export const ChatHeaderMenu: FC<ChatHeaderMenuProps> = ({
           label: activeChatMuted ? 'Enable notifications' : 'Disable notifications',
           icon: activeChatMuted ? <Bell className="w-4 h-4" /> : <BellOff className="w-4 h-4" />,
           onClick: onToggleMute,
+        }]
+      : []),
+    ...(canSelectMessages
+      ? [{
+          key: 'select-messages',
+          label: 'Select messages',
+          icon: <ListChecks className="w-4 h-4" />,
+          onClick: onSelectMessages,
+        }]
+      : []),
+    ...(canSearchMessages
+      ? [{
+          key: 'search-messages',
+          label: 'Search messages',
+          icon: <Search className="w-4 h-4" />,
+          onClick: onSearchMessages,
         }]
       : []),
     ...(groupStatus === 'active'
@@ -144,7 +168,7 @@ export const ChatHeaderMenu: FC<ChatHeaderMenuProps> = ({
     {
       key: 'edit-username',
       label: 'Edit username',
-      icon: <Info className="w-4 h-4" />,
+      icon: <Pencil className="w-4 h-4" />,
       onClick: onEditUsername,
     },
     {
@@ -159,6 +183,22 @@ export const ChatHeaderMenu: FC<ChatHeaderMenuProps> = ({
           label: 'Check missed messages',
           icon: <RefreshCw className="w-4 h-4" />,
           onClick: onCheckMissedDirectMessages,
+        }]
+      : []),
+    ...(canSelectMessages
+      ? [{
+          key: 'select-messages',
+          label: 'Select messages',
+          icon: <ListChecks className="w-4 h-4" />,
+          onClick: onSelectMessages,
+        }]
+      : []),
+    ...(canSearchMessages
+      ? [{
+          key: 'search-messages',
+          label: 'Search messages',
+          icon: <Search className="w-4 h-4" />,
+          onClick: onSearchMessages,
         }]
       : []),
     {

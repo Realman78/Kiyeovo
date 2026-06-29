@@ -302,6 +302,15 @@ function createChatNodeServices(runtimeConfig: ChatNodeRuntimeConfig) {
       clientMode: false,
       kBucketSize: K_BUCKET_SIZE,
       prefixLength: PREFIX_LENGTH,
+      // Bound the per-peer DHT dial/request. libp2p's AdaptiveTimeout grows on
+      // failure (next.push(time * 2)) up to 60s, so after a restart against many
+      // dead/stale peers the per-peer timeout balloons and a single offline
+      // closest-peer (no relay reservation + stale cross-subnet LAN addr) can
+      // stall a put/get past its overall budget. Capping maxTimeout keeps the
+      // runaway in check: the dead peer aborts fast (QUERY_ERROR) while reachable
+      // closest peers still get the record. (networkDialTimeout is wired to the
+      // DHT Network via patches/@libp2p+kad-dht+15.1.11.patch — upstream drops it.)
+      networkDialTimeout: { minTimeout: 5_000, maxTimeout: 8_000 },
       validators: {
         [runtimeConfig.modeRuntime.dhtNamespaceNames.offline]: offlineMessageValidator,
         [runtimeConfig.modeRuntime.dhtNamespaceNames.username]: usernameRegistrationValidator,
@@ -324,7 +333,10 @@ function createChatNodeServices(runtimeConfig: ChatNodeRuntimeConfig) {
     }),
     ping: ping({
       timeout: runtimeConfig.isAnonymousMode ? 60000 : 10000,
-      runOnLimitedConnection: true
+      runOnLimitedConnection: true,
+      // A single health-probe ping that fails/aborts can leave its outbound stream
+      // stuck, permanently occupying the only slot  so every later probe fails
+      maxOutboundStreams: 8,
     }),
     ...(runtimeConfig.networkMode === NETWORK_MODES.FAST && runtimeConfig.relayRuntime.dcutrFactory
       ? { dcutr: runtimeConfig.relayRuntime.dcutrFactory }

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, session } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, powerMonitor, session } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -14,11 +14,15 @@ import {
   type ChatCreatedEvent,
   type KeyExchangeFailedEvent,
   type MessageReceivedEvent,
+  type MessageSendStateChangedEvent,
+  type OfflineInboxCapacityChangedEvent,
   type FileTransferProgressEvent,
   type FileTransferCompleteEvent,
   type FileTransferFailedEvent,
   type OutgoingFileOfferPendingEvent,
+  type OutgoingFileOfferTerminalEvent,
   type PendingFileReceivedEvent,
+  type PendingFileOfferDeferredEvent,
   type GroupChatActivatedEvent,
   type GroupMembersUpdatedEvent,
   type TorConfig,
@@ -27,6 +31,10 @@ import {
   type CallSignalReceivedEvent,
   type CallStateChangedEvent,
   type CallErrorEvent,
+  type GroupCallControlSignalReceivedEvent,
+  type GroupCallPairSignalReceivedEvent,
+  type GroupCallStateChangedEvent,
+  type GroupCallErrorEvent,
 } from '../core/index.js';
 import { DEFAULT_NETWORK_MODE, NETWORK_MODE_ONBOARDED_SETTING_KEY } from '../core/constants.js';
 import { ensureAppDataDir } from '../core/utils/miscellaneous.js';
@@ -35,7 +43,7 @@ import { setupIPCHandlers } from './ipc-handlers.js';
 import { TorManager, getTorBinaryPath, BUNDLED_TOR_SOCKS_PORT } from '../core/transport/tor-manager.js';
 import { ChatDatabase } from '../core/db/database.js';
 import type { NetworkMode } from '../core/types.js';
-import { log } from '../shared/logger.js';
+import { isDebugModeEnabled, log } from '../shared/logger.js';
 import { errStr } from '../core/utils/general-error.js';
 import { scheduleAppRelaunch } from './relaunch.js';
 import { createTrustedIpcMainHandle } from './trusted-ipc.js';
@@ -43,13 +51,43 @@ import { applyWindowSecurityPolicies } from './window-security.js';
 import { applySessionSecurityPolicies } from './session-security.js';
 import { setupDisplayMediaPicker } from './display-media-picker.js';
 import { DEV_SERVER_URL } from './constants.js';
-import { getPackagedAppEntryUrl, registerAppProtocolHandler, registerAppProtocolScheme } from './app-protocol.js';
+import {
+  getPackagedAppEntryUrl,
+  registerAppProtocolHandler,
+  registerMediaProtocolHandler,
+  registerProtocolSchemes,
+} from './app-protocol.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const FILE_TRANSFER_PROGRESS_FLUSH_MS = 100;
+const pendingFileTransferProgress = new Map<string, FileTransferProgressEvent>();
+let fileTransferProgressTimer: ReturnType<typeof setTimeout> | null = null;
+
+// Temporary diagnostic: prefix all main-process console output with a timestamp. 
+function installLogTimestamps(): void {
+  if (!isDebugModeEnabled()) {
+    return;
+  }
+  const orig = {
+    log: console.log.bind(console),
+    warn: console.warn.bind(console),
+    error: console.error.bind(console),
+  };
+  const ts = (): string => {
+    const d = new Date();
+    const p = (n: number, w = 2) => String(n).padStart(w, '0');
+    return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
+  };
+  console.log = (...args: unknown[]) => orig.log(`[${ts()}]`, ...args);
+  console.warn = (...args: unknown[]) => orig.warn(`[${ts()}]`, ...args);
+  console.error = (...args: unknown[]) => orig.error(`[${ts()}]`, ...args);
+}
+installLogTimestamps();
 
 let mainWindow: BrowserWindow | null = null;
 let p2pCore: P2PCore | null = null;
+let wakeRecoverySeq = 0;
 let torManager: TorManager | null = null;
 let lastInitStatus: InitStatus | null = null;
 let initError: string | null = null;
@@ -58,9 +96,7 @@ let hasStartedInitialization = false;
 let requiresNetworkModeSelection = false;
 let pendingPasswordRequest: PasswordRequest | null = null;
 
-if (!isDev()) {
-  registerAppProtocolScheme();
-}
+registerProtocolSchemes();
 
 // Enforce single instance
 const gotTheLock = app.requestSingleInstanceLock();
@@ -143,6 +179,38 @@ function setupMinimalMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
+function setupTextContextMenu(win: BrowserWindow): void {
+  win.webContents.on('context-menu', (_event, params) => {
+    const hasSelection = params.selectionText.length > 0;
+    if (!params.isEditable && !hasSelection) {
+      return;
+    }
+
+    const template: Electron.MenuItemConstructorOptions[] = [];
+
+    if (params.isEditable) {
+      template.push(
+        { role: 'undo' as const, enabled: params.editFlags.canUndo },
+        { role: 'redo' as const, enabled: params.editFlags.canRedo },
+        { type: 'separator' as const },
+        { role: 'cut' as const, enabled: params.editFlags.canCut },
+        { role: 'copy' as const, enabled: params.editFlags.canCopy },
+        { role: 'paste' as const, enabled: params.editFlags.canPaste },
+        { type: 'separator' as const },
+        { role: 'selectAll' as const, enabled: params.editFlags.canSelectAll },
+      );
+    } else {
+      template.push(
+        { role: 'copy' as const, enabled: params.editFlags.canCopy || hasSelection },
+        { type: 'separator' as const },
+        { role: 'selectAll' as const },
+      );
+    }
+
+    Menu.buildFromTemplate(template).popup({ window: win });
+  });
+}
+
 function getWindowBrandingForMode(mode: NetworkMode): { title: string; icon: string } {
   const iconsDir = app.isPackaged
     ? path.join(process.resourcesPath, 'icons')
@@ -214,7 +282,13 @@ function createMainWindow() {
     enforceWindowTitle();
   });
   win.webContents.on('did-finish-load', enforceWindowTitle);
+  win.webContents.on('render-process-gone', (_event, details) => {
+    console.error(
+      `[Electron][RENDERER][GONE] reason=${details.reason} exitCode=${details.exitCode}`,
+    );
+  });
   applyWindowSecurityPolicies(win, { appEntryUrl, isDevelopment });
+  setupTextContextMenu(win);
 
   // Restore maximized state or maximize on first run
   if (savedBounds?.isMaximized || !savedBounds) {
@@ -253,6 +327,18 @@ function sendDHTConnectionStatus(status: { connected: boolean | null }) {
     log(`[Electron] Sending DHT connection status: ${status.connected}`);
     log(`[DHT-STATUS][ELECTRON][EMIT] connected=${status.connected}`);
     mainWindow.webContents.send(IPC_CHANNELS.DHT_CONNECTION_STATUS, status);
+  }
+}
+
+function sendWakeRecoveryStarted(data: { token: number; deadlineAt: number; trigger: string }) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC_CHANNELS.WAKE_RECOVERY_STARTED, data);
+  }
+}
+
+function sendWakeRecoveryReconnectSettled(data: { token: number }) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC_CHANNELS.WAKE_RECOVERY_RECONNECT_SETTLED, data);
   }
 }
 
@@ -305,6 +391,18 @@ function sendMessageReceived(data: MessageReceivedEvent) {
   }
 }
 
+function sendMessageSendStateChanged(data: MessageSendStateChangedEvent) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC_CHANNELS.MESSAGE_SEND_STATE_CHANGED, data);
+  }
+}
+
+function sendOfflineInboxCapacityChanged(data: OfflineInboxCapacityChangedEvent) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC_CHANNELS.OFFLINE_INBOX_CAPACITY_CHANGED, data);
+  }
+}
+
 function sendRestoreUsername(username: string) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     log(`[Electron] Restore username: ${username}`);
@@ -312,15 +410,46 @@ function sendRestoreUsername(username: string) {
   }
 }
 
-function sendFileTransferProgress(data: FileTransferProgressEvent) {
-  if (mainWindow && !mainWindow.isDestroyed()) {
+function flushFileTransferProgress(): void {
+  fileTransferProgressTimer = null;
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    pendingFileTransferProgress.clear();
+    return;
+  }
+
+  const progressEvents = Array.from(pendingFileTransferProgress.values());
+  pendingFileTransferProgress.clear();
+  for (const data of progressEvents) {
     log(`[Electron] File transfer progress: ${data.current}/${data.total} for ${data.filename}`);
     mainWindow.webContents.send(IPC_CHANNELS.FILE_TRANSFER_PROGRESS, data);
   }
 }
 
+function scheduleFileTransferProgressFlush(): void {
+  if (fileTransferProgressTimer) {
+    return;
+  }
+  fileTransferProgressTimer = setTimeout(flushFileTransferProgress, FILE_TRANSFER_PROGRESS_FLUSH_MS);
+}
+
+function clearPendingFileTransferProgress(messageId: string): void {
+  pendingFileTransferProgress.delete(messageId);
+  if (pendingFileTransferProgress.size === 0 && fileTransferProgressTimer) {
+    clearTimeout(fileTransferProgressTimer);
+    fileTransferProgressTimer = null;
+  }
+}
+
+function sendFileTransferProgress(data: FileTransferProgressEvent) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    pendingFileTransferProgress.set(data.messageId, data);
+    scheduleFileTransferProgressFlush();
+  }
+}
+
 function sendFileTransferComplete(data: FileTransferCompleteEvent) {
   if (mainWindow && !mainWindow.isDestroyed()) {
+    clearPendingFileTransferProgress(data.messageId);
     log(`[Electron] File transfer complete: ${data.filePath}`);
     mainWindow.webContents.send(IPC_CHANNELS.FILE_TRANSFER_COMPLETE, data);
   }
@@ -328,6 +457,7 @@ function sendFileTransferComplete(data: FileTransferCompleteEvent) {
 
 function sendFileTransferFailed(data: FileTransferFailedEvent) {
   if (mainWindow && !mainWindow.isDestroyed()) {
+    clearPendingFileTransferProgress(data.messageId);
     log(`[Electron] File transfer failed: ${data.error}`);
     mainWindow.webContents.send(IPC_CHANNELS.FILE_TRANSFER_FAILED, data);
   }
@@ -340,10 +470,25 @@ function sendOutgoingFileOfferPending(data: OutgoingFileOfferPendingEvent) {
   }
 }
 
+function sendOutgoingFileOfferTerminal(data: OutgoingFileOfferTerminalEvent) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    clearPendingFileTransferProgress(data.messageId);
+    log(`[Electron] Outgoing file offer terminal: ${data.messageId} status=${data.status}`);
+    mainWindow.webContents.send(IPC_CHANNELS.OUTGOING_FILE_OFFER_TERMINAL, data);
+  }
+}
+
 function sendPendingFileReceived(data: PendingFileReceivedEvent) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     log(`[Electron] Pending file received: ${data.filename} from ${data.senderUsername}`);
     mainWindow.webContents.send(IPC_CHANNELS.PENDING_FILE_RECEIVED, data);
+  }
+}
+
+function sendPendingFileOfferDeferred(data: PendingFileOfferDeferredEvent) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    log(`[Electron] Pending file offer deferred: sender=${data.senderUsername} reason=${data.reason}`);
+    mainWindow.webContents.send(IPC_CHANNELS.PENDING_FILE_OFFER_DEFERRED, data);
   }
 }
 
@@ -388,6 +533,30 @@ function sendCallStateChanged(data: CallStateChangedEvent) {
 function sendCallError(data: CallErrorEvent) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(IPC_CHANNELS.CALL_ERROR, data);
+  }
+}
+
+function sendGroupCallControlSignalReceived(data: GroupCallControlSignalReceivedEvent) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC_CHANNELS.GROUP_CALL_CONTROL_SIGNAL_RECEIVED, data);
+  }
+}
+
+function sendGroupCallPairSignalReceived(data: GroupCallPairSignalReceivedEvent) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC_CHANNELS.GROUP_CALL_PAIR_SIGNAL_RECEIVED, data);
+  }
+}
+
+function sendGroupCallStateChanged(data: GroupCallStateChangedEvent) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC_CHANNELS.GROUP_CALL_STATE_CHANGED, data);
+  }
+}
+
+function sendGroupCallError(data: GroupCallErrorEvent) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC_CHANNELS.GROUP_CALL_ERROR, data);
   }
 }
 
@@ -554,6 +723,12 @@ async function initializeP2PAfterWindow() {
       onMessageReceived: (data: MessageReceivedEvent) => {
         sendMessageReceived(data);
       },
+      onMessageSendStateChanged: (data: MessageSendStateChangedEvent) => {
+        sendMessageSendStateChanged(data);
+      },
+      onOfflineInboxCapacityChanged: (data: OfflineInboxCapacityChangedEvent) => {
+        sendOfflineInboxCapacityChanged(data);
+      },
       onRestoreUsername: (username: string) => {
         sendRestoreUsername(username);
       },
@@ -569,8 +744,14 @@ async function initializeP2PAfterWindow() {
       onOutgoingFileOfferPending: (data: OutgoingFileOfferPendingEvent) => {
         sendOutgoingFileOfferPending(data);
       },
+      onOutgoingFileOfferTerminal: (data: OutgoingFileOfferTerminalEvent) => {
+        sendOutgoingFileOfferTerminal(data);
+      },
       onPendingFileReceived: (data: PendingFileReceivedEvent) => {
         sendPendingFileReceived(data);
+      },
+      onPendingFileOfferDeferred: (data: PendingFileOfferDeferredEvent) => {
+        sendPendingFileOfferDeferred(data);
       },
       onGroupChatActivated: (data: GroupChatActivatedEvent) => {
         sendGroupChatActivated(data);
@@ -592,6 +773,18 @@ async function initializeP2PAfterWindow() {
       },
       onCallError: (data: CallErrorEvent) => {
         sendCallError(data);
+      },
+      onGroupCallControlSignalReceived: (data: GroupCallControlSignalReceivedEvent) => {
+        sendGroupCallControlSignalReceived(data);
+      },
+      onGroupCallPairSignalReceived: (data: GroupCallPairSignalReceivedEvent) => {
+        sendGroupCallPairSignalReceived(data);
+      },
+      onGroupCallStateChanged: (data: GroupCallStateChangedEvent) => {
+        sendGroupCallStateChanged(data);
+      },
+      onGroupCallError: (data: GroupCallErrorEvent) => {
+        sendGroupCallError(data);
       },
     };
     p2pCore = await initializeP2PCore(p2pCoreConfig);
@@ -629,6 +822,7 @@ async function initializeApp() {
     if (!isDevelopment) {
       registerAppProtocolHandler();
     }
+    registerMediaProtocolHandler();
 
     const displayMediaPicker = setupDisplayMediaPicker(trustedIpcMain, () => mainWindow);
 
@@ -642,6 +836,30 @@ async function initializeApp() {
     // Setup IPC handlers
     setupIPCHandlers(ipcMain, () => p2pCore, () => mainWindow);
     log('[Electron] IPC handlers registered');
+
+    // OS wake/unlock
+    const handlePowerResume = (trigger: string) => {
+      if (!p2pCore) {
+        return;
+      }
+      p2pCore.messageHandler.notePowerResume();
+      const token = ++wakeRecoverySeq;
+      sendWakeRecoveryStarted({
+        token,
+        deadlineAt: Date.now() + 30_000,
+        trigger,
+      });
+      log(`[Electron][POWER] ${trigger} - forcing immediate reconnect`);
+      void p2pCore.requestImmediateReconnect()
+        .catch((error) => {
+          console.warn(`[Electron][POWER] reconnect after ${trigger} failed:`, errStr(error));
+        })
+        .finally(() => {
+          sendWakeRecoveryReconnectSettled({ token });
+        });
+    };
+    powerMonitor.on('resume', () => handlePowerResume('resume'));
+    powerMonitor.on('unlock-screen', () => handlePowerResume('unlock-screen'));
     trustedIpcMain.handle(IPC_CHANNELS.INIT_STATE, () => {
       return {
         initialized: isCoreInitialized,
@@ -694,9 +912,11 @@ async function initializeApp() {
   }
 }
 
-app.whenReady().then(async () => {
-  await initializeApp();
-});
+if (gotTheLock) {
+  app.whenReady().then(async () => {
+    await initializeApp();
+  });
+}
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

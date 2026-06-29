@@ -1,20 +1,23 @@
 import type { BrowserWindow } from 'electron';
-import { app, dialog, Notification, shell } from 'electron';
+import { app, clipboard, dialog, nativeImage, Notification, shell } from 'electron';
 import {
   IPC_CHANNELS,
   type P2PCore,
+  type ChatNode,
   type AppConfig,
   type NetworkMode,
   type CallSignalOutgoingInput,
+  type GroupCallPairSignalOutgoingInput,
   type BootstrapRetryResponse,
   type ConnectionNodeStatus,
   type ConnectionNodesResponse,
+  type NodesLivenessResponse,
   type RelayRetryResponse,
   type IceServerConfig,
   type IceServerType,
   type IceServersResponse,
 } from '../core/index.js';
-import { CHATS_TO_CHECK_FOR_OFFLINE_MESSAGES, DEFAULT_NETWORK_MODE, DOWNLOADS_DIR, FAST_RELAY_MULTIADDRS_SETTING_KEY, FILE_OFFER_RATE_LIMIT, KEY_EXCHANGE_RATE_LIMIT_DEFAULT, MAX_FILE_SIZE, MAX_PENDING_FILES_PER_PEER, MAX_PENDING_FILES_TOTAL, NETWORK_MODE_ONBOARDED_SETTING_KEY, OFFLINE_MESSAGE_LIMIT, SILENT_REJECTION_THRESHOLD_GLOBAL, SILENT_REJECTION_THRESHOLD_PER_PEER, NETWORK_MODES, WEBRTC_ICE_SERVERS_SETTING_KEY, getTorConfig, isNetworkMode } from '../core/constants.js';
+import { CHATS_TO_CHECK_FOR_OFFLINE_MESSAGES, DEFAULT_NETWORK_MODE, DOWNLOADS_DIR, FAST_MISSING_ICE_WARNING_ACKNOWLEDGED_SETTING_KEY, FAST_RELAY_MULTIADDRS_SETTING_KEY, FILE_OFFER_RATE_LIMIT, KEY_EXCHANGE_RATE_LIMIT_DEFAULT, MAX_FILE_SIZE, MAX_PENDING_FILES_PER_PEER, MAX_PENDING_FILES_TOTAL, NETWORK_MODE_ONBOARDED_SETTING_KEY, OFFLINE_MESSAGE_LIMIT, SILENT_REJECTION_THRESHOLD_GLOBAL, SILENT_REJECTION_THRESHOLD_PER_PEER, NETWORK_MODES, UPLOADS_DIR, WEBRTC_ICE_SERVERS_SETTING_KEY, getInitialSetupStatusSettingKey, getTorConfig, isNetworkMode } from '../core/constants.js';
 import { validateMessageLength, validateUsername } from '../core/utils/validators.js';
 import { peerIdFromString } from '@libp2p/peer-id';
 import { multiaddr } from '@multiformats/multiaddr';
@@ -30,14 +33,20 @@ import {
 } from '../core/network/node-relays.js';
 import { DEFAULT_WEBRTC_ICE_SERVERS } from '../core/network/default-infrastructure.js';
 import { ensureAppDataDir } from '../core/utils/miscellaneous.js';
-import { homedir } from 'os';
-import { basename, isAbsolute, join, resolve as resolvePath } from 'path';
-import { copyFile, stat } from 'fs/promises';
+import { basename, dirname, isAbsolute, join, resolve as resolvePath } from 'path';
+import { copyFile, lstat, mkdir, readdir, realpath, rm, stat } from 'fs/promises';
 import { log } from '../shared/logger.js';
+import { isImageFile } from '../shared/file-types.js';
 import { errStr } from '../core/utils/general-error.js';
 import { ChatDatabase } from '../core/db/database.js';
+import type { PendingFileInboxSnapshot } from '../core/types.js';
+import { isNetworkConnected } from './network-connectivity.js';
 import { scheduleAppRelaunch } from './relaunch.js';
 import { createTrustedIpcMainHandle, type IpcMainHandleRegistrar } from './trusted-ipc.js';
+import { mintMediaToken } from './app-protocol.js';
+import { prepareTextUpload } from './text-upload.js';
+import { writeFileWithCopySuffix } from '../core/lib/file-storage.js';
+import type { InitialSetupStatus, SaveTextUploadResponse } from '../shared/kiyeovo-api.js';
 
 function requestAppRestart(): void {
   scheduleAppRelaunch();
@@ -60,6 +69,63 @@ function withSettingsDatabase<T>(getP2PCore: () => P2PCore | null, run: (db: Cha
   }
 }
 
+function resolveUploadsDirectory(db: ChatDatabase): string {
+  const configuredDownloadsDir = db.getSetting('downloads_directory') || DOWNLOADS_DIR;
+  const downloadsDir = isAbsolute(configuredDownloadsDir)
+    ? configuredDownloadsDir
+    : resolvePath(process.cwd(), configuredDownloadsDir);
+  return join(dirname(downloadsDir), UPLOADS_DIR);
+}
+
+function getConfiguredMaxFileSize(db: ChatDatabase): number {
+  const configured = Number.parseInt(db.getSetting('max_file_size') || '', 10);
+  return Number.isFinite(configured) && configured > 0 ? configured : MAX_FILE_SIZE;
+}
+
+async function writeUploadAtomically(
+  uploadsDir: string,
+  fileName: string,
+  bytes: Buffer,
+): Promise<string> {
+  return writeFileWithCopySuffix(uploadsDir, fileName, bytes);
+}
+
+async function getFlatDirectorySize(directoryPath: string): Promise<number> {
+  const entries = await readdir(directoryPath, { withFileTypes: true });
+  const sizes = await Promise.all(
+    entries
+      .filter((entry) => entry.isFile())
+      .map(async (entry) => (await stat(join(directoryPath, entry.name))).size),
+  );
+  return sizes.reduce((total, size) => total + size, 0);
+}
+
+async function resolveCompletedImageMedia(
+  p2pCore: P2PCore,
+  messageId: string,
+): Promise<{ canonicalPath: string; fileName: string }> {
+  const media = p2pCore.database.getCompletedFileMediaById(messageId);
+  if (!media || !isImageFile(media.fileName)) {
+    throw new Error('Completed image message not found');
+  }
+
+  const storedPathStats = await lstat(media.filePath);
+  if (storedPathStats.isSymbolicLink()) {
+    throw new Error('Symbolic-link media paths are not allowed');
+  }
+
+  const canonicalPath = await realpath(media.filePath);
+  const fileStats = await stat(canonicalPath);
+  if (!fileStats.isFile()) {
+    throw new Error('Media path is not a file');
+  }
+
+  return {
+    canonicalPath,
+    fileName: media.fileName,
+  };
+}
+
 function normalizeAddressList(addresses: string[]): string[] {
   return Array.from(
     new Set(
@@ -71,6 +137,12 @@ function normalizeAddressList(addresses: string[]): string[] {
 }
 
 const ICE_SERVER_TYPES: IceServerType[] = ['stun', 'turn', 'turns'];
+const INITIAL_SETUP_STATUSES: InitialSetupStatus[] = [
+  'not_started',
+  'in_progress',
+  'completed',
+  'skipped',
+];
 const SCREEN_SHARE_UNSUPPORTED_MESSAGE = 'Screen sharing is not supported yet';
 
 function isScreenShareSupported(): boolean {
@@ -79,6 +151,11 @@ function isScreenShareSupported(): boolean {
 
 function isIceServerType(value: string): value is IceServerType {
   return ICE_SERVER_TYPES.includes(value as IceServerType);
+}
+
+function isInitialSetupStatus(value: unknown): value is InitialSetupStatus {
+  return typeof value === 'string'
+    && INITIAL_SETUP_STATUSES.includes(value as InitialSetupStatus);
 }
 
 function inferIceServerType(url: string): IceServerType | null {
@@ -196,6 +273,27 @@ function getConfiguredIceServers(database: ChatDatabase): IceServerConfig[] {
   }
 }
 
+const NODE_LIVENESS_PING_TIMEOUT_MS = 2000;
+
+// True only if we have a connection to this peer AND it answers a ping
+async function isPeerReachable(node: ChatNode, peerIdStr: string | null): Promise<boolean> {
+  if (!peerIdStr) {
+    return false;
+  }
+  const hasConnection = node.getConnections().some((conn) => conn.remotePeer.toString() === peerIdStr);
+  if (!hasConnection) {
+    return false;
+  }
+  try {
+    const peerId = peerIdFromString(peerIdStr);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (node.services as any).ping.ping(peerId, { signal: AbortSignal.timeout(NODE_LIVENESS_PING_TIMEOUT_MS) });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Setup all IPC handlers for communication between renderer and main process
  */
@@ -214,6 +312,7 @@ export function setupIPCHandlers(
 
   // Call signaling handlers
   setupCallHandlers(trustedIpcMain, getP2PCore);
+  setupGroupCallHandlers(trustedIpcMain, getP2PCore);
 
   // Contact request handlers
   setupContactRequestHandlers(trustedIpcMain, getP2PCore);
@@ -229,6 +328,12 @@ export function setupIPCHandlers(
 
   // File dialog handlers
   setupFileDialogHandlers(trustedIpcMain);
+
+  // Capability-gated local media handlers
+  setupMediaHandlers(trustedIpcMain, getP2PCore);
+
+  // Persistent pasted-image storage
+  setupUploadHandlers(trustedIpcMain, getP2PCore);
 
   // Chat handlers
   setupChatHandlers(trustedIpcMain, getP2PCore);
@@ -366,7 +471,8 @@ function setupRegistrationHandlers(
 
       const mode = p2pCore.database.getSessionNetworkMode();
       const setting = p2pCore.database.getSetting(`auto_register_${mode}`);
-      return { autoRegister: setting === 'true' };
+      // Default ON when the user has never set a preference
+      return { autoRegister: setting !== 'never' };
     } catch (error) {
       console.error('[IPC] Failed to get auto-register setting:', error);
       return { autoRegister: false };
@@ -399,7 +505,7 @@ function setupMessagingHandlers(
   ipcMain: IpcMainHandleRegistrar,
   getP2PCore: () => P2PCore | null
 ): void {
-  ipcMain.handle(IPC_CHANNELS.SEND_MESSAGE_REQUEST, async (_event, identifier: string, message: string) => {
+  ipcMain.handle(IPC_CHANNELS.SEND_MESSAGE_REQUEST, async (_event, identifier: string, message: string, replyToCid?: string) => {
     try {
       const p2pCore = getP2PCore();
       if (!p2pCore) {
@@ -428,16 +534,93 @@ function setupMessagingHandlers(
 
       log(`[IPC] Sending message to ${identifier}: ${message}`);
 
-      const response = await p2pCore.messageHandler.sendMessage(identifier, message);
+      const response = await p2pCore.messageHandler.sendMessage(identifier, message, replyToCid);
       log(`[IPC] Message sent response: ${JSON.stringify(response)}`);
 
       if (response.success) {
-        return { success: true, messageSentStatus: response.messageSentStatus, error: null, message: response.message };
+        return {
+          success: true,
+          messageSentStatus: response.messageSentStatus,
+          error: null,
+          message: response.message,
+          localSendState: response.localSendState,
+        };
       }
-      return { success: false, messageSentStatus: null, error: response.error ?? 'Failed to send message' };
+      return {
+        success: false,
+        messageSentStatus: null,
+        error: response.error ?? 'Failed to send message',
+        ...(response.connectivityFailure
+          ? { connectivityFailure: response.connectivityFailure }
+          : {}),
+      };
     } catch (error) {
       console.error('[IPC] Failed to send message:', error);
       return { success: false, messageSentStatus: null, error: errStr(error, "Failed to send message") };
+    }
+  });
+
+  // Fast pre-send capacity check so the renderer can refuse (toast + keep draft)
+  // before creating an optimistic row when the offline bucket is full.
+  ipcMain.handle(IPC_CHANNELS.CHECK_OFFLINE_CAPACITY, async (_event, peerId: string, additional?: number) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { hasRoom: true };
+      }
+      return { hasRoom: p2pCore.messageHandler.checkOfflineCapacity(peerId, additional ?? 0) };
+    } catch (error) {
+      console.error('[IPC] checkOfflineCapacity failed:', error);
+      return { hasRoom: true };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.REQUEST_OFFLINE_INBOX_RECOVERY, async (_event, peerId: string) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { started: false };
+      }
+      return { started: p2pCore.messageHandler.requestDirectOfflineInboxRecovery(peerId) };
+    } catch (error) {
+      console.error('[IPC] requestOfflineInboxRecovery failed:', error);
+      return { started: false };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.GET_OFFLINE_INBOX_CAPACITY, async (_event, chatId: number) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { success: false, snapshot: null, error: 'P2P core not initialized' };
+      }
+      return {
+        success: true,
+        snapshot: p2pCore.messageHandler.getOfflineInboxCapacity(chatId),
+        error: null,
+      };
+    } catch (error) {
+      console.error('[IPC] getOfflineInboxCapacity failed:', error);
+      return {
+        success: false,
+        snapshot: null,
+        error: errStr(error, 'Failed to fetch offline inbox capacity'),
+      };
+    }
+  });
+
+  // Manual retry of a failed 1:1 offline send.
+  ipcMain.handle(IPC_CHANNELS.RETRY_OFFLINE_SEND, async (_event, messageId: string) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { success: false, error: 'P2P core not initialized' };
+      }
+      p2pCore.messageHandler.retryOfflineSend(messageId);
+      return { success: true, error: null };
+    } catch (error) {
+      console.error('[IPC] retryOfflineSend failed:', error);
+      return { success: false, error: errStr(error, 'Failed to retry offline send') };
     }
   });
 
@@ -447,7 +630,7 @@ function setupMessagingHandlers(
       _event,
       chatId: number,
       message: string,
-      options?: { rekeyRetryHint?: boolean }
+      options?: { rekeyRetryHint?: boolean; replyToCid?: string }
     ) => {
     const startedAt = Date.now();
     try {
@@ -479,7 +662,14 @@ function setupMessagingHandlers(
           offlineBackupRetry: response.offlineBackupRetry ?? null,
         };
       }
-      return { success: false, messageSentStatus: null, error: response.error ?? 'Failed to send group message' };
+      return {
+        success: false,
+        messageSentStatus: null,
+        error: response.error ?? 'Failed to send group message',
+        ...(response.connectivityFailure
+          ? { connectivityFailure: response.connectivityFailure }
+          : {}),
+      };
     } catch (error) {
       log(`[IPC][TIMING][GROUP-SEND] failed chatId=${chatId} took=${Date.now() - startedAt}ms`);
       console.error('[IPC] Failed to send group message:', error);
@@ -503,11 +693,11 @@ function setupCallHandlers(
     };
   });
 
-  ipcMain.handle(IPC_CHANNELS.CALL_START, async (_event, peerId: string, callId: string, offerSdp: string, mediaType: 'audio' | 'video' = 'audio') => {
+  ipcMain.handle(IPC_CHANNELS.CALL_START, async (_event, peerId: string, callId: string, offerSdp: string) => {
     try {
       const p2pCore = getP2PCore();
       if (!p2pCore) return { success: false, error: 'P2P core not initialized' };
-      return await p2pCore.messageHandler.startCall(peerId, callId, offerSdp, mediaType);
+      return await p2pCore.messageHandler.startCall(peerId, callId, offerSdp);
     } catch (error) {
       return { success: false, error: errStr(error, 'Failed to start call') };
     }
@@ -556,6 +746,61 @@ function setupCallHandlers(
       return await p2pCore.messageHandler.sendCallSignal(signal);
     } catch (error) {
       return { success: false, error: errStr(error, 'Failed to send call signal') };
+    }
+  });
+}
+
+function setupGroupCallHandlers(
+  ipcMain: IpcMainHandleRegistrar,
+  getP2PCore: () => P2PCore | null,
+): void {
+  ipcMain.handle(IPC_CHANNELS.GROUP_CALL_START, async (_event, chatId: number) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) return { success: false, error: 'P2P core not initialized' };
+      return await p2pCore.groupCallOrchestrator.startGroupCall(chatId);
+    } catch (error) {
+      return { success: false, error: errStr(error, 'Failed to start group call') };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.GROUP_CALL_JOIN, async (_event, chatId: number) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) return { success: false, error: 'P2P core not initialized' };
+      return await p2pCore.groupCallOrchestrator.joinGroupCall(chatId);
+    } catch (error) {
+      return { success: false, error: errStr(error, 'Failed to join group call') };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.GROUP_CALL_LEAVE, async (_event, chatId: number) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) return { success: false, error: 'P2P core not initialized' };
+      return await p2pCore.groupCallOrchestrator.leaveGroupCall(chatId);
+    } catch (error) {
+      return { success: false, error: errStr(error, 'Failed to leave group call') };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.GROUP_CALL_WRITER_RECOVERY_FALLBACK, async (_event, chatId: number) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) return { success: false, error: 'P2P core not initialized' };
+      return await p2pCore.groupCallOrchestrator.fallbackWriterRecovery(chatId);
+    } catch (error) {
+      return { success: false, error: errStr(error, 'Failed to recover group call writer session') };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.GROUP_CALL_PAIR_SIGNAL_SEND, async (_event, signal: GroupCallPairSignalOutgoingInput) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) return { success: false, error: 'P2P core not initialized' };
+      return await p2pCore.groupCallOrchestrator.sendPairSignal(signal);
+    } catch (error) {
+      return { success: false, error: errStr(error, 'Failed to send group call pair signal') };
     }
   });
 }
@@ -671,6 +916,41 @@ function setupBootstrapHandlers(
     }
   });
 
+  // OS-level network connectivity snapshot
+  ipcMain.handle(IPC_CHANNELS.GET_NETWORK_CONNECTED, async () => {
+    return { connected: isNetworkConnected() };
+  });
+
+  // OS connectivity just returned: reconnect to the DHT now instead of waiting 
+  ipcMain.handle(IPC_CHANNELS.NOTIFY_NETWORK_RECONNECTED, async () => {
+    const p2pCore = getP2PCore();
+    if (!p2pCore) {
+      return;
+    }
+    log('[IPC] OS connectivity returned — requesting immediate DHT reconnect');
+    void p2pCore.requestImmediateReconnect().catch((error) => {
+      console.warn('[IPC] Network-return reconnect failed:', errStr(error));
+    });
+  });
+
+  // Per-node liveness probe: pings each address (short timeout, never dials)
+  ipcMain.handle(IPC_CHANNELS.GET_NODES_LIVENESS, async (_event, addresses: string[]) => {
+    const p2pCore = getP2PCore();
+    if (!p2pCore) {
+      return { statuses: [] } satisfies NodesLivenessResponse;
+    }
+    const statuses = await Promise.all((addresses ?? []).map(async (address) => {
+      let peerIdStr: string | null = null;
+      try {
+        peerIdStr = multiaddr(address).getPeerId();
+      } catch {
+        peerIdStr = null;
+      }
+      return { address, connected: await isPeerReachable(p2pCore.node, peerIdStr) };
+    }));
+    return { statuses } satisfies NodesLivenessResponse;
+  });
+
   // Get bootstrap nodes from database
   ipcMain.handle(IPC_CHANNELS.GET_BOOTSTRAP_NODES, async () => {
     try {
@@ -681,22 +961,12 @@ function setupBootstrapHandlers(
 
       log('[IPC] Fetching bootstrap nodes from database...');
       const dbNodes = p2pCore.database.getBootstrapNodes();
-      const connectedRemoteAddrs = new Set(
-        p2pCore.node.getConnections().map((connection) => connection.remoteAddr.toString()),
-      );
-      const nodes: ConnectionNodeStatus[] = dbNodes.map((node) => {
-        let normalizedAddress: string | null = null;
-        try {
-          normalizedAddress = multiaddr(node.address).toString();
-        } catch {
-          normalizedAddress = null;
-        }
-
-        return {
-          address: node.address,
-          connected: normalizedAddress !== null && connectedRemoteAddrs.has(normalizedAddress),
-        };
-      });
+      // Fast: addresses only. Status is left null ("checking") and filled in by the
+      // separate liveness probe, so the slow ping never blocks the list from loading.
+      const nodes: ConnectionNodeStatus[] = dbNodes.map((node) => ({
+        address: node.address,
+        connected: null,
+      }));
       log(`[IPC] Found ${nodes.length} bootstrap nodes`);
 
       return { success: true, nodes, error: null };
@@ -760,7 +1030,12 @@ function setupBootstrapHandlers(
         return { success: true, nodes: [], error: null };
       }
 
-      const { nodes } = getFastRelayStatusSnapshot(p2pCore.node, p2pCore.database);
+      const snapshot = getFastRelayStatusSnapshot(p2pCore.node, p2pCore.database);
+      // Fast: addresses only, status left null. Liveness is filled in by the probe.
+      const nodes: ConnectionNodeStatus[] = snapshot.nodes.map((node) => ({
+        address: node.address,
+        connected: null,
+      }));
 
       return { success: true, nodes, error: null };
     } catch (error) {
@@ -778,7 +1053,12 @@ function setupBootstrapHandlers(
         return { success: false, error: 'Relay address cannot be empty' };
       }
 
-      const ma = multiaddr(normalized);
+      let ma: ReturnType<typeof multiaddr>;
+      try {
+        ma = multiaddr(normalized);
+      } catch {
+        return { success: false, error: 'Enter a valid multiaddress, e.g. /ip4/1.2.3.4/tcp/4002/p2p/12D3Koo…' };
+      }
       if (!ma.getPeerId()) {
         return { success: false, error: 'Relay multiaddr must include /p2p/<peerId>' };
       }
@@ -871,8 +1151,23 @@ function setupBootstrapHandlers(
         return { success: false, error: 'P2P core not initialized' };
       }
 
-      log(`[IPC] Adding bootstrap node: ${address}`);
-      p2pCore.database.addBootstrapNode(address);
+      const normalized = address.trim();
+      if (!normalized) {
+        return { success: false, error: 'Bootstrap address cannot be empty' };
+      }
+
+      let ma: ReturnType<typeof multiaddr>;
+      try {
+        ma = multiaddr(normalized);
+      } catch {
+        return { success: false, error: 'Enter a valid multiaddress, e.g. /ip4/1.2.3.4/tcp/4001/p2p/12D3Koo…' };
+      }
+      if (!ma.getPeerId()) {
+        return { success: false, error: 'Bootstrap multiaddr must include /p2p/<peerId>' };
+      }
+
+      log(`[IPC] Adding bootstrap node: ${normalized}`);
+      p2pCore.database.addBootstrapNode(normalized);
       log('[IPC] Bootstrap node added');
 
       return { success: true, error: null };
@@ -1000,30 +1295,41 @@ function setupTrustedUserHandlers(
     }
   });
 
-  ipcMain.handle(IPC_CHANNELS.EXPORT_PROFILE, async (_event, password: string, sharedSecret: string) => {
+  ipcMain.handle(IPC_CHANNELS.EXPORT_PROFILE, async (_event, password: string, sharedSecret: string, filename: string, label: string) => {
     try {
       const p2pCore = getP2PCore();
       if (!p2pCore) {
         return { success: false, error: 'P2P core not initialized' };
       }
 
-      const username = p2pCore.usernameRegistry.getCurrentUsername();
-      if (!username) {
-        return { success: false, error: 'No username registered' };
+      const registeredUsername = p2pCore.usernameRegistry.getCurrentUsername();
+      const trimmedLabel = typeof label === 'string' ? label.trim() : '';
+      const resolvedLabel = trimmedLabel || (registeredUsername ?? '');
+      if (!resolvedLabel) {
+        return { success: false, error: 'A display label is required' };
       }
+      if (resolvedLabel.length < 2 || resolvedLabel.length > 64) {
+        return { success: false, error: 'Display label must be between 2 and 64 characters' };
+      }
+
+      // The destination path comes from the renderer's native save dialog
+      const trimmedFilename = typeof filename === 'string' ? filename.trim() : '';
+      if (!trimmedFilename) {
+        return { success: false, error: 'A file path is required' };
+      }
+      const resolvedFilename = trimmedFilename.toLowerCase().endsWith('.kiyeovo')
+        ? trimmedFilename
+        : `${trimmedFilename}.kiyeovo`;
 
       const myPeerId = p2pCore.userIdentity.id;
 
-      // Save to home directory as ${username}.kiyeovo
-      const filename = join(homedir(), `${username}.kiyeovo`);
-
-      log(`[IPC] Exporting profile to: ${filename}`);
+      log(`[IPC] Exporting profile to: ${resolvedFilename}`);
 
       const result = await ProfileManager.exportProfileDesktop(
         p2pCore.userIdentity,
-        username,
+        resolvedLabel,
         myPeerId,
-        filename,
+        resolvedFilename,
         password,
         sharedSecret
       );
@@ -1086,13 +1392,37 @@ function setupFileDialogHandlers(ipcMain: IpcMainHandleRegistrar): void {
         filters: options.filters || []
       });
 
+      const filePath = result.filePaths[0] || null;
+      let mediaToken: string | null = null;
+      if (!result.canceled && filePath && isImageFile(filePath)) {
+        try {
+          const selectedPathStats = await lstat(filePath);
+          if (selectedPathStats.isSymbolicLink()) {
+            console.warn('[IPC][SECURITY] Refusing media capability for symbolic-link selection');
+            return {
+              filePath,
+              canceled: result.canceled,
+              mediaToken: null,
+            };
+          }
+          const canonicalPath = await realpath(filePath);
+          const fileStats = await stat(canonicalPath);
+          if (fileStats.isFile()) {
+            mediaToken = mintMediaToken(canonicalPath);
+          }
+        } catch (error) {
+          console.warn('[IPC] Failed to create selected-image media capability:', error);
+        }
+      }
+
       return {
-        filePath: result.filePaths[0] || null,
-        canceled: result.canceled
+        filePath,
+        canceled: result.canceled,
+        mediaToken,
       };
     } catch (error) {
       console.error('[IPC] Failed to show open dialog:', error);
-      return { filePath: null, canceled: true };
+      return { filePath: null, canceled: true, mediaToken: null };
     }
   });
 
@@ -1140,6 +1470,246 @@ function setupFileDialogHandlers(ipcMain: IpcMainHandleRegistrar): void {
         size: null,
         error: errStr(error, 'Failed to get file metadata')
       };
+    }
+  });
+}
+
+function setupMediaHandlers(
+  ipcMain: IpcMainHandleRegistrar,
+  getP2PCore: () => P2PCore | null,
+): void {
+  ipcMain.handle(IPC_CHANNELS.REGISTER_MESSAGE_MEDIA, async (_event, messageId: string) => {
+    try {
+      if (typeof messageId !== 'string' || !messageId.trim()) {
+        return { success: false, token: null, error: 'Invalid message ID' };
+      }
+
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { success: false, token: null, error: 'P2P core not initialized' };
+      }
+
+      const { canonicalPath } = await resolveCompletedImageMedia(p2pCore, messageId);
+
+      return {
+        success: true,
+        token: mintMediaToken(canonicalPath),
+        error: null,
+      };
+    } catch (error) {
+      console.error('[IPC] Failed to register message media:', error);
+      return {
+        success: false,
+        token: null,
+        error: errStr(error, 'Failed to register message media'),
+      };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.COPY_IMAGE_TO_CLIPBOARD, async (_event, messageId: string) => {
+    try {
+      if (typeof messageId !== 'string' || !messageId.trim()) {
+        return { success: false, error: 'Invalid message ID' };
+      }
+
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { success: false, error: 'P2P core not initialized' };
+      }
+
+      const { canonicalPath } = await resolveCompletedImageMedia(p2pCore, messageId);
+      const image = nativeImage.createFromPath(canonicalPath);
+      if (image.isEmpty()) {
+        return { success: false, error: 'Image could not be decoded for clipboard' };
+      }
+
+      clipboard.writeImage(image);
+      return { success: true, error: null };
+    } catch (error) {
+      console.error('[IPC] Failed to copy image to clipboard:', error);
+      return {
+        success: false,
+        error: errStr(error, 'Failed to copy image to clipboard'),
+      };
+    }
+  });
+}
+
+function setupUploadHandlers(
+  ipcMain: IpcMainHandleRegistrar,
+  getP2PCore: () => P2PCore | null,
+): void {
+  ipcMain.handle(IPC_CHANNELS.SAVE_UPLOAD, async (
+    _event,
+    bytes: unknown,
+    fileName: unknown,
+  ) => {
+    let savedFilePath: string | null = null;
+
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return {
+          success: false,
+          filePath: null,
+          mediaToken: null,
+          uploadsDirSizeBytes: 0,
+          error: 'P2P core not initialized',
+        };
+      }
+
+      if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0) {
+        return {
+          success: false,
+          filePath: null,
+          mediaToken: null,
+          uploadsDirSizeBytes: 0,
+          error: 'Upload bytes are required',
+        };
+      }
+
+      if (typeof fileName !== 'string' || !fileName.trim()) {
+        return {
+          success: false,
+          filePath: null,
+          mediaToken: null,
+          uploadsDirSizeBytes: 0,
+          error: 'Upload filename is required',
+        };
+      }
+
+      const sanitizedFileName = basename(fileName.trim());
+      if (
+        !sanitizedFileName
+        || sanitizedFileName.length > 255
+        || !isImageFile(sanitizedFileName)
+      ) {
+        return {
+          success: false,
+          filePath: null,
+          mediaToken: null,
+          uploadsDirSizeBytes: 0,
+          error: 'Unsupported upload filename',
+        };
+      }
+
+      const maxFileSize = getConfiguredMaxFileSize(p2pCore.database);
+      if (bytes.byteLength > maxFileSize) {
+        return {
+          success: false,
+          filePath: null,
+          mediaToken: null,
+          uploadsDirSizeBytes: 0,
+          error: `Image exceeds the configured file-size limit (${maxFileSize} bytes)`,
+        };
+      }
+
+      const uploadsDir = resolveUploadsDirectory(p2pCore.database);
+      await mkdir(uploadsDir, { recursive: true });
+      savedFilePath = await writeUploadAtomically(
+        uploadsDir,
+        sanitizedFileName,
+        Buffer.from(bytes),
+      );
+
+      const uploadsDirSizeBytes = await getFlatDirectorySize(uploadsDir);
+      const canonicalPath = await realpath(savedFilePath);
+      const savedFileStats = await stat(canonicalPath);
+      if (!savedFileStats.isFile()) {
+        throw new Error('Saved upload is not a regular file');
+      }
+
+      log(`[IPC] Saved pasted image upload: ${sanitizedFileName} (${bytes.byteLength} bytes)`);
+      return {
+        success: true,
+        filePath: savedFilePath,
+        mediaToken: mintMediaToken(canonicalPath),
+        uploadsDirSizeBytes,
+        error: null,
+      };
+    } catch (error) {
+      if (savedFilePath) {
+        try {
+          await rm(savedFilePath, { force: true });
+        } catch (cleanupError) {
+          console.error('[IPC] Failed to remove incomplete pasted-image upload:', cleanupError);
+        }
+      }
+      console.error('[IPC] Failed to save pasted-image upload:', error);
+      return {
+        success: false,
+        filePath: null,
+        mediaToken: null,
+        uploadsDirSizeBytes: 0,
+        error: errStr(error, 'Failed to save pasted image'),
+      };
+    }
+  });
+
+  const textUploadFailure = (error: string): SaveTextUploadResponse => ({
+    success: false,
+    filePath: null,
+    fileName: null,
+    fileSize: 0,
+    uploadsDirSizeBytes: 0,
+    error,
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SAVE_TEXT_UPLOAD, async (
+    _event,
+    text: unknown,
+    fileName: unknown,
+  ): Promise<SaveTextUploadResponse> => {
+    let savedFilePath: string | null = null;
+
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return textUploadFailure('P2P core not initialized');
+      }
+
+      const maxFileSize = getConfiguredMaxFileSize(p2pCore.database);
+      const prepared = prepareTextUpload(text, fileName, maxFileSize);
+      if (!prepared.success) {
+        return textUploadFailure(prepared.error);
+      }
+
+      const uploadsDir = resolveUploadsDirectory(p2pCore.database);
+      await mkdir(uploadsDir, { recursive: true });
+      savedFilePath = await writeUploadAtomically(
+        uploadsDir,
+        prepared.fileName,
+        prepared.bytes,
+      );
+
+      const canonicalPath = await realpath(savedFilePath);
+      const savedFileStats = await stat(canonicalPath);
+      if (!savedFileStats.isFile()) {
+        throw new Error('Saved text upload is not a regular file');
+      }
+
+      const uploadsDirSizeBytes = await getFlatDirectorySize(uploadsDir);
+      const finalFileName = basename(savedFilePath);
+      log(`[IPC] Saved generated text upload: ${finalFileName} (${savedFileStats.size} bytes)`);
+
+      return {
+        success: true,
+        filePath: savedFilePath,
+        fileName: finalFileName,
+        fileSize: savedFileStats.size,
+        uploadsDirSizeBytes,
+        error: null,
+      };
+    } catch (error) {
+      if (savedFilePath) {
+        try {
+          await rm(savedFilePath, { force: true });
+        } catch (cleanupError) {
+          console.error('[IPC] Failed to remove incomplete text upload:', cleanupError);
+        }
+      }
+      console.error('[IPC] Failed to save generated text upload:', error);
+      return textUploadFailure(errStr(error, 'Failed to save generated text'));
     }
   });
 }
@@ -1231,6 +1801,207 @@ function setupMessageHandlers(
     } catch (error) {
       console.error('[IPC] Failed to get messages:', error);
       return { success: false, messages: [], error: errStr(error, 'Failed to get messages') };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.GET_MESSAGE_JUMP_WINDOW, async (
+    _event,
+    chatId: number,
+    clientMsgId: string,
+  ) => {
+    const empty = {
+      status: 'not_found' as const,
+      messages: [],
+      hasMoreOlder: false,
+    };
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { success: false, ...empty, error: 'P2P core not initialized' };
+      }
+      if (
+        !Number.isInteger(chatId)
+        || chatId <= 0
+        || typeof clientMsgId !== 'string'
+        || clientMsgId.length === 0
+      ) {
+        return { success: false, ...empty, error: 'Invalid message jump request' };
+      }
+
+      const result = p2pCore.database.getMessageJumpWindow(chatId, clientMsgId);
+      return {
+        success: true,
+        status: result.status,
+        messages: result.messages,
+        hasMoreOlder: result.hasMoreOlder,
+        error: null,
+      };
+    } catch (error) {
+      console.error('[IPC] Failed to load message jump window:', error);
+      return {
+        success: false,
+        ...empty,
+        error: errStr(error, 'Failed to load message history'),
+      };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.GET_MESSAGE_PREVIEW_BY_CID, async (_event, chatId: number, clientMsgId: string) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { success: false, preview: null, error: 'P2P core not initialized' };
+      }
+      const preview = p2pCore.database.getMessagePreviewByClientMsgId(chatId, clientMsgId);
+      return { success: true, preview, error: null };
+    } catch (error) {
+      console.error('[IPC] Failed to get message preview by cid:', error);
+      return { success: false, preview: null, error: errStr(error, 'Failed to get message preview') };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.DELETE_MESSAGES_FOR_ME, async (_event, chatId: number, messageIds: string[]) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return {
+          success: false,
+          deletedCount: 0,
+          latestRemaining: null,
+          error: 'P2P core not initialized',
+        };
+      }
+      if (!Array.isArray(messageIds)) {
+        return {
+          success: false,
+          deletedCount: 0,
+          latestRemaining: null,
+          error: 'Invalid message selection',
+        };
+      }
+
+      const result = p2pCore.database.deleteMessagesForMe(chatId, messageIds);
+      p2pCore.messageHandler.discardDeletedMessageRetryState(messageIds);
+      log(`[IPC] Deleted ${result.deletedCount} local message row(s) from chat ${chatId}`);
+      return {
+        success: true,
+        deletedCount: result.deletedCount,
+        latestRemaining: result.latestRemaining
+          ? {
+              content: result.latestRemaining.content,
+              timestamp: result.latestRemaining.timestamp.getTime(),
+              clientMsgId: result.latestRemaining.clientMsgId,
+            }
+          : null,
+        error: null,
+      };
+    } catch (error) {
+      console.error('[IPC] Failed to delete selected messages:', error);
+      return {
+        success: false,
+        deletedCount: 0,
+        latestRemaining: null,
+        error: errStr(error, 'Failed to delete selected messages'),
+      };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SET_MESSAGE_PINNED, async (
+    _event,
+    chatId: number,
+    clientMsgId: string,
+    pinned: boolean,
+  ) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { success: false, error: 'P2P core not initialized' };
+      }
+      if (!Number.isInteger(chatId) || chatId <= 0 || typeof clientMsgId !== 'string' || clientMsgId.length === 0) {
+        return { success: false, error: 'Invalid pin request' };
+      }
+
+      const matched = p2pCore.database.setMessagePinned(chatId, clientMsgId, !!pinned);
+      if (pinned && !matched) {
+        return { success: false, error: 'Message not found' };
+      }
+      return { success: true, error: null };
+    } catch (error) {
+      console.error('[IPC] Failed to set message pin:', error);
+      return { success: false, error: errStr(error, 'Failed to pin message') };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.GET_PINNED_MESSAGE, async (_event, chatId: number) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { success: false, pinned: null, error: 'P2P core not initialized' };
+      }
+      const pinned = p2pCore.database.getPinnedMessage(chatId);
+      return { success: true, pinned, error: null };
+    } catch (error) {
+      console.error('[IPC] Failed to get pinned message:', error);
+      return { success: false, pinned: null, error: errStr(error, 'Failed to get pinned message') };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SEARCH_CHAT_MESSAGES, async (
+    _event,
+    chatId: number,
+    query: string,
+    options?: {
+      limit?: number;
+      snapshotMaxRowid?: number;
+      cursor?: { timestamp: number; rowid: number } | null;
+    },
+  ) => {
+    const empty = { results: [], total: 0, snapshotMaxRowid: 0, nextCursor: null };
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { success: false, ...empty, error: 'P2P core not initialized' };
+      }
+      if (!Number.isInteger(chatId) || chatId <= 0 || typeof query !== 'string') {
+        return { success: false, ...empty, error: 'Invalid search request' };
+      }
+
+      // Sanitize numeric options so NaN/Infinity/fractional values never reach SQL;
+      // the DB layer clamps ranges but should not receive malformed numbers.
+      const dbOptions: {
+        limit?: number;
+        snapshotMaxRowid?: number;
+        cursor: { timestamp: number; rowid: number } | null;
+      } = {
+        cursor: options?.cursor
+          && Number.isFinite(options.cursor.timestamp)
+          && Number.isInteger(options.cursor.rowid)
+          ? { timestamp: options.cursor.timestamp, rowid: options.cursor.rowid }
+          : null,
+      };
+      if (Number.isFinite(options?.limit as number)) {
+        dbOptions.limit = Math.trunc(options!.limit as number);
+      }
+      if (Number.isFinite(options?.snapshotMaxRowid as number)) {
+        dbOptions.snapshotMaxRowid = Math.trunc(options!.snapshotMaxRowid as number);
+      }
+
+      const result = p2pCore.database.searchChatMessages(chatId, query, dbOptions);
+      return {
+        success: true,
+        results: result.results,
+        total: result.total,
+        snapshotMaxRowid: result.snapshotMaxRowid,
+        nextCursor: result.nextCursor,
+        error: null,
+      };
+    } catch (error) {
+      console.error('[IPC] Failed to search chat messages:', error);
+      return {
+        success: false,
+        ...empty,
+        error: errStr(error, 'Failed to search messages'),
+      };
     }
   });
 }
@@ -1674,6 +2445,46 @@ function setupChatSettingsHandlers(
     }
   });
 
+  ipcMain.handle(IPC_CHANNELS.GET_INITIAL_SETUP_STATUS, async () => {
+    try {
+      const storedStatus = withSettingsDatabase(
+        getP2PCore,
+        (db) => db.getSetting(getInitialSetupStatusSettingKey(db.getNetworkMode())),
+      );
+      const status = isInitialSetupStatus(storedStatus) ? storedStatus : 'not_started';
+      return { success: true, status, error: null };
+    } catch (error) {
+      console.error('[IPC] Failed to get initial setup status:', error);
+      return {
+        success: false,
+        status: 'not_started' as InitialSetupStatus,
+        error: errStr(error, 'Failed to get initial setup status'),
+      };
+    }
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.SET_INITIAL_SETUP_STATUS,
+    async (_event, status: InitialSetupStatus) => {
+      try {
+        if (!isInitialSetupStatus(status)) {
+          return { success: false, error: 'Invalid initial setup status' };
+        }
+        withSettingsDatabase(
+          getP2PCore,
+          (db) => db.setSetting(
+            getInitialSetupStatusSettingKey(db.getNetworkMode()),
+            status,
+          ),
+        );
+        return { success: true, error: null };
+      } catch (error) {
+        console.error('[IPC] Failed to set initial setup status:', error);
+        return { success: false, error: errStr(error, 'Failed to set initial setup status') };
+      }
+    },
+  );
+
   ipcMain.handle(IPC_CHANNELS.GET_NOTIFICATIONS_ENABLED, async (_event) => {
     try {
       const p2pCore = getP2PCore();
@@ -1848,6 +2659,47 @@ function setupChatSettingsHandlers(
       return { success: false, error: errStr(error, 'Failed to save ICE servers') };
     }
   });
+
+  ipcMain.handle(IPC_CHANNELS.GET_MISSING_ICE_WARNING_ACKNOWLEDGED, async () => {
+    try {
+      const acknowledged = withSettingsDatabase(
+        getP2PCore,
+        (db) => db.getSetting(FAST_MISSING_ICE_WARNING_ACKNOWLEDGED_SETTING_KEY) === 'true',
+      );
+      return { success: true, acknowledged, error: null };
+    } catch (error) {
+      console.error('[IPC] Failed to get missing ICE warning acknowledgement:', error);
+      return {
+        success: false,
+        acknowledged: false,
+        error: errStr(error, 'Failed to get call setup warning preference'),
+      };
+    }
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.SET_MISSING_ICE_WARNING_ACKNOWLEDGED,
+    async (_event, acknowledged: boolean) => {
+      try {
+        if (typeof acknowledged !== 'boolean') {
+          return { success: false, error: 'Invalid call setup warning preference' };
+        }
+        withSettingsDatabase(getP2PCore, (db) => {
+          db.setSetting(
+            FAST_MISSING_ICE_WARNING_ACKNOWLEDGED_SETTING_KEY,
+            acknowledged ? 'true' : 'false',
+          );
+        });
+        return { success: true, error: null };
+      } catch (error) {
+        console.error('[IPC] Failed to set missing ICE warning acknowledgement:', error);
+        return {
+          success: false,
+          error: errStr(error, 'Failed to save call setup warning preference'),
+        };
+      }
+    },
+  );
 
   ipcMain.handle(IPC_CHANNELS.GET_APP_CONFIG, async () => {
     try {
@@ -2406,8 +3258,35 @@ function setupAppHandlers(ipcMain: IpcMainHandleRegistrar, getP2PCore: () => P2P
       }
 
       log('[IPC] Deleting all account data...');
+      const uploadsDir = resolveUploadsDirectory(p2pCore.database);
 
       await p2pCore.database.wipeDatabase();
+
+      try {
+        await rm(uploadsDir, { recursive: true, force: true });
+      } catch (error) {
+        const cleanupError = errStr(error, 'Unknown filesystem error');
+        console.error('[IPC] Account database was wiped, but pasted-image uploads could not be removed:', error);
+        try {
+          await dialog.showMessageBox({
+            type: 'error',
+            title: 'Account deleted with cleanup error',
+            message: 'Your account database was deleted, but pasted-image uploads could not be removed.',
+            detail: `${uploadsDir}\n\n${cleanupError}`,
+            buttons: ['Restart Kiyeovo'],
+            defaultId: 0,
+            noLink: true,
+          });
+        } catch (dialogError) {
+          console.error('[IPC] Failed to show pasted-image cleanup error dialog:', dialogError);
+        } finally {
+          requestAppRestart();
+        }
+        return {
+          success: false,
+          error: `Account database was wiped, but pasted-image uploads could not be removed: ${cleanupError}`,
+        };
+      }
 
       log('[IPC] Database wiped. Restarting app...');
 
@@ -2518,8 +3397,56 @@ function setupFileTransferHandlers(
   ipcMain: IpcMainHandleRegistrar,
   getP2PCore: () => P2PCore | null
 ): void {
+  let pendingFileCapacityRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const senderCountDecreased = (before: PendingFileInboxSnapshot, after: PendingFileInboxSnapshot): boolean => {
+    for (const beforeSender of before.senders) {
+      const afterSender = after.senders.find((sender) => sender.senderPeerId === beforeSender.senderPeerId);
+      if ((afterSender?.count ?? 0) < beforeSender.count) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const schedulePendingFileCapacityRecovery = (): void => {
+    if (pendingFileCapacityRecoveryTimer) {
+      clearTimeout(pendingFileCapacityRecoveryTimer);
+    }
+    pendingFileCapacityRecoveryTimer = setTimeout(() => {
+      pendingFileCapacityRecoveryTimer = null;
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return;
+      }
+      void (async () => {
+        try {
+          log('[IPC] Pending file capacity freed; checking group missed messages');
+          const result = await p2pCore.messageHandler.checkGroupOfflineMessages();
+          log(
+            `[IPC] Pending file capacity recovery complete - checked ${result.checkedChatIds.length} group chats`,
+          );
+        } catch (error) {
+          console.error('[IPC] Pending file capacity recovery failed:', error);
+        }
+      })();
+    }, 1000);
+  };
+
+  const maybeSchedulePendingFileCapacityRecovery = (
+    before: PendingFileInboxSnapshot,
+    after: PendingFileInboxSnapshot,
+  ): void => {
+    if (!(before.full || before.hasFullSender || pendingFileCapacityRecoveryTimer)) {
+      return;
+    }
+    if (after.total < before.total || senderCountDecreased(before, after)) {
+      schedulePendingFileCapacityRecovery();
+    }
+  };
+
   // Send file
-  ipcMain.handle(IPC_CHANNELS.SEND_FILE_REQUEST, async (_event, peerId: string, filePath: string, fileId?: string) => {
+  ipcMain.handle(IPC_CHANNELS.SEND_FILE_REQUEST, async (_event, peerId: string, filePath: string, fileId?: string, replyToCid?: string) => {
     try {
       const p2pCore = getP2PCore();
       if (!p2pCore) {
@@ -2535,12 +3462,34 @@ function setupFileTransferHandlers(
       }
 
       // Send the file (this will emit progress events internally)
-      await p2pCore.messageHandler.getFileHandler().sendFile(user.username, filePath, fileId);
+      await p2pCore.messageHandler.getFileHandler().sendFile(user.username, filePath, fileId, replyToCid);
 
       return { success: true, error: null };
     } catch (error) {
       console.error('[IPC] Failed to send file:', error);
       return { success: false, error: errStr(error, 'Failed to send file') };
+    }
+  });
+
+  // Send file to a group chat
+  ipcMain.handle(IPC_CHANNELS.SEND_GROUP_FILE_REQUEST, async (_event, chatId: number, filePath: string, fileId?: string, replyToCid?: string) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { success: false, error: 'P2P core not initialized' };
+      }
+      if (!Number.isInteger(chatId) || chatId <= 0) {
+        return { success: false, error: 'Invalid group chat' };
+      }
+
+      log(`[IPC] Sending file ${filePath} to group chat ${chatId}`);
+
+      await p2pCore.messageHandler.getFileHandler().sendGroupFile(chatId, filePath, fileId, replyToCid);
+
+      return { success: true, error: null };
+    } catch (error) {
+      console.error('[IPC] Failed to send group file:', error);
+      return { success: false, error: errStr(error, 'Failed to send group file') };
     }
   });
 
@@ -2553,7 +3502,11 @@ function setupFileTransferHandlers(
       }
 
       log(`[IPC] Accepting file: ${fileId}`);
-      p2pCore.messageHandler.getFileHandler().acceptPendingFile(fileId);
+      const fileHandler = p2pCore.messageHandler.getFileHandler();
+      const capacityBefore = fileHandler.getPendingFileInboxSnapshot();
+      fileHandler.acceptPendingFile(fileId);
+      const capacityAfter = fileHandler.getPendingFileInboxSnapshot();
+      maybeSchedulePendingFileCapacityRecovery(capacityBefore, capacityAfter);
 
       return { success: true, error: null };
     } catch (error) {
@@ -2571,12 +3524,35 @@ function setupFileTransferHandlers(
       }
 
       log(`[IPC] Rejecting file: ${fileId}`);
-      p2pCore.messageHandler.getFileHandler().rejectPendingFile(fileId);
+      const fileHandler = p2pCore.messageHandler.getFileHandler();
+      const capacityBefore = fileHandler.getPendingFileInboxSnapshot();
+      const rejected = fileHandler.rejectPendingFile(fileId);
+      if (!rejected) {
+        return { success: false, error: 'Pending file offer not found' };
+      }
+      const capacityAfter = fileHandler.getPendingFileInboxSnapshot();
+      maybeSchedulePendingFileCapacityRecovery(capacityBefore, capacityAfter);
 
       return { success: true, error: null };
     } catch (error) {
       console.error('[IPC] Failed to reject file:', error);
       return { success: false, error: errStr(error, 'Failed to reject file') };
+    }
+  });
+
+  // Current pending file-offer capacity snapshot
+  ipcMain.handle(IPC_CHANNELS.GET_PENDING_FILE_INBOX, async () => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { success: false, snapshot: null, error: 'P2P core not initialized' };
+      }
+
+      const snapshot = p2pCore.messageHandler.getFileHandler().getPendingFileInboxSnapshot();
+      return { success: true, snapshot, error: null };
+    } catch (error) {
+      console.error('[IPC] Failed to get pending file inbox:', error);
+      return { success: false, snapshot: null, error: errStr(error, 'Failed to get pending file inbox') };
     }
   });
 
@@ -2588,7 +3564,7 @@ function setupFileTransferHandlers(
         return { success: false, error: "P2P core not initialized" };
       }
 
-      const canceled = p2pCore.messageHandler.getFileHandler().cancelIncomingFileDownload(fileId);
+      const canceled = await p2pCore.messageHandler.getFileHandler().cancelIncomingFileDownload(fileId);
       if (!canceled) {
         return { success: false, error: "No active incoming download found" };
       }
@@ -2600,21 +3576,23 @@ function setupFileTransferHandlers(
     }
   });
 
-  // Get pending files
-  ipcMain.handle(IPC_CHANNELS.GET_PENDING_FILES, async (_event) => {
+  // Withdraw an outgoing, still-pending file offer
+  ipcMain.handle(IPC_CHANNELS.CANCEL_FILE_OFFER, async (_event, fileId: string) => {
     try {
       const p2pCore = getP2PCore();
       if (!p2pCore) {
-        return { success: false, files: [], error: 'P2P core not initialized' };
+        return { success: false, error: "P2P core not initialized" };
       }
 
-      const files = p2pCore.messageHandler.getFileHandler().getPendingFiles();
-      log(`[IPC] Get pending files: ${files.length} files`);
+      const cancelled = await p2pCore.messageHandler.getFileHandler().cancelOutgoingFileOffer(fileId);
+      if (!cancelled) {
+        return { success: false, error: "Active outgoing file offer not found" };
+      }
 
-      return { success: true, files, error: null };
+      return { success: true, error: null };
     } catch (error) {
-      console.error('[IPC] Failed to get pending files:', error);
-      return { success: false, files: [], error: errStr(error, 'Failed to get pending files') };
+      console.error("[IPC] Failed to cancel file offer:", error);
+      return { success: false, error: errStr(error, "Failed to cancel file offer") };
     }
   });
 

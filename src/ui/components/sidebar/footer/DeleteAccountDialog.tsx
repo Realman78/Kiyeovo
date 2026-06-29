@@ -23,19 +23,20 @@ export const DeleteAccountDialog: FC<DeleteAccountDialogProps> = ({
 
   const isDeleteConfirmed = deleteConfirmText === "I want to delete my account";
 
-  const handleClose = () => {
-    setDeleteConfirmText("");
-    onOpenChange(false);
+  const handleOpenChange = (nextOpen: boolean) => {
+    if (!nextOpen) {
+      setDeleteConfirmText("");
+    }
+    onOpenChange(nextOpen);
   };
 
   const handleConfirm = () => {
-    onOpenChange(false);
-    setDeleteConfirmText("");
+    handleOpenChange(false);
     onConfirm();
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle className="text-destructive">Delete Account and All Data</DialogTitle>
@@ -50,6 +51,7 @@ export const DeleteAccountDialog: FC<DeleteAccountDialogProps> = ({
               <li>Your identity and keys</li>
               <li>All settings and preferences</li>
               <li>Contact information</li>
+              <li>Locally stored pasted-image uploads</li>
             </ul>
             <p className="text-sm text-muted-foreground">
               will be permanently lost.
@@ -70,7 +72,7 @@ export const DeleteAccountDialog: FC<DeleteAccountDialogProps> = ({
               <Button
                 variant="outline"
                 size="sm"
-                onClick={handleClose}
+                onClick={() => handleOpenChange(false)}
               >
                 Cancel
               </Button>

@@ -4,6 +4,8 @@ import { createSlice, type PayloadAction } from '@reduxjs/toolkit';
 export interface User {
   peerId: string;
   connected: boolean | null;
+  // OS-level network connectivity (a real, non-virtual interface is up)
+  networkOnline: boolean;
   registered: boolean;
   username?: string;
   torEnabled: boolean;
@@ -14,6 +16,7 @@ export interface User {
 const initialState: User = {
   peerId: '',
   connected: null,
+  networkOnline: true,
   registered: false,
   username: '',
   torEnabled: false,
@@ -33,6 +36,9 @@ const userSlice = createSlice({
     },
     setConnected: (state, action: PayloadAction<boolean | null>) => {
       state.connected = action.payload;
+    },
+    setNetworkOnline: (state, action: PayloadAction<boolean>) => {
+      state.networkOnline = action.payload;
     },
     setRegistered: (state, action: PayloadAction<boolean>) => {
       state.registered = action.payload;
@@ -58,6 +64,7 @@ export const {
   setPeerId,
   setUsername,
   setConnected,
+  setNetworkOnline,
   setRegistered,
   setTorEnabled,
   setRegistrationInProgress,

@@ -3,6 +3,7 @@ import type { ToastVariant } from "./Toast";
 
 type ToastMessage = {
   id: string;
+  open: boolean;
   title?: string;
   description?: string;
   variant?: ToastVariant;
@@ -14,37 +15,51 @@ type ToastMessage = {
 
 type ToastContextValue = {
   toasts: ToastMessage[];
-  addToast: (toast: Omit<ToastMessage, "id">) => void;
+  addToast: (toast: Omit<ToastMessage, "id" | "open">) => void;
   removeToast: (id: string) => void;
   toast: {
     success: (message: string, title?: string) => void;
     error: (message: string, title?: string) => void;
-    warning: (message: string, title?: string) => void;
+    warning: (message: string, title?: string, duration?: number) => void;
     warningAction: (message: string, actionLabel: string, onAction: () => void, title?: string) => void;
     info: (message: string, title?: string) => void;
   };
 };
 
 const ToastContext = React.createContext<ToastContextValue | undefined>(undefined);
+const TOAST_REMOVE_DELAY_MS = 250;
 
 export function ToastContextProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = React.useState<ToastMessage[]>([]);
+  const removalTimeoutsRef = React.useRef<Map<string, number>>(new Map());
 
-  const addToast = React.useCallback((toast: Omit<ToastMessage, "id">) => {
+  React.useEffect(() => {
+    return () => {
+      removalTimeoutsRef.current.forEach((timeout) => window.clearTimeout(timeout));
+      removalTimeoutsRef.current.clear();
+    };
+  }, []);
+
+  const addToast = React.useCallback((toast: Omit<ToastMessage, "id" | "open">) => {
     const id = Math.random().toString(36).substring(2, 9);
-    setToasts((prev) => [...prev, { ...toast, id }]);
-
-    // Auto-remove after duration (default 5 seconds)
-    const duration = toast.duration ?? 5000;
-    if (duration > 0) {
-      setTimeout(() => {
-        setToasts((prev) => prev.filter((t) => t.id !== id));
-      }, duration);
-    }
+    setToasts((prev) => [...prev, { ...toast, id, open: true }]);
   }, []);
 
   const removeToast = React.useCallback((id: string) => {
-    setToasts((prev) => prev.filter((t) => t.id !== id));
+    if (removalTimeoutsRef.current.has(id)) {
+      return;
+    }
+
+    setToasts((prev) =>
+      prev.map((toast) => toast.id === id ? { ...toast, open: false } : toast)
+    );
+
+    const timeout = window.setTimeout(() => {
+      removalTimeoutsRef.current.delete(id);
+      setToasts((prev) => prev.filter((toast) => toast.id !== id));
+    }, TOAST_REMOVE_DELAY_MS);
+
+    removalTimeoutsRef.current.set(id, timeout);
   }, []);
 
   const toast = React.useMemo(() => ({
@@ -54,8 +69,8 @@ export function ToastContextProvider({ children }: { children: React.ReactNode }
     error: (message: string, title?: string) => {
       addToast({ description: message, title, variant: "error" });
     },
-    warning: (message: string, title?: string) => {
-      addToast({ description: message, title, variant: "warning" });
+    warning: (message: string, title?: string, duration?: number) => {
+      addToast({ description: message, title, variant: "warning", duration });
     },
     warningAction: (message: string, actionLabel: string, onAction: () => void, title?: string) => {
       addToast({

@@ -179,7 +179,7 @@ const RegisterDialog = ({
                   className="mt-0.5 h-4 w-4 cursor-pointer rounded border-border bg-input text-primary transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                 />
                 <span className="text-xs text-muted-foreground group-hover:text-foreground transition-colors leading-relaxed">
-                  Register on startup if username not taken
+                  Auto-register on startup if username not taken
                 </span>
               </label>
               {displayError && (

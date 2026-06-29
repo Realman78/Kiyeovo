@@ -3,6 +3,9 @@ import chatReducer from './slices/chatSlice';
 import userReducer from './slices/userSlice';
 import appConfigReducer from './slices/appConfigSlice';
 import callReducer from './slices/callSlice';
+import setupNodesReducer from './slices/setupNodesSlice';
+import iceSetupReducer from './slices/iceSetupSlice';
+import uiPrefsReducer from './slices/uiPrefsSlice';
 
 export const store = configureStore({
   reducer: {
@@ -10,6 +13,9 @@ export const store = configureStore({
     user: userReducer,
     appConfig: appConfigReducer,
     call: callReducer,
+    setupNodes: setupNodesReducer,
+    iceSetup: iceSetupReducer,
+    uiPrefs: uiPrefsReducer,
   },
 });
 

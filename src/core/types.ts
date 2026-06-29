@@ -19,6 +19,7 @@ export interface ChatNode extends Libp2p {
 }
 
 export type NetworkMode = 'fast' | 'anonymous';
+export type MessageConnectivityFailure = 'bootstrap_unavailable' | 'peer_unreachable';
 
 // Chat message structure
 export interface ChatMessage {
@@ -37,6 +38,11 @@ export interface SendMessageResponse {
     chatId: number;
     messageId: string;
   } | null;
+  // Set when the send was accepted but is still in flight (non-blocking offline
+  // path): the row stays on the spinner until a MESSAGE_SEND_STATE_CHANGED event
+  // settles it. Without this the renderer would finalize the row as delivered.
+  localSendState?: 'sending';
+  connectivityFailure?: MessageConnectivityFailure;
 }
 
 // We dont have to send sender info because we have it in the chat state
@@ -46,6 +52,9 @@ export interface StrippedMessage {
   content: string;
   timestamp: number;
   messageType: 'text' | 'file' | 'image' | 'system';
+  // Cross-peer stable id (cid) + reply reference for the reply feature.
+  clientMsgId?: string | undefined;
+  replyToClientId?: string | undefined;
 }
 
 // Stream handler context
@@ -209,6 +218,7 @@ export interface EncryptedMessage {
   timestamp: number
   senderUsername: string // Username of sender
   offline_ack_timestamp?: number // ACK for offline messages we've read from sender's bucket
+  ack_only?: boolean // Standalone ACK: process offline_ack_timestamp, do not display/save
 }
 
 export interface AuthenticatedEncryptedMessage extends EncryptedMessage {
@@ -226,6 +236,7 @@ export interface OfflineSignedPayload {
   sender_info_hash: string   // SHA256 of encrypted sender info (base64)
   timestamp: number
   bucket_key: string         // Full bucket key for binding
+  ack_only?: boolean         // Standalone ACK marker (authenticated by the signature)
 }
 
 // Offline message types
@@ -268,53 +279,15 @@ export interface OfflineMessageStore {
 
 // File Transfer Types
 export type FileTransferStatus =
-  | 'pending'
   | 'connecting'
   | 'awaiting_acceptance'
   | 'incoming_pending_user'
   | 'in_progress'
   | 'completed'
+  | 'partially_completed'
   | 'failed'
-  | 'expired'
-  | 'rejected';
-
-export interface FileOffer {
-  type: 'file_offer'
-  fileId: string
-  filename: string
-  mimeType: string
-  size: number
-  checksum: string      // BLAKE3 of full file
-  totalChunks: number
-  timestamp?: number
-  expiresAt?: number
-  signature?: string
-}
-
-export interface FileOfferResponse {
-  type: 'file_offer_response'
-  fileId: string
-  accepted: boolean
-  reason?: string
-}
-
-export interface FileChunk {
-  type: 'file_chunk'
-  fileId: string
-  index: number
-  nonce: string         // base64
-  data: string          // base64 encrypted
-  hash: string          // BLAKE3 of plaintext chunk
-}
-
-export interface FileTransferConfirm {
-  type: 'file_transfer_confirm'
-  fileId: string
-  success: boolean
-  error?: string
-}
-
-export type FileTransferMessage = FileOffer | FileOfferResponse | FileChunk | FileTransferConfirm
+  | 'rejected'
+  | 'cancelled';
 
 export type ContactMode = 'active' | 'silent' | 'block'
 
@@ -613,15 +586,75 @@ export interface MessageReceivedEvent {
   eventTimestamp?: number;
   messageSentStatus: MessageSentStatus;
   messageType?: 'text' | 'file' | 'image' | 'system';
+  clientMsgId?: string | undefined;
+  replyToClientId?: string | undefined;
   fileName?: string;
   fileSize?: number;
   filePath?: string;
   transferStatus?: FileTransferStatus;
   transferProgress?: number;
   transferError?: string;
+  fileGroupDownloadTotal?: number;
+  fileGroupDownloadCompleted?: number;
 }
 
 export type MessageSentStatus = 'online' | 'offline' | null;
+
+export interface MessageSendStateChangedEvent {
+  messageId: string;
+  chatId: number;
+  outcome: 'sending' | 'delivered' | 'failed';
+  messageSentStatus?: MessageSentStatus;
+  failedReason?: 'group_rekeying' | 'other';
+  connectivityFailure?: MessageConnectivityFailure;
+  retryAfterTs?: number;
+}
+
+export interface OfflineInboxCapacityChangedEvent {
+  chatId: number;
+}
+
+export interface DirectOfflineInboxCategorySnapshot {
+  stored: number;
+  pending: number;
+  total: number;
+  limit: number;
+}
+
+export interface ReservedOfflineInboxCategorySnapshot {
+  stored: number;
+  total: number;
+  limit: number;
+}
+
+export interface DirectOfflineInboxCapacitySnapshot {
+  kind: 'direct';
+  chatId: number;
+  peerId: string | null;
+  totalCapacity: number;
+  mainUsed: number;
+  mainLimit: number;
+  mainRatio: number;
+  regular: DirectOfflineInboxCategorySnapshot;
+  control: ReservedOfflineInboxCategorySnapshot;
+  ack: ReservedOfflineInboxCategorySnapshot;
+}
+
+export interface GroupOfflineInboxCapacitySnapshot {
+  kind: 'group';
+  chatId: number;
+  groupId: string;
+  currentKeyVersion: number;
+  mainUsed: number;
+  mainLimit: number;
+  mainRatio: number;
+  mainCompressedBytesUsed: number;
+  mainCompressedBytesLimit: number;
+}
+
+export type OfflineInboxCapacitySnapshot =
+  | DirectOfflineInboxCapacitySnapshot
+  | GroupOfflineInboxCapacitySnapshot;
 
 export interface FileTransferProgressEvent {
   chatId: number;
@@ -636,18 +669,31 @@ export interface FileTransferCompleteEvent {
   chatId: number;
   messageId: string;
   filePath: string;
+  status?: 'completed' | 'partially_completed';
+  groupDownloadTotal?: number;
+  groupDownloadCompleted?: number;
 }
 
 export interface FileTransferFailedEvent {
   chatId: number;
   messageId: string;
   error: string;
+  status?: FileTransferStatus;
 }
 
 export interface OutgoingFileOfferPendingEvent {
   chatId: number;
   messageId: string;
-  expiresAt: number;
+  groupDownloadTotal?: number;
+  groupDownloadCompleted?: number;
+}
+
+export interface OutgoingFileOfferTerminalEvent {
+  chatId: number;
+  messageId: string;
+  filename: string;
+  status: 'rejected' | 'failed' | 'cancelled';
+  error: string;
 }
 
 export interface PendingFileReceivedEvent {
@@ -657,7 +703,50 @@ export interface PendingFileReceivedEvent {
   size: number;
   senderId: string;
   senderUsername: string;
-  expiresAt: number;
+  replyToClientId?: string;
+}
+
+export interface PendingFileOfferDeferredEvent {
+  chatId: number;
+  senderId: string;
+  senderUsername: string;
+  reason: 'inbox_full';
+  pendingTotal: number;
+  maxPendingTotal: number;
+  pendingFromSender: number;
+  maxPendingPerPeer: number;
+}
+
+export interface PendingFileInboxOffer {
+  fileId: string;
+  chatId: number;
+  chatName: string;
+  chatType: 'direct' | 'group';
+  senderPeerId: string;
+  senderUsername: string;
+  filename: string;
+  size: number;
+  offeredAt: number;
+  countsTowardCapacity: boolean;
+  transferError?: string;
+}
+
+export interface PendingFileInboxSenderSummary {
+  senderPeerId: string;
+  senderUsername: string;
+  count: number;
+  limit: number;
+  full: boolean;
+  offers: PendingFileInboxOffer[];
+}
+
+export interface PendingFileInboxSnapshot {
+  total: number;
+  totalLimit: number;
+  full: boolean;
+  hasFullSender: boolean;
+  senders: PendingFileInboxSenderSummary[];
+  offers: PendingFileInboxOffer[];
 }
 
 export type CallSignalType =
@@ -667,10 +756,12 @@ export type CallSignalType =
   | 'CALL_REJECT'
   | 'CALL_END'
   | 'CALL_BUSY'
+  | 'CALL_CAMERA_STARTED'
+  | 'CALL_CAMERA_STOPPED'
   | 'CALL_SCREEN_SHARE_STARTED'
   | 'CALL_SCREEN_SHARE_STOPPED';
 
-export type CallMediaType = 'audio' | 'video';
+export type CallMediaType = 'audio';
 export type ScreenShareStopReason = 'manual' | 'track-ended' | 'call-ended' | 'failed';
 
 type BaseCallSignal = {
@@ -716,6 +807,14 @@ export type CallBusySignal = BaseCallSignal & {
   reason: 'busy';
 };
 
+export type CallCameraStartedSignal = BaseCallSignal & {
+  type: 'CALL_CAMERA_STARTED';
+};
+
+export type CallCameraStoppedSignal = BaseCallSignal & {
+  type: 'CALL_CAMERA_STOPPED';
+};
+
 export type CallScreenShareStartedSignal = BaseCallSignal & {
   type: 'CALL_SCREEN_SHARE_STARTED';
 };
@@ -732,6 +831,8 @@ export type CallSignalMessage =
   | CallRejectSignal
   | CallEndSignal
   | CallBusySignal
+  | CallCameraStartedSignal
+  | CallCameraStoppedSignal
   | CallScreenShareStartedSignal
   | CallScreenShareStoppedSignal;
 
@@ -742,6 +843,8 @@ export type UnsignedCallSignalMessage =
   | Omit<CallRejectSignal, 'signature'>
   | Omit<CallEndSignal, 'signature'>
   | Omit<CallBusySignal, 'signature'>
+  | Omit<CallCameraStartedSignal, 'signature'>
+  | Omit<CallCameraStoppedSignal, 'signature'>
   | Omit<CallScreenShareStartedSignal, 'signature'>
   | Omit<CallScreenShareStoppedSignal, 'signature'>;
 
@@ -793,6 +896,18 @@ export type CallSignalOutgoingInput =
     timestamp?: number;
   }
   | {
+    type: 'CALL_CAMERA_STARTED';
+    callId: string;
+    toPeerId: string;
+    timestamp?: number;
+  }
+  | {
+    type: 'CALL_CAMERA_STOPPED';
+    callId: string;
+    toPeerId: string;
+    timestamp?: number;
+  }
+  | {
     type: 'CALL_SCREEN_SHARE_STARTED';
     callId: string;
     toPeerId: string;
@@ -826,10 +941,319 @@ export interface CallStateChangedEvent {
   timestamp: number;
 }
 
+export type CallActionFailureReason = 'peer_unreachable';
+
+export interface CallActionResponse {
+  success: boolean;
+  error: string | null;
+  failureReason?: CallActionFailureReason;
+}
+
 export interface CallErrorEvent {
   error: string;
   peerId?: string;
   callId?: string;
+  code?: string;
+  timestamp: number;
+}
+
+export type GroupCallParticipant = {
+  peerId: string;
+  joinedAt: number;
+};
+
+export type AdmissionToken = {
+  callId: string;
+  admittedPeerId: string;
+  issuedAt: number;
+  issuerPeerId: string;
+  signature: string;
+};
+
+export type GroupCallRole = 'writer' | 'participant';
+export type GroupCallState = 'idle' | 'starting' | 'joining' | 'waiting' | 'active' | 'ended';
+export type GroupCallJoinFailureReason = 'full' | 'not_a_member' | 'call_not_active' | 'busy';
+
+export type GroupCallControlSignalType =
+  | 'CALL_GROUP_STARTED'
+  | 'GROUP_CALL_QUERY'
+  | 'GROUP_CALL_QUERY_RESPONSE'
+  | 'CALL_GROUP_JOIN_REQUEST'
+  | 'CALL_GROUP_JOIN_RESPONSE'
+  | 'CALL_GROUP_ROSTER'
+  | 'CALL_GROUP_LEAVE'
+  | 'CALL_GROUP_ENDED'
+  | 'CALL_GROUP_MUTE_STATE';
+
+type BaseGroupCallLiveSignal = {
+  groupId: string;
+  callId: string;
+  fromPeerId: string;
+  toPeerId: string;
+  timestamp: number;
+  signature: string;
+};
+
+export type CallGroupStartedSignal = BaseGroupCallLiveSignal & {
+  type: 'CALL_GROUP_STARTED';
+};
+
+export type GroupCallQuerySignal = {
+  type: 'GROUP_CALL_QUERY';
+  groupId: string;
+  requestId: string;
+  fromPeerId: string;
+  toPeerId: string;
+  timestamp: number;
+  signature: string;
+};
+
+type BaseGroupCallQueryResponseSignal = {
+  type: 'GROUP_CALL_QUERY_RESPONSE';
+  groupId: string;
+  requestId: string;
+  fromPeerId: string;
+  toPeerId: string;
+  timestamp: number;
+  signature: string;
+};
+
+export type GroupCallQueryResponseActiveSignal = BaseGroupCallQueryResponseSignal & {
+  active: true;
+  callId: string;
+  rosterVersion: number;
+  writerPeerId: string;
+  participants: GroupCallParticipant[];
+};
+
+export type GroupCallQueryResponseInactiveSignal = BaseGroupCallQueryResponseSignal & {
+  active: false;
+};
+
+export type GroupCallQueryResponseSignal =
+  | GroupCallQueryResponseActiveSignal
+  | GroupCallQueryResponseInactiveSignal;
+
+export type GroupCallQueryResponseActiveWithoutSignature = Omit<GroupCallQueryResponseActiveSignal, 'signature'>;
+export type GroupCallQueryResponseInactiveWithoutSignature = Omit<GroupCallQueryResponseInactiveSignal, 'signature'>;
+export type GroupCallQueryResponseWithoutSignature =
+  | GroupCallQueryResponseActiveWithoutSignature
+  | GroupCallQueryResponseInactiveWithoutSignature;
+
+export type CallGroupJoinRequestSignal = BaseGroupCallLiveSignal & {
+  type: 'CALL_GROUP_JOIN_REQUEST';
+};
+
+export type CallGroupJoinResponseAcceptedSignal = BaseGroupCallLiveSignal & {
+  type: 'CALL_GROUP_JOIN_RESPONSE';
+  accepted: true;
+  rosterVersion: number;
+  writerPeerId: string;
+  participants: GroupCallParticipant[];
+  admissionToken: AdmissionToken;
+};
+
+export type CallGroupJoinResponseRejectedSignal = BaseGroupCallLiveSignal & {
+  type: 'CALL_GROUP_JOIN_RESPONSE';
+  accepted: false;
+  reason: GroupCallJoinFailureReason;
+};
+
+export type CallGroupJoinResponseSignal =
+  | CallGroupJoinResponseAcceptedSignal
+  | CallGroupJoinResponseRejectedSignal;
+
+export type CallGroupRosterSignal = BaseGroupCallLiveSignal & {
+  type: 'CALL_GROUP_ROSTER';
+  rosterVersion: number;
+  writerPeerId: string;
+  participants: GroupCallParticipant[];
+};
+
+export type CallGroupLeaveSignal = BaseGroupCallLiveSignal & {
+  type: 'CALL_GROUP_LEAVE';
+};
+
+export type CallGroupEndedSignal = BaseGroupCallLiveSignal & {
+  type: 'CALL_GROUP_ENDED';
+};
+
+export type CallGroupMuteStateSignal = BaseGroupCallLiveSignal & {
+  type: 'CALL_GROUP_MUTE_STATE';
+  muted: boolean;
+};
+
+export type GroupCallControlSignalMessage =
+  | CallGroupStartedSignal
+  | GroupCallQuerySignal
+  | GroupCallQueryResponseSignal
+  | CallGroupJoinRequestSignal
+  | CallGroupJoinResponseSignal
+  | CallGroupRosterSignal
+  | CallGroupLeaveSignal
+  | CallGroupEndedSignal
+  | CallGroupMuteStateSignal;
+
+export type CallGroupJoinResponseAcceptedWithoutSignature = Omit<CallGroupJoinResponseAcceptedSignal, 'signature'>;
+export type CallGroupJoinResponseRejectedWithoutSignature = Omit<CallGroupJoinResponseRejectedSignal, 'signature'>;
+
+export type GroupCallControlSignalWithoutSignature =
+  | Omit<CallGroupStartedSignal, 'signature'>
+  | Omit<GroupCallQuerySignal, 'signature'>
+  | GroupCallQueryResponseWithoutSignature
+  | Omit<CallGroupJoinRequestSignal, 'signature'>
+  | CallGroupJoinResponseAcceptedWithoutSignature
+  | CallGroupJoinResponseRejectedWithoutSignature
+  | Omit<CallGroupRosterSignal, 'signature'>
+  | Omit<CallGroupLeaveSignal, 'signature'>
+  | Omit<CallGroupEndedSignal, 'signature'>
+  | Omit<CallGroupMuteStateSignal, 'signature'>;
+
+export type GroupCallControlSignalForRenderer =
+  | Omit<CallGroupStartedSignal, 'signature'>
+  | Omit<GroupCallQuerySignal, 'signature'>
+  | GroupCallQueryResponseWithoutSignature
+  | Omit<CallGroupJoinRequestSignal, 'signature'>
+  | Omit<CallGroupJoinResponseAcceptedSignal, 'signature'>
+  | Omit<CallGroupJoinResponseRejectedSignal, 'signature'>
+  | Omit<CallGroupRosterSignal, 'signature'>
+  | Omit<CallGroupLeaveSignal, 'signature'>
+  | Omit<CallGroupEndedSignal, 'signature'>
+  | Omit<CallGroupMuteStateSignal, 'signature'>;
+
+export type GroupCallHint = {
+  type: 'GROUP_CALL_HINT';
+  groupId: string;
+  fromPeerId: string;
+  toPeerId: string;
+  timestamp: number;
+  signature: string;
+};
+
+export type GroupCallHintWithoutSignature = Omit<GroupCallHint, 'signature'>;
+
+type BaseGroupCallPairSignal = {
+  groupId: string;
+  callId: string;
+  fromPeerId: string;
+  toPeerId: string;
+  timestamp: number;
+  signature: string;
+};
+
+export type GroupCallOfferSignal = BaseGroupCallPairSignal & {
+  type: 'CALL_OFFER';
+  offerSdp: string;
+  mediaType: 'audio';
+  admissionToken?: AdmissionToken;
+};
+
+export type GroupCallAnswerSignal = BaseGroupCallPairSignal & {
+  type: 'CALL_ANSWER';
+  answerSdp: string;
+};
+
+export type GroupCallIceSignal = BaseGroupCallPairSignal & {
+  type: 'CALL_ICE';
+  candidate: string;
+  sdpMid: string | null;
+  sdpMLineIndex: number | null;
+  usernameFragment: string | null;
+};
+
+// Peer-owned camera on/off state
+export type GroupCallCameraStateSignal = BaseGroupCallPairSignal & {
+  type: 'CALL_CAMERA_STATE';
+  cameraOn: boolean;
+};
+
+export type GroupCallPairSignalMessage =
+  | GroupCallOfferSignal
+  | GroupCallAnswerSignal
+  | GroupCallIceSignal
+  | GroupCallCameraStateSignal;
+
+export type GroupCallPairSignalWithoutSignature =
+  | Omit<GroupCallOfferSignal, 'signature'>
+  | Omit<GroupCallAnswerSignal, 'signature'>
+  | Omit<GroupCallIceSignal, 'signature'>
+  | Omit<GroupCallCameraStateSignal, 'signature'>;
+
+export type GroupCallPairSignalForRenderer =
+  | Omit<GroupCallOfferSignal, 'signature' | 'admissionToken'>
+  | Omit<GroupCallAnswerSignal, 'signature'>
+  | Omit<GroupCallIceSignal, 'signature'>
+  | Omit<GroupCallCameraStateSignal, 'signature'>;
+
+export type GroupCallPairSignalOutgoingInput =
+  | {
+    type: 'CALL_OFFER';
+    groupId: string;
+    callId: string;
+    toPeerId: string;
+    offerSdp: string;
+    mediaType?: 'audio';
+    admissionToken?: AdmissionToken;
+    timestamp?: number;
+  }
+  | {
+    type: 'CALL_ANSWER';
+    groupId: string;
+    callId: string;
+    toPeerId: string;
+    answerSdp: string;
+    timestamp?: number;
+  }
+  | {
+    type: 'CALL_ICE';
+    groupId: string;
+    callId: string;
+    toPeerId: string;
+    candidate: string;
+    sdpMid: string | null;
+    sdpMLineIndex: number | null;
+    usernameFragment: string | null;
+    timestamp?: number;
+  }
+  | {
+    type: 'CALL_CAMERA_STATE';
+    groupId: string;
+    callId: string;
+    toPeerId: string;
+    cameraOn: boolean;
+    timestamp?: number;
+  };
+
+export interface GroupCallControlSignalReceivedEvent {
+  signal: GroupCallControlSignalForRenderer;
+  receivedAt: number;
+}
+
+export interface GroupCallPairSignalReceivedEvent {
+  signal: GroupCallPairSignalForRenderer;
+  receivedAt: number;
+}
+
+export interface GroupCallStateChangedEvent {
+  chatId: number | null;
+  groupId: string;
+  callId: string | null;
+  state: GroupCallState;
+  role: GroupCallRole | null;
+  peerId?: string;
+  participants?: GroupCallParticipant[];
+  pendingDisconnects?: { peerId: string; expiresAt: number }[];
+  writerPeerId?: string | null;
+  reason?: string;
+  timestamp: number;
+}
+
+export interface GroupCallErrorEvent {
+  error: string;
+  chatId?: number | null;
+  groupId?: string;
+  callId?: string;
+  peerId?: string;
   code?: string;
   timestamp: number;
 }
@@ -873,13 +1297,23 @@ export type BootstrapConnectResult = {
 
 export type ConnectionNodeStatus = {
   address: string;
-  connected: boolean;
+  // null = liveness not yet determined
+  connected: boolean | null;
 };
 
 export type ConnectionNodesResponse = {
   success: boolean;
   nodes: ConnectionNodeStatus[];
   error: string | null;
+};
+
+export type NodeLivenessResult = {
+  address: string;
+  connected: boolean;
+};
+
+export type NodesLivenessResponse = {
+  statuses: NodeLivenessResult[];
 };
 
 export type BootstrapRetryResponse = {

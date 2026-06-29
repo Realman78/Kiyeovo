@@ -1,9 +1,6 @@
 import { type CategoryConfig, Categories } from "emoji-picker-react";
 
-export const MAX_FILE_MESSAGE_SIZE = 1 * 1024 * 1024; // 1MB for JSON overhead
 export const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB max file size
-export const FILE_ACCEPTANCE_TIMEOUT = 5 * 60 * 1000;
-export const SHOW_TIMESTAMP_INTERVAL = 15 * 60 * 1000;
 export const INITIAL_MESSAGES_LIMIT = 50;
 export const LOAD_MORE_MESSAGES_LIMIT = 50;
 export const REINVITE_COOLDOWN_MS = 2 * 60 * 1000;
@@ -29,7 +26,7 @@ export const MAX_PENDING_FILES_PER_PEER = 5;
 export const MAX_PENDING_FILES_TOTAL = 10;
 export const SILENT_REJECTION_THRESHOLD_GLOBAL = 20;
 export const SILENT_REJECTION_THRESHOLD_PER_PEER = 5;
-export const MAX_MESSAGE_CONTENT_LENGTH = 1024;
+export const MAX_MESSAGE_CONTENT_LENGTH = 2048;
 export const MAX_GROUP_MEMBERS = 10;
 
 // String constants

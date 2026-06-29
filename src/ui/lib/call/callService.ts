@@ -1,12 +1,16 @@
 import type {
+  CameraLifecycleState,
   CallDirection,
-  CallMediaType,
   CallSignal,
   CallStateChangedEvent,
   ScreenShareLifecycleState,
   ScreenShareStopReason,
 } from '../../types';
-import type { IceServerConfig } from '../../../core/types';
+import type {
+  CallActionResponse,
+  CallSignalOutgoingInput,
+  IceServerConfig,
+} from '../../../core/types';
 import { DEFAULT_WEBRTC_ICE_SERVERS } from '../../../core/network/default-infrastructure';
 import { errStr } from '../../../core/utils/general-error';
 import { SCREEN_SHARE_UNSUPPORTED_MESSAGE } from '../../constants';
@@ -15,7 +19,6 @@ type CurrentCall = {
   callId: string;
   peerId: string;
   direction: CallDirection;
-  mediaType: CallMediaType;
 };
 
 const SCREEN_SHARE_MAX_BITRATE_BPS = 4_000_000;
@@ -36,9 +39,15 @@ export type CallServiceEvent =
     type: 'media';
     callId: string;
     peerId: string;
-    mediaType: CallMediaType;
     localStream: MediaStream | null;
     remoteStream: MediaStream | null;
+  }
+  | {
+    type: 'camera';
+    callId: string;
+    peerId: string;
+    localState: CameraLifecycleState;
+    remoteEnabled: boolean;
   }
   | {
     type: 'screen-share';
@@ -52,12 +61,17 @@ class CallService {
   private static readonly RING_TIMEOUT_MS = 30_000;
   private peerConnection: RTCPeerConnection | null = null;
   private currentCall: CurrentCall | null = null;
-  private localStream: MediaStream | null = null;
+  private localAudioStream: MediaStream | null = null;
+  private localCameraStream: MediaStream | null = null;
   private remoteStream: MediaStream | null = null;
   private screenStream: MediaStream | null = null;
   private sharedVideoTransceiver: RTCRtpTransceiver | null = null;
   private sharedVideoSender: RTCRtpSender | null = null;
   private remoteAudio: HTMLAudioElement | null = null;
+  private localCameraState: CameraLifecycleState = 'off';
+  private isRemoteCameraEnabled = false;
+  private localCameraAnnounced = false;
+  private remoteCameraLastSignalTs: number | null = null;
   private localScreenShareState: ScreenShareLifecycleState = 'idle';
   private isRemoteScreenSharing = false;
   private localScreenShareAnnounced = false;
@@ -65,6 +79,8 @@ class CallService {
   private muted = false;
   private deafened = false;
   private pendingRemoteIce: RTCIceCandidateInit[] = [];
+  private pendingLocalIce: Extract<CallSignalOutgoingInput, { type: 'CALL_ICE' }>[] = [];
+  private initialSignalSentCallId: string | null = null;
   private disconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private ringTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
   private sentDisconnectHangupCallId: string | null = null;
@@ -86,9 +102,19 @@ class CallService {
       type: 'media',
       callId: context.callId,
       peerId: context.peerId,
-      mediaType: context.mediaType,
       localStream: this.getLocalDisplayStream(),
       remoteStream: this.remoteStream,
+    });
+  }
+
+  private emitCameraUpdate(context: CurrentCall | null = this.currentCall): void {
+    if (!context) return;
+    this.emit({
+      type: 'camera',
+      callId: context.callId,
+      peerId: context.peerId,
+      localState: this.localCameraState,
+      remoteEnabled: this.isRemoteCameraEnabled,
     });
   }
 
@@ -119,6 +145,48 @@ class CallService {
     if (this.isRemoteScreenSharing === sharing) return;
     this.isRemoteScreenSharing = sharing;
     this.emitScreenShareUpdate(context);
+  }
+
+  private setLocalCameraState(
+    state: CameraLifecycleState,
+    context: CurrentCall | null = this.currentCall,
+  ): void {
+    if (this.localCameraState === state) return;
+    this.localCameraState = state;
+    this.emitCameraUpdate(context);
+  }
+
+  private setRemoteCameraEnabled(
+    enabled: boolean,
+    context: CurrentCall | null = this.currentCall,
+  ): void {
+    if (this.isRemoteCameraEnabled === enabled) return;
+    this.isRemoteCameraEnabled = enabled;
+    this.emitCameraUpdate(context);
+  }
+
+  private async sendCameraStartedSignal(context: CurrentCall): Promise<void> {
+    const response = await window.kiyeovoAPI.sendCallSignal({
+      type: 'CALL_CAMERA_STARTED',
+      callId: context.callId,
+      toPeerId: context.peerId,
+    });
+
+    if (!response.success) {
+      throw new Error(response.error || 'Failed to notify remote camera started');
+    }
+  }
+
+  private async sendCameraStoppedSignal(context: CurrentCall): Promise<void> {
+    const response = await window.kiyeovoAPI.sendCallSignal({
+      type: 'CALL_CAMERA_STOPPED',
+      callId: context.callId,
+      toPeerId: context.peerId,
+    });
+
+    if (!response.success) {
+      throw new Error(response.error || 'Failed to notify remote camera stopped');
+    }
   }
 
   private async sendScreenShareStartedSignal(context: CurrentCall): Promise<void> {
@@ -161,11 +229,11 @@ class CallService {
   }
 
   private getLocalDisplayStream(): MediaStream | null {
-    return this.screenStream ?? this.localStream;
+    return this.screenStream ?? this.localCameraStream;
   }
 
   private getCameraTrack(): MediaStreamTrack | null {
-    return this.localStream?.getVideoTracks()[0] ?? null;
+    return this.localCameraStream?.getVideoTracks()[0] ?? null;
   }
 
   private findSharedVideoTransceiver(pc: RTCPeerConnection): RTCRtpTransceiver | null {
@@ -243,8 +311,8 @@ class CallService {
     }
   }
 
-  private async restoreSharedVideoTrack(context: CurrentCall): Promise<void> {
-    const cameraTrack = context.mediaType === 'video' ? this.getCameraTrack() : null;
+  private async restoreSharedVideoTrack(): Promise<void> {
+    const cameraTrack = this.localCameraState === 'on' ? this.getCameraTrack() : null;
     await this.replaceSharedVideoTrack(cameraTrack, cameraTrack ? 'camera' : 'none');
   }
 
@@ -277,6 +345,72 @@ class CallService {
     }));
   }
 
+  private sendLocalIceBestEffort(
+    signal: Extract<CallSignalOutgoingInput, { type: 'CALL_ICE' }>,
+  ): void {
+    void window.kiyeovoAPI.sendCallSignal(signal)
+      .then((response) => {
+        if (!response.success) {
+          console.warn('[CallService] Failed to send ICE candidate:', response.error);
+        }
+      })
+      .catch((error: unknown) => {
+        console.warn('[CallService] Failed to send ICE candidate:', error);
+      });
+  }
+
+  private queueOrSendLocalIce(
+    context: CurrentCall,
+    candidate: RTCIceCandidate,
+  ): void {
+    if (
+      this.currentCall?.callId !== context.callId
+      || this.currentCall.peerId !== context.peerId
+    ) {
+      return;
+    }
+
+    const signal: Extract<CallSignalOutgoingInput, { type: 'CALL_ICE' }> = {
+      type: 'CALL_ICE',
+      callId: context.callId,
+      toPeerId: context.peerId,
+      candidate: candidate.candidate,
+      sdpMid: candidate.sdpMid ?? null,
+      sdpMLineIndex: candidate.sdpMLineIndex ?? null,
+      usernameFragment: candidate.usernameFragment ?? null,
+    };
+
+    if (this.initialSignalSentCallId === context.callId) {
+      this.sendLocalIceBestEffort(signal);
+      return;
+    }
+    this.pendingLocalIce.push(signal);
+  }
+
+  private flushPendingLocalIce(context: CurrentCall): void {
+    if (
+      this.currentCall?.callId !== context.callId
+      || this.currentCall.peerId !== context.peerId
+    ) {
+      return;
+    }
+
+    this.initialSignalSentCallId = context.callId;
+    const queued = this.pendingLocalIce;
+    this.pendingLocalIce = [];
+    queued.forEach((signal) => this.sendLocalIceBestEffort(signal));
+  }
+
+  private getCallActionError(
+    response: CallActionResponse,
+    fallback: string,
+  ): string {
+    if (response.failureReason === 'peer_unreachable') {
+      return "Couldn't reach this contact. They may be offline or unavailable through a relay.";
+    }
+    return response.error || fallback;
+  }
+
   private createPeerConnection(context: CurrentCall): RTCPeerConnection {
     const pc = new RTCPeerConnection({
       iceServers: this.getIceServers(),
@@ -285,15 +419,7 @@ class CallService {
 
     pc.onicecandidate = (event) => {
       if (!event.candidate) return;
-      void window.kiyeovoAPI.sendCallSignal({
-        type: 'CALL_ICE',
-        callId: context.callId,
-        toPeerId: context.peerId,
-        candidate: event.candidate.candidate,
-        sdpMid: event.candidate.sdpMid ?? null,
-        sdpMLineIndex: event.candidate.sdpMLineIndex ?? null,
-        usernameFragment: event.candidate.usernameFragment ?? null,
-      });
+      this.queueOrSendLocalIce(context, event.candidate);
     };
 
     pc.ontrack = (event) => {
@@ -341,11 +467,29 @@ class CallService {
       this.remoteStream = new MediaStream();
     }
 
+    if (track.kind === 'video') {
+      this.remoteStream.getVideoTracks().forEach((existing) => {
+        if (existing.id !== track.id) {
+          this.remoteStream?.removeTrack(existing);
+        }
+      });
+    }
+
     if (this.remoteStream.getTracks().some((existing) => existing.id === track.id)) {
       return false;
     }
 
     this.remoteStream.addTrack(track);
+    return true;
+  }
+
+  private removeRemoteTracksByKind(kind: 'audio' | 'video'): boolean {
+    if (!this.remoteStream) return false;
+    const tracks = kind === 'audio' ? this.remoteStream.getAudioTracks() : this.remoteStream.getVideoTracks();
+    if (tracks.length === 0) return false;
+    tracks.forEach((track) => {
+      this.remoteStream?.removeTrack(track);
+    });
     return true;
   }
 
@@ -409,37 +553,56 @@ class CallService {
     });
   }
 
-  private async getLocalStream(mediaType: CallMediaType): Promise<MediaStream> {
-    if (this.localStream) {
-      const hasVideoTrack = this.localStream.getVideoTracks().length > 0;
-      if ((mediaType === 'video' && hasVideoTrack) || (mediaType === 'audio' && !hasVideoTrack)) {
-        return this.localStream;
-      }
-      this.localStream.getTracks().forEach((track) => track.stop());
-      this.localStream = null;
+  private async ensureLocalAudioStream(): Promise<MediaStream> {
+    if (this.localAudioStream && this.localAudioStream.getAudioTracks().length > 0) {
+      return this.localAudioStream;
     }
 
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: true,
-      video: mediaType === 'video',
+      video: false,
     });
     stream.getAudioTracks().forEach((track) => {
       track.enabled = !this.muted;
     });
-    this.localStream = stream;
+    this.localAudioStream = stream;
     return stream;
   }
 
-  private async addLocalTracks(pc: RTCPeerConnection, mediaType: CallMediaType): Promise<void> {
-    const stream = await this.getLocalStream(mediaType);
+  private async ensureLocalCameraStream(): Promise<MediaStream> {
+    if (this.localCameraStream && this.localCameraStream.getVideoTracks().length > 0) {
+      return this.localCameraStream;
+    }
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: true,
+    });
+    const [cameraTrack] = stream.getVideoTracks();
+    if (cameraTrack) {
+      cameraTrack.onended = () => {
+        void this.stopCamera();
+      };
+    }
+    this.localCameraStream = stream;
+    return stream;
+  }
+
+  private stopLocalCameraStream(): void {
+    if (!this.localCameraStream) return;
+    this.localCameraStream.getTracks().forEach((track) => {
+      track.onended = null;
+      track.stop();
+    });
+    this.localCameraStream = null;
+  }
+
+  private async addLocalTracks(pc: RTCPeerConnection): Promise<void> {
+    const stream = await this.ensureLocalAudioStream();
     stream.getAudioTracks().forEach((track) => {
       pc.addTrack(track, stream);
     });
-    const videoSender = this.ensureSharedVideoTransceiver(pc);
-    const cameraTrack = mediaType === 'video' ? this.getCameraTrack() : null;
-    if (cameraTrack) {
-      await videoSender.replaceTrack(cameraTrack);
-    }
+    this.ensureSharedVideoTransceiver(pc);
     this.emitMediaUpdate();
   }
 
@@ -506,9 +669,18 @@ class CallService {
 
   private stopStreams(context: CurrentCall | null = this.currentCall): void {
     this.resetScreenShare(context);
-    if (this.localStream) {
-      this.localStream.getTracks().forEach((track) => track.stop());
-      this.localStream = null;
+    const hadCameraState = this.localCameraState !== 'off' || this.isRemoteCameraEnabled;
+    this.stopLocalCameraStream();
+    this.localCameraState = 'off';
+    this.isRemoteCameraEnabled = false;
+    this.localCameraAnnounced = false;
+    this.remoteCameraLastSignalTs = null;
+    if (hadCameraState) {
+      this.emitCameraUpdate(context);
+    }
+    if (this.localAudioStream) {
+      this.localAudioStream.getTracks().forEach((track) => track.stop());
+      this.localAudioStream = null;
     }
     if (this.remoteStream) {
       this.remoteStream.getTracks().forEach((track) => track.stop());
@@ -525,6 +697,8 @@ class CallService {
   private closePeerConnection(): void {
     if (!this.peerConnection) {
       this.pendingRemoteIce = [];
+      this.pendingLocalIce = [];
+      this.initialSignalSentCallId = null;
       return;
     }
     try {
@@ -536,6 +710,8 @@ class CallService {
     this.sharedVideoTransceiver = null;
     this.sharedVideoSender = null;
     this.pendingRemoteIce = [];
+    this.pendingLocalIce = [];
+    this.initialSignalSentCallId = null;
   }
 
   private async endCallInternal(
@@ -591,7 +767,6 @@ class CallService {
 
   async startOutgoingCall(
     peerId: string,
-    mediaType: CallMediaType = 'audio',
   ): Promise<{ success: boolean; callId?: string; error?: string }> {
     if (this.currentCall) {
       return { success: false, error: 'Another call is already in progress' };
@@ -602,7 +777,6 @@ class CallService {
       callId,
       peerId,
       direction: 'outgoing',
-      mediaType,
     };
 
     try {
@@ -610,7 +784,7 @@ class CallService {
       this.currentCall = context;
       this.sentDisconnectHangupCallId = null;
       this.peerConnection = this.createPeerConnection(context);
-      await this.addLocalTracks(this.peerConnection, context.mediaType);
+      await this.addLocalTracks(this.peerConnection);
       const offer = await this.peerConnection.createOffer();
       await this.peerConnection.setLocalDescription(offer);
       const offerSdp = this.peerConnection.localDescription?.sdp;
@@ -618,10 +792,11 @@ class CallService {
         throw new Error('Failed to create call offer');
       }
 
-      const response = await window.kiyeovoAPI.startCall(peerId, callId, offerSdp, mediaType);
+      const response = await window.kiyeovoAPI.startCall(peerId, callId, offerSdp);
       if (!response.success) {
-        throw new Error(response.error || 'Failed to start call');
+        throw new Error(this.getCallActionError(response, 'Failed to start call'));
       }
+      this.flushPendingLocalIce(context);
       this.scheduleOutgoingRingTimeout(context);
       return { success: true, callId };
     } catch (error: unknown) {
@@ -639,7 +814,6 @@ class CallService {
     callId: string;
     peerId: string;
     offerSdp: string;
-    mediaType: CallMediaType;
   }): Promise<{ success: boolean; error?: string }> {
     if (this.currentCall && (this.currentCall.callId !== params.callId || this.currentCall.peerId !== params.peerId)) {
       return { success: false, error: 'Another call is already in progress' };
@@ -657,7 +831,6 @@ class CallService {
       callId: params.callId,
       peerId: params.peerId,
       direction: 'incoming',
-      mediaType: params.mediaType,
     };
 
     try {
@@ -671,7 +844,7 @@ class CallService {
         sdp: params.offerSdp,
       });
       await this.flushPendingRemoteIce();
-      await this.addLocalTracks(this.peerConnection, context.mediaType);
+      await this.addLocalTracks(this.peerConnection);
       this.syncRemoteVideoReceivers(context);
 
       const answer = await this.peerConnection.createAnswer();
@@ -683,8 +856,9 @@ class CallService {
 
       const response = await window.kiyeovoAPI.acceptCall(params.peerId, params.callId, answerSdp);
       if (!response.success) {
-        throw new Error(response.error || 'Failed to accept call');
+        throw new Error(this.getCallActionError(response, 'Failed to accept call'));
       }
+      this.flushPendingLocalIce(context);
       this.emit({
         type: 'state',
         callId: context.callId,
@@ -781,8 +955,15 @@ class CallService {
 
   getMediaStreams(): { localStream: MediaStream | null; remoteStream: MediaStream | null } {
     return {
-      localStream: this.localStream,
+      localStream: this.getLocalDisplayStream(),
       remoteStream: this.remoteStream,
+    };
+  }
+
+  getCameraState(): { localState: CameraLifecycleState; remoteEnabled: boolean } {
+    return {
+      localState: this.localCameraState,
+      remoteEnabled: this.isRemoteCameraEnabled,
     };
   }
 
@@ -791,6 +972,115 @@ class CallService {
       localState: this.localScreenShareState,
       remoteSharing: this.isRemoteScreenSharing,
     };
+  }
+
+  async startCamera(): Promise<{ success: boolean; error?: string; canceled?: boolean }> {
+    const context = this.currentCall;
+    if (!context) {
+      return { success: false, error: 'No active call' };
+    }
+
+    if (this.peerConnection?.connectionState !== 'connected') {
+      return { success: false, error: 'Camera is available once the call is connected' };
+    }
+
+    if (this.localCameraState === 'starting' || this.localCameraState === 'on') {
+      return { success: true };
+    }
+
+    if (this.localCameraState === 'stopping') {
+      return { success: false, error: 'Camera is still stopping' };
+    }
+
+    this.setLocalCameraState('starting', context);
+
+    try {
+      const stream = await this.ensureLocalCameraStream();
+      const stillCurrentCall = this.currentCall?.callId === context.callId
+        && this.currentCall.peerId === context.peerId
+        && this.getCameraState().localState === 'starting';
+      if (!stillCurrentCall) {
+        stream.getTracks().forEach((track) => track.stop());
+        if (this.localCameraStream === stream) {
+          this.localCameraStream = null;
+        }
+        return { success: false, canceled: true, error: 'Call ended before camera started' };
+      }
+
+      if (this.localScreenShareState !== 'starting' && this.localScreenShareState !== 'sharing') {
+        await this.replaceSharedVideoTrack(this.getCameraTrack(), 'camera');
+      }
+
+      try {
+        await this.sendCameraStartedSignal(context);
+        this.localCameraAnnounced = true;
+      } catch (signalError: unknown) {
+        if (this.localScreenShareState !== 'starting' && this.localScreenShareState !== 'sharing') {
+          await this.replaceSharedVideoTrack(null, 'none').catch((restoreError: unknown) => {
+            console.warn('[CallService] Failed to detach camera after signaling failure:', restoreError);
+          });
+        }
+        this.stopLocalCameraStream();
+        this.emitMediaUpdate(context);
+        this.setLocalCameraState('off', context);
+        return {
+          success: false,
+          error: errStr(signalError, 'Failed to notify remote camera started'),
+        };
+      }
+
+      this.setLocalCameraState('on', context);
+      this.emitMediaUpdate(context);
+      return { success: true };
+    } catch (error: unknown) {
+      if (this.currentCall?.callId === context.callId && this.currentCall.peerId === context.peerId) {
+        this.setLocalCameraState('off', context);
+      }
+      return { success: false, error: errStr(error, 'Could not start camera') };
+    }
+  }
+
+  async stopCamera(): Promise<{ success: boolean; error?: string }> {
+    const context = this.currentCall;
+    if (!context) {
+      this.stopLocalCameraStream();
+      this.localCameraState = 'off';
+      this.localCameraAnnounced = false;
+      return { success: true };
+    }
+
+    if (this.localCameraState === 'off') {
+      this.stopLocalCameraStream();
+      this.localCameraAnnounced = false;
+      this.emitMediaUpdate(context);
+      return { success: true };
+    }
+
+    const shouldAnnounceStopped = this.localCameraAnnounced;
+    this.localCameraAnnounced = false;
+    this.setLocalCameraState('stopping', context);
+
+    if (this.localScreenShareState !== 'starting' && this.localScreenShareState !== 'sharing') {
+      try {
+        await this.replaceSharedVideoTrack(null, 'none');
+      } catch (error: unknown) {
+        console.warn('[CallService] Failed to detach camera while stopping:', error);
+      }
+    }
+
+    this.stopLocalCameraStream();
+    this.emitMediaUpdate(context);
+
+    if (shouldAnnounceStopped) {
+      try {
+        await this.sendCameraStoppedSignal(context);
+      } catch (error: unknown) {
+        console.warn('[CallService] Failed to notify remote camera stopped:', error);
+      }
+    }
+
+    this.setLocalCameraState('off', context);
+    return { success: true };
   }
 
   async startScreenShare(): Promise<{ success: boolean; error?: string; canceled?: boolean; unsupported?: boolean }> {
@@ -900,7 +1190,7 @@ class CallService {
         await this.sendScreenShareStartedSignal(context);
         this.localScreenShareAnnounced = true;
       } catch (signalError: unknown) {
-        await this.restoreSharedVideoTrack(context).catch((restoreError: unknown) => {
+        await this.restoreSharedVideoTrack().catch((restoreError: unknown) => {
           console.warn('[CallService] Failed to restore video sender after screen share signaling failed:', restoreError);
         });
         this.stopScreenCaptureTracks();
@@ -924,7 +1214,7 @@ class CallService {
           // The call is already changing state; cleanup below is the important part.
         }
         this.localScreenShareAnnounced = false;
-        await this.restoreSharedVideoTrack(context).catch((restoreError: unknown) => {
+        await this.restoreSharedVideoTrack().catch((restoreError: unknown) => {
           console.warn('[CallService] Failed to restore video sender after screen share race cleanup:', restoreError);
         });
         this.stopScreenCaptureTracks();
@@ -969,7 +1259,7 @@ class CallService {
     this.setLocalScreenShareState('stopping', context);
 
     try {
-      await this.restoreSharedVideoTrack(context);
+      await this.restoreSharedVideoTrack();
     } catch (error: unknown) {
       console.warn('[CallService] Failed to restore video sender while stopping screen share:', error);
     }
@@ -995,8 +1285,8 @@ class CallService {
 
   toggleMute(): boolean {
     this.muted = !this.muted;
-    if (this.localStream) {
-      this.localStream.getAudioTracks().forEach((track) => {
+    if (this.localAudioStream) {
+      this.localAudioStream.getAudioTracks().forEach((track) => {
         track.enabled = !this.muted;
       });
     }
@@ -1029,8 +1319,33 @@ class CallService {
     this.remoteScreenShareLastSignalTs = signal.timestamp;
     if (signal.type === 'CALL_SCREEN_SHARE_STARTED') {
       this.syncRemoteVideoReceivers(this.currentCall);
+    } else if (!this.isRemoteCameraEnabled && this.removeRemoteTracksByKind('video')) {
+      this.emitMediaUpdate(this.currentCall);
     }
     this.setRemoteScreenSharing(signal.type === 'CALL_SCREEN_SHARE_STARTED', this.currentCall);
+  }
+
+  private applyRemoteCameraSignal(signal: CallSignal): void {
+    if (!this.currentCall) return;
+    if (signal.type !== 'CALL_CAMERA_STARTED' && signal.type !== 'CALL_CAMERA_STOPPED') {
+      return;
+    }
+
+    if (this.remoteCameraLastSignalTs !== null && signal.timestamp < this.remoteCameraLastSignalTs) {
+      return;
+    }
+
+    this.remoteCameraLastSignalTs = signal.timestamp;
+    if (signal.type === 'CALL_CAMERA_STARTED') {
+      this.syncRemoteVideoReceivers(this.currentCall);
+      this.setRemoteCameraEnabled(true, this.currentCall);
+      return;
+    }
+
+    if (!this.isRemoteScreenSharing && this.removeRemoteTracksByKind('video')) {
+      this.emitMediaUpdate(this.currentCall);
+    }
+    this.setRemoteCameraEnabled(false, this.currentCall);
   }
 
   async handleSignal(signal: CallSignal): Promise<void> {
@@ -1052,6 +1367,10 @@ class CallService {
           return;
         case 'CALL_ICE':
           await this.addRemoteIce(signal);
+          return;
+        case 'CALL_CAMERA_STARTED':
+        case 'CALL_CAMERA_STOPPED':
+          this.applyRemoteCameraSignal(signal);
           return;
         case 'CALL_SCREEN_SHARE_STARTED':
         case 'CALL_SCREEN_SHARE_STOPPED':
@@ -1113,14 +1432,7 @@ class CallService {
         callId: event.callId,
         peerId: event.peerId,
         direction: event.direction,
-        mediaType: event.mediaType ?? 'audio',
       };
-    } else if (
-      this.currentCall.callId === event.callId
-      && this.currentCall.peerId === event.peerId
-      && event.mediaType
-    ) {
-      this.currentCall.mediaType = event.mediaType;
     }
   }
 

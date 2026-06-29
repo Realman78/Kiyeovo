@@ -1,3 +1,5 @@
+import { MAX_MESSAGE_CONTENT_LENGTH } from '../constants.js';
+
 export function validateUsername(username: string): boolean {
     // Allow alphanumeric, underscore, hyphen
     // Length: 1-32 characters
@@ -11,7 +13,10 @@ export function validateFileId(fileId: string): boolean {
     return uuidRegex.test(fileId);
 }
 
-export function validateMessageLength(message: string, maxLength: number = 1024): boolean {
+export function validateMessageLength(
+    message: string,
+    maxLength: number = MAX_MESSAGE_CONTENT_LENGTH,
+): boolean {
     return message.length <= maxLength;
 }
 

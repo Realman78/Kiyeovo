@@ -4,7 +4,12 @@ import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as path from 'path';
 import { errStr, generalErrorHandler } from '../utils/general-error.js';
-import type { FileTransferStatus, NetworkMode, OfflineMessage } from '../types.js';
+import type {
+    FileTransferStatus,
+    NetworkMode,
+    OfflineMessage,
+    PendingFileInboxSnapshot,
+} from '../types.js';
 import type { AckMessageType, GroupContentMessage, GroupStatus } from '../group/types.js';
 import { assertGroupTransition, isGroupStatus } from '../group/runtime/group-state-machine.js';
 import { DEFAULT_BOOTSTRAP_NODES, DEFAULT_FAST_RELAY_MULTIADDRS } from '../network/default-infrastructure.js';
@@ -16,9 +21,50 @@ import {
     NETWORK_MODES,
     NETWORK_MODE_SETTING_KEY,
     PENDING_KEY_EXCHANGE_EXPIRATION,
+    MESSAGE_TTL,
     getNetworkModeRuntime,
     isNetworkMode,
 } from '../constants.js';
+
+/** Conversation-search tuning. */
+const MAX_SEARCH_QUERY_LENGTH = 256;
+const DEFAULT_SEARCH_PAGE_SIZE = 20;
+const MAX_SEARCH_PAGE_SIZE = 50;
+const MESSAGE_JUMP_CONTEXT_SIZE = 20;
+const MAX_MESSAGE_JUMP_WINDOW_SIZE = 200;
+
+/** Escape LIKE wildcards so a 1-2 char fallback query matches literally. */
+function escapeLikePattern(value: string): string {
+    return value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+
+export interface ChatMessageSearchResult {
+    id: string;
+    clientMsgId: string | null;
+    content: string;
+    fileName: string | null;
+    messageType: 'text' | 'file' | 'image' | 'system';
+    senderPeerId: string;
+    timestamp: number; // epoch ms
+}
+
+export interface ChatMessageSearchCursor {
+    timestamp: number; // epoch ms of the last returned row
+    rowid: number;     // tiebreaker for equal timestamps
+}
+
+export interface ChatMessageSearchResponse {
+    results: ChatMessageSearchResult[];
+    total: number;
+    snapshotMaxRowid: number;
+    nextCursor: ChatMessageSearchCursor | null;
+}
+
+export interface MessageJumpWindowResponse {
+    status: 'loaded' | 'too_deep' | 'not_found';
+    messages: Array<Message & { sender_username?: string | undefined }>;
+    hasMoreOlder: boolean;
+}
 
 export interface User {
     network_mode: NetworkMode
@@ -68,6 +114,8 @@ export interface Chat {
     group_status?: string // GroupStatus from group/types.ts
     needs_removed_catchup?: boolean
     removed_at?: number | null
+    last_known_active_call_id?: string | null
+    last_known_active_call_seen_at?: number | null
     created_at: Date
     updated_at: Date
 }
@@ -88,12 +136,61 @@ export interface Message {
     timestamp: Date
     event_timestamp?: Date | null
     created_at: Date
+    // same value on both sender and recipient
+    client_msg_id?: string | undefined
+    // The `client_msg_id` (cid) this message replies to, if any.
+    reply_to_client_id?: string | null
     file_name?: string
     file_size?: number
     file_path?: string
+    file_offer_id?: string
+    file_checksum?: string
+    file_total_chunks?: number
+    file_protocol_version?: number
+    file_group_download_total?: number
+    file_group_download_completed?: number
     transfer_status?: FileTransferStatus
     transfer_progress?: number
     transfer_error?: string
+    // Local outbound send lifecycle for optimistic UI / offline-send queue
+    local_send_state?: 'queued' | 'sending' | 'failed' | null
+    failed_reason?: string | null
+    // Absolute ms timestamp before which a failed send may not be retried
+    // (e.g. group-rekey cooldown). Persisted so the block survives a restart.
+    retry_after_ts?: number | null
+    // Local-only pin. NULL = not pinned
+    pinned_at?: number | null
+}
+
+export interface PinnedMessagePreview {
+    clientMsgId: string
+    senderPeerId: string
+    senderUsername: string | undefined
+    content: string
+    messageType: 'text' | 'file' | 'image' | 'system'
+    fileName: string | undefined
+}
+
+export interface DeleteMessagesForMeResult {
+    deletedCount: number
+    latestRemaining: {
+        content: string
+        timestamp: Date
+        clientMsgId: string | null
+    } | null
+}
+
+// A 1:1 message awaiting an offline DHT write (durable background-send queue).
+export interface PendingOfflineSend {
+    message_id: string
+    chat_id: number
+    peer_id: string
+    bucket_key: string
+    content: string
+    created_at: number
+    status: 'queued' | 'failed'
+    attempts: number
+    last_error: string | null
 }
 
 export interface EncryptedUserIdentityDb {
@@ -142,6 +239,15 @@ export interface OfflineSentMessages {
     messages: OfflineMessage[]
     version: number
     updated_at: Date
+}
+
+export type OfflineMessageCategory = 'regular' | 'control' | 'ack';
+
+export interface OfflineSentMessageCategoryEntry {
+    bucket_key: string
+    message_id: string
+    category: OfflineMessageCategory
+    updated_at: string
 }
 
 export interface LoginAttempt {
@@ -257,6 +363,7 @@ export class ChatDatabase {
             this.initializeTables();
             this.sessionNetworkMode = this.getNetworkMode();
             this.createIndexes();
+            this.ensureMessageSearchIndex();
 
             this.checkIntegrity();
         } catch (error) {
@@ -277,6 +384,8 @@ export class ChatDatabase {
             key_version: row.key_version ?? 0,
             needs_removed_catchup: Boolean(row.needs_removed_catchup),
             removed_at: row.removed_at ?? null,
+            last_known_active_call_id: row.last_known_active_call_id ?? null,
+            last_known_active_call_seen_at: row.last_known_active_call_seen_at ?? null,
         };
     }
 
@@ -324,11 +433,14 @@ export class ChatDatabase {
                 group_status TEXT,
                 needs_removed_catchup INTEGER NOT NULL DEFAULT 0,
                 removed_at INTEGER,
+                last_known_active_call_id TEXT,
+                last_known_active_call_seen_at INTEGER,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         `);
         this.ensureChatsRemovedCatchupColumns();
+        this.ensureChatsLastKnownActiveCallColumns();
 
 
         // Messages table
@@ -342,6 +454,12 @@ export class ChatDatabase {
                 file_name TEXT,
                 file_size INTEGER,
                 file_path TEXT,
+                file_offer_id TEXT,
+                file_checksum TEXT,
+                file_total_chunks INTEGER,
+                file_protocol_version INTEGER,
+                file_group_download_total INTEGER,
+                file_group_download_completed INTEGER,
                 transfer_status TEXT,
                 transfer_progress INTEGER,
                 transfer_error TEXT,
@@ -352,6 +470,16 @@ export class ChatDatabase {
             )
         `);
         this.ensureEventTimestampColumn();
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS file_offer_cancellation_tombstones (
+                network_mode TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}',
+                offer_id TEXT NOT NULL,
+                sender_peer_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                PRIMARY KEY (network_mode, offer_id, sender_peer_id)
+            )
+        `);
         this.db.exec(`
             CREATE TABLE IF NOT EXISTS encrypted_user_identities (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -471,6 +599,48 @@ export class ChatDatabase {
                 messages TEXT NOT NULL,
                 version INTEGER NOT NULL DEFAULT 0,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS offline_sent_message_categories (
+                bucket_key TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                category TEXT NOT NULL CHECK(category IN ('regular', 'control', 'ack')),
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (bucket_key, message_id)
+            )
+        `);
+
+        // Durable queue of 1:1 messages awaiting an offline DHT write. The
+        // background flush worker batches all 'queued' rows for a bucket into one
+        // PUT. 'failed' rows wait for a manual retry (give-up threshold = 0).
+        // message_id is the chat message id (shared with the UI row).
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS pending_offline_sends (
+                message_id TEXT PRIMARY KEY NOT NULL,
+                chat_id INTEGER NOT NULL,
+                peer_id TEXT NOT NULL,
+                bucket_key TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'queued',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT
+            )
+        `);
+        this.db.exec(`CREATE INDEX IF NOT EXISTS idx_pending_offline_sends_bucket ON pending_offline_sends(bucket_key, status)`);
+
+        // Durable mirror of group messages that were published online but whose
+        // offline DHT backup failed — so an app-close mid-backup doesn't lose them.
+        // payload is the serialized GroupContentMessage; retried on startup.
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS pending_group_offline_backups (
+                message_id TEXT PRIMARY KEY NOT NULL,
+                chat_id INTEGER NOT NULL,
+                group_id TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at INTEGER NOT NULL
             )
         `);
 
@@ -645,12 +815,15 @@ export class ChatDatabase {
       CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages (chat_id);
       CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages (created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_messages_sender_peer_id ON messages (sender_peer_id);
+      CREATE INDEX IF NOT EXISTS idx_messages_file_offer_id ON messages (file_offer_id);
+      CREATE INDEX IF NOT EXISTS idx_file_offer_cancel_tombstones_expires ON file_offer_cancellation_tombstones (expires_at);
       CREATE INDEX IF NOT EXISTS idx_users_mode_username ON users (network_mode, username);
       CREATE INDEX IF NOT EXISTS idx_users_mode_peer_id ON users (network_mode, peer_id);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_users_unique_mode_peer ON users(network_mode, peer_id);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_encrypted_identities_unique_mode_kind ON encrypted_user_identities(network_mode, identity_kind);
       CREATE INDEX IF NOT EXISTS idx_participants_peer ON chat_participants(peer_id);
       CREATE INDEX IF NOT EXISTS idx_messages_conv_created ON messages(chat_id, created_at);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_chat_client_msg ON messages(chat_id, client_msg_id);
       CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON notifications(created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_notifications_mode_created_at ON notifications(network_mode, created_at DESC);
 
@@ -662,6 +835,7 @@ export class ChatDatabase {
       CREATE UNIQUE INDEX IF NOT EXISTS idx_login_attempts_unique_mode_peer ON login_attempts(network_mode, peer_id);
       CREATE INDEX IF NOT EXISTS idx_notifications_status_created ON notifications(status, created_at);
       CREATE INDEX IF NOT EXISTS idx_notifications_mode_status_created ON notifications(network_mode, status, created_at);
+      CREATE INDEX IF NOT EXISTS idx_offline_sent_message_categories_bucket ON offline_sent_message_categories(bucket_key, category);
 
       -- Group indexes
       CREATE INDEX IF NOT EXISTS idx_group_key_history_group ON group_key_history(group_id);
@@ -674,6 +848,59 @@ export class ChatDatabase {
       CREATE INDEX IF NOT EXISTS idx_bootstrap_nodes_mode ON bootstrap_nodes(network_mode);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_bootstrap_nodes_unique_addr_mode ON bootstrap_nodes(address, network_mode);
         `);
+    }
+
+    /**
+     * Full-text search index over message text + filenames, backing conversation
+     * search. External-content FTS5 (no duplicated content column) keyed on the
+     * messages table's integer rowid, with the `trigram` tokenizer so MATCH does
+     * case-insensitive *substring* search (incl. inside filenames like
+     * `report_2024.pdf`). System messages are indexed too but excluded at query
+     * time. Triggers keep it in sync; the UPDATE trigger is scoped to the two
+     * indexed columns + a value-change guard so routine writes
+     * (transfer_status/local_send_state/read receipts) never churn the index.
+     */
+    private ensureMessageSearchIndex(): void {
+        const alreadyExists = this.db.prepare(
+            `SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts'`
+        ).get();
+
+        this.db.exec(`
+            CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+                content,
+                file_name,
+                content='messages',
+                content_rowid='rowid',
+                tokenize='trigram'
+            );
+
+            CREATE TRIGGER IF NOT EXISTS messages_fts_ai AFTER INSERT ON messages BEGIN
+                INSERT INTO messages_fts(rowid, content, file_name)
+                VALUES (new.rowid, new.content, new.file_name);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS messages_fts_ad AFTER DELETE ON messages BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, content, file_name)
+                VALUES ('delete', old.rowid, old.content, old.file_name);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS messages_fts_au
+                AFTER UPDATE OF content, file_name ON messages
+                WHEN old.content IS NOT new.content OR old.file_name IS NOT new.file_name
+            BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, content, file_name)
+                VALUES ('delete', old.rowid, old.content, old.file_name);
+                INSERT INTO messages_fts(rowid, content, file_name)
+                VALUES (new.rowid, new.content, new.file_name);
+            END;
+        `);
+
+        // First-time creation only: backfill existing rows from the content table.
+        // On later launches the triggers have kept the index current, so we skip
+        // the (potentially large) rebuild.
+        if (!alreadyExists) {
+            this.db.exec(`INSERT INTO messages_fts(messages_fts) VALUES('rebuild')`);
+        }
     }
 
     private ensureEventTimestampColumn(): void {
@@ -704,6 +931,24 @@ export class ChatDatabase {
         }
     }
 
+    private ensureChatsLastKnownActiveCallColumns(): void {
+        try {
+            this.db.exec('ALTER TABLE chats ADD COLUMN last_known_active_call_id TEXT');
+        } catch (error) {
+            if (!errStr(error).toLowerCase().includes('duplicate column name')) {
+                throw error;
+            }
+        }
+
+        try {
+            this.db.exec('ALTER TABLE chats ADD COLUMN last_known_active_call_seen_at INTEGER');
+        } catch (error) {
+            if (!errStr(error).toLowerCase().includes('duplicate column name')) {
+                throw error;
+            }
+        }
+    }
+
     private ensureModeScopedColumns(): void {
         this.ensureColumnExists('users', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
         this.ensureColumnExists('chats', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
@@ -720,6 +965,21 @@ export class ChatDatabase {
         this.ensureColumnExists('blocked_peers', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
         this.ensureColumnExists('failed_key_exchanges', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
         this.ensureColumnExists('login_attempts', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
+        this.ensureColumnExists('messages', 'local_send_state', 'TEXT');
+        this.ensureColumnExists('messages', 'failed_reason', 'TEXT');
+        this.ensureColumnExists('messages', 'retry_after_ts', 'INTEGER');
+        // Pin feature: local-only pinned marker
+        this.ensureColumnExists('messages', 'pinned_at', 'INTEGER');
+        // Reply feature: cross-peer stable id + reply reference
+        this.ensureColumnExists('messages', 'client_msg_id', 'TEXT');
+        this.ensureColumnExists('messages', 'reply_to_client_id', 'TEXT');
+        this.ensureColumnExists('messages', 'file_offer_id', 'TEXT');
+        this.ensureColumnExists('messages', 'file_checksum', 'TEXT');
+        this.ensureColumnExists('messages', 'file_total_chunks', 'INTEGER');
+        this.ensureColumnExists('messages', 'file_protocol_version', 'INTEGER');
+        this.ensureColumnExists('messages', 'file_group_download_total', 'INTEGER');
+        this.ensureColumnExists('messages', 'file_group_download_completed', 'INTEGER');
+        this.db.prepare(`UPDATE messages SET client_msg_id = id WHERE client_msg_id IS NULL`).run();
         this.db.prepare(`UPDATE bootstrap_nodes SET network_mode = ? WHERE address LIKE '%/onion%'`).run(NETWORK_MODES.ANONYMOUS);
         this.db.prepare(`UPDATE bootstrap_nodes SET network_mode = ? WHERE address NOT LIKE '%/onion%'`).run(NETWORK_MODES.FAST);
     }
@@ -1356,6 +1616,7 @@ export class ChatDatabase {
             LEFT JOIN messages last_msg ON last_msg.id = (
                 SELECT id FROM messages
                 WHERE chat_id = c.id
+                  AND local_send_state IS NULL
                 ORDER BY timestamp DESC
                 LIMIT 1
             )
@@ -1419,6 +1680,7 @@ export class ChatDatabase {
             LEFT JOIN messages last_msg ON last_msg.id = (
                 SELECT id FROM messages
                 WHERE chat_id = c.id
+                  AND local_send_state IS NULL
                 ORDER BY timestamp DESC
                 LIMIT 1
             )
@@ -1486,6 +1748,29 @@ export class ChatDatabase {
             LIMIT ?
         `);
         const rows = stmt.all(this.getActiveNetworkMode(), limit) as any[];
+
+        if (!rows) return [];
+
+        return rows.map(row => this.mapChatRow(row));
+    }
+
+    getRecentlyActiveGroupChats(sinceMs: number, limit: number): Chat[] {
+        const stmt = this.db.prepare(`
+            SELECT * FROM chats
+            WHERE type = 'group'
+              AND network_mode = ?
+              AND datetime(updated_at) > datetime(?)
+              AND group_id IS NOT NULL
+              AND key_version > 0
+              AND (
+                group_status IN ('active', 'rekeying')
+                OR (group_status = 'removed' AND needs_removed_catchup = 1)
+              )
+            ORDER BY datetime(updated_at) DESC
+            LIMIT ?
+        `);
+        const sinceIso = new Date(sinceMs).toISOString();
+        const rows = stmt.all(this.getActiveNetworkMode(), sinceIso, limit) as any[];
 
         if (!rows) return [];
 
@@ -1758,8 +2043,139 @@ export class ChatDatabase {
     }
 
     deleteOfflineSentMessages(bucketKey: string): void {
-        const stmt = this.db.prepare('DELETE FROM offline_sent_messages WHERE bucket_key = ?');
-        stmt.run(bucketKey);
+        const tx = this.db.transaction((key: string) => {
+            this.db.prepare('DELETE FROM offline_sent_messages WHERE bucket_key = ?').run(key);
+            this.db.prepare('DELETE FROM offline_sent_message_categories WHERE bucket_key = ?').run(key);
+        });
+        tx(bucketKey);
+    }
+
+    getOfflineSentMessageCategories(bucketKey: string): OfflineSentMessageCategoryEntry[] {
+        const stmt = this.db.prepare(`
+            SELECT bucket_key, message_id, category, updated_at
+            FROM offline_sent_message_categories
+            WHERE bucket_key = ?
+        `);
+        return stmt.all(bucketKey) as OfflineSentMessageCategoryEntry[];
+    }
+
+    syncOfflineSentMessageCategories(
+        bucketKey: string,
+        entries: Array<{ messageId: string; category: OfflineMessageCategory }>,
+    ): void {
+        const tx = this.db.transaction((key: string, rows: Array<{ messageId: string; category: OfflineMessageCategory }>) => {
+            this.db.prepare('DELETE FROM offline_sent_message_categories WHERE bucket_key = ?').run(key);
+            if (rows.length === 0) {
+                return;
+            }
+
+            const insert = this.db.prepare(`
+                INSERT OR REPLACE INTO offline_sent_message_categories (bucket_key, message_id, category, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            `);
+            for (const row of rows) {
+                insert.run(key, row.messageId, row.category);
+            }
+        });
+        tx(bucketKey, entries);
+    }
+
+    // --- Pending offline sends queue (durable, batched background flush) ---
+
+    insertPendingOfflineSend(row: {
+        messageId: string;
+        chatId: number;
+        peerId: string;
+        bucketKey: string;
+        content: string;
+        createdAt: number;
+    }): void {
+        const stmt = this.db.prepare(`
+            INSERT OR REPLACE INTO pending_offline_sends
+                (message_id, chat_id, peer_id, bucket_key, content, created_at, status, attempts, last_error)
+            VALUES (?, ?, ?, ?, ?, ?, 'queued', 0, NULL)
+        `);
+        stmt.run(row.messageId, row.chatId, row.peerId, row.bucketKey, row.content, row.createdAt);
+    }
+
+    // 'queued' rows for a bucket, oldest first — the batch the flush worker drains.
+    getQueuedPendingOfflineSendsByBucket(bucketKey: string): PendingOfflineSend[] {
+        const stmt = this.db.prepare(`
+            SELECT * FROM pending_offline_sends
+            WHERE bucket_key = ? AND status = 'queued'
+            ORDER BY created_at ASC
+        `);
+        return stmt.all(bucketKey) as PendingOfflineSend[];
+    }
+
+    // Count rows that are still actively queued for a bucket write. Failed rows
+    // remain retryable local state but do not occupy DHT bucket capacity.
+    countActivePendingOfflineSendsByBucket(bucketKey: string): number {
+        const stmt = this.db.prepare(`
+            SELECT COUNT(*) AS count FROM pending_offline_sends
+            WHERE bucket_key = ? AND status = 'queued'
+        `);
+        return (stmt.get(bucketKey) as { count: number }).count;
+    }
+
+    getPendingOfflineSend(messageId: string): PendingOfflineSend | null {
+        const stmt = this.db.prepare('SELECT * FROM pending_offline_sends WHERE message_id = ?');
+        return (stmt.get(messageId) as PendingOfflineSend | undefined) ?? null;
+    }
+
+    getAllPendingOfflineSends(): PendingOfflineSend[] {
+        return this.db.prepare('SELECT * FROM pending_offline_sends').all() as PendingOfflineSend[];
+    }
+
+    // Atomic settle of delivered sends: drop the queue rows AND clear the matching
+    // chat rows' send-state in one transaction, so a crash can never split them
+    // (leaving a row stuck on `sending`).
+    settlePendingOfflineSendsDelivered(messageIds: string[]): void {
+        if (messageIds.length === 0) return;
+        const placeholders = messageIds.map(() => '?').join(',');
+        const tx = this.db.transaction((ids: string[]) => {
+            this.db.prepare(`DELETE FROM pending_offline_sends WHERE message_id IN (${placeholders})`).run(...ids);
+            this.db.prepare(
+                `UPDATE messages SET local_send_state = NULL, failed_reason = NULL, retry_after_ts = NULL WHERE id IN (${placeholders})`,
+            ).run(...ids);
+        });
+        tx(messageIds);
+    }
+
+    // Atomic settle of failed sends: mark the queue rows failed AND the chat rows
+    // failed in one transaction.
+    settlePendingOfflineSendsFailed(messageIds: string[], lastError?: string): void {
+        if (messageIds.length === 0) return;
+        const placeholders = messageIds.map(() => '?').join(',');
+        const tx = this.db.transaction((ids: string[]) => {
+            this.db.prepare(
+                `UPDATE pending_offline_sends SET status = 'failed', attempts = attempts + 1, last_error = ? WHERE message_id IN (${placeholders})`,
+            ).run(lastError ?? null, ...ids);
+            this.db.prepare(
+                `UPDATE messages SET local_send_state = 'failed', failed_reason = COALESCE(NULLIF(failed_reason, ''), 'other') WHERE id IN (${placeholders})`,
+            ).run(...ids);
+        });
+        tx(messageIds);
+    }
+
+    // Manual retry: move a failed row back to 'queued' so the flush picks it up.
+    requeuePendingOfflineSend(messageId: string): void {
+        this.db.prepare(`UPDATE pending_offline_sends SET status = 'queued' WHERE message_id = ?`).run(messageId);
+    }
+
+    // Startup reconcile (atomic, idempotent): no auto-resume. Any send interrupted
+    // mid-flight (`queued`) becomes `failed`, and every chat row that still has a
+    // pending queue row but shows `sending` is corrected to `failed` (manual retry).
+    // Delivered sends left no pending row (atomic settle), so they're untouched.
+    reconcileInterruptedOfflineSends(): void {
+        const tx = this.db.transaction(() => {
+            this.db.prepare(`UPDATE pending_offline_sends SET status = 'failed' WHERE status = 'queued'`).run();
+            this.db.prepare(`
+                UPDATE messages SET local_send_state = 'failed', failed_reason = COALESCE(NULLIF(failed_reason, ''), 'other')
+                WHERE local_send_state = 'sending' AND id IN (SELECT message_id FROM pending_offline_sends)
+            `).run();
+        });
+        tx();
     }
 
     // Group offline sent messages operations (local cache to avoid DHT reads before writes)
@@ -1792,6 +2208,23 @@ export class ChatDatabase {
         stmt.run(bucketKey);
     }
 
+    // --- Pending group offline backups (durable retry across restart) ---
+
+    upsertPendingGroupOfflineBackup(row: { messageId: string; chatId: number; groupId: string; payload: string }): void {
+        this.db.prepare(`
+            INSERT OR REPLACE INTO pending_group_offline_backups (message_id, chat_id, group_id, payload, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        `).run(row.messageId, row.chatId, row.groupId, row.payload, Date.now());
+    }
+
+    deletePendingGroupOfflineBackup(messageId: string): void {
+        this.db.prepare('DELETE FROM pending_group_offline_backups WHERE message_id = ?').run(messageId);
+    }
+
+    getAllPendingGroupOfflineBackups(): Array<{ message_id: string; chat_id: number; group_id: string; payload: string }> {
+        return this.db.prepare('SELECT message_id, chat_id, group_id, payload FROM pending_group_offline_backups').all() as Array<{ message_id: string; chat_id: number; group_id: string; payload: string }>;
+    }
+
     deleteGroupOfflineSentMessagesByPrefix(bucketKeyPrefix: string): void {
         const stmt = this.db.prepare('DELETE FROM group_offline_sent_messages WHERE bucket_key LIKE ?');
         stmt.run(`${bucketKeyPrefix}%`);
@@ -1804,58 +2237,695 @@ export class ChatDatabase {
         return !!row;
     }
 
+    /**
+     * Chat-scoped existence check. The global `messageExists` would treat a
+     * cross-chat id collision as a duplicate; group offline catch-up needs to know
+     * whether the message is already persisted *in this chat* specifically.
+     */
+    messageExistsInChat(chatId: number, messageId: string): boolean {
+        const row = this.db
+            .prepare(`SELECT 1 FROM messages WHERE chat_id = ? AND id = ? LIMIT 1`)
+            .get(chatId, messageId);
+        return !!row;
+    }
+
+    getFileMessageById(messageId: string): Message | null {
+        const row = this.db.prepare(`
+            SELECT m.*
+            FROM messages m
+            JOIN chats c ON c.id = m.chat_id
+            WHERE m.id = ?
+              AND c.network_mode = ?
+              AND m.message_type = 'file'
+            LIMIT 1
+        `).get(messageId, this.sessionNetworkMode) as (Omit<Message, 'timestamp' | 'event_timestamp' | 'created_at'> & {
+            timestamp: string;
+            event_timestamp: string | null;
+            created_at: string;
+        }) | undefined;
+        if (!row) return null;
+        return {
+            ...row,
+            timestamp: new Date(row.timestamp),
+            event_timestamp: row.event_timestamp ? new Date(row.event_timestamp) : null,
+            created_at: new Date(row.created_at),
+        };
+    }
+
+    getPendingIncomingFileOffers(): Array<Message & { sender_username?: string }> {
+        const rows = this.db.prepare(`
+            SELECT m.*, u.username AS sender_username
+            FROM messages m
+            JOIN chats c ON c.id = m.chat_id
+            LEFT JOIN users u
+              ON u.peer_id = m.sender_peer_id
+             AND u.network_mode = c.network_mode
+            WHERE c.network_mode = ?
+              AND m.message_type = 'file'
+              AND m.transfer_status = 'incoming_pending_user'
+            ORDER BY m.timestamp ASC
+        `).all(this.sessionNetworkMode) as Array<Omit<Message, 'timestamp' | 'event_timestamp' | 'created_at'> & {
+            timestamp: string;
+            event_timestamp: string | null;
+            created_at: string;
+            sender_username?: string;
+        }>;
+        return rows.map((row) => ({
+            ...row,
+            timestamp: new Date(row.timestamp),
+            event_timestamp: row.event_timestamp ? new Date(row.event_timestamp) : null,
+            created_at: new Date(row.created_at),
+        }));
+    }
+
+    getPendingFileInboxSnapshot(input: {
+        maxPendingFilesPerPeer: number;
+        maxPendingFilesTotal: number;
+    }): PendingFileInboxSnapshot {
+        const rows = this.db.prepare(`
+            SELECT
+                m.id,
+                m.chat_id,
+                m.sender_peer_id,
+                m.file_name,
+                m.file_size,
+                m.timestamp,
+                m.transfer_error,
+                c.name AS chat_name,
+                c.type AS chat_type,
+                u.username AS sender_username
+            FROM messages m
+            JOIN chats c ON c.id = m.chat_id
+            LEFT JOIN users u
+              ON u.peer_id = m.sender_peer_id
+             AND u.network_mode = c.network_mode
+            WHERE c.network_mode = ?
+              AND m.message_type = 'file'
+              AND m.transfer_status = 'incoming_pending_user'
+            ORDER BY m.timestamp ASC
+        `).all(this.sessionNetworkMode) as Array<{
+            id: string;
+            chat_id: number;
+            sender_peer_id: string;
+            file_name: string | null;
+            file_size: number | null;
+            timestamp: string;
+            transfer_error: string | null;
+            chat_name: string | null;
+            chat_type: 'direct' | 'group';
+            sender_username: string | null;
+        }>;
+
+        const offers = rows.map((row) => ({
+            fileId: row.id,
+            chatId: row.chat_id,
+            chatName: row.chat_name ?? 'Unknown chat',
+            chatType: row.chat_type,
+            senderPeerId: row.sender_peer_id,
+            senderUsername: row.sender_username ?? row.sender_peer_id,
+            filename: row.file_name ?? 'Unknown file',
+            size: row.file_size ?? 0,
+            offeredAt: new Date(row.timestamp).getTime(),
+            countsTowardCapacity: !row.transfer_error,
+            ...(row.transfer_error ? { transferError: row.transfer_error } : {}),
+        }));
+
+        const senderMap = new Map<string, PendingFileInboxSnapshot['senders'][number]>();
+        for (const offer of offers) {
+            let summary = senderMap.get(offer.senderPeerId);
+            if (!summary) {
+                summary = {
+                    senderPeerId: offer.senderPeerId,
+                    senderUsername: offer.senderUsername,
+                    count: 0,
+                    limit: input.maxPendingFilesPerPeer,
+                    full: false,
+                    offers: [],
+                };
+                senderMap.set(offer.senderPeerId, summary);
+            }
+            summary.offers.push(offer);
+            if (offer.countsTowardCapacity) {
+                summary.count += 1;
+            }
+        }
+
+        const senders = [...senderMap.values()]
+            .map((summary) => ({
+                ...summary,
+                full: summary.count >= input.maxPendingFilesPerPeer,
+            }))
+            .sort((a, b) => {
+                if (a.full !== b.full) return a.full ? -1 : 1;
+                if (a.count !== b.count) return b.count - a.count;
+                return a.senderUsername.localeCompare(b.senderUsername);
+            });
+
+        const total = offers.filter((offer) => offer.countsTowardCapacity).length;
+        return {
+            total,
+            totalLimit: input.maxPendingFilesTotal,
+            full: total >= input.maxPendingFilesTotal,
+            hasFullSender: senders.some((sender) => sender.full),
+            senders,
+            offers,
+        };
+    }
+
+    rejectPendingIncomingFileOffer(messageId: string): {
+        messageId: string;
+        offerId: string;
+        chatId: number;
+        senderPeerId: string;
+    } | null {
+        const row = this.db.prepare(`
+            UPDATE messages
+            SET transfer_status = 'rejected',
+                transfer_progress = 0,
+                transfer_error = 'Offer rejected'
+            WHERE id = ?
+              AND message_type = 'file'
+              AND transfer_status = 'incoming_pending_user'
+              AND chat_id IN (
+                SELECT id FROM chats WHERE network_mode = ?
+              )
+              AND file_offer_id IS NOT NULL
+            RETURNING
+              id AS messageId,
+              file_offer_id AS offerId,
+              chat_id AS chatId,
+              sender_peer_id AS senderPeerId
+        `).get(messageId, this.sessionNetworkMode) as {
+            messageId: string;
+            offerId: string;
+            chatId: number;
+            senderPeerId: string;
+        } | undefined;
+        return row ?? null;
+    }
+
+    terminalizeOutgoingFileOfferFromNack(input: {
+        offerId: string;
+        chatId: number;
+        localPeerId: string;
+        status: 'rejected' | 'failed';
+        error: string;
+    }): { messageId: string; filename: string } | null {
+        const row = this.db.prepare(`
+            UPDATE messages
+            SET transfer_status = ?,
+                transfer_progress = 0,
+                transfer_error = ?
+            WHERE file_offer_id = ?
+              AND chat_id = ?
+              AND sender_peer_id = ?
+              AND message_type = 'file'
+              AND transfer_status = 'awaiting_acceptance'
+              AND chat_id IN (
+                SELECT id FROM chats WHERE network_mode = ?
+              )
+            RETURNING id AS messageId, file_name AS filename
+        `).get(
+            input.status,
+            input.error,
+            input.offerId,
+            input.chatId,
+            input.localPeerId,
+            this.sessionNetworkMode,
+        ) as { messageId: string; filename: string | null } | undefined;
+        return row ? {
+            messageId: row.messageId,
+            filename: row.filename ?? 'Unknown file',
+        } : null;
+    }
+
+    cancelOutgoingFileOffer(input: {
+        fileId: string;
+        localPeerId: string;
+    }): { offerId: string; chatId: number; targetPeerId: string; filename: string } | null {
+        const tx = this.db.transaction(() => {
+            const row = this.db.prepare(`
+                SELECT
+                  m.file_offer_id AS offerId,
+                  m.chat_id AS chatId,
+                  m.file_name AS filename,
+                  (
+                    SELECT cp.peer_id
+                    FROM chat_participants cp
+                    WHERE cp.chat_id = m.chat_id
+                      AND cp.peer_id != ?
+                    LIMIT 1
+                  ) AS targetPeerId
+                FROM messages m
+                JOIN chats c ON c.id = m.chat_id
+                WHERE m.id = ?
+                  AND m.sender_peer_id = ?
+                  AND m.message_type = 'file'
+                  AND m.transfer_status = 'awaiting_acceptance'
+                  AND m.file_offer_id IS NOT NULL
+                  AND c.type = 'direct'
+                  AND c.network_mode = ?
+                LIMIT 1
+            `).get(
+                input.localPeerId,
+                input.fileId,
+                input.localPeerId,
+                this.sessionNetworkMode,
+            ) as {
+                offerId: string;
+                chatId: number;
+                filename: string | null;
+                targetPeerId: string | null;
+            } | undefined;
+            if (!row?.targetPeerId) {
+                return null;
+            }
+            const result = this.db.prepare(`
+                UPDATE messages
+                SET transfer_status = 'cancelled',
+                    transfer_progress = 0,
+                    transfer_error = 'Offer cancelled'
+                WHERE id = ?
+                  AND sender_peer_id = ?
+                  AND message_type = 'file'
+                  AND transfer_status = 'awaiting_acceptance'
+                  AND chat_id IN (SELECT id FROM chats WHERE network_mode = ?)
+            `).run(input.fileId, input.localPeerId, this.sessionNetworkMode);
+            if (result.changes !== 1) {
+                return null;
+            }
+            return {
+                offerId: row.offerId,
+                chatId: row.chatId,
+                targetPeerId: row.targetPeerId,
+                filename: row.filename ?? 'Unknown file',
+            };
+        });
+        return tx() as { offerId: string; chatId: number; targetPeerId: string; filename: string } | null;
+    }
+
+    cancelOutgoingGroupFileOffer(input: {
+        fileId: string;
+        localPeerId: string;
+    }): {
+        offerId: string;
+        chatId: number;
+        groupId: string;
+        filename: string;
+        status: 'cancelled' | 'partially_completed';
+        error: string | null;
+        groupDownloadTotal: number;
+        groupDownloadCompleted: number;
+    } | null {
+        const tx = this.db.transaction(() => {
+            const row = this.db.prepare(`
+                SELECT
+                  m.file_offer_id AS offerId,
+                  m.chat_id AS chatId,
+                  m.file_name AS filename,
+                  COALESCE(m.file_group_download_total, 0) AS groupDownloadTotal,
+                  COALESCE(m.file_group_download_completed, 0) AS groupDownloadCompleted,
+                  c.group_id AS groupId
+                FROM messages m
+                JOIN chats c ON c.id = m.chat_id
+                WHERE m.id = ?
+                  AND m.sender_peer_id = ?
+                  AND m.message_type = 'file'
+                  AND m.transfer_status = 'awaiting_acceptance'
+                  AND m.file_offer_id IS NOT NULL
+                  AND c.type = 'group'
+                  AND c.group_id IS NOT NULL
+                  AND c.network_mode = ?
+                LIMIT 1
+            `).get(
+                input.fileId,
+                input.localPeerId,
+                this.sessionNetworkMode,
+            ) as {
+                offerId: string;
+                chatId: number;
+                filename: string | null;
+                groupDownloadTotal: number;
+                groupDownloadCompleted: number;
+                groupId: string | null;
+            } | undefined;
+            if (!row?.groupId) {
+                return null;
+            }
+
+            const status = row.groupDownloadCompleted > 0 ? 'partially_completed' : 'cancelled';
+            const error = status === 'cancelled' ? 'Offer cancelled' : null;
+            const result = this.db.prepare(`
+                UPDATE messages
+                SET transfer_status = ?,
+                    transfer_progress = ?,
+                    transfer_error = ?
+                WHERE id = ?
+                  AND sender_peer_id = ?
+                  AND message_type = 'file'
+                  AND transfer_status = 'awaiting_acceptance'
+                  AND chat_id IN (SELECT id FROM chats WHERE network_mode = ?)
+            `).run(
+                status,
+                status === 'partially_completed' ? 100 : 0,
+                error,
+                input.fileId,
+                input.localPeerId,
+                this.sessionNetworkMode,
+            );
+            if (result.changes !== 1) {
+                return null;
+            }
+            return {
+                offerId: row.offerId,
+                chatId: row.chatId,
+                groupId: row.groupId,
+                filename: row.filename ?? 'Unknown file',
+                status,
+                error,
+                groupDownloadTotal: row.groupDownloadTotal,
+                groupDownloadCompleted: row.groupDownloadCompleted,
+            };
+        });
+        return tx() as {
+            offerId: string;
+            chatId: number;
+            groupId: string;
+            filename: string;
+            status: 'cancelled' | 'partially_completed';
+            error: string | null;
+            groupDownloadTotal: number;
+            groupDownloadCompleted: number;
+        } | null;
+    }
+
+    cancelPendingIncomingFileOfferByOfferId(input: {
+        offerId: string;
+        chatId: number;
+        senderPeerId: string;
+    }): { messageId: string; filename: string } | null {
+        const row = this.db.prepare(`
+            UPDATE messages
+            SET transfer_status = 'cancelled',
+                transfer_progress = 0,
+                transfer_error = 'Offer cancelled'
+            WHERE file_offer_id = ?
+              AND chat_id = ?
+              AND sender_peer_id = ?
+              AND message_type = 'file'
+              AND transfer_status = 'incoming_pending_user'
+              AND chat_id IN (
+                SELECT id FROM chats WHERE network_mode = ?
+              )
+            RETURNING id AS messageId, file_name AS filename
+        `).get(
+            input.offerId,
+            input.chatId,
+            input.senderPeerId,
+            this.sessionNetworkMode,
+        ) as { messageId: string; filename: string | null } | undefined;
+        return row ? {
+            messageId: row.messageId,
+            filename: row.filename ?? 'Unknown file',
+        } : null;
+    }
+
+    recordFileOfferCancellationTombstone(input: {
+        offerId: string;
+        senderPeerId: string;
+    }): void {
+        const now = Date.now();
+        this.pruneExpiredFileOfferCancellationTombstones(now);
+        this.db.prepare(`
+            INSERT OR REPLACE INTO file_offer_cancellation_tombstones
+              (network_mode, offer_id, sender_peer_id, created_at, expires_at)
+            VALUES (?, ?, ?, ?, ?)
+        `).run(this.sessionNetworkMode, input.offerId, input.senderPeerId, now, now + MESSAGE_TTL);
+    }
+
+    hasFileOfferCancellationTombstone(input: {
+        offerId: string;
+        senderPeerId: string;
+    }): boolean {
+        const now = Date.now();
+        this.pruneExpiredFileOfferCancellationTombstones(now);
+        const row = this.db.prepare(`
+            SELECT 1
+            FROM file_offer_cancellation_tombstones
+            WHERE network_mode = ?
+              AND offer_id = ?
+              AND sender_peer_id = ?
+              AND expires_at > ?
+            LIMIT 1
+        `).get(this.sessionNetworkMode, input.offerId, input.senderPeerId, now);
+        return !!row;
+    }
+
+    private pruneExpiredFileOfferCancellationTombstones(now: number = Date.now()): void {
+        this.db.prepare(`
+            DELETE FROM file_offer_cancellation_tombstones
+            WHERE network_mode = ?
+              AND expires_at <= ?
+        `).run(this.sessionNetworkMode, now);
+    }
+
+    getCompletedFileMediaById(messageId: string): {
+        filePath: string;
+        fileName: string;
+    } | null {
+        const row = this.db.prepare(`
+            SELECT m.file_path, m.file_name
+            FROM messages m
+            JOIN chats c ON c.id = m.chat_id
+            WHERE m.id = ?
+              AND c.network_mode = ?
+              AND m.message_type = 'file'
+              AND m.transfer_status = 'completed'
+              AND m.file_path IS NOT NULL
+              AND m.file_path != ''
+            LIMIT 1
+        `).get(messageId, this.sessionNetworkMode) as {
+            file_path: string;
+            file_name: string | null;
+        } | undefined;
+
+        if (!row) {
+            return null;
+        }
+
+        return {
+            filePath: row.file_path,
+            fileName: row.file_name || path.basename(row.file_path),
+        };
+    }
+
+    /**
+     * Authoritative insert. A (chat_id, client_msg_id) collision is an invariant
+     * violation here — outbound sends mint fresh cids, and other callers default
+     * client_msg_id to the unique row id — so we DON'T swallow conflicts: a plain
+     * INSERT throws (and the caller's transaction, if any, rolls back). For the
+     * inbound path where the same logical message can legitimately arrive twice
+     * (online + offline), use `tryCreateMessage` instead.
+     */
     async createMessage(message: Omit<Message, 'created_at'>): Promise<string> {
         return this.retryOperation(() => {
-            const stmt = this.db.prepare(`
-                INSERT INTO messages (
-                    id,
-                    chat_id,
-                    sender_peer_id,
-                    content,
-                    message_type,
-                    timestamp,
-                    file_name,
-                    file_size,
-                    file_path,
-                    transfer_status,
-                    transfer_progress,
-                    transfer_error,
-                    event_timestamp
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `);
-
-            stmt.run(
-                message.id,
-                message.chat_id,
-                message.sender_peer_id,
-                message.content,
-                message.message_type,
-                message.timestamp instanceof Date ? message.timestamp.toISOString() : message.timestamp,
-                message.file_name ?? null,
-                message.file_size ?? null,
-                message.file_path ?? null,
-                message.transfer_status ?? null,
-                message.transfer_progress ?? null,
-                message.transfer_error ?? null,
-                message.event_timestamp
-                    ? (message.event_timestamp instanceof Date
-                        ? message.event_timestamp.toISOString()
-                        : message.event_timestamp)
-                    : null
-            );
-
-            // Update the chat's updated_at to match the message timestamp
-            const updateChatStmt = this.db.prepare(`
-                UPDATE chats SET updated_at = ? WHERE id = ?
-            `);
-            updateChatStmt.run(
-                message.timestamp instanceof Date ? message.timestamp.toISOString() : message.timestamp,
-                message.chat_id
-            );
-
+            this.insertMessageRow(message, 'throw');
             return message.id;
         });
+    }
+
+    /**
+     * Inbound dedup insert; reports whether a row was actually inserted so callers
+     * can skip emitting a phantom "message received" event on a duplicate.
+     * - `dedupe: 'cid'` (default) — direct inbound: the row `id` is a freshly minted
+     *   per-receive UUID (never collides), only `(chat_id, client_msg_id)` can, so a
+     *   cid-targeted `ON CONFLICT` is right (and a PK collision still throws — an anomaly).
+     * - `dedupe: 'any'` — group inbound: `id == messageId == client_msg_id`, so a
+     *   duplicate collides on the **PK `id`** too; a *targetless* `ON CONFLICT DO NOTHING`
+     *   covers both. (Not `INSERT OR IGNORE`, which would also swallow NOT NULL/CHECK/FK.)
+     */
+    async tryCreateMessage(
+        message: Omit<Message, 'created_at'>,
+        opts?: { dedupe?: 'cid' | 'any' },
+    ): Promise<{ id: string; inserted: boolean }> {
+        const strategy = opts?.dedupe === 'any' ? 'ignoreAny' : 'ignoreCid';
+        return this.retryOperation(() => {
+            const inserted = this.insertMessageRow(message, strategy);
+            // Targetless DO NOTHING swallows *any* uniqueness conflict, so a skipped
+            // 'any' insert is only a valid duplicate if a row matching ALL of
+            // (id, chat_id, client_msg_id) exists. Otherwise the conflict came from a
+            // *different* row (cross-chat PK reuse, or a cid collision with a different
+            // id) — throw so the caller does NOT advance sequence/cursor for a message
+            // it never actually persisted.
+            if (!inserted && strategy === 'ignoreAny') {
+                this.assertIgnoredInsertIsExactDuplicate(message);
+            }
+            return { id: message.id, inserted };
+        });
+    }
+
+    /** Throws unless a skipped insert corresponds to an exact-matching existing row. */
+    private assertIgnoredInsertIsExactDuplicate(message: Omit<Message, 'created_at'>): void {
+        const expectedCid = message.client_msg_id ?? message.id;
+        const exact = this.db
+            .prepare('SELECT 1 FROM messages WHERE id = ? AND chat_id = ? AND client_msg_id = ? LIMIT 1')
+            .get(message.id, message.chat_id, expectedCid);
+        if (!exact) {
+            throw new Error(
+                `Message insert skipped on conflict but no exact-matching row exists ` +
+                `(id=${message.id} chat=${message.chat_id} cid=${expectedCid}) — uniqueness collision with a different row`,
+            );
+        }
+    }
+
+    /**
+     * Shared message INSERT. The conflict strategy decides duplicate handling:
+     * `'throw'` (outbound/authoritative — surfaces an invariant violation),
+     * `'ignoreCid'` (cid-targeted DO NOTHING, direct inbound), or
+     * `'ignoreAny'` (targetless DO NOTHING, group inbound where id == cid).
+     * Bumps the chat's updated_at only when a row was actually inserted. Returns
+     * whether a row was inserted.
+     */
+    private insertMessageRow(
+        message: Omit<Message, 'created_at'>,
+        conflict: 'throw' | 'ignoreCid' | 'ignoreAny',
+    ): boolean {
+        const conflictClause =
+            conflict === 'ignoreCid' ? 'ON CONFLICT(chat_id, client_msg_id) DO NOTHING'
+                : conflict === 'ignoreAny' ? 'ON CONFLICT DO NOTHING'
+                    : '';
+        const ts = message.timestamp instanceof Date ? message.timestamp.toISOString() : message.timestamp;
+        const info = this.db.prepare(`
+            INSERT INTO messages (
+                id, chat_id, sender_peer_id, content, message_type, timestamp,
+                file_name, file_size, file_path, file_offer_id, file_checksum,
+                file_total_chunks, file_protocol_version, file_group_download_total,
+                file_group_download_completed, transfer_status, transfer_progress, transfer_error,
+                local_send_state, failed_reason, retry_after_ts, event_timestamp, client_msg_id,
+                reply_to_client_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ${conflictClause}
+        `).run(
+            message.id,
+            message.chat_id,
+            message.sender_peer_id,
+            message.content,
+            message.message_type,
+            ts,
+            message.file_name ?? null,
+            message.file_size ?? null,
+            message.file_path ?? null,
+            message.file_offer_id ?? null,
+            message.file_checksum ?? null,
+            message.file_total_chunks ?? null,
+            message.file_protocol_version ?? null,
+            message.file_group_download_total ?? null,
+            message.file_group_download_completed ?? null,
+            message.transfer_status ?? null,
+            message.transfer_progress ?? null,
+            message.transfer_error ?? null,
+            message.local_send_state ?? null,
+            message.failed_reason ?? null,
+            message.retry_after_ts ?? null,
+            message.event_timestamp
+                ? (message.event_timestamp instanceof Date
+                    ? message.event_timestamp.toISOString()
+                    : message.event_timestamp)
+                : null,
+            // cid defaults to the row id (file rows: id = fileId) so it is never null
+            message.client_msg_id ?? message.id,
+            message.reply_to_client_id ?? null,
+        );
+
+        const inserted = info.changes > 0;
+        if (inserted) {
+            this.db.prepare(`UPDATE chats SET updated_at = ? WHERE id = ?`).run(ts, message.chat_id);
+        }
+        return inserted;
+    }
+
+    /**
+     * Atomically persist a new outbound message AND its pending offline-send queue
+     * row in one transaction — and enforce the bucket capacity within that same
+     * transaction so two concurrent sends can't both observe room and overfill.
+     * Returns false (and writes nothing) if the bucket is full. The crash-safety
+     * guarantee also holds: never a `sending` message row without its queue row.
+     */
+    createMessageWithPendingOfflineSend(
+        message: Omit<Message, 'created_at'>,
+        pending: { peerId: string; bucketKey: string; content: string; createdAt: number },
+        capacityLimit: number,
+    ): boolean {
+        const ts = message.timestamp instanceof Date ? message.timestamp.toISOString() : message.timestamp;
+        const tx = this.db.transaction(() => {
+            // Capacity check inside the transaction: live (non-expired) stored count
+            // + still-pending count, matching the write path's pruning.
+            const storedRow = this.db.prepare('SELECT messages FROM offline_sent_messages WHERE bucket_key = ?')
+                .get(pending.bucketKey) as { messages: string } | undefined;
+            const now = Date.now();
+            const storedLive = storedRow
+                ? (JSON.parse(storedRow.messages) as Array<{ expires_at: number; signed_payload?: { ack_only?: boolean } }>)
+                    .filter(m => m.expires_at > now && m.signed_payload?.ack_only !== true).length
+                : 0;
+            const pendingActive = (this.db.prepare(
+                `SELECT COUNT(*) AS c FROM pending_offline_sends WHERE bucket_key = ? AND status = 'queued'`,
+            ).get(pending.bucketKey) as { c: number }).c;
+            if (storedLive + pendingActive >= capacityLimit) {
+                return false;
+            }
+            this.db.prepare(`
+                INSERT INTO messages (
+                    id, chat_id, sender_peer_id, content, message_type, timestamp,
+                    file_name, file_size, file_path, transfer_status, transfer_progress,
+                    transfer_error, local_send_state, failed_reason, retry_after_ts, event_timestamp,
+                    client_msg_id, reply_to_client_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(
+                // Outbound own-send: a cid collision is an invariant violation, so a
+                // plain INSERT throws and the surrounding transaction rolls back
+                // (no orphaned pending-queue row).
+                message.id, message.chat_id, message.sender_peer_id, message.content,
+                message.message_type, ts,
+                message.file_name ?? null, message.file_size ?? null, message.file_path ?? null,
+                message.transfer_status ?? null, message.transfer_progress ?? null, message.transfer_error ?? null,
+                message.local_send_state ?? null, message.failed_reason ?? null, message.retry_after_ts ?? null,
+                null,
+                message.client_msg_id ?? message.id, message.reply_to_client_id ?? null,
+            );
+            this.db.prepare(`UPDATE chats SET updated_at = ? WHERE id = ?`).run(ts, message.chat_id);
+            this.db.prepare(`
+                INSERT OR REPLACE INTO pending_offline_sends
+                    (message_id, chat_id, peer_id, bucket_key, content, created_at, status, attempts, last_error)
+                VALUES (?, ?, ?, ?, ?, ?, 'queued', 0, NULL)
+            `).run(message.id, message.chat_id, pending.peerId, pending.bucketKey, pending.content, pending.createdAt);
+            return true;
+        });
+        return tx() as boolean;
+    }
+
+    /**
+     * Update the local outbound send lifecycle of a message. Pass state=null to
+     * settle it (delivered) — clears the failure reason and retry cooldown.
+     * retryAfterTs only persists for 'failed' (e.g. group-rekey cooldown).
+     */
+    updateMessageSendState(
+        messageId: string,
+        state: 'queued' | 'sending' | 'failed' | null,
+        failedReason?: string | null,
+        retryAfterTs?: number | null,
+    ): void {
+        const isFailed = state === 'failed';
+        const stmt = this.db.prepare(`
+            UPDATE messages SET local_send_state = ?, failed_reason = ?, retry_after_ts = ? WHERE id = ?
+        `);
+        stmt.run(
+            state,
+            isFailed ? (failedReason ?? 'other') : null,
+            isFailed ? (retryAfterTs ?? null) : null,
+            messageId,
+        );
     }
 
     updateMessageTransfer(messageId: string, updates: {
@@ -1888,28 +2958,172 @@ export class ChatDatabase {
         );
     }
 
-    expirePendingFileOffers(timeoutMs: number): number {
-        const cutoff = new Date(Date.now() - timeoutMs).toISOString();
-        const stmt = this.db.prepare(`
+    /**
+     * Compare-and-set terminal transition for an outgoing served file: applies only while the row
+     * is still in the active serving state (`awaiting_acceptance`), so the first terminal state
+     * wins and a serve completion can never overwrite an already-applied NACK (rejected/failed).
+     * Returns true iff this call performed the transition.
+     */
+    terminalizeServedFileIfActive(
+        fileId: string,
+        status: 'completed' | 'partially_completed' | 'failed' | 'cancelled',
+        progress: number,
+        error: string | null,
+    ): boolean {
+        const result = this.db.prepare(`
             UPDATE messages
-            SET transfer_status = 'expired', transfer_error = 'Offer expired'
-            WHERE message_type = 'file'
-              AND transfer_status IN ('pending', 'awaiting_acceptance', 'incoming_pending_user')
-              AND timestamp < ?
-        `);
-        const result = stmt.run(cutoff);
-        return result.changes ?? 0;
+            SET transfer_status = ?, transfer_progress = ?, transfer_error = ?
+            WHERE id = ?
+              AND message_type = 'file'
+              AND transfer_status = 'awaiting_acceptance'
+              AND chat_id IN (SELECT id FROM chats WHERE network_mode = ?)
+        `).run(status, progress, error, fileId, this.sessionNetworkMode);
+        return result.changes === 1;
     }
 
-    failInProgressFileTransfers(): number {
-        const stmt = this.db.prepare(`
+    recordGroupServedFileDownloadIfActive(fileId: string): {
+        completed: number;
+        total: number;
+        completedAll: boolean;
+    } | null {
+        const row = this.db.prepare(`
             UPDATE messages
-            SET transfer_status = 'failed', transfer_error = 'Transfer interrupted'
-            WHERE message_type = 'file'
+            SET file_group_download_completed = COALESCE(file_group_download_completed, 0) + 1,
+                transfer_error = NULL
+            WHERE id = ?
+              AND message_type = 'file'
+              AND transfer_status = 'awaiting_acceptance'
+              AND file_group_download_total IS NOT NULL
+              AND file_group_download_total > 0
+              AND COALESCE(file_group_download_completed, 0) < file_group_download_total
+              AND chat_id IN (SELECT id FROM chats WHERE network_mode = ?)
+            RETURNING
+              file_group_download_completed AS completed,
+              file_group_download_total AS total
+        `).get(fileId, this.sessionNetworkMode) as { completed: number; total: number } | undefined;
+        if (!row) {
+            return null;
+        }
+        return {
+            completed: row.completed,
+            total: row.total,
+            completedAll: row.completed >= row.total,
+        };
+    }
+
+    claimIncomingFilePull(messageId: string): {
+        messageId: string;
+        chatId: number;
+        senderPeerId: string;
+        offerId: string;
+        fileName: string;
+        size: number;
+        checksum: string;
+        totalChunks: number;
+    } | null {
+        const row = this.db.prepare(`
+            UPDATE messages
+            SET transfer_status = 'in_progress',
+                transfer_progress = 0,
+                transfer_error = NULL
+            WHERE id = ?
+              AND message_type = 'file'
+              AND transfer_status = 'incoming_pending_user'
+              AND file_offer_id IS NOT NULL
+              AND file_name IS NOT NULL
+              AND file_size IS NOT NULL
+              AND file_checksum IS NOT NULL
+              AND file_total_chunks IS NOT NULL
+              AND chat_id IN (SELECT id FROM chats WHERE network_mode = ?)
+            RETURNING
+              id AS messageId,
+              chat_id AS chatId,
+              sender_peer_id AS senderPeerId,
+              file_offer_id AS offerId,
+              file_name AS fileName,
+              file_size AS size,
+              file_checksum AS checksum,
+              file_total_chunks AS totalChunks
+        `).get(messageId, this.sessionNetworkMode) as {
+            messageId: string;
+            chatId: number;
+            senderPeerId: string;
+            offerId: string;
+            fileName: string;
+            size: number;
+            checksum: string;
+            totalChunks: number;
+        } | undefined;
+        return row ?? null;
+    }
+
+    updateIncomingFilePullProgress(messageId: string, progress: number): boolean {
+        const result = this.db.prepare(`
+            UPDATE messages
+            SET transfer_progress = ?
+            WHERE id = ?
+              AND message_type = 'file'
               AND transfer_status = 'in_progress'
-        `);
-        const result = stmt.run();
-        return result.changes ?? 0;
+              AND chat_id IN (SELECT id FROM chats WHERE network_mode = ?)
+        `).run(progress, messageId, this.sessionNetworkMode);
+        return result.changes === 1;
+    }
+
+    resetIncomingFilePullToPending(messageId: string, error: string): boolean {
+        const result = this.db.prepare(`
+            UPDATE messages
+            SET transfer_status = 'incoming_pending_user',
+                transfer_progress = 0,
+                transfer_error = ?
+            WHERE id = ?
+              AND message_type = 'file'
+              AND transfer_status = 'in_progress'
+              AND chat_id IN (SELECT id FROM chats WHERE network_mode = ?)
+        `).run(error, messageId, this.sessionNetworkMode);
+        return result.changes === 1;
+    }
+
+    failIncomingFilePull(messageId: string, error: string): boolean {
+        const result = this.db.prepare(`
+            UPDATE messages
+            SET transfer_status = 'failed',
+                transfer_progress = 0,
+                transfer_error = ?
+            WHERE id = ?
+              AND message_type = 'file'
+              AND transfer_status = 'in_progress'
+              AND chat_id IN (SELECT id FROM chats WHERE network_mode = ?)
+        `).run(error, messageId, this.sessionNetworkMode);
+        return result.changes === 1;
+    }
+
+    cancelIncomingFilePull(messageId: string, error: string): boolean {
+        const result = this.db.prepare(`
+            UPDATE messages
+            SET transfer_status = 'failed',
+                transfer_progress = 0,
+                transfer_error = ?
+            WHERE id = ?
+              AND message_type = 'file'
+              AND transfer_status = 'in_progress'
+              AND chat_id IN (SELECT id FROM chats WHERE network_mode = ?)
+        `).run(error, messageId, this.sessionNetworkMode);
+        return result.changes === 1;
+    }
+
+    completeIncomingFilePull(messageId: string, filePath: string): boolean {
+        const result = this.db.prepare(`
+            UPDATE messages
+            SET transfer_status = 'completed',
+                transfer_progress = 100,
+                transfer_error = NULL,
+                file_path = ?
+            WHERE id = ?
+              AND message_type = 'file'
+              AND transfer_status = 'in_progress'
+              AND chat_id IN (SELECT id FROM chats WHERE network_mode = ?)
+        `).run(filePath, messageId, this.sessionNetworkMode);
+        return result.changes === 1;
     }
 
     failNonTerminalFileTransfers(reason: string = 'Transfer interrupted'): number {
@@ -1917,18 +3131,19 @@ export class ChatDatabase {
             UPDATE messages
             SET transfer_status = 'failed', transfer_error = ?
             WHERE message_type = 'file'
+              AND chat_id IN (
+                SELECT id FROM chats WHERE network_mode = ?
+              )
               AND transfer_status IN (
-                'pending',
                 'in_progress',
                 'connecting',
                 'awaiting_acceptance',
                 'uploading',
                 'awaiting_confirmation',
-                'incoming_pending_user',
                 'downloading'
               )
         `);
-        const result = stmt.run(reason);
+        const result = stmt.run(reason, this.sessionNetworkMode);
         return result.changes ?? 0;
     }
 
@@ -1959,6 +3174,144 @@ export class ChatDatabase {
         }));
     }
 
+    getMessageJumpWindow(chatId: number, clientMsgId: string): MessageJumpWindowResponse {
+        if (!Number.isInteger(chatId) || chatId <= 0 || typeof clientMsgId !== 'string' || clientMsgId.length === 0) {
+            throw new Error('Invalid message jump request');
+        }
+
+        const loadWindow = this.db.transaction((): MessageJumpWindowResponse => {
+            const target = this.db.prepare(`
+                SELECT rowid, timestamp
+                FROM messages
+                WHERE chat_id = ? AND client_msg_id = ?
+                LIMIT 1
+            `).get(chatId, clientMsgId) as { rowid: number; timestamp: string } | undefined;
+
+            if (!target) {
+                return { status: 'not_found', messages: [], hasMoreOlder: false };
+            }
+
+            const newerCount = (this.db.prepare(`
+                SELECT COUNT(*) AS count
+                FROM messages
+                WHERE chat_id = ?
+                  AND (
+                    timestamp > ?
+                    OR (timestamp = ? AND rowid > ?)
+                  )
+            `).get(chatId, target.timestamp, target.timestamp, target.rowid) as { count: number }).count;
+
+            const requiredCount = newerCount + 1;
+            if (requiredCount > MAX_MESSAGE_JUMP_WINDOW_SIZE) {
+                return { status: 'too_deep', messages: [], hasMoreOlder: true };
+            }
+
+            const limit = Math.min(
+                MAX_MESSAGE_JUMP_WINDOW_SIZE,
+                requiredCount + MESSAGE_JUMP_CONTEXT_SIZE,
+            );
+            const rows = this.db.prepare(`
+                SELECT * FROM (
+                    SELECT
+                        m.*,
+                        u.username AS sender_username
+                    FROM messages m
+                    JOIN chats c ON c.id = m.chat_id
+                    LEFT JOIN users u
+                      ON m.sender_peer_id = u.peer_id
+                     AND u.network_mode = c.network_mode
+                    WHERE m.chat_id = ?
+                    ORDER BY m.timestamp DESC, m.rowid DESC
+                    LIMIT ?
+                ) AS jump_window
+                ORDER BY timestamp ASC
+            `).all(chatId, limit) as any[];
+
+            const total = (this.db.prepare(
+                'SELECT COUNT(*) AS count FROM messages WHERE chat_id = ?'
+            ).get(chatId) as { count: number }).count;
+
+            return {
+                status: 'loaded',
+                messages: rows.map((row) => ({
+                    ...row,
+                    timestamp: new Date(row.timestamp),
+                    event_timestamp: row.event_timestamp ? new Date(row.event_timestamp) : null,
+                    created_at: new Date(row.created_at),
+                    sender_username: row.sender_username || undefined,
+                })),
+                hasMoreOlder: total > rows.length,
+            };
+        });
+
+        return loadWindow();
+    }
+
+    getMessagePreviewByClientMsgId(chatId: number, clientMsgId: string): {
+        senderPeerId: string;
+        senderUsername: string | undefined;
+        content: string;
+        messageType: 'text' | 'file' | 'image' | 'system';
+        fileName: string | undefined;
+    } | null {
+        const stmt = this.db.prepare(`
+            SELECT m.sender_peer_id, m.content, m.message_type, m.file_name, u.username AS sender_username
+            FROM messages m
+            JOIN chats c ON c.id = m.chat_id
+            LEFT JOIN users u ON m.sender_peer_id = u.peer_id AND u.network_mode = c.network_mode
+            WHERE m.chat_id = ? AND m.client_msg_id = ?
+            LIMIT 1
+        `);
+        const row = stmt.get(chatId, clientMsgId) as any;
+        if (!row) return null;
+        return {
+            senderPeerId: row.sender_peer_id,
+            senderUsername: row.sender_username || undefined,
+            content: row.content,
+            messageType: row.message_type,
+            fileName: row.file_name || undefined,
+        };
+    }
+
+    // Pin or unpin a message
+    setMessagePinned(chatId: number, clientMsgId: string, pinned: boolean): boolean {
+        const tx = this.db.transaction((): boolean => {
+            this.db.prepare(
+                'UPDATE messages SET pinned_at = NULL WHERE chat_id = ? AND pinned_at IS NOT NULL'
+            ).run(chatId);
+            if (!pinned) return true;
+            const result = this.db.prepare(
+                'UPDATE messages SET pinned_at = ? WHERE chat_id = ? AND client_msg_id = ?'
+            ).run(Date.now(), chatId, clientMsgId);
+            return (result.changes ?? 0) > 0;
+        });
+        return tx();
+    }
+
+    /** The single pinned message for a chat (local-only), or null. */
+    getPinnedMessage(chatId: number): PinnedMessagePreview | null {
+        const stmt = this.db.prepare(`
+            SELECT m.client_msg_id, m.sender_peer_id, m.content, m.message_type, m.file_name,
+                   u.username AS sender_username
+            FROM messages m
+            JOIN chats c ON c.id = m.chat_id
+            LEFT JOIN users u ON m.sender_peer_id = u.peer_id AND u.network_mode = c.network_mode
+            WHERE m.chat_id = ? AND m.pinned_at IS NOT NULL
+            ORDER BY m.pinned_at DESC
+            LIMIT 1
+        `);
+        const row = stmt.get(chatId) as any;
+        if (!row || !row.client_msg_id) return null;
+        return {
+            clientMsgId: row.client_msg_id,
+            senderPeerId: row.sender_peer_id,
+            senderUsername: row.sender_username || undefined,
+            content: row.content,
+            messageType: row.message_type,
+            fileName: row.file_name || undefined,
+        };
+    }
+
     getLatestMessageForChat(chatId: number): Message | null {
         const stmt = this.db.prepare(`
             SELECT * FROM messages 
@@ -1979,43 +3332,243 @@ export class ChatDatabase {
         };
     }
 
-    searchMessages(query: string, chatId?: number): Message[] {
-        let stmt: Database.Statement;
-        let params: any[];
+    /**
+     * Conversation search, scoped to one chat. Matches message text + filenames,
+     * excludes system messages, newest-first. Two query paths by length:
+     *   - >= 3 chars -> FTS5 trigram MATCH (indexed substring search) as an
+     *     indexed pre-filter, refined by the type-scoped LIKE below.
+     *   - 1-2 chars  -> type-scoped LIKE over the single chat (trigram can't
+     *     index <3-char terms); bounded to one chat_id so the scan stays cheap.
+     *
+     * Column scope: TEXT messages match on `content`; FILE/IMAGE messages match
+     * on `file_name` only (their `content` is the synthetic "name (size bytes)"
+     * string, outside the agreed text+filename scope).
+     *
+     * Pagination is **keyset** on (timestamp, rowid), not OFFSET: a message
+     * deleted mid-search can't shift later pages and skip a match. `snapshotMaxRowid`
+     * additionally freezes the searchable universe (and the total) for the life
+     * of one query so arriving messages don't inflate the count.
+     */
+    searchChatMessages(
+        chatId: number,
+        rawQuery: string,
+        options?: {
+            limit?: number;
+            snapshotMaxRowid?: number;
+            cursor?: ChatMessageSearchCursor | null;
+        },
+    ): ChatMessageSearchResponse {
+        const empty: ChatMessageSearchResponse = {
+            results: [], total: 0, snapshotMaxRowid: 0, nextCursor: null,
+        };
 
-        if (chatId) {
-            stmt = this.db.prepare(`
-                SELECT m.* FROM messages m
-                JOIN chats c ON c.id = m.chat_id
-                WHERE m.chat_id = ? AND m.content LIKE ? AND c.network_mode = ?
-                ORDER BY timestamp DESC 
-                LIMIT 100
-            `);
-            params = [chatId, `%${query}%`, this.getActiveNetworkMode()];
-        } else {
-            stmt = this.db.prepare(`
-                SELECT m.* FROM messages m
-                JOIN chats c ON c.id = m.chat_id
-                WHERE m.content LIKE ? AND c.network_mode = ?
-                ORDER BY timestamp DESC 
-                LIMIT 100
-            `);
-            params = [`%${query}%`, this.getActiveNetworkMode()];
+        const query = (rawQuery ?? '').trim().slice(0, MAX_SEARCH_QUERY_LENGTH);
+        if (!Number.isInteger(chatId) || chatId <= 0 || query.length === 0) {
+            return empty;
         }
 
-        const rows = stmt.all(...params) as any[];
-        return rows.map(row => ({
-            ...row,
-            timestamp: new Date(row.timestamp),
-            event_timestamp: row.event_timestamp ? new Date(row.event_timestamp) : null,
-            created_at: new Date(row.created_at)
+        const rawLimit = options?.limit;
+        const limit = Number.isFinite(rawLimit)
+            ? Math.min(Math.max(Math.trunc(rawLimit as number), 1), MAX_SEARCH_PAGE_SIZE)
+            : DEFAULT_SEARCH_PAGE_SIZE;
+
+        // Stable snapshot: capture MAX(rowid) once per query and reuse across pages.
+        let snapshotMaxRowid =
+            Number.isFinite(options?.snapshotMaxRowid) && (options!.snapshotMaxRowid as number) > 0
+                ? Math.trunc(options!.snapshotMaxRowid as number)
+                : 0;
+        if (snapshotMaxRowid <= 0) {
+            const row = this.db
+                .prepare(`SELECT MAX(rowid) AS maxRowid FROM messages WHERE chat_id = ?`)
+                .get(chatId) as { maxRowid: number | null } | undefined;
+            snapshotMaxRowid = row?.maxRowid ?? 0;
+        }
+        if (snapshotMaxRowid <= 0) {
+            return empty;
+        }
+
+        const cursor = options?.cursor ?? null;
+        const hasCursor = !!cursor
+            && Number.isFinite(cursor.timestamp)
+            && Number.isInteger(cursor.rowid);
+
+        const useFts = query.length >= 3;
+        const likeExpr = `%${escapeLikePattern(query)}%`;
+
+        // text -> content; file/image -> file_name only.
+        const typeScoped = `(
+            (m.message_type = 'text' AND m.content LIKE ? ESCAPE '\\')
+            OR (m.message_type IN ('file', 'image')
+                AND m.file_name IS NOT NULL
+                AND m.file_name LIKE ? ESCAPE '\\')
+        )`;
+
+        // FTS path adds an indexed trigram MATCH as a pre-filter; the quoted
+        // term keeps special chars from altering the FTS grammar.
+        const source = useFts
+            ? `FROM messages_fts JOIN messages m ON m.rowid = messages_fts.rowid
+               WHERE messages_fts MATCH ? AND`
+            : `FROM messages m WHERE`;
+        const matchParam = useFts ? [`"${query.replace(/"/g, '""')}"`] : [];
+        const scopeParams = [chatId, snapshotMaxRowid, likeExpr, likeExpr];
+
+        const cursorClause = hasCursor
+            ? `AND (m.timestamp < ? OR (m.timestamp = ? AND m.rowid < ?))`
+            : '';
+        const cursorIso = hasCursor ? new Date(cursor!.timestamp).toISOString() : null;
+        const cursorParams = hasCursor ? [cursorIso, cursorIso, cursor!.rowid] : [];
+
+        const rows = this.db.prepare(`
+            SELECT m.id, m.client_msg_id, m.content, m.file_name, m.message_type,
+                   m.sender_peer_id, m.timestamp, m.rowid AS rowid
+            ${source} m.chat_id = ?
+                  AND m.message_type != 'system'
+                  AND m.rowid <= ?
+                  AND ${typeScoped}
+                  ${cursorClause}
+            ORDER BY m.timestamp DESC, m.rowid DESC
+            LIMIT ?
+        `).all(...matchParam, ...scopeParams, ...cursorParams, limit) as any[];
+
+        const total = (this.db.prepare(`
+            SELECT COUNT(*) AS total
+            ${source} m.chat_id = ?
+                  AND m.message_type != 'system'
+                  AND m.rowid <= ?
+                  AND ${typeScoped}
+        `).get(...matchParam, ...scopeParams) as { total: number }).total;
+
+        const results: ChatMessageSearchResult[] = rows.map((row) => ({
+            id: row.id as string,
+            clientMsgId: (row.client_msg_id ?? null) as string | null,
+            content: row.content as string,
+            fileName: (row.file_name ?? null) as string | null,
+            messageType: row.message_type as ChatMessageSearchResult['messageType'],
+            senderPeerId: row.sender_peer_id as string,
+            timestamp: new Date(row.timestamp).getTime(),
         }));
+
+        const last = rows[rows.length - 1];
+        const nextCursor: ChatMessageSearchCursor | null =
+            rows.length === limit && last
+                ? { timestamp: new Date(last.timestamp).getTime(), rowid: last.rowid as number }
+                : null;
+
+        return { results, total, snapshotMaxRowid, nextCursor };
     }
 
     // Utility methods
     deleteMessage(messageId: number): void {
         const stmt = this.db.prepare('DELETE FROM messages WHERE id = ?');
         stmt.run(messageId);
+    }
+
+    deleteMessagesForMe(chatId: number, messageIds: string[]): DeleteMessagesForMeResult {
+        if (!Number.isInteger(chatId) || chatId <= 0) {
+            throw new Error('Invalid chat id');
+        }
+        if (messageIds.length === 0) {
+            throw new Error('Select at least one message to delete');
+        }
+        if (messageIds.some((messageId) => typeof messageId !== 'string' || messageId.length === 0)) {
+            throw new Error('Invalid message id');
+        }
+        if (new Set(messageIds).size !== messageIds.length) {
+            throw new Error('Duplicate message ids are not allowed');
+        }
+
+        const chunkSize = 500;
+        const transaction = this.db.transaction((): DeleteMessagesForMeResult => {
+            const selectedRows: Array<{
+                id: string;
+                message_type: Message['message_type'];
+                local_send_state: Message['local_send_state'];
+                transfer_status: FileTransferStatus | null;
+            }> = [];
+
+            for (let start = 0; start < messageIds.length; start += chunkSize) {
+                const ids = messageIds.slice(start, start + chunkSize);
+                const placeholders = ids.map(() => '?').join(',');
+                const rows = this.db.prepare(`
+                    SELECT id, message_type, local_send_state, transfer_status
+                    FROM messages
+                    WHERE chat_id = ? AND id IN (${placeholders})
+                `).all(chatId, ...ids) as typeof selectedRows;
+                selectedRows.push(...rows);
+            }
+
+            if (selectedRows.length !== messageIds.length) {
+                throw new Error('One or more selected messages no longer exist in this chat');
+            }
+
+            const hasIneligibleRow = selectedRows.some((row) =>
+                row.message_type === 'system'
+                || (
+                    row.local_send_state !== null
+                    && row.local_send_state !== 'failed'
+                )
+                || (
+                    (row.message_type === 'file' || row.message_type === 'image')
+                    && !['completed', 'partially_completed', 'failed', 'rejected', 'cancelled'].includes(row.transfer_status ?? '')
+                )
+            );
+            if (hasIneligibleRow) {
+                throw new Error('One or more selected messages cannot be deleted');
+            }
+
+            for (let start = 0; start < messageIds.length; start += chunkSize) {
+                const ids = messageIds.slice(start, start + chunkSize);
+                const placeholders = ids.map(() => '?').join(',');
+                this.db.prepare(`
+                    DELETE FROM pending_offline_sends
+                    WHERE message_id IN (${placeholders})
+                `).run(...ids);
+                this.db.prepare(`
+                    DELETE FROM pending_group_offline_backups
+                    WHERE message_id IN (${placeholders})
+                `).run(...ids);
+            }
+
+            let deletedCount = 0;
+            for (let start = 0; start < messageIds.length; start += chunkSize) {
+                const ids = messageIds.slice(start, start + chunkSize);
+                const placeholders = ids.map(() => '?').join(',');
+                const result = this.db.prepare(`
+                    DELETE FROM messages
+                    WHERE chat_id = ? AND id IN (${placeholders})
+                `).run(chatId, ...ids);
+                deletedCount += result.changes ?? 0;
+            }
+
+            if (deletedCount !== messageIds.length) {
+                throw new Error('Message deletion did not complete atomically');
+            }
+
+            const latestRow = this.db.prepare(`
+                SELECT content, timestamp, client_msg_id
+                FROM messages
+                WHERE chat_id = ? AND local_send_state IS NULL
+                ORDER BY timestamp DESC, created_at DESC, id DESC
+                LIMIT 1
+            `).get(chatId) as {
+                content: string;
+                timestamp: string | number;
+                client_msg_id: string | null;
+            } | undefined;
+
+            return {
+                deletedCount,
+                latestRemaining: latestRow
+                    ? {
+                        content: latestRow.content,
+                        timestamp: new Date(latestRow.timestamp),
+                        clientMsgId: latestRow.client_msg_id,
+                    }
+                    : null,
+            };
+        });
+
+        return transaction();
     }
 
     deleteAllMessagesForChat(chatId: number): void {
@@ -2223,7 +3776,7 @@ export class ChatDatabase {
     private reconnect(): void {
         try {
             this.db.close();
-        } catch (error) {
+        } catch {
             // Ignore close errors
         }
         try {
@@ -2793,6 +4346,26 @@ export class ChatDatabase {
                 updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
             WHERE id = ?
         `).run(groupStatus, chatId);
+    }
+
+    setLastKnownActiveCall(chatId: number, callId: string, seenAt: number): void {
+        this.db.prepare(`
+            UPDATE chats
+            SET last_known_active_call_id = ?,
+                last_known_active_call_seen_at = ?,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            WHERE id = ?
+        `).run(callId, seenAt, chatId);
+    }
+
+    clearLastKnownActiveCall(chatId: number): void {
+        this.db.prepare(`
+            UPDATE chats
+            SET last_known_active_call_id = NULL,
+                last_known_active_call_seen_at = NULL,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            WHERE id = ?
+        `).run(chatId);
     }
 
     transitionChatGroupStatus(chatId: number, nextStatus: GroupStatus, reason: string): void {

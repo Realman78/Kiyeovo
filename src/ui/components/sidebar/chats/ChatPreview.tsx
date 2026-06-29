@@ -1,11 +1,13 @@
-import type { FC } from "react";
+import { useEffect, useState, type FC } from "react";
 import type { Chat } from "../../../state/slices/chatSlice";
-import { formatTimestampToHourMinute } from "../../../utils/dateUtils";
-import { AlertCircle, Ban, BellOff, Paperclip, Users } from "lucide-react";
+import { formatRelativeTimestamp } from "../../../utils/dateUtils";
+import { useHour12 } from "../../../hooks/useHour12";
+import { AlertCircle, Ban, BellOff, Paperclip, Phone, Users } from "lucide-react";
 import { useSelector } from "react-redux";
 import type { RootState } from "../../../state/store";
 import { getGroupCreatorLinkState } from "../../../utils/groupCreatorLinkHealth";
 import { getGroupStatusMessage } from "../../../utils/groupStatusMessages";
+import { groupCallService } from "../../../lib/call/groupCallService";
 
 type ChatPreviewProps = {
     chat: Chat;
@@ -15,6 +17,8 @@ type ChatPreviewProps = {
 export const ChatPreview: FC<ChatPreviewProps> = ({ chat, onSelectChat, selectedChatId }) => {
     const chats = useSelector((state: RootState) => state.chat.chats);
     const myPeerId = useSelector((state: RootState) => state.user.peerId);
+    const hour12 = useHour12();
+    const [groupCallSnapshot, setGroupCallSnapshot] = useState(() => groupCallService.getSnapshot());
     const creatorLinkState = getGroupCreatorLinkState(chat, chats, myPeerId);
     const isAwaitingActivation = chat.type === 'group' && chat.groupStatus === 'awaiting_activation';
     const isArchivedGroup = chat.type === 'group' && chat.groupStatus === 'removed';
@@ -23,8 +27,21 @@ export const ChatPreview: FC<ChatPreviewProps> = ({ chat, onSelectChat, selected
     const previewText = creatorLinkState.broken
         ? 'Creator link is broken. Group updates are paused.'
         : groupStatusMessage
-        ? groupStatusMessage
-        : (chat.lastMessage || "SYSTEM: No messages yet");
+            ? groupStatusMessage
+            : (chat.lastMessage || "SYSTEM: No messages yet");
+    const isInThisGroupCall = chat.type === 'group'
+        && Boolean(chat.groupId)
+        && groupCallSnapshot.groupId === chat.groupId
+        && groupCallSnapshot.state !== 'idle'
+        && groupCallSnapshot.state !== 'ended';
+
+    useEffect(() => {
+        return groupCallService.subscribe((event) => {
+            if (event.type === 'state') {
+                setGroupCallSnapshot(event.snapshot);
+            }
+        });
+    }, []);
 
     return (
         <button
@@ -43,7 +60,7 @@ export const ChatPreview: FC<ChatPreviewProps> = ({ chat, onSelectChat, selected
                         )}
                         {isDisbandedGroup && (
                             <span className="text-[10px] px-1.5 py-0.5 rounded bg-destructive/15 text-destructive uppercase tracking-wide shrink-0">
-                                Disbanded
+                                Deactivated
                             </span>
                         )}
                         {!isDisbandedGroup && creatorLinkState.broken && (
@@ -59,7 +76,7 @@ export const ChatPreview: FC<ChatPreviewProps> = ({ chat, onSelectChat, selected
                         )}
                     </span>
                     <span className="text-xs text-muted-foreground shrink-0">
-                        {formatTimestampToHourMinute(chat.lastMessageTimestamp)}
+                        {formatRelativeTimestamp(chat.lastMessageTimestamp, hour12)}
                     </span>
                 </div>
                 <div className="flex items-center justify-between gap-2">
@@ -71,7 +88,16 @@ export const ChatPreview: FC<ChatPreviewProps> = ({ chat, onSelectChat, selected
                             <BellOff className="w-4 h-4 text-muted-foreground" />
                         )}
                         {chat.hasPendingFile && (
-                            <Paperclip className="w-4 h-4 text-primary"/>
+                            <Paperclip className="w-4 h-4 text-primary" />
+                        )}
+                        {chat.lastKnownActiveCallId && (
+
+                            <span
+                                title={isInThisGroupCall ? "You are in this group's call" : "Group call may be active"}
+                                className={isInThisGroupCall ? `inline-flex items-center gap-1 rounded-full border border-emerald-600/25 bg-emerald-600/10 px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-wide`: ''}
+                            >
+                                <Phone className={`w-3 h-3 text-emerald-600 bg-emerald-600/10  ${isInThisGroupCall ? 'pulse-online' : ''}`} />
+                            </span>
                         )}
                         {chat.isFetchingOffline && !chat.blocked && (
                             <div className="w-4 h-4 border-2 border-muted-foreground border-t-transparent rounded-full animate-spin" title="Checking for offline messages..." />

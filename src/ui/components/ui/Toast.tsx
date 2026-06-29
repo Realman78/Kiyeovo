@@ -9,7 +9,7 @@ const ToastViewport = React.forwardRef<
   React.ComponentPropsWithoutRef<typeof ToastPrimitives.Viewport>
 >(({ className = "", ...props }, ref) => {
   const classes = [
-    "fixed top-0 right-0 z-[130] flex max-h-screen w-full flex-col-reverse p-4 sm:top-auto sm:right-0 sm:bottom-0 sm:flex-col md:max-w-[420px]",
+    "fixed top-0 right-0 z-[130] flex max-h-screen w-full flex-col-reverse items-end p-4 sm:top-auto sm:right-0 sm:bottom-0 sm:flex-col md:max-w-[550px]",
     className,
   ].filter(Boolean).join(" ");
 
@@ -83,7 +83,7 @@ const ToastAction = React.forwardRef<
   React.ComponentPropsWithoutRef<typeof ToastPrimitives.Action>
 >(({ className = "", ...props }, ref) => {
   const classes = [
-    "inline-flex h-8 shrink-0 items-center justify-center rounded-md border border-border bg-transparent px-3 text-sm font-medium ring-offset-background transition-colors hover:bg-muted focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none disabled:opacity-50",
+    "inline-flex h-8 shrink-0 items-center cursor-pointer justify-center rounded-md border border-border bg-transparent px-3 text-sm font-medium ring-offset-background transition-colors hover:bg-muted focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50",
     className,
   ].filter(Boolean).join(" ");
 
@@ -102,7 +102,7 @@ const ToastClose = React.forwardRef<
   React.ComponentPropsWithoutRef<typeof ToastPrimitives.Close>
 >(({ className = "", ...props }, ref) => {
   const classes = [
-    "absolute right-2 top-2 rounded-md p-1 text-foreground/50 opacity-0 transition-opacity hover:text-foreground focus:opacity-100 focus:outline-none focus:ring-2 group-hover:opacity-100",
+    "absolute right-2 top-2 rounded-md p-1 text-foreground/50 opacity-0 transition-opacity hover:text-foreground focus:opacity-100 focus:outline-none focus-visible:ring-2 group-hover:opacity-100",
     className,
   ].filter(Boolean).join(" ");
 

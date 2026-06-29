@@ -1,9 +1,6 @@
 import { useEffect, useState, useRef, type FC } from "react";
-import { Logo } from "../../icons/Logo";
 import { Plus, MessageSquarePlus, UserPlus, Users } from "lucide-react";
 import { Button } from "../../ui/Button";
-import ConnectionStatusDialog from "./ConnectionStatusDialog";
-import { KiyeovoDialog } from "./KiyeovoDialog";
 import { useDispatch, useSelector } from "react-redux";
 import { setConnected, setRegistered, setRegistrationInProgress, setUsername } from "../../../state/slices/userSlice";
 import NewConversationDialog from "./NewConversationDialog";
@@ -13,24 +10,32 @@ import { addPendingKeyExchange, removeContactAttempt, removePendingKeyExchange, 
 import type { RootState } from "../../../state/store";
 import { DropdownMenu, DropdownMenuItem } from "../../ui/DropdownMenu";
 import { useToast } from "../../ui/use-toast";
+import { useOfflineSendWarning } from "../../../hooks/useOfflineSendWarning";
 import { errStr } from '../../../../core/utils/general-error';
 import { UNEXPECTED_ERROR } from "../../../constants";
+import { OPEN_SIDEBAR_ACTION_EVENT, type SidebarAction } from "../../../utils/uiSignals";
+import { useConnectivityGuidance } from "../../../hooks/useConnectivityGuidance";
 
 type SidebarHeaderProps = {
+    statusSuffix: string;
     collapsed?: boolean;
+    onOpenBootstrapSetup: () => void;
 };
 
-export const SidebarHeader: FC<SidebarHeaderProps> = ({ collapsed = false }) => {
-    const [dhtDialogOpen, setDhtDialogOpen] = useState(false);
-    const [kiyeovoDialogOpen, setKiyeovoDialogOpen] = useState(false);
+export const SidebarHeader: FC<SidebarHeaderProps> = ({
+    collapsed = false,
+    statusSuffix,
+    onOpenBootstrapSetup,
+}) => {
     const [isDHTConnected, setIsDHTConnected] = useState<boolean | null>(null);
     const [newConversationDialogOpen, setNewConversationDialogOpen] = useState(false);
     const [importTrustedUserDialogOpen, setImportTrustedUserDialogOpen] = useState(false);
     const [newGroupDialogOpen, setNewGroupDialogOpen] = useState(false);
     const [dropdownOpen, setDropdownOpen] = useState(false);
     const [error, setError] = useState<string | undefined>(undefined);
-    const [isTorEnabled, setIsTorEnabled] = useState<boolean>(false);
     const isConnected = useSelector((state: RootState) => state.user.connected);
+    // Status reflects real DHT-peer reachability (liveness)
+    const statusText = isDHTConnected === null ? 'Connecting...' : isDHTConnected ? `Connected${statusSuffix}` : 'Offline';
     const isRegistered = useSelector((state: RootState) => state.user.registered);
     const registrationInProgress = useSelector((state: RootState) => state.user.registrationInProgress);
     const chats = useSelector((state: RootState) => state.chat.chats);
@@ -40,6 +45,8 @@ export const SidebarHeader: FC<SidebarHeaderProps> = ({ collapsed = false }) => 
 
     const dispatch = useDispatch();
     const { toast } = useToast();
+    const warnOfflineSend = useOfflineSendWarning();
+    const { showMessageFailureGuidance } = useConnectivityGuidance();
 
     // Ref to track latest newConversationDialogOpen value without recreating listeners
     const newConversationDialogOpenRef = useRef(newConversationDialogOpen);
@@ -88,10 +95,16 @@ export const SidebarHeader: FC<SidebarHeaderProps> = ({ collapsed = false }) => 
             const result = await window.kiyeovoAPI.sendMessage(peerIdOrUsername, message);
 
             if (result.success) {
+                warnOfflineSend();
                 setNewConversationDialogOpen(false);
                 dispatch(setActivePendingKeyExchange(null));
             } else {
-                setError(result.error || 'Failed to send message');
+                const guidanceShown = result.connectivityFailure
+                    ? showMessageFailureGuidance(result.connectivityFailure)
+                    : false;
+                if (!guidanceShown) {
+                    setError(result.error || 'Failed to send message');
+                }
             }
         } catch (err) {
             console.error('Failed to send message:', err);
@@ -153,6 +166,8 @@ export const SidebarHeader: FC<SidebarHeaderProps> = ({ collapsed = false }) => 
                     if (result.success && result.username) {
                         dispatch(setUsername(result.username));
                         dispatch(setRegistered(true));
+                    } else if (!isDisposed && result.error) {
+                        toast.error(result.error, 'Username registration failed');
                     }
                 } finally {
                     dispatch(setRegistrationInProgress({ inProgress: false, pendingUsername: '' }));
@@ -233,29 +248,6 @@ export const SidebarHeader: FC<SidebarHeaderProps> = ({ collapsed = false }) => 
         }
     }, [isConnected]);
 
-    useEffect(() => {
-        const loadTorSettings = async () => {
-            try {
-                const result = await window.kiyeovoAPI.getTorSettings();
-                if (result.success && result.settings) {
-                    setIsTorEnabled(result.settings.enabled === 'true');
-                }
-            } catch (error) {
-                console.error('Failed to load Tor settings:', error);
-            }
-        };
-        void loadTorSettings();
-    }, []);
-
-
-    const handleShowDhtDialog = () => {
-        setDhtDialogOpen(true);
-    }
-
-    const handleShowKiyeovoDialog = () => {
-        setKiyeovoDialogOpen(true);
-    }
-
     const handleShowNewConversationDialog = () => {
         if (!isRegistered || registrationInProgress) {
             toast.error('Register before starting a new conversation.');
@@ -277,6 +269,27 @@ export const SidebarHeader: FC<SidebarHeaderProps> = ({ collapsed = false }) => 
         setNewGroupDialogOpen(true);
         setDropdownOpen(false);
     }
+
+    // Allow these actions to be triggered from elsewhere in the tree
+    useEffect(() => {
+        const handler = (event: Event) => {
+            const action = (event as CustomEvent<SidebarAction>).detail;
+            if (action === 'new-conversation') {
+                if (!isRegisteredRef.current || registrationInProgressRef.current) {
+                    toast.error('Register before starting a new conversation.');
+                    return;
+                }
+                setError(undefined);
+                setNewConversationDialogOpen(true);
+            } else if (action === 'new-group') {
+                setNewGroupDialogOpen(true);
+            } else if (action === 'import-trusted-user') {
+                setImportTrustedUserDialogOpen(true);
+            }
+        };
+        window.addEventListener(OPEN_SIDEBAR_ACTION_EVENT, handler);
+        return () => window.removeEventListener(OPEN_SIDEBAR_ACTION_EVENT, handler);
+    }, [toast]);
 
     const handleGroupCreated = async (groupId: string, chatId: number, inviteDeliveries: GroupInviteDeliveryView[]) => {
         try {
@@ -358,25 +371,24 @@ export const SidebarHeader: FC<SidebarHeaderProps> = ({ collapsed = false }) => 
     return <>
         <div className={collapsed ? "w-full p-3 flex flex-col items-center gap-3" : "w-full p-4 flex"}>
             <div className={collapsed ? "flex flex-col items-center gap-3" : "w-full flex items-center justify-between"}>
-                <div className={`w-10 h-10 cursor-pointer rounded-full border ${isTorEnabled ? "border-[#5a3184] glow-border-tor" : "border-primary/50 glow-border"} flex items-center justify-center`} onClick={handleShowKiyeovoDialog}>
-                    <Logo version="2" />
-                </div>
                 {collapsed ? (
                     <button
-                        onClick={handleShowDhtDialog}
+                        onClick={onOpenBootstrapSetup}
                         className="flex cursor-pointer items-center justify-center w-8 h-8 rounded-md transition-colors hover:bg-sidebar-accent"
-                        title={isDHTConnected === null ? "Connecting..." : isDHTConnected ? `Connected${isTorEnabled ? ' (tor)' : ''}` : "Offline"}
-                        aria-label="DHT status"
+                        title={statusText}
+                        aria-label={`${statusText}. Open Bootstrap setup`}
                     >
                         <span className={`w-2.5 h-2.5 rounded-full ${isDHTConnected === null ? "bg-muted-foreground" : isDHTConnected ? "bg-success pulse-online" : "bg-destructive"}`} />
                     </button>
                 ) : (
                     <button
-                        onClick={handleShowDhtDialog}
+                        onClick={onOpenBootstrapSetup}
                         className={`flex cursor-pointer items-center gap-2 px-2 py-1 rounded-md transition-colors hover:bg-sidebar-accent group ${isDHTConnected === null ? "text-muted-foreground" : isDHTConnected ? "text-success" : "text-destructive"}`}
+                        aria-label={`${statusText}. Open Bootstrap setup`}
+                        title="Open setup"
                     >
                         <span className="font-mono text-xs uppercase tracking-wider">
-                            {isDHTConnected === null ? "Connecting..." : isDHTConnected ? `Connected${isTorEnabled ? ' (tor)' : ''}` : "Offline"}
+                            {statusText}
                         </span>
                         <span className={`w-2 h-2 rounded-full mb-0.5 ${isDHTConnected === null ? "bg-muted-foreground" : isDHTConnected ? "bg-success pulse-online" : "bg-destructive"}`} />
                     </button>
@@ -405,7 +417,7 @@ export const SidebarHeader: FC<SidebarHeaderProps> = ({ collapsed = false }) => 
                         icon={<UserPlus className="w-4 h-4" />}
                         onClick={handleShowImportTrustedUserDialog}
                     >
-                        Import Trusted User
+                        Add user from file
                     </DropdownMenuItem>
                     <DropdownMenuItem
                         icon={<Users className="w-4 h-4" />}
@@ -416,8 +428,6 @@ export const SidebarHeader: FC<SidebarHeaderProps> = ({ collapsed = false }) => 
                 </DropdownMenu>
             </div>
         </div>
-        <ConnectionStatusDialog open={dhtDialogOpen} onOpenChange={setDhtDialogOpen} isConnected={isDHTConnected} />
-        <KiyeovoDialog open={kiyeovoDialogOpen} onOpenChange={setKiyeovoDialogOpen} />
         <NewConversationDialog
             open={newConversationDialogOpen}
             onOpenChange={(open) => {

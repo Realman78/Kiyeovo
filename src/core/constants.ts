@@ -15,6 +15,7 @@ export const NETWORK_MODE_ONBOARDED_SETTING_KEY = 'network_mode_onboarded';
 export const FAST_RELAY_MULTIADDRS_SETTING_KEY = 'fast_relay_multiaddrs';
 export const FAST_RELAY_MULTIADDRS_INITIALIZED_SETTING_KEY = 'fast_relay_multiaddrs_initialized';
 export const WEBRTC_ICE_SERVERS_SETTING_KEY = 'webrtc_ice_servers';
+export const FAST_MISSING_ICE_WARNING_ACKNOWLEDGED_SETTING_KEY = 'setup_missing_ice_warning_acknowledged_fast';
 
 export type ModeNamespaceKind =
   | 'offline'
@@ -99,6 +100,10 @@ export function isNetworkMode(value: unknown): value is NetworkMode {
   return value === NETWORK_MODES.FAST || value === NETWORK_MODES.ANONYMOUS;
 }
 
+export function getInitialSetupStatusSettingKey(mode: NetworkMode): string {
+  return `initial_setup_status_${mode}_v1`;
+}
+
 export function buildModeDhtKey(mode: NetworkMode, kind: ModeNamespaceKind, ...parts: Array<string | number>): string {
   const namespace = getNetworkModeConfig(mode).dhtNamespaces[kind];
   const suffix = parts
@@ -135,6 +140,9 @@ export const DAY = 24 * HOUR;
 export const BUCKET_NUDGE_COOLDOWN_MS = 5 * SECOND;
 export const BUCKET_NUDGE_DIAL_TIMEOUT_MS = 5 * SECOND;
 export const BUCKET_NUDGE_FETCH_DELAY_MS = 4 * SECOND;
+export const DIRECT_OFFLINE_REFETCH_DELAY_MS = 500;
+export const DIRECT_OFFLINE_INBOX_RECOVERY_COOLDOWN_MS = 5 * SECOND;
+export const DIRECT_OFFLINE_INBOX_RECOVERY_RECHECK_DELAY_MS = 5 * SECOND;
 export const BUCKET_NUDGE_RETRY_DELAY_MS = 30 * SECOND;
 
 /**
@@ -163,6 +171,7 @@ export const NETWORK_CHECK_DELAY = 3 * SECOND;      // 3 seconds
 export const MESSAGE_TIMEOUT = 10 * SECOND;         // 10 seconds
 export const MAX_KEY_EXCHANGE_AGE = 5 * MINUTE;     // 5 minutes
 export const KEY_EXCHANGE_MAX_FUTURE_SKEW_MS = 2 * MINUTE; // 2 minutes
+export const USERNAME_MAX_FUTURE_SKEW_MS = 2 * MINUTE;     // 2 minutes
 export const ROTATION_COOLDOWN = 30 * SECOND;       // 30 seconds - min time between rotations
 export const RECENT_KEY_EXCHANGE_ATTEMPTS_WINDOW = 5 * MINUTE; // 5 minutes
 /**
@@ -286,14 +295,23 @@ export const KEEP_ALIVE_INTERVAL = 90 * SECOND; // 90 seconds
 export const RELAY_KEEP_ALIVE_INTERVAL = KEEP_ALIVE_INTERVAL; // 90 seconds
 export const RELAY_KEEP_ALIVE_START_DELAY = 30 * SECOND; // 30 seconds
 export const RELAY_KEEP_ALIVE_PING_TIMEOUT = 10 * SECOND; // 10 seconds
+// After an OS resume, all connections (incl. the relay reservation) are torn down
+// and re-established. A send fired inside this window can otherwise burn its whole
+// dial budget on a not-yet-ready relay and get demoted to offline even though the
+// peer is online. Sends within RESUME_RELAY_GRACE_MS of a resume wait up to
+// RESUME_RELAY_READY_WAIT_MS (polling every RESUME_RELAY_READY_POLL_MS, after
+// nudging a refresh) for the relay reservation to return before attempting online.
+export const RESUME_RELAY_GRACE_MS = 30 * SECOND;
+export const RESUME_RELAY_READY_WAIT_MS = 12 * SECOND;
+export const RESUME_RELAY_READY_POLL_MS = 250; // 0.25 seconds
 export const OFFLINE_MESSAGE_LIMIT = 50; // 50 messages
 export const OFFLINE_MESSAGE_CHECK_INTERVAL = 5 * MINUTE; // 5 minutes
 export const KEY_ROTATION_TIMEOUT = 30 * SECOND; // 30 seconds
 export const PENDING_KEY_EXCHANGE_EXPIRATION = 5 * MINUTE; // 5 minutes
-export const FILE_ACCEPTANCE_TIMEOUT = 5 * MINUTE; // 5 minutes
 export const DATABASE_CLEANUP_INTERVAL = 30 * MINUTE; // 30 minutes
-export const MAX_MESSAGES_PER_STORE = 40; // Hard cap for one offline DHT store payload
+export const MAX_MESSAGES_PER_STORE = 41; // Hard cap for one offline DHT store payload (incl. ack reserve)
 export const OFFLINE_CONTROL_MESSAGE_RESERVE = 10; // Slots reserved for offline control traffic
+export const OFFLINE_ACK_RESERVE = 1; // Slot reserved for a standalone (superseding) offline ACK
 export const MESSAGE_TTL = 7 * DAY; // 7 days
 export const OFFLINE_MESSAGE_MAX_FUTURE_SKEW_MS = 2 * MINUTE; // 2 minutes
 export const OFFLINE_ACK_MAX_FUTURE_SKEW_MS = 10 * MINUTE; // 10 minutes
@@ -303,11 +321,10 @@ export const PROFILE_SCRYPT_N = 2 ** 17; // slightly less because of less sensit
 /**
  * Other
  */
-export const FILE_OFFER = 'file_offer';
-export const FILE_OFFER_RESPONSE = 'file_offer_response';
-export const FILE_TRANSFER_CONFIRM = 'file_transfer_confirm';
 export const CHUNK_SIZE = 32 * 1024; // 32KB
 export const DOWNLOADS_DIR = 'kiyeovo-downloads';
+export const UPLOADS_DIR = 'kiyeovo-uploads';
+export const UPLOADS_QUOTA_WARN_BYTES = 100 * 1024 * 1024; // 100MB
 export const MAX_FILE_MESSAGE_SIZE = 1 * 1024 * 1024; // 1MB for JSON overhead
 export const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB max file size
 export const MAX_COPY_ATTEMPTS = 10; // Max number of duplicate filename attempts
@@ -317,11 +334,23 @@ export const FILE_OFFER_RATE_LIMIT = 5; // Max file offers per peer in time wind
 export const FILE_OFFER_RATE_LIMIT_WINDOW = 1 * MINUTE; // 1 minute
 export const MAX_PENDING_FILES_PER_PEER = 5; // Max unanswered file offers per peer
 export const MAX_PENDING_FILES_TOTAL = 10; // Max unanswered file offers globally
-export const FILE_REJECTION_COUNTER_RESET_INTERVAL = 10 * MINUTE; // Reset rejection counters every 10 minutes
+export const MAX_ACTIVE_FILE_OFFERS_PER_CHAT = 5; // Sender cap: live served-file offers per chat (in-RAM registry)
+
+// Pull-transfer (1d) operational bounds.
+export const MAX_CONCURRENT_FILE_SERVES = 15; // Global concurrent serve leases (bound to 10MB MAX_FILE_SIZE → ~150MB RAM)
+export const MAX_CONCURRENT_FILE_SERVES_PER_PEER = 5; // …and per peer; matches MAX_ACTIVE_FILE_OFFERS_PER_CHAT so a peer can pull all their offers at once without a gratuitous busy
+export const MAX_PREAUTH_STREAMS_GLOBAL = 32; // Concurrent unauthenticated inbound pull streams, globally
+export const MAX_PREAUTH_STREAMS_PER_PEER = 2; // …and per peer, so one peer can't consume all handshake capacity
+export const FILE_PULL_FIRST_FRAME_TIMEOUT_FAST = 10 * SECOND; // Stream opened but no FilePullInit (fast mode)
+export const FILE_PULL_FIRST_FRAME_TIMEOUT_ANON = 30 * SECOND; // …anonymous mode (higher latency)
+export const FILE_PULL_AUTH_TIMEOUT_FAST = 10 * SECOND; // FilePullChallenge sent, awaiting FilePullAuth (fast mode)
+export const FILE_PULL_AUTH_TIMEOUT_ANON = 30 * SECOND; // …anonymous mode
+export const FILE_PULL_CONFIRM_TIMEOUT = 30 * SECOND; // Last chunk sent, awaiting FileTransferConfirm
+// Chunk idle (CHUNK_IDLE_TIMEOUT) and total-transfer (CHUNK_RECEIVE_TIMEOUT) bounds are reused.
 export const SILENT_REJECTION_THRESHOLD_GLOBAL = 20; // After N global rejections, stop responding (bandwidth optimization)
 export const SILENT_REJECTION_THRESHOLD_PER_PEER = 5; // After N rejections to same peer, stop responding (bandwidth optimization)
 export const CHATS_TO_CHECK_FOR_OFFLINE_MESSAGES = 10; // Max chats scanned per offline-message check pass
-export const MAX_MESSAGE_CONTENT_LENGTH = 1024; // Max direct/group message characters
+export const MAX_MESSAGE_CONTENT_LENGTH = 2048; // Max direct/group message characters
 
 /**
  * Group chat constants
@@ -363,3 +392,6 @@ export const GROUP_OFFLINE_MESSAGE_TTL_MS = MESSAGE_TTL;
 export const GROUP_MISSING_USED_UNTIL_SCAN_EPOCH_CAP = 10; // Max historical epochs scanned for missing used-until markers
 export const MAX_BOOTSTRAP_NODES_FAST = 3; // Target bootstrap connection count in fast mode
 export const MAX_BOOTSTRAP_NODES_TOR = 2; // Target bootstrap connection count in anonymous mode
+
+export const POST_RECONNECT_RECENT_ACTIVITY_WINDOW_MS = 15 * 60_000;
+export const POST_RECONNECT_RECENT_GROUP_CAP = 15;

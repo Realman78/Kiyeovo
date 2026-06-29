@@ -1,10 +1,10 @@
 import { ed25519 } from '@noble/curves/ed25519';
 import { xchacha20poly1305 } from '@noble/ciphers/chacha';
-import { gzip, gunzip } from 'zlib';
+import { gzip, gunzip, gzipSync } from 'zlib';
 import { promisify } from 'util';
 import type { QueryEvent } from '@libp2p/kad-dht';
 import type { ChatNode, GroupOfflineGapWarning, MessageReceivedEvent } from '../../types.js';
-import type { ChatDatabase, Chat } from '../../db/database.js';
+import type { ChatDatabase, Chat, User } from '../../db/database.js';
 import type { EncryptedUserIdentity } from '../../identity/encrypted-user-identity.js';
 import {
   CHATS_TO_CHECK_FOR_OFFLINE_MESSAGES,
@@ -26,6 +26,12 @@ import {
   type GroupOfflineStore,
   GroupMessageType,
 } from '../types.js';
+import { isGroupCallHintSystemPayload } from '../../lib/group-call-signaling.js';
+import { dispatchEnvelope, isValidCid } from '../../protocol/message-envelope.js';
+import type {
+  InboundApplicationMessageContext,
+  InboundApplicationMessageHandler,
+} from '../../protocol/application-message.js';
 import { toBase64Url } from '../../utils/miscellaneous.js';
 import { errStr, generalErrorHandler } from '../../utils/general-error.js';
 import { log } from '../../../shared/logger.js';
@@ -39,6 +45,12 @@ interface GroupOfflineManagerDeps {
   userIdentity: EncryptedUserIdentity;
   myPeerId: string;
   onMessageReceived: (data: MessageReceivedEvent) => void;
+  onApplicationMessage: InboundApplicationMessageHandler;
+  onGroupCallHint?: (data: { groupId: string; senderPeerId: string; timestamp: number }) => void | Promise<void>;
+  onOfflineInboxCapacityChanged?: (chatId: number) => void;
+  // Forces an immediate reconnect when a DHT write hits dead connections.
+  // Resolves true if a live DHT path exists afterwards.
+  requestReconnect?: () => Promise<boolean>;
 }
 
 interface GroupOfflineVersionMeta {
@@ -81,8 +93,17 @@ export interface GroupOfflineCheckResult {
   gapWarnings: GroupOfflineGapWarning[];
 }
 
+export interface GroupOfflineBucketUsage {
+  messageCountUsed: number;
+  messageCountLimit: number;
+  compressedBytesUsed: number;
+  compressedBytesLimit: number;
+  fullnessRatio: number;
+}
+
 export class GroupOfflineManager {
   private readonly deps: GroupOfflineManagerDeps;
+  private readonly networkMode: string;
   private readonly groupOfflineBucketPrefix: string;
   private readonly groupInfoVersionPrefix: string;
   private readonly bucketMutationQueues = new Map<string, Promise<void>>();
@@ -90,16 +111,77 @@ export class GroupOfflineManager {
   private readonly groupCheckInFlight = new Map<string, Promise<GroupChatCheckResult>>();
   private offlineCheckRunCounter = 0;
 
+  // Upper bound for a single group offline DHT op (put/get). Without it a stale
+  // or slow peer can keep a send stuck on "sending..." until the underlying
+  // query gives up on its own (~tens of seconds). A timeout here is not fatal:
+  // a connectivity-shaped failure triggers an immediate reconnect + one retry,
+  // so fast mode can run tighter than the direct path (a healthy put completes
+  // in well under a second) to keep the spinner short. Anonymous (Tor) keeps a
+  // larger budget for its higher baseline latency.
+  private static readonly DHT_OP_TIMEOUT_FAST_MS = 10_000;
+  private static readonly DHT_OP_TIMEOUT_ANONYMOUS_MS = 30_000;
+
   constructor(deps: GroupOfflineManagerDeps) {
     this.deps = deps;
     const runtime = getNetworkModeRuntime(this.deps.database.getSessionNetworkMode());
+    this.networkMode = runtime.mode;
     this.groupOfflineBucketPrefix = runtime.config.dhtNamespaces.groupOffline;
     this.groupInfoVersionPrefix = runtime.config.dhtNamespaces.groupInfoVersion;
   }
 
-  async storeGroupMessage(message: GroupContentMessage): Promise<void> {
+  private notifyOfflineInboxCapacityChanged(chatId: number): void {
+    this.deps.onOfflineInboxCapacityChanged?.(chatId);
+  }
+
+  private notifyGroupInboxCapacityChangedByGroupId(groupId: string): void {
+    const chat = this.deps.database.getChatByGroupId(groupId);
+    if (chat) {
+      this.notifyOfflineInboxCapacityChanged(chat.id);
+    }
+  }
+
+  getOwnBucketKey(groupId: string, keyVersion: number): string {
     const ownPubKeyBase64url = toBase64Url(this.deps.userIdentity.signingPublicKey);
-    const bucketKey = `${this.groupOfflineBucketPrefix}/${message.groupId}/${message.keyVersion}/${ownPubKeyBase64url}`;
+    return `${this.groupOfflineBucketPrefix}/${groupId}/${keyVersion}/${ownPubKeyBase64url}`;
+  }
+
+  getLocalBucketUsage(bucketKey: string): GroupOfflineBucketUsage {
+    const local = this.deps.database.getGroupOfflineSentMessages(bucketKey);
+    const {
+      messages,
+    } = this.normalizeStoreMessages(
+      this.filterLiveMessages(local.messages),
+      bucketKey,
+      'Snapshot overflow',
+    );
+
+    if (messages.length === 0) {
+      return {
+        messageCountUsed: 0,
+        messageCountLimit: GROUP_MAX_MESSAGES_PER_SENDER,
+        compressedBytesUsed: 0,
+        compressedBytesLimit: GROUP_OFFLINE_STORE_MAX_COMPRESSED_BYTES,
+        fullnessRatio: 0,
+      };
+    }
+
+    const highestSeq = messages.reduce((max, message) => Math.max(max, message.seq), 0);
+    const { signedStore } = this.buildSignedStore(messages, bucketKey, local.version, highestSeq);
+    const compressedBytesUsed = gzipSync(Buffer.from(JSON.stringify(signedStore), 'utf8')).length;
+    const countRatio = messages.length / GROUP_MAX_MESSAGES_PER_SENDER;
+    const sizeRatio = compressedBytesUsed / GROUP_OFFLINE_STORE_MAX_COMPRESSED_BYTES;
+
+    return {
+      messageCountUsed: messages.length,
+      messageCountLimit: GROUP_MAX_MESSAGES_PER_SENDER,
+      compressedBytesUsed,
+      compressedBytesLimit: GROUP_OFFLINE_STORE_MAX_COMPRESSED_BYTES,
+      fullnessRatio: Math.max(countRatio, sizeRatio),
+    };
+  }
+
+  async storeGroupMessage(message: GroupContentMessage): Promise<void> {
+    const bucketKey = this.getOwnBucketKey(message.groupId, message.keyVersion);
     const queuedAt = Date.now();
     const bucketTag = bucketKey.slice(-12);
     log(
@@ -144,6 +226,7 @@ export class GroupOfflineManager {
             );
             await this.putStore(bucketKey, signedStore);
             this.deps.database.saveGroupOfflineSentMessages(bucketKey, normalizedExistingMessages, version);
+            this.notifyGroupInboxCapacityChangedByGroupId(message.groupId);
           }
           return;
         }
@@ -163,11 +246,28 @@ export class GroupOfflineManager {
         try {
           await this.putStore(bucketKey, signedStore);
           this.deps.database.saveGroupOfflineSentMessages(bucketKey, nextMessages, version);
+          this.notifyGroupInboxCapacityChangedByGroupId(message.groupId);
           return;
         } catch (firstError: unknown) {
           // Oversized stores cannot be recovered via remote merge.
           if (this.isStoreTooLargeError(firstError)) {
             throw firstError;
+          }
+
+          // Connectivity failure: a recovery DHT read would run over the same
+          // dead connections and just burn another timeout. Instead, force a
+          // reconnect to get fresh peers and retry the write once. The first
+          // failure already proved zero peers stored it, so re-putting the same
+          // store is safe.
+          if (this.isConnectivityFailureError(firstError)) {
+            const reconnected = await this.triggerReconnect();
+            if (!reconnected) {
+              throw firstError;
+            }
+            await this.putStore(bucketKey, signedStore);
+            this.deps.database.saveGroupOfflineSentMessages(bucketKey, nextMessages, version);
+            this.notifyGroupInboxCapacityChangedByGroupId(message.groupId);
+            return;
           }
 
           // Recovery path: local version may be stale (restart/cleanup race). Fetch once, merge, retry once.
@@ -203,6 +303,7 @@ export class GroupOfflineManager {
           );
           await this.putStore(bucketKey, mergedStore);
           this.deps.database.saveGroupOfflineSentMessages(bucketKey, mergedMessages, mergedVersion);
+          this.notifyGroupInboxCapacityChangedByGroupId(message.groupId);
         }
       } finally {
         const lockHeldMs = Date.now() - lockAcquiredAt;
@@ -219,6 +320,10 @@ export class GroupOfflineManager {
         }
       }
     });
+  }
+
+  resolveRecentlyActiveGroupChats(sinceMs: number, limit: number): Chat[] {
+    return this.deps.database.getRecentlyActiveGroupChats(sinceMs, limit);
   }
 
   async checkGroupOfflineMessages(chatIds?: number[], options?: GroupOfflineCheckOptions): Promise<GroupOfflineCheckResult> {
@@ -356,8 +461,7 @@ export class GroupOfflineManager {
       return existing;
     }
 
-    let checkPromise!: Promise<GroupChatCheckResult>;
-    checkPromise = this.checkGroupChat(chat, mode)
+    const checkPromise = this.checkGroupChat(chat, mode)
       .finally(() => {
         if (this.groupCheckInFlight.get(inFlightKey) === checkPromise) {
           this.groupCheckInFlight.delete(inFlightKey);
@@ -426,8 +530,6 @@ export class GroupOfflineManager {
         store: await this.getLatestStore(desc.bucketKey),
       })));
 
-      let epochMessagesDelivered = 0;
-
       for (const { senderPeerId, sender, store } of senderStores) {
         if (!store || store.messages.length === 0) continue;
 
@@ -448,6 +550,15 @@ export class GroupOfflineManager {
 
         for (const msg of orderedMessages) {
           const messageId = msg.messageId;
+          // Offline parse gate (this path doesn't go through isGroupChatMessage):
+          // messageId becomes the indexed client_msg_id / row PK / dedup key, so a
+          // malformed one is dropped — it can't be substituted.
+          if (!isValidCid(messageId)) {
+            console.warn(
+              `[GROUP-OFFLINE][DROP] chat=${chat.id} epoch=${epoch.key_version} sender=${senderPeerId.slice(-8)} reason=invalid_message_id`,
+            );
+            continue;
+          }
           if (msg.groupId !== chat.group_id || msg.keyVersion !== epoch.key_version) continue;
           if (!Number.isFinite(msg.timestamp) || msg.timestamp <= 0) {
             console.warn(
@@ -480,7 +591,7 @@ export class GroupOfflineManager {
             continue;
           }
 
-          const alreadyPersisted = this.deps.database.messageExists(messageId);
+          const alreadyPersisted = this.deps.database.messageExistsInChat(chat.id, messageId);
 
           if (msg.seq <= highestSeenSeq) {
             if (alreadyPersisted) {
@@ -493,29 +604,30 @@ export class GroupOfflineManager {
             // Persist the missing message, but do NOT change highestSeenSeq.
             try {
               const content = this.decryptContent(msg.encryptedContent, keyBytes, msg.nonce);
-              await this.deps.database.createMessage({
-                id: messageId,
-                chat_id: chat.id,
-                sender_peer_id: senderPeerId,
-                content,
-                message_type: 'text',
-                timestamp: new Date(msg.timestamp),
-              });
-              ({ lastReadTs, lastReadMessageId } = this.advanceCursor(lastReadTs, lastReadMessageId, msg));
-              unreadAdded++;
-              deliveredForSender++;
-              epochMessagesDelivered++;
-              repairedLate++;
-              this.deps.onMessageReceived({
+              const wasHiddenSystemMessage = await this.handleHiddenSystemMessage({
                 chatId: chat.id,
-                messageId,
-                content,
                 senderPeerId,
-                senderUsername: sender.username,
                 timestamp: msg.timestamp,
-                messageSentStatus: 'offline',
-                messageType: 'text',
+                content,
               });
+              if (wasHiddenSystemMessage) {
+                ({ lastReadTs, lastReadMessageId } = this.advanceCursor(lastReadTs, lastReadMessageId, msg));
+                repairedLate++;
+                continue;
+              }
+              const inserted = await this.persistIncomingGroupContent({
+                chat,
+                sender,
+                message: msg,
+                content,
+              });
+              // Cursor advances regardless; counters/event only when a row was added.
+              ({ lastReadTs, lastReadMessageId } = this.advanceCursor(lastReadTs, lastReadMessageId, msg));
+              if (inserted) {
+                unreadAdded++;
+                deliveredForSender++;
+                repairedLate++;
+              }
             } catch (error: unknown) {
               console.warn(
                 `[GROUP-OFFLINE][ANOMALY][CHAT:${chat.id}] epoch=${epoch.key_version} sender=${senderPeerId.slice(-8)} ` +
@@ -527,7 +639,16 @@ export class GroupOfflineManager {
           }
 
           const expectedSeq = highestSeenSeq + 1;
-          if (msg.seq > expectedSeq) {
+          let shouldWarnForGap = msg.seq > expectedSeq && msg.messageType !== 'system';
+          if (shouldWarnForGap) {
+            try {
+              const gapContent = this.decryptContent(msg.encryptedContent, keyBytes, msg.nonce);
+              shouldWarnForGap = !isGroupCallHintSystemPayload(this.parseHiddenSystemPayload(gapContent));
+            } catch {
+              shouldWarnForGap = true;
+            }
+          }
+          if (shouldWarnForGap) {
             gapWarnings.push({
               chatId: chat.id,
               groupId: chat.group_id,
@@ -541,29 +662,30 @@ export class GroupOfflineManager {
           try {
             if (!alreadyPersisted) {
               const content = this.decryptContent(msg.encryptedContent, keyBytes, msg.nonce);
-              await this.deps.database.createMessage({
-                id: messageId,
-                chat_id: chat.id,
-                sender_peer_id: senderPeerId,
-                content,
-                message_type: 'text',
-                timestamp: new Date(msg.timestamp),
-              });
-
-              unreadAdded++;
-              deliveredForSender++;
-              epochMessagesDelivered++;
-
-              this.deps.onMessageReceived({
+              const wasHiddenSystemMessage = await this.handleHiddenSystemMessage({
                 chatId: chat.id,
-                messageId,
-                content,
                 senderPeerId,
-                senderUsername: sender.username,
                 timestamp: msg.timestamp,
-                messageSentStatus: 'offline',
-                messageType: 'text',
+                content,
               });
+              if (wasHiddenSystemMessage) {
+                highestSeenSeq = msg.seq;
+                ({ lastReadTs, lastReadMessageId } = this.advanceCursor(lastReadTs, lastReadMessageId, msg));
+                continue;
+              }
+              const inserted = await this.persistIncomingGroupContent({
+                chat,
+                sender,
+                message: msg,
+                content,
+              });
+
+              // Counters/event only when a row was actually added (a concurrent gossip
+              // delivery may have inserted it first); seq/cursor advance below regardless.
+              if (inserted) {
+                unreadAdded++;
+                deliveredForSender++;
+              }
             }
 
             highestSeenSeq = msg.seq;
@@ -616,6 +738,146 @@ export class GroupOfflineManager {
       unreadAdded,
       gapWarnings,
     };
+  }
+
+  private async persistIncomingGroupContent(input: {
+    chat: Chat;
+    sender: User;
+    message: GroupContentMessage;
+    content: string;
+  }): Promise<boolean> {
+    const { chat, sender, message, content } = input;
+    if (message.messageType === 'system') {
+      const { inserted } = await this.deps.database.tryCreateMessage({
+        id: message.messageId,
+        chat_id: chat.id,
+        sender_peer_id: message.senderPeerId,
+        content,
+        message_type: 'system',
+        timestamp: new Date(message.timestamp),
+        client_msg_id: message.messageId,
+        reply_to_client_id: null,
+      }, { dedupe: 'any' });
+      if (inserted) {
+        this.deps.onMessageReceived({
+          chatId: chat.id,
+          messageId: message.messageId,
+          content,
+          senderPeerId: message.senderPeerId,
+          senderUsername: sender.username,
+          timestamp: message.timestamp,
+          messageSentStatus: 'offline',
+          messageType: 'system',
+          clientMsgId: message.messageId,
+        });
+      }
+      return inserted;
+    }
+
+    const routeNonText = (
+      applicationMessage: InboundApplicationMessageContext['message'],
+    ): boolean | Promise<boolean> => this.deps.onApplicationMessage({
+      message: applicationMessage,
+      chatId: chat.id,
+      senderPeerId: message.senderPeerId,
+      senderUsername: sender.username,
+      timestamp: message.timestamp,
+      transportMessageId: message.messageId,
+      route: 'group_offline',
+    });
+    const dispatched = await dispatchEnvelope(content, {
+      text: async ({ payload }) => {
+        const { inserted } = await this.deps.database.tryCreateMessage({
+          id: message.messageId,
+          chat_id: chat.id,
+          sender_peer_id: message.senderPeerId,
+          content: payload.text,
+          message_type: 'text',
+          timestamp: new Date(message.timestamp),
+          client_msg_id: message.messageId,
+          reply_to_client_id: payload.reply_to ?? null,
+        }, { dedupe: 'any' });
+        if (inserted) {
+          this.deps.onMessageReceived({
+            chatId: chat.id,
+            messageId: message.messageId,
+            content: payload.text,
+            senderPeerId: message.senderPeerId,
+            senderUsername: sender.username,
+            timestamp: message.timestamp,
+            messageSentStatus: 'offline',
+            messageType: 'text',
+            clientMsgId: message.messageId,
+            replyToClientId: payload.reply_to,
+          });
+        }
+        return inserted;
+      },
+      file_offer: routeNonText,
+      file_offer_cancel: routeNonText,
+      file_offer_nack: routeNonText,
+    }, { expectedCid: message.messageId });
+
+    // TEMP_LOG: temporary group offline application-message dispatch diagnostics; remove after Phase 2a delivery debugging.
+    log(
+      `[TEMP_LOG][APP-MESSAGE][GROUP-OFFLINE][DISPATCH] group=${message.groupId.slice(0, 8)} `
+      + `msgId=${message.messageId} sender=${message.senderPeerId.slice(-8)} status=${dispatched.status} `
+      + `value=${dispatched.status === 'handled' ? String(dispatched.value) : 'n/a'}`
+      + `${dispatched.status === 'unhandled' ? ` kind=${dispatched.message.kind}` : ''}`
+      + `${dispatched.status === 'rejected' ? ` reason=${dispatched.reason}` : ''}`,
+    );
+
+    if (dispatched.status === 'handled') {
+      return dispatched.value;
+    }
+    if (dispatched.status === 'rejected') {
+      log(
+        `[APP-MESSAGE][GROUP-OFFLINE][DROP] group=${message.groupId.slice(0, 8)} ` +
+        `msgId=${message.messageId} reason=${dispatched.reason}`,
+      );
+    } else {
+      log(
+        `[APP-MESSAGE][GROUP-OFFLINE][DROP] group=${message.groupId.slice(0, 8)} ` +
+        `msgId=${message.messageId} reason=unhandled_kind kind=${dispatched.message.kind}`,
+      );
+    }
+    return false;
+  }
+
+  private async handleHiddenSystemMessage(input: {
+    chatId: number;
+    senderPeerId: string;
+    timestamp: number;
+    content: string;
+  }): Promise<boolean> {
+    const parsed = this.parseHiddenSystemPayload(input.content);
+    if (!isGroupCallHintSystemPayload(parsed)) {
+      return false;
+    }
+
+    try {
+      await this.deps.onGroupCallHint?.({
+        groupId: parsed.groupId,
+        senderPeerId: input.senderPeerId,
+        timestamp: input.timestamp,
+      });
+    } catch (error: unknown) {
+      console.warn(
+        `[GROUP-OFFLINE][SYSTEM][GROUP_CALL_HINT][WARN] group=${parsed.groupId.slice(0, 8)} sender=${input.senderPeerId.slice(-8)} reason=${errStr(error)}`,
+      );
+    }
+    log(
+      `[GROUP-OFFLINE][SYSTEM][GROUP_CALL_HINT] chat=${input.chatId} group=${parsed.groupId.slice(0, 8)} sender=${input.senderPeerId.slice(-8)}`,
+    );
+    return true;
+  }
+
+  private parseHiddenSystemPayload(content: string): unknown {
+    try {
+      return JSON.parse(content);
+    } catch {
+      return null;
+    }
   }
 
   private selectHistoryForMode(
@@ -845,7 +1107,9 @@ export class GroupOfflineManager {
     log('fetching store from dht', bucketKey);
 
     try {
-      for await (const event of this.deps.node.services.dht.get(key) as AsyncIterable<QueryEvent>) {
+      for await (const event of this.deps.node.services.dht.get(key, {
+        signal: AbortSignal.timeout(this.dhtOpTimeoutMs()),
+      }) as AsyncIterable<QueryEvent>) {
         if (event.name !== 'VALUE' || event.value.length === 0) continue;
         valueEvents++;
         try {
@@ -877,6 +1141,12 @@ export class GroupOfflineManager {
     return best;
   }
 
+  private dhtOpTimeoutMs(): number {
+    return this.networkMode === 'anonymous'
+      ? GroupOfflineManager.DHT_OP_TIMEOUT_ANONYMOUS_MS
+      : GroupOfflineManager.DHT_OP_TIMEOUT_FAST_MS;
+  }
+
   private async putStore(bucketKey: string, store: GroupOfflineStore): Promise<void> {
     const startedAt = Date.now();
     const bucketTag = bucketKey.slice(-12);
@@ -895,15 +1165,29 @@ export class GroupOfflineManager {
     let queryErrorCount = 0;
     let firstPeerResponseAt: number | null = null;
 
-    for await (const event of this.deps.node.services.dht.put(key, compressed) as AsyncIterable<QueryEvent>) {
-      eventCount++;
-      if (event.name === 'PEER_RESPONSE') {
-        successCount++;
-        if (firstPeerResponseAt === null) {
-          firstPeerResponseAt = Date.now();
+    try {
+      for await (const event of this.deps.node.services.dht.put(key, compressed, {
+        signal: AbortSignal.timeout(this.dhtOpTimeoutMs()),
+      }) as AsyncIterable<QueryEvent>) {
+        eventCount++;
+        if (event.name === 'PEER_RESPONSE') {
+          successCount++;
+          if (firstPeerResponseAt === null) {
+            firstPeerResponseAt = Date.now();
+          }
+        } else if (event.name === 'QUERY_ERROR') {
+          queryErrorCount++;
         }
-      } else if (event.name === 'QUERY_ERROR') {
-        queryErrorCount++;
+      }
+    } catch (error: unknown) {
+      // Timeout (or abort) reaching the rest of the peers. If at least one peer
+      // already stored the record, the message is on the DHT, so let it count
+      // as success instead of forcing the caller into recovery/offline-failure.
+      // A timeout with zero successful peers is a real failure and rethrows.
+      const isTimeout = error instanceof Error
+        && (error.name === 'AbortError' || error.name === 'TimeoutError');
+      if (!isTimeout || successCount === 0) {
+        throw error;
       }
     }
     const totalPutMs = Date.now() - startedAt;
@@ -927,6 +1211,31 @@ export class GroupOfflineManager {
 
   private isStoreTooLargeError(error: unknown): boolean {
     return errStr(error).includes('store too large');
+  }
+
+  // A DHT write that reached zero peers, or aborted/timed out against stale
+  // connections. Distinguished from version-conflict failures (which warrant a
+  // remote read + merge) because reading the DHT can't succeed here either.
+  private isConnectivityFailureError(error: unknown): boolean {
+    const errorText = errStr(error).toLowerCase();
+    return (
+      errorText.includes('no successful dht peers')
+      || errorText.includes('all peers unreachable')
+      || errorText.includes('timed out')
+      || errorText.includes('aborted')
+      || errorText.includes('no connected peers')
+    );
+  }
+
+  private async triggerReconnect(): Promise<boolean> {
+    if (!this.deps.requestReconnect) {
+      return false;
+    }
+    try {
+      return await this.deps.requestReconnect();
+    } catch {
+      return false;
+    }
   }
 
   private decryptContent(encryptedContent: string, key: Uint8Array, nonceBase64: string): string {
@@ -1158,6 +1467,7 @@ export class GroupOfflineManager {
 
     const bucketPrefix = `${this.groupOfflineBucketPrefix}/${chat.group_id}/${epoch.key_version}/`;
     this.deps.database.deleteGroupOfflineSentMessagesByPrefix(bucketPrefix);
+    this.notifyOfflineInboxCapacityChanged(chat.id);
     log(
       `[GROUP-OFFLINE][TIMING][PRUNE][CHAT:${chat.id}] epoch=${epoch.key_version} action=pruned reason=${reason}`
     );

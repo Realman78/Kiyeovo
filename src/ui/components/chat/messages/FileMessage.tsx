@@ -1,81 +1,179 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, type ReactNode } from 'react';
 import { Button } from '../../ui/Button';
 import { FolderOpen, X } from 'lucide-react';
 import { useDispatch, useSelector } from 'react-redux';
 import type { RootState } from '../../../state/store';
 import type { FileTransferStatus } from '../../../../core/types';
+import { isImageFile } from '../../../../shared/file-types';
 import { setPendingFileStatus, updateFileTransferStatus } from '../../../state/slices/chatSlice';
+import { highlightText } from '../../../utils/highlightText';
+import { ImagePreviewDialog } from './ImagePreviewDialog';
+import { shouldRenderInlineImage } from './fileMessageUtils';
 
 interface FileMessageProps {
   fileId: string;
   chatId: number;
   fileName: string;
+  searchQuery?: string;
   fileSize: number;
   filePath?: string;
+  previewMediaToken?: string;
   transferStatus: FileTransferStatus;
   transferProgress?: number;
   transferError?: string;
-  transferExpiresAt?: number;
+  fileGroupDownloadTotal?: number;
+  fileGroupDownloadCompleted?: number;
   isFromCurrentUser: boolean;
 }
+
+interface InlineImageMessageProps {
+  fileId: string;
+  fileName: string;
+  fileSizeText: string;
+  searchQuery?: string;
+  initialMediaToken?: string;
+  canOpenFile: boolean;
+  onOpenFile: () => Promise<void>;
+  canCopyImage: boolean;
+  onCopyImage: () => Promise<boolean>;
+  statusContent?: ReactNode;
+  fallback: ReactNode;
+}
+
+const InlineImageMessage: React.FC<InlineImageMessageProps> = ({
+  fileId,
+  fileName,
+  fileSizeText,
+  searchQuery,
+  initialMediaToken,
+  canOpenFile,
+  onOpenFile,
+  canCopyImage,
+  onCopyImage,
+  statusContent,
+  fallback,
+}) => {
+  const [mediaToken, setMediaToken] = useState<string | null>(initialMediaToken ?? null);
+  const [imageFailed, setImageFailed] = useState(false);
+  const [previewOpen, setPreviewOpen] = useState(false);
+
+  useEffect(() => {
+    if (initialMediaToken) return;
+
+    let cancelled = false;
+
+    void window.kiyeovoAPI.registerMessageMedia(fileId)
+      .then((result) => {
+        if (cancelled) return;
+        if (result.success && result.token) {
+          setMediaToken(result.token);
+          return;
+        }
+        setImageFailed(true);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        console.error('Failed to register inline image:', error);
+        setImageFailed(true);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [fileId, initialMediaToken]);
+
+  if (!mediaToken || imageFailed) {
+    return fallback;
+  }
+
+  const mediaUrl = `kiyeovo-media://media/${encodeURIComponent(mediaToken)}`;
+
+  return (
+    <>
+      <div className="flex w-[320px] max-w-[65vw] flex-col gap-2">
+        <button
+          type="button"
+          onClick={() => setPreviewOpen(true)}
+          className="flex max-h-[320px] w-full cursor-pointer items-center justify-center overflow-hidden rounded-lg bg-background/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          aria-label={`Preview ${fileName}`}
+          title="View full size"
+        >
+          <img
+            src={mediaUrl}
+            alt={fileName}
+            className="block max-h-[320px] max-w-full object-contain"
+            onError={() => setImageFailed(true)}
+          />
+        </button>
+        <div className="flex min-w-0 items-center gap-2 text-left">
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-medium">{highlightText(fileName, searchQuery)}</p>
+            <p className="text-xs opacity-70">{fileSizeText}</p>
+          </div>
+          {canOpenFile && (
+            <Button
+              onClick={() => void onOpenFile()}
+              variant="outline"
+              size="icon"
+              className="shrink-0"
+              aria-label={`Show ${fileName} in folder`}
+              title="Show in folder"
+            >
+              <FolderOpen className="w-4 h-4" />
+            </Button>
+          )}
+        </div>
+        {statusContent}
+      </div>
+      <ImagePreviewDialog
+        open={previewOpen}
+        onOpenChange={setPreviewOpen}
+        mediaUrl={mediaUrl}
+        fileName={fileName}
+        canOpenFile={canOpenFile}
+        onOpenFile={onOpenFile}
+        canCopyImage={canCopyImage}
+        onCopyImage={onCopyImage}
+      />
+    </>
+  );
+};
 
 export const FileMessage: React.FC<FileMessageProps> = ({
   fileId,
   chatId,
   fileName,
+  searchQuery,
   fileSize,
   filePath,
+  previewMediaToken,
   transferStatus,
   transferProgress = 0,
   transferError,
-  transferExpiresAt,
+  fileGroupDownloadTotal,
+  fileGroupDownloadCompleted,
   isFromCurrentUser
 }) => {
   const dispatch = useDispatch();
   const messages = useSelector((state: RootState) => state.chat.messages);
-  const isAwaitingApproval =
-    transferStatus === 'awaiting_acceptance' ||
-    (transferStatus === 'pending' && isFromCurrentUser);
-  const isIncomingPendingDecision =
-    transferStatus === 'incoming_pending_user' ||
-    (transferStatus === 'pending' && !isFromCurrentUser);
-  const showsDecisionDeadline = isAwaitingApproval || isIncomingPendingDecision;
-  const [timeLeftMs, setTimeLeftMs] = useState(() => {
-    if (showsDecisionDeadline && transferExpiresAt) {
-      return Math.max(0, transferExpiresAt - Date.now());
-    }
-    return 0;
-  });
+  const chat = useSelector((state: RootState) => state.chat.chats.find((item) => item.id === chatId));
+  const isGroupChat = chat?.type === 'group';
+  const isAwaitingApproval = transferStatus === 'awaiting_acceptance';
+  const isIncomingPendingDecision = transferStatus === 'incoming_pending_user';
+  const isOutgoingPendingOffer = isFromCurrentUser && isAwaitingApproval;
+  const isGroupSenderOffer = isFromCurrentUser
+    && isGroupChat
+    && fileGroupDownloadTotal !== undefined
+    && fileGroupDownloadTotal > 0;
+  const showsDecisionStatus = isAwaitingApproval || isIncomingPendingDecision;
+  const showsGroupSenderStandaloneStatus = isGroupSenderOffer
+    && (
+      transferStatus === 'in_progress'
+      || transferStatus === 'completed'
+      || transferStatus === 'partially_completed'
+      || transferStatus === 'cancelled'
+    );
   const [isCancelling, setIsCancelling] = useState(false);
-
-  useEffect(() => {
-    if (!showsDecisionDeadline || !transferExpiresAt) {
-      return;
-    }
-
-    const tick = () => {
-      const remaining = Math.max(0, transferExpiresAt - Date.now());
-      setTimeLeftMs(remaining);
-      if (remaining === 0 && isIncomingPendingDecision) {
-        dispatch(updateFileTransferStatus({
-          messageId: fileId,
-          status: 'expired',
-          transferError: 'Offer expired'
-        }));
-        const hasOtherPending = messages.some(
-          (m) =>
-            m.chatId === chatId &&
-            m.id !== fileId &&
-            (m.transferStatus === 'incoming_pending_user' || m.transferStatus === 'pending'),
-        );
-        dispatch(setPendingFileStatus({ chatId, hasPendingFile: hasOtherPending }));
-      }
-    };
-
-    tick();
-    const intervalId = setInterval(tick, 1000);
-    return () => clearInterval(intervalId);
-  }, [showsDecisionDeadline, transferExpiresAt, isIncomingPendingDecision, fileId, chatId, messages, dispatch]);
 
   const formatFileSize = (bytes: number): string => {
     if (bytes === 0) return '0 B';
@@ -83,13 +181,6 @@ export const FileMessage: React.FC<FileMessageProps> = ({
     const sizes = ['B', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
-  };
-
-  const formatTimeLeft = (ms: number): string => {
-    const totalSeconds = Math.ceil(ms / 1000);
-    const minutes = Math.floor(totalSeconds / 60);
-    const seconds = totalSeconds % 60;
-    return `${minutes}:${seconds.toString().padStart(2, '0')}`;
   };
 
   const handleAccept = async () => {
@@ -104,14 +195,24 @@ export const FileMessage: React.FC<FileMessageProps> = ({
           (m) =>
             m.chatId === chatId &&
             m.id !== fileId &&
-            (m.transferStatus === 'incoming_pending_user' || m.transferStatus === 'pending'),
+            m.transferStatus === 'incoming_pending_user',
         );
         dispatch(setPendingFileStatus({ chatId, hasPendingFile: hasOtherPending }));
       } else {
         console.error('Failed to accept file:', result.error);
+        dispatch(updateFileTransferStatus({
+          messageId: fileId,
+          status: 'incoming_pending_user',
+          transferError: result.error || 'Failed to accept file'
+        }));
       }
     } catch (error) {
       console.error('Error accepting file:', error);
+      dispatch(updateFileTransferStatus({
+        messageId: fileId,
+        status: 'incoming_pending_user',
+        transferError: error instanceof Error ? error.message : 'Failed to accept file'
+      }));
     }
   };
 
@@ -128,7 +229,7 @@ export const FileMessage: React.FC<FileMessageProps> = ({
           (m) =>
             m.chatId === chatId &&
             m.id !== fileId &&
-            (m.transferStatus === 'incoming_pending_user' || m.transferStatus === 'pending'),
+            m.transferStatus === 'incoming_pending_user',
         );
         dispatch(setPendingFileStatus({ chatId, hasPendingFile: hasOtherPending }));
       } else {
@@ -162,6 +263,23 @@ export const FileMessage: React.FC<FileMessageProps> = ({
     }
   };
 
+  const handleCancelOffer = async () => {
+    if (isCancelling) return;
+
+    setIsCancelling(true);
+    try {
+      const result = await window.kiyeovoAPI.cancelFileOffer(fileId);
+      if (!result.success) {
+        console.error('Failed to cancel file offer:', result.error);
+        return;
+      }
+    } catch (error) {
+      console.error('Error canceling file offer:', error);
+    } finally {
+      setIsCancelling(false);
+    }
+  };
+
   const handleOpenFile = async () => {
     if (filePath && transferStatus === 'completed') {
       const result = await window.kiyeovoAPI.openFileLocation(filePath);
@@ -171,16 +289,49 @@ export const FileMessage: React.FC<FileMessageProps> = ({
     }
   };
 
+  const canCopyImage = isImageFile(fileName) && transferStatus === 'completed' && !!filePath;
+
+  const handleCopyImage = async (): Promise<boolean> => {
+    if (!canCopyImage) return false;
+
+    try {
+      const result = await window.kiyeovoAPI.copyImageToClipboard(fileId);
+      if (!result.success) {
+        console.error('Failed to copy image:', result.error);
+        return false;
+      }
+      return true;
+    } catch (error) {
+      console.error('Error copying image:', error);
+      return false;
+    }
+  };
+
   const getStatusText = () => {
+    if (isGroupSenderOffer) {
+      if (transferStatus === 'completed') {
+        return 'Completed';
+      }
+      if (transferStatus === 'cancelled') {
+        return 'Cancelled';
+      }
+      if (
+        transferStatus === 'awaiting_acceptance'
+        || transferStatus === 'in_progress'
+        || transferStatus === 'partially_completed'
+      ) {
+        const completed = Math.max(0, Math.min(fileGroupDownloadCompleted ?? 0, fileGroupDownloadTotal));
+        return `Downloaded by ${completed}/${fileGroupDownloadTotal}`;
+      }
+    }
+
     switch (transferStatus) {
       case 'connecting':
         return 'Connecting...';
       case 'awaiting_acceptance':
-        return 'Waiting for approval';
+        return isGroupChat ? 'Group file offered' : 'File offered';
       case 'incoming_pending_user':
         return 'Waiting for your decision';
-      case 'pending':
-        return isFromCurrentUser ? 'Waiting for approval' : 'Waiting for your decision';
       case 'in_progress':
         if (isFromCurrentUser && transferProgress >= 100) {
           return 'Awaiting recipient confirmation';
@@ -188,12 +339,14 @@ export const FileMessage: React.FC<FileMessageProps> = ({
         return `${transferProgress}%`;
       case 'completed':
         return 'Completed';
+      case 'partially_completed':
+        return 'Partially completed';
       case 'failed':
         return 'Failed';
-      case 'expired':
-        return 'Offer expired';
       case 'rejected':
         return 'Offer rejected';
+      case 'cancelled':
+        return 'Offer cancelled';
       default:
         return '';
     }
@@ -227,29 +380,15 @@ export const FileMessage: React.FC<FileMessageProps> = ({
     if (transferError?.toLowerCase().includes('download canceled by user')) {
       return 'Download canceled';
     }
+    if (transferError?.toLowerCase().includes('offer cancelled')) {
+      return 'Offer cancelled';
+    }
     return transferError;
   };
 
-  return (
-    <div className="flex flex-col gap-2 w-[250px]">
-      <div className="flex items-center justify-between gap-3">
-        <div className={`text-2xl ${isFromCurrentUser ? 'bg-background/50' : ''} rounded-md p-1`}>{getIcon()}</div>
-        <div className="flex-1 min-w-0 text-left">
-          <p className="text-sm font-medium truncate">{fileName}</p>
-          <p className="text-xs opacity-70">{formatFileSize(fileSize)}</p>
-        </div>
-        {transferStatus === 'completed' && !!filePath ? (
-          <Button
-            onClick={handleOpenFile}
-            variant="outline"
-            size="icon"
-          >
-            <FolderOpen className="w-4 h-4" />
-          </Button>
-        ) : <div />}
-      </div>
-
-      {transferStatus === 'in_progress' && (
+  const transferStatusContent = (
+    <>
+      {transferStatus === 'in_progress' && !isGroupSenderOffer && (
         <div className="w-full">
           <div className="flex items-center gap-2">
             <div className="flex-1 bg-background/20 rounded-full h-1.5 overflow-hidden">
@@ -276,13 +415,19 @@ export const FileMessage: React.FC<FileMessageProps> = ({
         </div>
       )}
 
+      {showsGroupSenderStandaloneStatus && (
+        <div className="text-xs opacity-70">
+          {getStatusText()}
+        </div>
+      )}
+
       {transferStatus === 'failed' && (
         <div className="text-xs">
           {specificErrorText() || 'Transfer failed'}
         </div>
       )}
 
-      {(transferStatus === 'expired' || transferStatus === 'rejected') && (
+      {(transferStatus === 'rejected' || (transferStatus === 'cancelled' && !isGroupSenderOffer)) && (
         <div className="text-xs opacity-70">
           {getStatusText()}
         </div>
@@ -294,11 +439,11 @@ export const FileMessage: React.FC<FileMessageProps> = ({
         </div>
       )}
 
-      {showsDecisionDeadline && (
+      {showsDecisionStatus && (
         <div className="text-xs opacity-70">
           <div>{getStatusText()}</div>
-          {transferExpiresAt && (
-            <div>Expires in {formatTimeLeft(timeLeftMs)}</div>
+          {isIncomingPendingDecision && transferError && (
+            <div className="mt-1">{specificErrorText()}</div>
           )}
         </div>
       )}
@@ -322,6 +467,62 @@ export const FileMessage: React.FC<FileMessageProps> = ({
           </Button>
         </div>
       )}
+
+      {isOutgoingPendingOffer && (
+        <Button
+          onClick={handleCancelOffer}
+          size="sm"
+          variant="outline"
+          disabled={isCancelling}
+        >
+          Cancel offer
+        </Button>
+      )}
+    </>
+  );
+
+  const fileCard = (
+    <div className="flex flex-col gap-2 w-[250px]">
+      <div className="flex items-center justify-between gap-3">
+        <div className={`text-2xl ${isFromCurrentUser ? 'bg-background/50' : ''} rounded-md p-1`}>{getIcon()}</div>
+        <div className="flex-1 min-w-0 text-left">
+          <p className="text-sm font-medium truncate" title={fileName}>{highlightText(fileName, searchQuery)}</p>
+          <p className="text-xs opacity-70">{formatFileSize(fileSize)}</p>
+        </div>
+        {transferStatus === 'completed' && !!filePath ? (
+          <Button
+            onClick={handleOpenFile}
+            variant="outline"
+            size="icon"
+          >
+            <FolderOpen className="w-4 h-4" />
+          </Button>
+        ) : <div />}
+      </div>
+      {transferStatusContent}
     </div>
   );
+
+  const hasSenderPreview = isImageFile(fileName) && isFromCurrentUser && !!previewMediaToken;
+
+  if (shouldRenderInlineImage({ fileName, isFromCurrentUser, previewMediaToken, transferStatus, filePath })) {
+    return (
+      <InlineImageMessage
+        key={`${fileId}:${previewMediaToken ?? filePath}`}
+        fileId={fileId}
+        fileName={fileName}
+        fileSizeText={formatFileSize(fileSize)}
+        searchQuery={searchQuery}
+        initialMediaToken={hasSenderPreview ? previewMediaToken : undefined}
+        canOpenFile={transferStatus === 'completed' && !!filePath}
+        onOpenFile={handleOpenFile}
+        canCopyImage={canCopyImage}
+        onCopyImage={handleCopyImage}
+        statusContent={transferStatusContent}
+        fallback={fileCard}
+      />
+    );
+  }
+
+  return fileCard;
 };

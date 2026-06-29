@@ -1,21 +1,61 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { finalizeSendingMessage, markOfflineFetched, markOfflineFetchFailed, prependMessages, setMessages, setOfflineFetchStatus, updateChat, updateLocalMessageSendState, type ChatMessage } from "../../../state/slices/chatSlice";
+import { Fragment, useCallback, useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from "react";
+import { finalizeSendingMessage, markOfflineFetched, markOfflineFetchFailed, prependMessages, replaceMessagesForChat, resolveMessageSendOutcome, setMessages, setOfflineFetchStatus, updateChat, updateLocalMessageSendState, type ChatMessage } from "../../../state/slices/chatSlice";
 import type { RootState } from "../../../state/store";
 import { useDispatch, useSelector } from "react-redux";
-import { formatTimestampToHourMinute } from "../../../utils/dateUtils";
+import { formatTimestampToHourMinuteEu, formatDateDivider, startOfDay } from "../../../utils/dateUtils";
+import { useHour12 } from "../../../hooks/useHour12";
 import { PendingNotifications } from "./PendingNotifications";
 import { MessageRow } from "./MessageRow";
 import type { MessageSentStatus } from "../../../types";
 import type { FileTransferStatus } from "../../../../core/types";
-import { FILE_ACCEPTANCE_TIMEOUT, INITIAL_MESSAGES_LIMIT, LOAD_MORE_MESSAGES_LIMIT, SHOW_TIMESTAMP_INTERVAL } from "../../../constants";
+import { INITIAL_MESSAGES_LIMIT, LOAD_MORE_MESSAGES_LIMIT } from "../../../constants";
 import { useToast } from "../../ui/use-toast";
+import { useOfflineSendWarning } from "../../../hooks/useOfflineSendWarning";
 import type { Message } from "../../../../core/db/database";
 import { errStr } from '../../../../core/utils/general-error';
+import { useConnectivityGuidance } from "../../../hooks/useConnectivityGuidance";
+import { ChevronDown } from "lucide-react";
 
 type MessagesContainerProps = {
   messages: ChatMessage[];
   isPending: boolean;
+  selectionMode?: boolean;
+  selectedMessageIds?: ReadonlySet<string>;
+  onToggleMessageSelection?: (messageId: string) => void;
+  onEnterMessageSelection?: (messageId: string) => void;
+  historyRefreshRequest?: MessageHistoryRefreshRequest | null;
+  onHistoryRefreshHandled?: (requestId: number) => void;
+  messageJumpRequest?: MessageJumpRequest | null;
+  onMessageJumpHandled?: (requestId: number, outcome: MessageJumpOutcome) => void;
+  activeSearchClientMsgId?: string | null;
+  searchHighlightQuery?: string;
+  onOfflineInboxRelevant?: () => void;
+  bottomOverlayClearancePx?: number;
+  onTogglePin?: (message: ChatMessage) => void;
 }
+
+export type MessageHistoryRefreshRequest = {
+  requestId: number;
+  chatId: number;
+  visibleCount: number;
+};
+
+export type MessageJumpRequest = {
+  requestId: number;
+  chatId: number;
+  clientMsgId: string;
+};
+
+export type MessageJumpOutcome = 'completed' | 'unavailable' | 'cancelled' | 'error';
+
+type LoadMoreResult = 'loaded' | 'exhausted' | 'cancelled' | 'error';
+const TERMINAL_FILE_TRANSFER_STATUSES = new Set<FileTransferStatus>([
+  'completed',
+  'partially_completed',
+  'failed',
+  'rejected',
+  'cancelled',
+]);
 
 function mapDbMessage(msg: Message & { sender_username?: string }): ChatMessage {
   let fileName = msg.file_name;
@@ -31,15 +71,6 @@ function mapDbMessage(msg: Message & { sender_username?: string }): ChatMessage 
     msg.transfer_status ??
     (msg.message_type === 'file' ? 'completed' : undefined);
 
-  const transferExpiresAt =
-    msg.message_type === 'file' && (
-      msg.transfer_status === 'pending' ||
-      msg.transfer_status === 'awaiting_acceptance' ||
-      msg.transfer_status === 'incoming_pending_user'
-    )
-      ? msg.timestamp.getTime() + FILE_ACCEPTANCE_TIMEOUT
-      : undefined;
-
   return {
     id: msg.id,
     chatId: msg.chat_id,
@@ -50,21 +81,69 @@ function mapDbMessage(msg: Message & { sender_username?: string }): ChatMessage 
     eventTimestamp: msg.event_timestamp ? msg.event_timestamp.getTime() : undefined,
     messageType: msg.message_type as 'text' | 'file' | 'image' | 'system',
     messageSentStatus: 'online' as MessageSentStatus,
+    clientMsgId: msg.client_msg_id,
+    replyToClientId: msg.reply_to_client_id ?? undefined,
     fileName,
     fileSize,
     filePath: msg.file_path,
     transferStatus: inferredTransferStatus as FileTransferStatus | undefined,
     transferProgress: msg.transfer_progress,
     transferError: msg.transfer_error,
-    transferExpiresAt
+    fileGroupDownloadTotal: msg.file_group_download_total ?? undefined,
+    fileGroupDownloadCompleted: msg.file_group_download_completed ?? undefined,
+    // Restore outbound send lifecycle (incl. the retry cooldown, so a
+    // group-rekey block survives a restart instead of becoming immediately
+    // retryable).
+    localSendState: msg.local_send_state ?? undefined,
+    failedReason: (msg.failed_reason as ChatMessage['failedReason']) ?? undefined,
+    retryAfterTs: msg.retry_after_ts ?? undefined,
+    pinnedAt: msg.pinned_at ?? undefined,
   };
 }
 
-export const MessagesContainer = ({ messages, isPending }: MessagesContainerProps) => {
+export const MessagesContainer = ({
+  messages,
+  isPending,
+  selectionMode = false,
+  selectedMessageIds,
+  onToggleMessageSelection,
+  onEnterMessageSelection,
+  historyRefreshRequest,
+  onHistoryRefreshHandled,
+  messageJumpRequest,
+  onMessageJumpHandled,
+  activeSearchClientMsgId,
+  searchHighlightQuery,
+  onOfflineInboxRelevant,
+  bottomOverlayClearancePx = 0,
+  onTogglePin,
+}: MessagesContainerProps) => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  // Inner content wrapper observed for height changes (stick-to-bottom on async growth).
+  const contentRef = useRef<HTMLDivElement>(null);
+  const isAtBottomRef = useRef(true);
+  const stickToBottomRef = useRef(true);
+  const activePointerScrollRef = useRef(false);
+  const previousScrollTopRef = useRef(0);
+  // Current vs. last-observed message count, to tell a real new/removed message
+  // (count change → handled by the smooth auto-scroll / loadMore) apart from async
+  // content growth at a stable count (e.g. a reply quote resolving late).
+  const messagesLengthRef = useRef(0);
+  const observerSeenLengthRef = useRef(0);
   const skipNextAutoScrollRef = useRef(false);
+  // Signature of the message tail
+  const autoScrollTailSignatureRef = useRef('');
+  // Jump-to-message: suppress the bottom auto-scroll while we page back to a quote
+  const isJumpingRef = useRef(false);
+  const jumpGenerationRef = useRef(0);
+  const pulseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isLoadingMoreRef = useRef(false);
+  const loadMoreInFlightRef = useRef<{
+    chatId: number;
+    requestId: symbol;
+    promise: Promise<LoadMoreResult>;
+  } | null>(null);
   const activeChatIdRef = useRef<number | null>(null);
   const loadTokenRef = useRef(0);
   const topZoneActiveRef = useRef(false);
@@ -74,16 +153,42 @@ export const MessagesContainer = ({ messages, isPending }: MessagesContainerProp
   const myPeerId = useSelector((state: RootState) => state.user.peerId);
   const activeChat = useSelector((state: RootState) => state.chat.activeChat);
   const activePendingKeyExchange = useSelector((state: RootState) => state.chat.activePendingKeyExchange);
+  const persistedMessages = useSelector((state: RootState) => state.chat.messages);
+  const hour12 = useHour12();
   const dispatch = useDispatch();
   const { toast } = useToast();
+  const { showMessageFailureGuidance } = useConnectivityGuidance();
+  const warnOfflineSend = useOfflineSendWarning();
 
   const [error, setError] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(true);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [isScrollable, setIsScrollable] = useState(true);
+  const [isAtBottom, setIsAtBottom] = useState(true);
+  const [loadedChatId, setLoadedChatId] = useState<number | null>(null);
   const offsetRef = useRef(0);
   const latestDisplayedMessagesRef = useRef(messages);
-  const showEmptyState = !isPending && messages.length === 0;
+  const persistedMessagesRef = useRef(persistedMessages);
+  const showEmptyState =
+    !isPending && messages.length === 0 && loadedChatId === (activeChat?.id ?? null);
+  // Kept current synchronously (during render) so the ResizeObserver callback,
+  // which runs before paint, reads an up-to-date count.
+  messagesLengthRef.current = messages.length;
+
+  const isMessageSelectable = useCallback((message: ChatMessage): boolean => {
+    if (
+      message.messageType === 'system'
+      || message.localSendState === 'queued'
+      || message.localSendState === 'sending'
+    ) {
+      return false;
+    }
+    if (message.messageType === 'file' || message.messageType === 'image') {
+      return message.transferStatus !== undefined
+        && TERMINAL_FILE_TRANSFER_STATUSES.has(message.transferStatus);
+    }
+    return true;
+  }, []);
 
   const getMembershipInfoTooltip = (message: ChatMessage): string | null => {
     if (message.messageType !== 'system' || !message.eventTimestamp) {
@@ -97,7 +202,7 @@ export const MessagesContainer = ({ messages, isPending }: MessagesContainerProp
     if (!isMembershipEvent) {
       return null;
     }
-    return `${message.content} at ${formatTimestampToHourMinute(message.eventTimestamp)}.${normalized.includes('joined the group') ? ' This member can only see your messages after this system message, not strictly after the join time.' : ''}`;
+    return `${message.content} at ${formatTimestampToHourMinuteEu(message.eventTimestamp, hour12)}.${normalized.includes('joined the group') ? ' This member can only see your messages after this system message, not strictly after the join time.' : ''}`;
   };
 
   const suppressTopLoadTemporarily = useCallback((durationMs = 180) => {
@@ -124,15 +229,65 @@ export const MessagesContainer = ({ messages, isPending }: MessagesContainerProp
     hasUserInteractedRef.current = true;
   }, []);
 
+  const updateBottomState = useCallback((container: HTMLElement) => {
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    const atBottom = distanceFromBottom <= 64;
+    isAtBottomRef.current = atBottom;
+    if (distanceFromBottom <= 2) {
+      stickToBottomRef.current = true;
+    }
+    setIsAtBottom(atBottom);
+    return atBottom;
+  }, []);
+
+  // Stick to the bottom when content grows underneath the viewport at a *stable*
+  // message count — e.g. a reply quote resolving async after the initial scroll has
+  // already landed — so the latest message stays fully visible. New/removed messages
+  // (count change) are left to the smooth auto-scroll effect and loadMore's restore.
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    const content = contentRef.current;
+    if (!container || !content || typeof ResizeObserver === 'undefined') return;
+    observerSeenLengthRef.current = messagesLengthRef.current;
+    const observer = new ResizeObserver(() => {
+      const len = messagesLengthRef.current;
+      const countChanged = len !== observerSeenLengthRef.current;
+      observerSeenLengthRef.current = len;
+      if (countChanged) return;
+      if (isJumpingRef.current || isLoadingMoreRef.current || !stickToBottomRef.current) return;
+      container.scrollTop = container.scrollHeight;
+      previousScrollTopRef.current = container.scrollTop;
+      isAtBottomRef.current = true;
+      setIsAtBottom(true);
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [activeChat?.id]);
+
   useEffect(() => {
     latestDisplayedMessagesRef.current = messages;
   }, [messages]);
 
+  useEffect(() => {
+    persistedMessagesRef.current = persistedMessages;
+  }, [persistedMessages]);
+
+  useLayoutEffect(() => {
+    jumpGenerationRef.current += 1;
+    isJumpingRef.current = false;
+    skipNextAutoScrollRef.current = false;
+    loadMoreInFlightRef.current = null;
+    activeChatIdRef.current = activeChat?.id ?? null;
+    loadTokenRef.current += 1;
+    stickToBottomRef.current = true;
+    isAtBottomRef.current = true;
+    activePointerScrollRef.current = false;
+    previousScrollTopRef.current = 0;
+  }, [activeChat?.id]);
+
   // Initial fetch
   useEffect(() => {
     const chatId = activeChat?.id ?? null;
-    activeChatIdRef.current = chatId;
-    loadTokenRef.current += 1;
     const requestToken = loadTokenRef.current;
     setError(null);
     setHasMore(true);
@@ -142,6 +297,9 @@ export const MessagesContainer = ({ messages, isPending }: MessagesContainerProp
     topZoneActiveRef.current = false;
     hasUserInteractedRef.current = false;
     suppressTopLoadRef.current = false;
+    stickToBottomRef.current = true;
+    activePointerScrollRef.current = false;
+    previousScrollTopRef.current = 0;
 
     const fetchMessages = async () => {
       if (!chatId) return;
@@ -158,36 +316,158 @@ export const MessagesContainer = ({ messages, isPending }: MessagesContainerProp
         if (mapped.length === 0 && hasOptimisticContactSeed) {
           offsetRef.current = 0;
           setHasMore(false);
+          setLoadedChatId(chatId);
           return;
         }
 
         dispatch(setMessages(mapped));
         offsetRef.current = mapped.length;
         setHasMore(mapped.length >= INITIAL_MESSAGES_LIMIT);
+        setLoadedChatId(chatId);
       } else {
         setError(result.error || 'Failed to fetch messages');
+        setLoadedChatId(chatId);
       }
     }
     void fetchMessages();
   }, [activeChat?.id, dispatch]);
 
-  // Load more on scroll to top
-  const loadMore = useCallback(async () => {
+  useLayoutEffect(() => {
+    if (!historyRefreshRequest) return;
+    skipNextAutoScrollRef.current = true;
+  }, [historyRefreshRequest]);
+
+  const refreshMessagesAfterDelete = useEffectEvent(async (
+    request: MessageHistoryRefreshRequest,
+    chatId: number,
+    isCancelled: () => boolean,
+  ) => {
+      const requestToken = ++loadTokenRef.current;
+      loadMoreInFlightRef.current = null;
+      isLoadingMoreRef.current = false;
+      setIsLoadingMore(false);
+      jumpGenerationRef.current += 1;
+      isJumpingRef.current = false;
+      skipNextAutoScrollRef.current = true;
+
+      const startingIds = new Set(
+        persistedMessagesRef.current
+          .filter((message) => message.chatId === chatId)
+          .map((message) => message.id)
+      );
+      const limit = Math.max(INITIAL_MESSAGES_LIMIT, request.visibleCount);
+      const container = scrollContainerRef.current;
+      const previousScrollTop = container?.scrollTop ?? 0;
+      const wasAtBottom = stickToBottomRef.current;
+
+      try {
+        const result = await window.kiyeovoAPI.getMessages(chatId, limit, 0);
+        if (
+          isCancelled()
+          || loadTokenRef.current !== requestToken
+          || activeChatIdRef.current !== chatId
+        ) {
+          return;
+        }
+        if (!result.success) {
+          toast.error(result.error || 'Messages were deleted, but history could not be refreshed');
+          return;
+        }
+
+        const refreshed = result.messages.map(mapDbMessage);
+        const refreshedIds = new Set(refreshed.map((message) => message.id));
+        const messagesAddedDuringRefresh = persistedMessagesRef.current.filter(
+          (message) =>
+            message.chatId === chatId
+            && !startingIds.has(message.id)
+            && !refreshedIds.has(message.id)
+        );
+        const merged = [...refreshed, ...messagesAddedDuringRefresh]
+          .sort((a, b) => a.timestamp - b.timestamp);
+
+        skipNextAutoScrollRef.current = true;
+        dispatch(replaceMessagesForChat({ chatId, messages: merged }));
+        offsetRef.current = refreshed.length;
+        setHasMore(refreshed.length >= limit);
+
+        await new Promise<void>((resolve) => {
+          requestAnimationFrame(() => {
+            if (
+              !isCancelled()
+              && loadTokenRef.current === requestToken
+              && activeChatIdRef.current === chatId
+              && container
+            ) {
+              suppressTopLoadTemporarily();
+              container.scrollTop = wasAtBottom
+                ? container.scrollHeight
+                : Math.min(previousScrollTop, Math.max(0, container.scrollHeight - container.clientHeight));
+              updateBottomState(container);
+            }
+            resolve();
+          });
+        });
+      } catch (error) {
+        if (!isCancelled()) {
+          console.error('[MessagesContainer] Failed to refresh messages after deletion:', error);
+          toast.error('Messages were deleted, but history could not be refreshed');
+        }
+      } finally {
+        if (!isCancelled()) {
+          onHistoryRefreshHandled?.(request.requestId);
+        }
+      }
+  });
+
+  const markHistoryRefreshHandled = useEffectEvent((requestId: number) => {
+    onHistoryRefreshHandled?.(requestId);
+  });
+
+  useEffect(() => {
+    if (!historyRefreshRequest) return;
+    const request = historyRefreshRequest;
     const chatId = activeChat?.id;
-    if (!chatId || isLoadingMoreRef.current || !hasMore) return;
+    if (chatId !== request.chatId) {
+      markHistoryRefreshHandled(request.requestId);
+      return;
+    }
+
+    let cancelled = false;
+    void refreshMessagesAfterDelete(request, chatId, () => cancelled);
+    return () => {
+      cancelled = true;
+    };
+  }, [activeChat?.id, historyRefreshRequest]);
+
+  // Load more on scroll to top
+  const loadMore = useCallback((): Promise<LoadMoreResult> => {
+    const chatId = activeChat?.id;
+    if (!chatId) return Promise.resolve('cancelled');
+
+    const inFlight = loadMoreInFlightRef.current;
+    if (inFlight?.chatId === chatId) {
+      return inFlight.promise;
+    }
+    if (!hasMore) return Promise.resolve('exhausted');
 
     isLoadingMoreRef.current = true;
     setIsLoadingMore(true);
     const requestToken = loadTokenRef.current;
+    const requestId = Symbol('load-more');
     const container = scrollContainerRef.current;
     const prevScrollHeight = container?.scrollHeight ?? 0;
 
-    try {
-      const result = await window.kiyeovoAPI.getMessages(chatId, LOAD_MORE_MESSAGES_LIMIT, offsetRef.current);
-      if (loadTokenRef.current !== requestToken || activeChatIdRef.current !== chatId) {
-        return;
-      }
-      if (result.success) {
+    const promise = (async (): Promise<LoadMoreResult> => {
+      try {
+        const result = await window.kiyeovoAPI.getMessages(chatId, LOAD_MORE_MESSAGES_LIMIT, offsetRef.current);
+        if (loadTokenRef.current !== requestToken || activeChatIdRef.current !== chatId) {
+          return 'cancelled';
+        }
+        if (!result.success) {
+          console.error('[MessagesContainer] Failed to load more messages:', result.error);
+          return 'error';
+        }
+
         const mapped = result.messages.map(mapDbMessage);
         if (mapped.length > 0) {
           skipNextAutoScrollRef.current = true;
@@ -196,23 +476,39 @@ export const MessagesContainer = ({ messages, isPending }: MessagesContainerProp
 
           // Restore scroll position after DOM update
           requestAnimationFrame(() => {
-            if (container) {
-              suppressTopLoadTemporarily();
-              const newScrollHeight = container.scrollHeight;
-              container.scrollTop = newScrollHeight - prevScrollHeight;
-            }
+            if (
+              !container
+              || loadTokenRef.current !== requestToken
+              || activeChatIdRef.current !== chatId
+              || scrollContainerRef.current !== container
+            ) return;
+
+            suppressTopLoadTemporarily();
+            const newScrollHeight = container.scrollHeight;
+            container.scrollTop = newScrollHeight - prevScrollHeight;
           });
         }
-        if (mapped.length < LOAD_MORE_MESSAGES_LIMIT) {
+        const exhausted = mapped.length < LOAD_MORE_MESSAGES_LIMIT;
+        if (exhausted) {
           setHasMore(false);
         }
+        return exhausted ? 'exhausted' : 'loaded';
+      } catch (err) {
+        console.error('[MessagesContainer] Failed to load more messages:', err);
+        return 'error';
+      } finally {
+        if (loadMoreInFlightRef.current?.requestId === requestId) {
+          loadMoreInFlightRef.current = null;
+        }
+        if (loadTokenRef.current === requestToken && activeChatIdRef.current === chatId) {
+          isLoadingMoreRef.current = false;
+          setIsLoadingMore(false);
+        }
       }
-    } catch (err) {
-      console.error('[MessagesContainer] Failed to load more messages:', err);
-    } finally {
-      isLoadingMoreRef.current = false;
-      setIsLoadingMore(false);
-    }
+    })();
+
+    loadMoreInFlightRef.current = { chatId, requestId, promise };
+    return promise;
   }, [activeChat?.id, hasMore, dispatch, suppressTopLoadTemporarily]);
 
   useEffect(() => {
@@ -225,6 +521,7 @@ export const MessagesContainer = ({ messages, isPending }: MessagesContainerProp
     let frameId: number | null = null;
     const updateScrollable = () => {
       setIsScrollable(container.scrollHeight > container.clientHeight + 1);
+      updateBottomState(container);
     };
 
     frameId = requestAnimationFrame(updateScrollable);
@@ -237,16 +534,24 @@ export const MessagesContainer = ({ messages, isPending }: MessagesContainerProp
       }
       window.removeEventListener('resize', onResize);
     };
-  }, [activeChat?.id, messages.length, isLoadingMore, hasMore, showEmptyState]);
+  }, [activeChat?.id, messages.length, isLoadingMore, hasMore, showEmptyState, updateBottomState]);
 
   const handleScroll = useCallback(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
 
+    const currentScrollTop = container.scrollTop;
+    const movedUp = currentScrollTop < previousScrollTopRef.current - 1;
+    if (activePointerScrollRef.current && movedUp) {
+      stickToBottomRef.current = false;
+    }
+    previousScrollTopRef.current = currentScrollTop;
+
     const thresholdPx = Math.min(120, Math.max(24, container.clientHeight * 0.08));
     const inTopZone = container.scrollTop <= thresholdPx;
     const wasInTopZone = topZoneActiveRef.current;
     topZoneActiveRef.current = inTopZone;
+    updateBottomState(container);
 
     if (suppressTopLoadRef.current || !hasUserInteractedRef.current) {
       return;
@@ -255,7 +560,30 @@ export const MessagesContainer = ({ messages, isPending }: MessagesContainerProp
     if (!wasInTopZone && inTopZone && hasMore && !isLoadingMoreRef.current) {
       void loadMore();
     }
-  }, [hasMore, loadMore]);
+  }, [hasMore, loadMore, updateBottomState]);
+
+  const handleWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
+    markUserInteraction();
+    if (event.deltaY < 0) {
+      stickToBottomRef.current = false;
+    }
+  }, [markUserInteraction]);
+
+  const handlePointerDown = useCallback(() => {
+    markUserInteraction();
+    activePointerScrollRef.current = true;
+    previousScrollTopRef.current = scrollContainerRef.current?.scrollTop ?? 0;
+  }, [markUserInteraction]);
+
+  const handlePointerEnd = useCallback(() => {
+    activePointerScrollRef.current = false;
+  }, []);
+
+  const scrollToBottom = useCallback(() => {
+    stickToBottomRef.current = true;
+    suppressTopLoadTemporarily();
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [suppressTopLoadTemporarily]);
 
   useEffect(() => {
     if (activeChat?.justCreated && messages.length === 0) {
@@ -273,19 +601,234 @@ export const MessagesContainer = ({ messages, isPending }: MessagesContainerProp
   }, [activeChat?.justCreated, activeChat?.id, messages.length, dispatch]);
 
   useEffect(() => {
+    if (isJumpingRef.current) return;
+    const lastMessage = messages[messages.length - 1];
+    const tailSignature = `${messages.length}:${lastMessage?.id ?? ''}`;
+    const tailChanged = tailSignature !== autoScrollTailSignatureRef.current;
+    autoScrollTailSignatureRef.current = tailSignature;
     if (skipNextAutoScrollRef.current) {
       skipNextAutoScrollRef.current = false;
       return;
     }
-    if (messagesEndRef.current) {
+    // No new/replaced message (just an in-place field edit) — don't scroll.
+    if (!tailChanged) return;
+    if (messagesEndRef.current && stickToBottomRef.current) {
       suppressTopLoadTemporarily();
       messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
     }
   }, [messages, suppressTopLoadTemporarily]);
 
+  useEffect(() => () => {
+    jumpGenerationRef.current += 1;
+    isJumpingRef.current = false;
+    skipNextAutoScrollRef.current = false;
+    if (pulseTimeoutRef.current) clearTimeout(pulseTimeoutRef.current);
+  }, []);
+
   const isTrustedOutOfBand = activeChat?.trusted_out_of_band;
   let previousSenderPeerId: string | null = null;
   let senderStreak = 0;
+  let previousDayStart: number | null = null;
+
+  // Briefly tint the target bubble so the eye lands on it after a jump.
+  const pulseRow = useCallback((rowEl: HTMLElement) => {
+    const bubble = rowEl.querySelector<HTMLElement>('[data-message-bubble]') ?? rowEl;
+    bubble.classList.remove('reply-pulse-highlight');
+    void bubble.offsetWidth; // force reflow so the animation restarts on a repeat jump
+    bubble.classList.add('reply-pulse-highlight');
+    if (pulseTimeoutRef.current) clearTimeout(pulseTimeoutRef.current);
+    pulseTimeoutRef.current = setTimeout(() => {
+      bubble.classList.remove('reply-pulse-highlight');
+      pulseTimeoutRef.current = null;
+    }, 2600);
+  }, []);
+
+  const waitForJumpTarget = useCallback((
+    rowEl: HTMLElement,
+    container: HTMLElement,
+    isCurrentJump: () => boolean,
+  ): Promise<boolean> => new Promise((resolve) => {
+    const startedAt = performance.now();
+    let previousScrollTop = container.scrollTop;
+    let stableFrames = 0;
+
+    const checkVisibility = () => {
+      if (!isCurrentJump() || !rowEl.isConnected) {
+        resolve(false);
+        return;
+      }
+
+      const rowRect = rowEl.getBoundingClientRect();
+      const containerRect = container.getBoundingClientRect();
+      const isVisible = rowRect.bottom > containerRect.top && rowRect.top < containerRect.bottom;
+      const currentScrollTop = container.scrollTop;
+
+      stableFrames = isVisible && Math.abs(currentScrollTop - previousScrollTop) < 0.5
+        ? stableFrames + 1
+        : 0;
+      previousScrollTop = currentScrollTop;
+
+      if (stableFrames >= 2) {
+        resolve(true);
+        return;
+      }
+      if (performance.now() - startedAt >= 5000) {
+        resolve(isVisible);
+        return;
+      }
+
+      requestAnimationFrame(checkVisibility);
+    };
+
+    requestAnimationFrame(checkVisibility);
+  }), []);
+
+  const performMessageJump = useCallback(async (
+    clientMsgId: string,
+    expectedChatId?: number,
+  ): Promise<MessageJumpOutcome> => {
+    const chatId = activeChat?.id;
+    const container = scrollContainerRef.current;
+    if (!chatId || !container || (expectedChatId !== undefined && expectedChatId !== chatId)) {
+      return 'cancelled';
+    }
+    let requestToken = loadTokenRef.current;
+    const jumpGeneration = ++jumpGenerationRef.current;
+    const findRow = () => container.querySelector<HTMLElement>(`[data-cid="${CSS.escape(clientMsgId)}"]`);
+    const isCurrentJump = () =>
+      jumpGenerationRef.current === jumpGeneration
+      && activeChatIdRef.current === chatId
+      && loadTokenRef.current === requestToken
+      && scrollContainerRef.current === container;
+
+    isJumpingRef.current = true;
+    stickToBottomRef.current = false;
+    try {
+      let row = findRow();
+      if (!row) {
+        const startingIds = new Set(
+          persistedMessagesRef.current
+            .filter((message) => message.chatId === chatId)
+            .map((message) => message.id)
+        );
+        const jumpWindow = await window.kiyeovoAPI.getMessageJumpWindow(chatId, clientMsgId);
+        if (!isCurrentJump()) return 'cancelled';
+        if (!jumpWindow.success) return 'error';
+        if (jumpWindow.status === 'not_found') return 'unavailable';
+
+        if (jumpWindow.status === 'loaded') {
+          requestToken = ++loadTokenRef.current;
+          loadMoreInFlightRef.current = null;
+          isLoadingMoreRef.current = false;
+          setIsLoadingMore(false);
+
+          const fetched = jumpWindow.messages.map(mapDbMessage);
+          const fetchedIds = new Set(fetched.map((message) => message.id));
+          const messagesAddedDuringFetch = persistedMessagesRef.current.filter(
+            (message) =>
+              message.chatId === chatId
+              && !startingIds.has(message.id)
+              && !fetchedIds.has(message.id)
+          );
+          const merged = [...fetched, ...messagesAddedDuringFetch]
+            .sort((a, b) => a.timestamp - b.timestamp);
+
+          skipNextAutoScrollRef.current = true;
+          dispatch(replaceMessagesForChat({ chatId, messages: merged }));
+          offsetRef.current = fetched.length;
+          setHasMore(jumpWindow.hasMoreOlder);
+
+          await new Promise<void>((resolve) => {
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+          });
+          if (!isCurrentJump()) return 'cancelled';
+          row = findRow();
+          if (!row) return 'unavailable';
+        }
+      }
+
+      const MAX_PAGES = 200;
+      let pages = 0;
+      let exhausted = false;
+      while (!row && pages < MAX_PAGES) {
+        const result = await loadMore();
+        if (!isCurrentJump()) return 'cancelled';
+
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        if (!isCurrentJump()) return 'cancelled';
+
+        row = findRow();
+        if (row) break;
+        if (result === 'loaded') {
+          pages++;
+          continue;
+        }
+        if (result === 'exhausted') {
+          exhausted = true;
+          break;
+        }
+        return result === 'error' ? 'error' : 'cancelled';
+      }
+
+      if (!isCurrentJump()) return 'cancelled';
+      if (row) {
+        row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const isVisible = await waitForJumpTarget(row, container, isCurrentJump);
+        if (!isVisible || !isCurrentJump()) return 'cancelled';
+        pulseRow(row);
+        return 'completed';
+      }
+      return exhausted ? 'unavailable' : 'error';
+    } finally {
+      if (jumpGenerationRef.current === jumpGeneration) {
+        isJumpingRef.current = false;
+        skipNextAutoScrollRef.current = false;
+      }
+    }
+  }, [activeChat?.id, dispatch, loadMore, pulseRow, waitForJumpTarget]);
+
+  const handleJumpToMessage = useCallback(async (clientMsgId: string) => {
+    const outcome = await performMessageJump(clientMsgId);
+    if (outcome === 'unavailable') {
+      toast.info('Original message is no longer available');
+    } else if (outcome === 'error') {
+      toast.error('Could not search the full message history');
+    }
+  }, [performMessageJump, toast]);
+
+  const runExternalMessageJump = useEffectEvent(async (request: MessageJumpRequest) => {
+    return performMessageJump(request.clientMsgId, request.chatId);
+  });
+
+  const reportExternalMessageJump = useEffectEvent((
+    requestId: number,
+    outcome: MessageJumpOutcome,
+  ) => {
+    onMessageJumpHandled?.(requestId, outcome);
+  });
+
+  useEffect(() => {
+    if (!messageJumpRequest) return;
+
+    const request = messageJumpRequest;
+    let cancelled = false;
+    void (async () => {
+      const outcome = await runExternalMessageJump(request);
+      if (!cancelled) {
+        reportExternalMessageJump(request.requestId, outcome);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      jumpGenerationRef.current += 1;
+      isJumpingRef.current = false;
+      skipNextAutoScrollRef.current = false;
+    };
+  }, [
+    activeChat?.id,
+    messageJumpRequest,
+  ]);
 
   const handleRetryFailedMessage = useCallback(async (message: ChatMessage) => {
     if (!activeChat) return;
@@ -298,6 +841,27 @@ export const MessagesContainer = ({ messages, isPending }: MessagesContainerProp
       toast.info(`Group is rekeying. Retry available in ${seconds}s.`);
       return;
     }
+
+    // Delivered online; only the offline backup failed → re-store the backup,
+    // do NOT re-send the message (online members already have it).
+    if (message.failedReason === 'offline_backup') {
+      dispatch(updateLocalMessageSendState({ messageId: message.id, state: 'sending' }));
+      try {
+        const res = await window.kiyeovoAPI.retryGroupOfflineBackup(activeChat.id, message.id);
+        if (res.success) {
+          dispatch(resolveMessageSendOutcome({ messageId: message.id, outcome: 'delivered' }));
+          toast.success('Offline backup synced');
+        } else {
+          dispatch(updateLocalMessageSendState({ messageId: message.id, state: 'failed', failedReason: 'offline_backup' }));
+          toast.error(res.error || 'Failed to retry offline backup');
+        }
+      } catch (err) {
+        dispatch(updateLocalMessageSendState({ messageId: message.id, state: 'failed', failedReason: 'offline_backup' }));
+        toast.error(errStr(err, 'Failed to retry offline backup'));
+      }
+      return;
+    }
+
     dispatch(updateLocalMessageSendState({ messageId: message.id, state: 'sending' }));
 
     try {
@@ -305,7 +869,7 @@ export const MessagesContainer = ({ messages, isPending }: MessagesContainerProp
         const { success, error, warning, offlineBackupRetry, message: sentMessage, messageSentStatus } = await window.kiyeovoAPI.sendGroupMessage(
           activeChat.id,
           message.content,
-          { rekeyRetryHint: message.failedReason === 'group_rekeying' },
+          { rekeyRetryHint: message.failedReason === 'group_rekeying', replyToCid: message.replyToClientId },
         );
         if (!success) {
           const isRekeyFailure =
@@ -320,24 +884,13 @@ export const MessagesContainer = ({ messages, isPending }: MessagesContainerProp
           toast.error(error || 'Failed to resend group message');
           return;
         }
-        if (warning && offlineBackupRetry) {
-          toast.warningAction(
-            warning,
-            'Retry offline backup',
-            async () => {
-              const retry = await window.kiyeovoAPI.retryGroupOfflineBackup(
-                offlineBackupRetry.chatId,
-                offlineBackupRetry.messageId,
-              );
-              if (retry.success) {
-                toast.success('Group offline backup synced');
-              } else {
-                toast.error(retry.error || 'Failed to retry group offline backup');
-              }
-            },
-          );
+        warnOfflineSend();
+        const backupFailed = !!(warning && offlineBackupRetry);
+        if (backupFailed) {
+          toast.warning(warning!);
         }
         if (sentMessage?.messageId) {
+          onOfflineInboxRelevant?.();
           dispatch(finalizeSendingMessage({
             localMessageId: message.id,
             finalMessage: {
@@ -346,8 +899,18 @@ export const MessagesContainer = ({ messages, isPending }: MessagesContainerProp
               timestamp: sentMessage.timestamp ?? Date.now(),
               messageSentStatus: messageSentStatus ?? 'online',
               localSendState: undefined,
+              clientMsgId: sentMessage.clientMsgId,
+              replyToClientId: message.replyToClientId,
             },
           }));
+          // Delivered online but backup failed again → re-show the dedicated affordance.
+          if (backupFailed) {
+            dispatch(updateLocalMessageSendState({
+              messageId: sentMessage.messageId,
+              state: 'failed',
+              failedReason: 'offline_backup',
+            }));
+          }
         }
         return;
       }
@@ -358,19 +921,57 @@ export const MessagesContainer = ({ messages, isPending }: MessagesContainerProp
         return;
       }
 
-      const { success, error, message: sentMessage, messageSentStatus } = await window.kiyeovoAPI.sendMessage(activeChat.peerId, message.content);
+      // A persisted offline-queue send (real backend id) is requeued + reflushed in
+      // place — re-sending would create a duplicate row. A never-persisted optimistic
+      // row (local-send-… id) is re-sent from scratch.
+      if (!message.id.startsWith('local-send-')) {
+        const res = await window.kiyeovoAPI.retryOfflineSend(message.id);
+        if (!res.success) {
+          dispatch(updateLocalMessageSendState({ messageId: message.id, state: 'failed' }));
+          toast.error(res.error || 'Failed to retry message');
+        } else {
+          onOfflineInboxRelevant?.();
+        }
+        // success → backend emits 'sending' then the settled outcome via events.
+        return;
+      }
+
+      const {
+        success,
+        error,
+        message: sentMessage,
+        messageSentStatus,
+        localSendState,
+        connectivityFailure,
+      } = await window.kiyeovoAPI.sendMessage(activeChat.peerId, message.content, message.replyToClientId);
       if (!success) {
         dispatch(updateLocalMessageSendState({ messageId: message.id, state: 'failed' }));
-        toast.error(error || 'Failed to resend message');
+        if (error === 'OFFLINE_BUCKET_FULL') {
+          onOfflineInboxRelevant?.();
+          if (activeChat.type === 'direct' && activeChat.peerId) {
+            void window.kiyeovoAPI.requestOfflineInboxRecovery(activeChat.peerId).catch(() => undefined);
+          }
+        }
+        if (!connectivityFailure || !showMessageFailureGuidance(connectivityFailure)) {
+          toast.error(error || 'Failed to resend message');
+        }
       } else if (sentMessage?.messageId) {
+        const stillSending = localSendState === 'sending';
+        if (!stillSending) warnOfflineSend();
+        if (messageSentStatus === 'offline') {
+          onOfflineInboxRelevant?.();
+        }
         dispatch(finalizeSendingMessage({
           localMessageId: message.id,
           finalMessage: {
             ...message,
             id: sentMessage.messageId,
             timestamp: sentMessage.timestamp ?? Date.now(),
-            messageSentStatus: messageSentStatus ?? 'online',
-            localSendState: undefined,
+            messageSentStatus: stillSending ? null : (messageSentStatus ?? 'online'),
+            localSendState: stillSending ? 'sending' : undefined,
+            // Adopt the cid the backend minted on this (re)send; the spread above
+            // would otherwise keep the optimistic row's stale/empty clientMsgId.
+            clientMsgId: sentMessage.clientMsgId,
           },
         }));
       }
@@ -378,7 +979,14 @@ export const MessagesContainer = ({ messages, isPending }: MessagesContainerProp
       dispatch(updateLocalMessageSendState({ messageId: message.id, state: 'failed' }));
       toast.error(errStr(err, 'Unexpected resend error'));
     }
-  }, [activeChat, dispatch, toast]);
+  }, [
+    activeChat,
+    dispatch,
+    onOfflineInboxRelevant,
+    showMessageFailureGuidance,
+    toast,
+    warnOfflineSend,
+  ]);
 
   const handleRetryOfflineFetch = useCallback(async () => {
     if (!activeChat?.id) return;
@@ -434,14 +1042,20 @@ export const MessagesContainer = ({ messages, isPending }: MessagesContainerProp
     }
   }, [activeChat, dispatch, toast]);
 
-  return <div
-    ref={scrollContainerRef}
-    onScroll={handleScroll}
-    onWheel={markUserInteraction}
-    onTouchStart={markUserInteraction}
-    onPointerDown={markUserInteraction}
-    className={`flex-1 overflow-y-auto p-6 space-y-2`}
-  >
+  return <div className="relative min-h-0 flex-1">
+    <div
+      ref={scrollContainerRef}
+      onScroll={handleScroll}
+      onWheel={handleWheel}
+      onTouchStart={markUserInteraction}
+      onPointerDown={handlePointerDown}
+      onPointerUp={handlePointerEnd}
+      onPointerCancel={handlePointerEnd}
+      onPointerLeave={handlePointerEnd}
+      className="h-full overflow-y-auto p-6"
+      style={{ paddingBottom: `${bottomOverlayClearancePx}px` }}
+    >
+    <div ref={contentRef} className="min-h-full space-y-2">
     {activeChat?.offlineFetchNeedsSync && !activeChat.blocked && (
       <div className="sticky top-2 z-20 mb-2 flex items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
         <span>Failed to fetch offline messages.</span>
@@ -512,8 +1126,19 @@ export const MessagesContainer = ({ messages, isPending }: MessagesContainerProp
         {error}
       </div>
     </div>}
-    {messages.map((message, index) => {
+    {messages.map((message) => {
       const isSystemMessage = message.messageType === 'system';
+
+      const messageDayStart = startOfDay(message.timestamp).getTime();
+      const showDateDivider = previousDayStart === null || previousDayStart !== messageDayStart;
+      previousDayStart = messageDayStart;
+      if (showDateDivider) {
+        // A new day breaks sender grouping so the first bubble under the
+        // divider gets its tail corner (same as system messages do).
+        previousSenderPeerId = null;
+        senderStreak = 0;
+      }
+
       if (isSystemMessage) {
         // Break sender grouping across system events.
         previousSenderPeerId = null;
@@ -527,29 +1152,59 @@ export const MessagesContainer = ({ messages, isPending }: MessagesContainerProp
         previousSenderPeerId = message.senderPeerId;
       }
 
-      const hasPendingSendState = !!message.localSendState;
-      const showTimestamp =
-        hasPendingSendState ||
-        senderChanged ||
-        (index > 0 && message.timestamp - messages[index - 1].timestamp > SHOW_TIMESTAMP_INTERVAL);
       const showSenderLabel =
         !isSystemMessage &&
         message.senderPeerId !== myPeerId &&
         !!activeChat?.groupId &&
         (senderChanged || senderStreak % 10 === 0);
+      const isSelectable = !isPending && isMessageSelectable(message);
       return (
-        <MessageRow
-          key={message.id}
-          message={message}
-          myPeerId={myPeerId}
-          hasActivePendingKeyExchange={!!activePendingKeyExchange}
-          showSenderLabel={showSenderLabel}
-          showTimestamp={showTimestamp}
-          membershipInfoTooltip={getMembershipInfoTooltip(message)}
-          onRetry={handleRetryFailedMessage}
-        />
+        <Fragment key={message.id}>
+          {showDateDivider && (
+            <div className="w-full flex justify-center py-1">
+              <span className="rounded-md bg-muted/50 px-3 py-1 text-xs text-muted-foreground">
+                {formatDateDivider(message.timestamp)}
+              </span>
+            </div>
+          )}
+          <MessageRow
+            message={message}
+            myPeerId={myPeerId}
+            hasActivePendingKeyExchange={!!activePendingKeyExchange}
+            showSenderLabel={showSenderLabel}
+            isFirstInSeries={senderChanged}
+            membershipInfoTooltip={getMembershipInfoTooltip(message)}
+            onRetry={handleRetryFailedMessage}
+            onJumpToMessage={handleJumpToMessage}
+            onTogglePin={onTogglePin}
+            selectionMode={selectionMode}
+            isSelectable={isSelectable}
+            isSelected={isSelectable && selectedMessageIds?.has(message.id) === true}
+            isActiveSearchResult={
+              !!activeSearchClientMsgId
+              && message.clientMsgId === activeSearchClientMsgId
+            }
+            searchQuery={searchHighlightQuery}
+            onToggleSelect={onToggleMessageSelection}
+            onEnterSelection={onEnterMessageSelection}
+          />
+        </Fragment>
       );
     })}
-    <div ref={messagesEndRef} />
+      <div ref={messagesEndRef} />
+    </div>
+    </div>
+    {!isAtBottom && !showEmptyState && (
+      <button
+        type="button"
+        onClick={scrollToBottom}
+        className="absolute cursor-pointer left-1/2 -translate-x-1/2 z-30 inline-flex h-9 w-9 items-center justify-center rounded-full border border-border bg-background/95 text-muted-foreground shadow-lg backdrop-blur-sm transition-colors hover:border-primary/50 hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/60"
+        style={{ bottom: `${bottomOverlayClearancePx + 16}px` }}
+        aria-label="Scroll to bottom"
+        title="Scroll to bottom"
+      >
+        <ChevronDown className="h-5 w-5" />
+      </button>
+    )}
   </div>
 }

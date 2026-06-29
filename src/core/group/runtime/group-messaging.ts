@@ -7,6 +7,7 @@ import {
   GROUP_GOSSIPSUB_HEARTBEAT_INTERVAL,
   GROUP_MESSAGE_MAX_AGE_MS,
   GROUP_MESSAGE_MAX_FUTURE_SKEW_MS,
+  GROUP_OFFLINE_MESSAGE_TTL_MS,
   GROUP_OLD_TOPIC_SUBSCRIPTION_GRACE_MS,
   GROUP_PUBLISH_RETRYABLE_ERROR,
   GROUP_PUBLISH_RETRY_DELAY_MS,
@@ -21,9 +22,24 @@ import {
   type GroupContentMessage,
   type GroupHeartbeatMessage,
 } from '../types.js';
+import { isGroupCallHintSystemPayload } from '../../lib/group-call-signaling.js';
+import {
+  dispatchEnvelope,
+  encodeApplicationEnvelope,
+  isValidCid,
+} from '../../protocol/message-envelope.js';
+import type {
+  ApplicationMessageSendResult,
+  InboundApplicationMessageContext,
+  InboundApplicationMessageHandler,
+  SendApplicationMessageRequest,
+} from '../../protocol/application-message.js';
+import { toBase64Url } from '../../utils/miscellaneous.js';
 import { errStr, generalErrorHandler } from '../../utils/general-error.js';
 import { GroupOfflineManager } from './group-offline-manager.js';
 import { log } from '../../../shared/logger.js';
+
+export const GROUP_OFFLINE_BACKUP_FAILED_MARKER = 'no online peers and offline backup failed';
 
 interface GroupMessagingDeps {
   node: ChatNode;
@@ -32,6 +48,7 @@ interface GroupMessagingDeps {
   myPeerId: string;
   myUsername: string;
   onMessageReceived: (data: MessageReceivedEvent) => void;
+  onApplicationMessage: InboundApplicationMessageHandler;
   groupOfflineManager: GroupOfflineManager;
   nudgeGroupRefetch?: (peerId: string, groupId: string) => void;
 }
@@ -79,6 +96,7 @@ export class GroupMessaging {
   start(): void {
     if (this.started) return;
     this.started = true;
+    this.recoverPendingOfflineBackups();
     this.deps.node.services.pubsub.addEventListener('message', this.onPubsubMessage as EventListener);
     this.deps.node.addEventListener('peer:connect', this.onPeerConnect as EventListener);
     void this.reconcileSubscriptions();
@@ -236,28 +254,80 @@ export class GroupMessaging {
   async sendGroupMessage(
     groupId: string,
     content: string,
-    options?: { rekeyRetryHint?: boolean }
+    options?: { rekeyRetryHint?: boolean; replyToCid?: string }
   ): Promise<SendMessageResponse> {
-    const ctx = this.resolveActiveGroupContext(groupId);
+    const messageId = randomUUID();
+    const replyToCid = isValidCid(options?.replyToCid) ? options.replyToCid : undefined;
+    const result = await this.sendApplicationMessage(groupId, {
+      message: {
+        cid: messageId,
+        kind: 'text',
+        payload: {
+          text: content,
+          ...(replyToCid ? { reply_to: replyToCid } : {}),
+        },
+      },
+      persistence: {
+        owner: 'transport',
+        content,
+        messageType: 'text',
+        ...(replyToCid ? { replyToCid } : {}),
+      },
+      ...(options?.rekeyRetryHint !== undefined
+        ? { rekeyRetryHint: options.rekeyRetryHint }
+        : {}),
+    });
 
+    const strippedMessage: StrippedMessage = {
+      chatId: result.chatId,
+      messageId,
+      content,
+      timestamp: result.timestamp,
+      messageType: 'text',
+      clientMsgId: messageId,
+      replyToClientId: replyToCid,
+    };
+    return {
+      success: true,
+      message: strippedMessage,
+      messageSentStatus: result.messageSentStatus,
+      error: null,
+      warning: result.warning,
+      offlineBackupRetry: result.offlineBackupRetry,
+    };
+  }
+
+  async sendApplicationMessage(
+    groupId: string,
+    request: SendApplicationMessageRequest,
+  ): Promise<ApplicationMessageSendResult> {
+    const ctx = this.resolveActiveGroupContext(groupId);
     const participants = this.deps.database.getChatParticipants(ctx.chatId);
     const hasRecipient = participants.some((participant) => participant.peer_id !== this.deps.myPeerId);
-    const participantPeers = participants.map((participant) => participant.peer_id);
-    const connectedPeers = this.deps.node.getPeers().map((peerId) => peerId.toString());
-
     if (!hasRecipient) {
       throw new Error('Cannot send message: group has no other members');
     }
+    if (
+      request.persistence.owner === 'caller'
+      && !this.deps.database.messageExistsInChat(ctx.chatId, request.message.cid)
+    ) {
+      throw new Error('Caller-owned application message row was not persisted before send');
+    }
     this.ensureTopicSubscription(ctx);
-    
+
+    const participantPeers = participants.map((participant) => participant.peer_id);
+    const connectedPeers = this.deps.node.getPeers().map((peerId) => peerId.toString());
     log(
       `[GROUP-MSG][SEND][CTX] group=${groupId.slice(0, 8)} keyVersion=${ctx.keyVersion} ` +
       `topic=${ctx.topic.slice(0, 16)}... participants=${participantPeers.map((p) => p.slice(-8)).join(',') || 'none'} ` +
       `connectedPeers=${connectedPeers.map((p) => p.slice(-8)).join(',') || 'none'}`
     );
 
+    const messageId = request.message.cid;
+    const envelopeBody = encodeApplicationEnvelope(request.message);
+
     const nonce = randomBytes(24);
-    const encryptedContent = this.encryptContent(content, ctx.groupKey, nonce);
+    const encryptedContent = this.encryptContent(envelopeBody, ctx.groupKey, nonce);
 
     const seq = this.deps.database.getNextSeqAndIncrement(groupId, ctx.keyVersion);
     const timestamp = Date.now();
@@ -267,7 +337,7 @@ export class GroupMessaging {
       groupId,
       keyVersion: ctx.keyVersion,
       senderPeerId: this.deps.myPeerId,
-      messageId: randomUUID(),
+      messageId,
       seq,
       encryptedContent,
       nonce: Buffer.from(nonce).toString('base64'),
@@ -295,8 +365,9 @@ export class GroupMessaging {
       );
       await this.deps.groupOfflineManager.storeGroupMessage(signedMessage);
       this.pendingOfflineBackups.delete(signedMessage.messageId);
+      this.deps.database.deletePendingGroupOfflineBackup(signedMessage.messageId);
 
-      if (!published && options?.rekeyRetryHint) {
+      if (!published && request.rekeyRetryHint) {
         participants
           .filter(p => p.peer_id !== this.deps.myPeerId)
           .forEach((p) => this.deps.nudgeGroupRefetch?.(p.peer_id, groupId))
@@ -304,51 +375,61 @@ export class GroupMessaging {
     } catch (error: unknown) {
       const errorText = errStr(error);
       if (!published) {
-        throw new Error(`Failed to deliver group message: no online peers and offline backup failed: ${errorText}`);
+        throw new Error(`Failed to deliver group message: ${GROUP_OFFLINE_BACKUP_FAILED_MARKER}: ${errorText}`);
       }
       warning = `Message delivered online, but offline group backup failed: ${errorText}`;
-      offlineBackupRetry = { chatId: ctx.chatId, messageId: signedMessage.messageId };
-
-      this.pendingOfflineBackups.set(signedMessage.messageId, signedMessage);
+      if (request.persistence.owner !== 'none') {
+        offlineBackupRetry = { chatId: ctx.chatId, messageId: signedMessage.messageId };
+        this.pendingOfflineBackups.set(signedMessage.messageId, signedMessage);
+        this.deps.database.upsertPendingGroupOfflineBackup({
+          messageId: signedMessage.messageId,
+          chatId: ctx.chatId,
+          groupId,
+          payload: JSON.stringify(signedMessage),
+        });
+      }
       console.warn(`[GROUP-OFFLINE] ${warning}`);
     }
 
-    if (!this.deps.database.messageExists(signedMessage.messageId)) {
+    if (request.persistence.owner === 'transport') {
       await this.deps.database.createMessage({
-        id: signedMessage.messageId,
+        id: messageId,
         chat_id: ctx.chatId,
         sender_peer_id: this.deps.myPeerId,
-        content,
-        message_type: 'text',
+        content: request.persistence.content,
+        message_type: request.persistence.messageType,
         timestamp: new Date(timestamp),
+        client_msg_id: messageId,
+        reply_to_client_id: request.persistence.replyToCid ?? null,
       });
-      this.deps.database.updateMemberSeq(groupId, ctx.keyVersion, this.deps.myPeerId, seq);
 
       this.deps.onMessageReceived({
         chatId: ctx.chatId,
-        messageId: signedMessage.messageId,
-        content,
+        messageId,
+        content: request.persistence.content,
         senderPeerId: this.deps.myPeerId,
         senderUsername: this.deps.myUsername,
         timestamp,
         messageSentStatus: published ? 'online' : 'offline',
-        messageType: 'text',
+        messageType: request.persistence.messageType,
+        clientMsgId: messageId,
+        replyToClientId: request.persistence.replyToCid,
       });
     }
+    this.deps.database.updateMemberSeq(groupId, ctx.keyVersion, this.deps.myPeerId, seq);
 
-    const strippedMessage: StrippedMessage = {
+    // Delivered online but the DHT backup failed → persist a distinct failed
+    // state on the row so the "Retry offline backup" affordance shows and survives
+    // restart (the message itself was delivered; this is backup-only, manual retry).
+    if (offlineBackupRetry) {
+      this.deps.database.updateMessageSendState(signedMessage.messageId, 'failed', 'offline_backup');
+    }
+
+    const response: ApplicationMessageSendResult = {
       chatId: ctx.chatId,
-      messageId: signedMessage.messageId,
-      content,
+      messageId,
       timestamp,
-      messageType: 'text',
-    };
-
-    const response: SendMessageResponse = {
-      success: true,
-      message: strippedMessage,
       messageSentStatus: published ? 'online' : 'offline',
-      error: null,
       warning,
       offlineBackupRetry,
     };
@@ -356,6 +437,52 @@ export class GroupMessaging {
     log(`[GROUP-MSG][SEND] ${groupId} done publishMs=${publishMs} ${published ? 'online' : 'offline'}`);
 
     return response;
+  }
+
+  async storeHiddenSystemMessage(groupId: string, content: string): Promise<void> {
+    const ctx = this.resolveActiveGroupContext(groupId);
+    const seq = this.deps.database.getNextSeqAndIncrement(groupId, ctx.keyVersion);
+    const timestamp = Date.now();
+    const nonce = randomBytes(24);
+    const encryptedContent = this.encryptContent(content, ctx.groupKey, nonce);
+
+    const unsignedMessage: Omit<GroupContentMessage, 'signature'> = {
+      type: GroupMessageType.GROUP_MESSAGE,
+      groupId,
+      keyVersion: ctx.keyVersion,
+      senderPeerId: this.deps.myPeerId,
+      messageId: randomUUID(),
+      seq,
+      encryptedContent,
+      nonce: Buffer.from(nonce).toString('base64'),
+      timestamp,
+      messageType: 'system',
+    };
+
+    const signedMessage: GroupChatMessage = {
+      ...unsignedMessage,
+      signature: this.sign(unsignedMessage),
+    };
+
+    await this.deps.groupOfflineManager.storeGroupMessage(signedMessage);
+    log(
+      `[GROUP-MSG][SYSTEM][OFFLINE_ONLY] group=${groupId.slice(0, 8)} msgId=${signedMessage.messageId} seq=${seq}`,
+    );
+  }
+
+  async storeGroupCallHintMessage(groupId: string): Promise<void> {
+    const ctx = this.resolveActiveGroupContext(groupId);
+    if (this.hasLiveGroupCallHintInLocalMirror(ctx)) {
+      log(
+        `[GROUP-CALL][HINT][STORE_SKIP] group=${groupId.slice(0, 8)} epoch=${ctx.keyVersion}`,
+      );
+      return;
+    }
+
+    await this.storeHiddenSystemMessage(groupId, JSON.stringify({
+      type: 'GROUP_CALL_HINT',
+      groupId,
+    }));
   }
 
   async retryOfflineBackup(chatId: number, messageId: string): Promise<void> {
@@ -374,6 +501,33 @@ export class GroupMessaging {
 
     await this.deps.groupOfflineManager.storeGroupMessage(pending);
     this.pendingOfflineBackups.delete(messageId);
+    this.deps.database.deletePendingGroupOfflineBackup(messageId);
+    this.deps.database.updateMessageSendState(messageId, null);
+  }
+
+  discardDeletedMessageRetryState(messageIds: string[]): void {
+    for (const messageId of messageIds) {
+      this.pendingOfflineBackups.delete(messageId);
+    }
+  }
+
+  /**
+   * On startup, rehydrate persisted offline backups (published online but the DHT
+   * backup failed before app-close) into the in-memory map, so `retryOfflineBackup`
+   * works again. No auto-retry — the persisted `failed`/`offline_backup` row shows
+   * the "Retry offline backup" button and the user re-stores manually.
+   */
+  private recoverPendingOfflineBackups(): void {
+    const rows = this.deps.database.getAllPendingGroupOfflineBackups();
+    if (rows.length === 0) return;
+    for (const row of rows) {
+      try {
+        this.pendingOfflineBackups.set(row.message_id, JSON.parse(row.payload) as GroupContentMessage);
+      } catch (error: unknown) {
+        log(`[GROUP-OFFLINE][RECOVER] failed to rehydrate msgId=${row.message_id}: ${errStr(error)}`);
+      }
+    }
+    log(`[GROUP-OFFLINE][RECOVER] rehydrated ${this.pendingOfflineBackups.size} pending backup(s) for manual retry`);
   }
 
   private scheduleReconcile(delayMs: number): void {
@@ -781,6 +935,32 @@ export class GroupMessaging {
     return new TextDecoder().decode(decrypted);
   }
 
+  private hasLiveGroupCallHintInLocalMirror(ctx: GroupContext): boolean {
+    const ownPubKeyBase64url = toBase64Url(this.deps.userIdentity.signingPublicKey);
+    const bucketKey = `${getNetworkModeRuntime(this.deps.database.getSessionNetworkMode()).config.dhtNamespaces.groupOffline}/${ctx.groupId}/${ctx.keyVersion}/${ownPubKeyBase64url}`;
+    const local = this.deps.database.getGroupOfflineSentMessages(bucketKey);
+    const cutoff = Date.now() - GROUP_OFFLINE_MESSAGE_TTL_MS;
+    const maxAllowedTimestamp = Date.now() + GROUP_MESSAGE_MAX_FUTURE_SKEW_MS;
+
+    return local.messages.some((message) => {
+      if (
+        message.messageType !== 'system'
+        || message.timestamp < cutoff
+        || message.timestamp > maxAllowedTimestamp
+      ) {
+        return false;
+      }
+
+      try {
+        const content = this.decryptContent(message.encryptedContent, ctx.groupKey, message.nonce);
+        const parsed = JSON.parse(content);
+        return isGroupCallHintSystemPayload(parsed) && parsed.groupId === ctx.groupId;
+      } catch {
+        return false;
+      }
+    });
+  }
+
   private async handleIncomingPubsubEvent(detail: unknown): Promise<void> {
     try {
       if (!detail || typeof detail !== 'object') return;
@@ -857,33 +1037,101 @@ export class GroupMessaging {
         );
         return;
       }
-      if (this.deps.database.messageExists(parsed.messageId)) {
-        log(`[GROUP-MSG][IN][DROP] reason=duplicate_message_id ${msgTag}`);
+
+      const decrypted = this.decryptContent(parsed.encryptedContent, ctx.groupKey, parsed.nonce);
+      let inserted = false;
+      if (parsed.messageType === 'system') {
+        ({ inserted } = await this.deps.database.tryCreateMessage({
+          id: parsed.messageId,
+          chat_id: ctx.chatId,
+          sender_peer_id: parsed.senderPeerId,
+          content: decrypted,
+          message_type: 'system',
+          timestamp: new Date(parsed.timestamp),
+          client_msg_id: parsed.messageId,
+          reply_to_client_id: null,
+        }, { dedupe: 'any' }));
+        if (inserted) {
+          this.deps.onMessageReceived({
+            chatId: ctx.chatId,
+            messageId: parsed.messageId,
+            content: decrypted,
+            senderPeerId: parsed.senderPeerId,
+            senderUsername: sender.username,
+            timestamp: parsed.timestamp,
+            messageSentStatus: 'online',
+            messageType: 'system',
+            clientMsgId: parsed.messageId,
+          });
+        }
+      } else {
+        const routeNonText = (
+          message: InboundApplicationMessageContext['message'],
+        ): boolean | Promise<boolean> => this.deps.onApplicationMessage({
+          message,
+          chatId: ctx.chatId,
+          senderPeerId: parsed.senderPeerId,
+          senderUsername: sender.username,
+          timestamp: parsed.timestamp,
+          transportMessageId: parsed.messageId,
+          route: 'group_realtime',
+        });
+        const dispatched = await dispatchEnvelope(decrypted, {
+          text: async ({ payload }) => {
+            const result = await this.deps.database.tryCreateMessage({
+              id: parsed.messageId,
+              chat_id: ctx.chatId,
+              sender_peer_id: parsed.senderPeerId,
+              content: payload.text,
+              message_type: 'text',
+              timestamp: new Date(parsed.timestamp),
+              client_msg_id: parsed.messageId,
+              reply_to_client_id: payload.reply_to ?? null,
+            }, { dedupe: 'any' });
+            if (result.inserted) {
+              this.deps.onMessageReceived({
+                chatId: ctx.chatId,
+                messageId: parsed.messageId,
+                content: payload.text,
+                senderPeerId: parsed.senderPeerId,
+                senderUsername: sender.username,
+                timestamp: parsed.timestamp,
+                messageSentStatus: 'online',
+                messageType: 'text',
+                clientMsgId: parsed.messageId,
+                replyToClientId: payload.reply_to,
+              });
+            }
+            return result.inserted;
+          },
+          file_offer: routeNonText,
+          file_offer_cancel: routeNonText,
+          file_offer_nack: routeNonText,
+        }, { expectedCid: parsed.messageId });
+        // TEMP_LOG: temporary group application-message dispatch diagnostics; remove after Phase 2a delivery debugging.
+        log(
+          `[TEMP_LOG][APP-MESSAGE][GROUP][DISPATCH] ${msgTag} status=${dispatched.status} `
+          + `value=${dispatched.status === 'handled' ? String(dispatched.value) : 'n/a'}`
+          + `${dispatched.status === 'unhandled' ? ` kind=${dispatched.message.kind}` : ''}`
+          + `${dispatched.status === 'rejected' ? ` reason=${dispatched.reason}` : ''}`,
+        );
+        inserted = dispatched.status === 'handled' && dispatched.value;
+        if (dispatched.status === 'rejected') {
+          log(`[APP-MESSAGE][GROUP][DROP] ${msgTag} reason=${dispatched.reason}`);
+        } else if (dispatched.status === 'unhandled') {
+          log(`[APP-MESSAGE][GROUP][DROP] ${msgTag} reason=unhandled_kind kind=${dispatched.message.kind}`);
+        }
+      }
+
+      // Cursor/seq must advance even for a deduped duplicate (idempotent), or we'd
+      // reprocess it forever. Only the "received" event is gated on `inserted`.
+      this.deps.database.updateMemberSeq(parsed.groupId, parsed.keyVersion, parsed.senderPeerId, parsed.seq);
+
+      if (!inserted) {
+        log(`[GROUP-MSG][IN][SKIP] reason=not_inserted ${msgTag}`);
         return;
       }
 
-      const content = this.decryptContent(parsed.encryptedContent, ctx.groupKey, parsed.nonce);
-
-      await this.deps.database.createMessage({
-        id: parsed.messageId,
-        chat_id: ctx.chatId,
-        sender_peer_id: parsed.senderPeerId,
-        content,
-        message_type: parsed.messageType === 'system' ? 'system' : 'text',
-        timestamp: new Date(parsed.timestamp),
-      });
-      this.deps.database.updateMemberSeq(parsed.groupId, parsed.keyVersion, parsed.senderPeerId, parsed.seq);
-
-      this.deps.onMessageReceived({
-        chatId: ctx.chatId,
-        messageId: parsed.messageId,
-        content,
-        senderPeerId: parsed.senderPeerId,
-        senderUsername: sender.username,
-        timestamp: parsed.timestamp,
-        messageSentStatus: 'online',
-        messageType: parsed.messageType === 'system' ? 'system' : 'text',
-      });
       log(`[GROUP-MSG][IN][APPLY] ${msgTag} chatId=${ctx.chatId}`);
     } catch (error: unknown) {
       generalErrorHandler(error, '[GROUP-MSG] Failed to handle incoming pubsub message');
@@ -900,7 +1148,7 @@ export class GroupMessaging {
       Number.isInteger(msg.keyVersion) &&
       msg.keyVersion > 0 &&
       typeof msg.senderPeerId === 'string' &&
-      typeof msg.messageId === 'string' &&
+      isValidCid(msg.messageId) &&
       typeof msg.timestamp === 'number' &&
       typeof msg.messageType === 'string' &&
       (msg.messageType === 'text' || msg.messageType === 'system' || msg.messageType === 'heartbeat') &&

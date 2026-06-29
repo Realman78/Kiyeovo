@@ -14,6 +14,7 @@ interface GroupAckRepublisherDeps {
   usernameRegistry: UsernameRegistry;
   onGroupChatActivated: (data: GroupChatActivatedEvent) => void;
   onGroupMembersUpdated: (data: GroupMembersUpdatedEvent) => void;
+  onOfflineInboxCapacityChanged?: (chatId: number) => void;
   nudgeGroupRefetch: (peerId: string, groupId: string) => void;
 }
 
@@ -92,6 +93,9 @@ export class GroupAckRepublisher {
       onGroupChatActivated: this.deps.onGroupChatActivated,
       onGroupMembersUpdated: this.deps.onGroupMembersUpdated,
       nudgeGroupRefetch: this.deps.nudgeGroupRefetch,
+      ...(this.deps.onOfflineInboxCapacityChanged
+        ? { onOfflineInboxCapacityChanged: this.deps.onOfflineInboxCapacityChanged }
+        : {}),
     };
 
     const creator = new GroupCreator(sendDeps);

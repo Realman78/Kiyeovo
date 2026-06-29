@@ -4,6 +4,8 @@ import type { DhtStatusCheckSource } from './network-health.js';
 
 const DHT_RECONNECT_FAILURE_THRESHOLD = 3;
 const DHT_RECONNECT_COOLDOWN_MS = 120_000;
+// Shorter cooldown applied after a reconnect that reached zero peers
+const DHT_RECONNECT_FAILURE_FLOOR_MS = 5_000;
 const POST_RETRY_VERIFY_DELAY_FAST_MS = 3_000;
 const POST_RETRY_VERIFY_DELAY_ANONYMOUS_MS = 7_000;
 
@@ -13,6 +15,8 @@ export function createReconnectController() {
   let bootstrapRetryInProgress = false;
   let lastReconnectAt = 0;
   let postRetryVerifyTimeout: ReturnType<typeof setTimeout> | null = null;
+  let catchupNeeded = false;
+  const reconnectSucceededHandlers: Array<() => void> = [];
 
   const getPostRetryVerifyDelayMs = (mode: NetworkMode): number => (
     mode === 'anonymous' ? POST_RETRY_VERIFY_DELAY_ANONYMOUS_MS : POST_RETRY_VERIFY_DELAY_FAST_MS
@@ -63,6 +67,14 @@ export function createReconnectController() {
     consecutiveProbeFailures = 0;
   };
 
+  // Just-finished reconnect failed to establish connectivity
+  const noteFailedReconnect = () => {
+    lastReconnectAt = Date.now() - (DHT_RECONNECT_COOLDOWN_MS - DHT_RECONNECT_FAILURE_FLOOR_MS);
+    log(
+      `[DHT-STATUS][CORE][RECONNECT][COOLDOWN_FLOOR] reason=zero_peers floorMs=${DHT_RECONNECT_FAILURE_FLOOR_MS}`,
+    );
+  };
+
   const tryBeginReconnect = (): boolean => {
     const gateMessage = `[DHT-STATUS][CORE][RECONNECT][GATE] probeFailures=${consecutiveProbeFailures}/${DHT_RECONNECT_FAILURE_THRESHOLD}`;
     if (consecutiveProbeFailures < DHT_RECONNECT_FAILURE_THRESHOLD) {
@@ -92,6 +104,32 @@ export function createReconnectController() {
     return true;
   };
 
+  // On-demand reconnect for callers with direct evidence the current
+  // connections are dead (e.g. an offline DHT write that reached zero peers).
+  // Keeps the same cooldown and in-progress guards as tryBeginReconnect so we
+  // never stack reconnects, but skips the consecutive-probe-failure threshold
+  // instead of waiting for the periodic probe to agree.
+  const tryBeginImmediateReconnect = (): boolean => {
+    const now = Date.now();
+    const sinceLastReconnect = now - lastReconnectAt;
+    if (lastReconnectAt > 0 && sinceLastReconnect < DHT_RECONNECT_COOLDOWN_MS) {
+      log(
+        `[DHT-STATUS][CORE][RECONNECT][SKIP] reason=cooldown source=immediate ` +
+        `waitMs=${DHT_RECONNECT_COOLDOWN_MS - sinceLastReconnect}`,
+      );
+      return false;
+    }
+
+    if (reconnectInProgress) {
+      log('[Core] Immediate reconnect requested but one is already in progress, skipping');
+      return false;
+    }
+
+    lastReconnectAt = now;
+    reconnectInProgress = true;
+    return true;
+  };
+
   return {
     beginBootstrapRetry() {
       clearPostRetryVerifyTimeout();
@@ -109,8 +147,34 @@ export function createReconnectController() {
     },
     recordHealthStatus,
     resetProbeFailures,
+    noteFailedReconnect,
     schedulePostRetryVerify,
     shouldSuppressNegativeStatusDuringBootstrapRetry,
     tryBeginReconnect,
+    tryBeginImmediateReconnect,
+    // Register a handler to fire after a destructive reconnect succeeds
+    onReconnectSucceeded(handler: () => void): void {
+      reconnectSucceededHandlers.push(handler);
+    },
+    fireReconnectSucceededHandlers(): void {
+      for (const handler of reconnectSucceededHandlers) {
+        try {
+          handler();
+        } catch (error: unknown) {
+          console.warn('[Reconnect] post-reconnect handler threw:', error);
+        }
+      }
+    },
+    // A destructive reconnect happened
+    markCatchupNeeded(): void {
+      catchupNeeded = true;
+    },
+    consumeCatchupNeeded(): boolean {
+      if (!catchupNeeded) {
+        return false;
+      }
+      catchupNeeded = false;
+      return true;
+    },
   };
 }

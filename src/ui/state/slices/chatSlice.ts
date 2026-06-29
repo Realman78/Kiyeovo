@@ -2,6 +2,7 @@ import { createSlice, type PayloadAction } from '@reduxjs/toolkit';
 import type { ContactAttempt } from '../../components/sidebar/contact-attempts/ContactAttemptItem';
 import type { MessageSentStatus } from '../../types';
 import type { FileTransferStatus } from '../../../core/types';
+import type { DeleteMessagesLatestRemaining } from '../../../shared/kiyeovo-api';
 
 // PendingKeyExchange is used for showing messages on the UI (Key Exchange) 
 // that are sent, but not accepted by the recipient
@@ -21,18 +22,27 @@ export interface ChatMessage {
   eventTimestamp?: number;
   messageType: 'text' | 'file' | 'image' | 'system';
   messageSentStatus: MessageSentStatus;
+  // Cross-peer stable id (cid) and reply reference for the reply feature.
+  clientMsgId?: string;
+  replyToClientId?: string;
   currentUserPeerId?: string; // For determining if message is from current user
   // File transfer fields
   fileName?: string;
   fileSize?: number;
   filePath?: string;
+  // Renderer-session capability for previewing an outgoing image before completion.
+  // Never persisted; completed messages can mint a fresh capability from file_path.
+  filePreviewToken?: string;
   transferStatus?: FileTransferStatus;
   transferProgress?: number; // Percentage 0-100
   transferError?: string;
-  transferExpiresAt?: number;
+  fileGroupDownloadTotal?: number;
+  fileGroupDownloadCompleted?: number;
   localSendState?: 'queued' | 'sending' | 'failed';
-  failedReason?: 'group_rekeying' | 'other';
+  // 'offline_backup' = delivered online, only the DHT backup failed (retry re-stores, not re-sends)
+  failedReason?: 'group_rekeying' | 'other' | 'offline_backup';
   retryAfterTs?: number;
+  pinnedAt?: number;
 }
 
 export interface Chat {
@@ -57,9 +67,26 @@ export interface Chat {
   muted?: boolean; // Whether notifications and sounds are muted for this chat
   blocked?: boolean; // Whether the other user is blocked
   hasPendingFile?: boolean; // Whether chat has a pending file request
+  pendingFileInboxAttention?: boolean; // A group file offer was skipped locally because pending file capacity is full
   groupStatus?: string; // Group-specific status (invited_pending, active, etc.)
   needsRemovedCatchup?: boolean; // Removed-group startup one-time catchup flag
+  lastKnownActiveCallId?: string | null;
+  lastKnownActiveCallSeenAt?: number | null;
 }
+
+// Reply feature: the message currently being replied to in the composer.
+// `sender`/`excerpt` are display-only (for the compose bar); only `cid` is sent.
+export interface ReplyTarget {
+  cid: string;
+  sender: string;
+  excerpt: string;
+}
+
+type RemoveMessagesByIdsPayload = {
+  chatId: number;
+  messageIds: string[];
+  latestRemaining: DeleteMessagesLatestRemaining | null;
+};
 
 interface ChatState {
   chats: Chat[];
@@ -71,6 +98,8 @@ interface ChatState {
   messages: ChatMessage[];
   sendingMessages: ChatMessage[];
   loading: boolean;
+  // Keyed by chatId so a half-composed reply survives switching chats.
+  replyTargetByChatId: Record<number, ReplyTarget>;
 }
 
 const initialState: ChatState = {
@@ -83,6 +112,7 @@ const initialState: ChatState = {
   messages: [],
   sendingMessages: [],
   loading: false,
+  replyTargetByChatId: {},
 };
 
 const compareMessageOrder = (a: ChatMessage, b: ChatMessage): number => {
@@ -114,6 +144,16 @@ const getLastChatMessage = (messages: ChatMessage[], chatId: number, excludeId?:
     if (msg.chatId !== chatId) continue;
     if (excludeId && msg.id === excludeId) continue;
     return msg;
+  }
+  return null;
+};
+
+const getLastSettledChatMessage = (messages: ChatMessage[], chatId: number): ChatMessage | null => {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.chatId === chatId && !message.localSendState) {
+      return message;
+    }
   }
   return null;
 };
@@ -317,6 +357,89 @@ const chatSlice = createSlice({
         state.messages = [...newMessages, ...state.messages].sort(compareMessageOrder);
       }
     },
+    replaceMessagesForChat: (
+      state,
+      action: PayloadAction<{ chatId: number; messages: ChatMessage[] }>
+    ) => {
+      state.messages = [
+        ...state.messages.filter((message) => message.chatId !== action.payload.chatId),
+        ...action.payload.messages,
+      ].sort(compareMessageOrder);
+    },
+    removeMessagesByIds: (state, action: PayloadAction<RemoveMessagesByIdsPayload>) => {
+      const { chatId, messageIds, latestRemaining } = action.payload;
+      const deletedIds = new Set(messageIds);
+      const deletedClientMsgIds = new Set<string>();
+
+      for (const message of state.messages) {
+        if (
+          message.chatId === chatId
+          && deletedIds.has(message.id)
+          && message.clientMsgId
+        ) {
+          deletedClientMsgIds.add(message.clientMsgId);
+        }
+      }
+
+      state.messages = state.messages.filter(
+        (message) => message.chatId !== chatId || !deletedIds.has(message.id)
+      );
+      state.sendingMessages = state.sendingMessages.filter(
+        (message) => message.chatId !== chatId || !deletedIds.has(message.id)
+      );
+
+      const replyTarget = state.replyTargetByChatId[chatId];
+      if (replyTarget && deletedClientMsgIds.has(replyTarget.cid)) {
+        delete state.replyTargetByChatId[chatId];
+      }
+
+      const reduxLatest = getLastSettledChatMessage(state.messages, chatId);
+      const useReduxLatest =
+        reduxLatest !== null
+        && (
+          latestRemaining === null
+          || reduxLatest.timestamp >= latestRemaining.timestamp
+        );
+      const preview = useReduxLatest
+        ? {
+            content: reduxLatest.content,
+            timestamp: reduxLatest.timestamp,
+          }
+        : latestRemaining
+          ? {
+              content: latestRemaining.content,
+              timestamp: latestRemaining.timestamp,
+            }
+          : null;
+
+      const chat = state.chats.find((candidate) => candidate.id === chatId);
+      if (chat) {
+        chat.lastMessage = preview?.content ?? 'SYSTEM: No messages yet';
+        if (preview) {
+          chat.lastMessageTimestamp = preview.timestamp;
+        }
+      }
+      if (state.activeChat?.id === chatId) {
+        state.activeChat.lastMessage = preview?.content ?? 'SYSTEM: No messages yet';
+        if (preview) {
+          state.activeChat.lastMessageTimestamp = preview.timestamp;
+        }
+      }
+      if (preview) {
+        state.chats.sort((a, b) => b.lastMessageTimestamp - a.lastMessageTimestamp);
+      }
+    },
+    removeSendingMessagesByIds: (
+      state,
+      action: PayloadAction<{ chatId: number; messageIds: string[] }>
+    ) => {
+      const removedIds = new Set(action.payload.messageIds);
+      state.sendingMessages = state.sendingMessages.filter(
+        (message) =>
+          message.chatId !== action.payload.chatId
+          || !removedIds.has(message.id)
+      );
+    },
     addSendingMessage: (state, action: PayloadAction<ChatMessage>) => {
       if (!state.sendingMessages.some((m) => m.id === action.payload.id)) {
         state.sendingMessages.push(action.payload);
@@ -324,6 +447,24 @@ const chatSlice = createSlice({
     },
     removeSendingMessage: (state, action: PayloadAction<string>) => {
       state.sendingMessages = state.sendingMessages.filter((m) => m.id !== action.payload);
+    },
+    applyPinnedMessage: (state, action: PayloadAction<{ chatId: number; clientMsgId: string | null }>) => {
+      const { chatId, clientMsgId } = action.payload;
+      const stamp = Date.now();
+      for (const message of state.messages) {
+        if (message.chatId !== chatId) continue;
+        if (clientMsgId && message.clientMsgId === clientMsgId) {
+          message.pinnedAt = stamp;
+        } else if (message.pinnedAt !== undefined) {
+          message.pinnedAt = undefined;
+        }
+      }
+    },
+    setReplyTarget: (state, action: PayloadAction<{ chatId: number; target: ReplyTarget }>) => {
+      state.replyTargetByChatId[action.payload.chatId] = action.payload.target;
+    },
+    clearReplyTarget: (state, action: PayloadAction<number>) => {
+      delete state.replyTargetByChatId[action.payload];
     },
     finalizeSendingMessage: (state, action: PayloadAction<{ localMessageId: string; finalMessage: ChatMessage }>) => {
       state.sendingMessages = state.sendingMessages.filter((m) => m.id !== action.payload.localMessageId);
@@ -336,6 +477,15 @@ const chatSlice = createSlice({
         });
       }
       state.messages.sort(compareMessageOrder);
+
+      // Refresh the sidebar preview for our own sent message
+      const { chatId, content, timestamp, localSendState } = action.payload.finalMessage;
+      const chatIndex = state.chats.findIndex((c) => c.id === chatId);
+      if (!localSendState && chatIndex !== -1 && timestamp >= state.chats[chatIndex].lastMessageTimestamp) {
+        state.chats[chatIndex].lastMessage = content;
+        state.chats[chatIndex].lastMessageTimestamp = timestamp;
+        state.chats.sort((a, b) => b.lastMessageTimestamp - a.lastMessageTimestamp);
+      }
     },
     setPendingKeyExchanges: (state, action: PayloadAction<PendingKeyExchange[]>) => {
       state.pendingKeyExchanges = action.payload;
@@ -408,7 +558,13 @@ const chatSlice = createSlice({
     updateFileTransferProgress: (state, action: PayloadAction<{ messageId: string; progress: number; chatId: number; filename: string; size: number }>) => {
       const message = state.messages.find((m) => m.id === action.payload.messageId);
       if (message) {
-        if (message.transferStatus === 'completed' || message.transferStatus === 'failed' || message.transferStatus === 'expired' || message.transferStatus === 'rejected') {
+        if (
+          message.transferStatus === 'completed'
+          || message.transferStatus === 'partially_completed'
+          || message.transferStatus === 'failed'
+          || message.transferStatus === 'rejected'
+          || message.transferStatus === 'cancelled'
+        ) {
           return;
         }
         message.fileName = action.payload.filename;
@@ -424,18 +580,25 @@ const chatSlice = createSlice({
       status: FileTransferStatus;
       filePath?: string;
       transferError?: string;
-      transferExpiresAt?: number;
+      fileGroupDownloadTotal?: number;
+      fileGroupDownloadCompleted?: number;
     }>) => {
       const message = state.messages.find((m) => m.id === action.payload.messageId);
       if (message) {
         message.transferStatus = action.payload.status;
-        if (action.payload.transferExpiresAt !== undefined) {
-          message.transferExpiresAt = action.payload.transferExpiresAt;
+        if (action.payload.fileGroupDownloadTotal !== undefined) {
+          message.fileGroupDownloadTotal = action.payload.fileGroupDownloadTotal;
         }
-        if (action.payload.status === 'completed' && action.payload.filePath) {
+        if (action.payload.fileGroupDownloadCompleted !== undefined) {
+          message.fileGroupDownloadCompleted = action.payload.fileGroupDownloadCompleted;
+        }
+        if (
+          (action.payload.status === 'completed' || action.payload.status === 'partially_completed')
+          && action.payload.filePath
+        ) {
           message.filePath = action.payload.filePath;
         }
-        if (action.payload.status === 'completed') {
+        if (action.payload.status === 'completed' || action.payload.status === 'partially_completed') {
           message.transferProgress = 100;
         }
         if (action.payload.transferError) {
@@ -455,7 +618,7 @@ const chatSlice = createSlice({
       action: PayloadAction<{
         messageId: string;
         state: 'queued' | 'sending' | 'failed';
-        failedReason?: 'group_rekeying' | 'other';
+        failedReason?: 'group_rekeying' | 'other' | 'offline_backup';
         retryAfterTs?: number;
       }>
     ) => {
@@ -478,6 +641,49 @@ const chatSlice = createSlice({
         chat.hasPendingFile = action.payload.hasPendingFile;
       }
     },
+    // outcome for a backgrounded send (offline DHT write).
+    // 'delivered' settles the row (clears the spinner, stamps messageSentStatus);
+    // 'failed' surfaces Retry; 'sending' keeps it in flight.
+    resolveMessageSendOutcome: (
+      state,
+      action: PayloadAction<{
+        messageId: string;
+        outcome: 'sending' | 'delivered' | 'failed';
+        messageSentStatus?: MessageSentStatus;
+        failedReason?: 'group_rekeying' | 'other' | 'offline_backup';
+        retryAfterTs?: number;
+      }>
+    ) => {
+      const message = state.sendingMessages.find((m) => m.id === action.payload.messageId)
+        ?? state.messages.find((m) => m.id === action.payload.messageId);
+      if (!message) {
+        return;
+      }
+      if (action.payload.outcome === 'delivered') {
+        message.localSendState = undefined;
+        message.failedReason = undefined;
+        message.retryAfterTs = undefined;
+        if (action.payload.messageSentStatus !== undefined) {
+          message.messageSentStatus = action.payload.messageSentStatus;
+        }
+        // Confirmed delivery for a backgrounded (offline) send — now safe to
+        // refresh the sidebar preview. Guard against a newer inbound message.
+        const chatIndex = state.chats.findIndex((c) => c.id === message.chatId);
+        if (chatIndex !== -1 && message.timestamp >= state.chats[chatIndex].lastMessageTimestamp) {
+          state.chats[chatIndex].lastMessage = message.content;
+          state.chats[chatIndex].lastMessageTimestamp = message.timestamp;
+          state.chats.sort((a, b) => b.lastMessageTimestamp - a.lastMessageTimestamp);
+        }
+      } else if (action.payload.outcome === 'failed') {
+        message.localSendState = 'failed';
+        message.failedReason = action.payload.failedReason ?? 'other';
+        message.retryAfterTs = action.payload.retryAfterTs;
+      } else {
+        message.localSendState = 'sending';
+        message.failedReason = undefined;
+        message.retryAfterTs = undefined;
+      }
+    },
   },
 });
 
@@ -497,9 +703,15 @@ export const {
   removeContactAttempt,
   setMessages,
   prependMessages,
+  replaceMessagesForChat,
+  removeMessagesByIds,
+  removeSendingMessagesByIds,
   addSendingMessage,
   removeSendingMessage,
   finalizeSendingMessage,
+  applyPinnedMessage,
+  setReplyTarget,
+  clearReplyTarget,
   setPendingKeyExchanges,
   addPendingKeyExchange,
   removePendingKeyExchange,
@@ -510,6 +722,7 @@ export const {
   updateFileTransferStatus,
   updateFileTransferError,
   updateLocalMessageSendState,
+  resolveMessageSendOutcome,
   setPendingFileStatus,
   removeMessageById
 } = chatSlice.actions;
