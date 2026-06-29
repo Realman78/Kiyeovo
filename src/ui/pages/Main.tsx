@@ -48,6 +48,7 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
     useState<InitialSetupStatus | null>(null);
   const [initialSetupSaving, setInitialSetupSaving] = useState(false);
   const initialSetupTransitionInFlightRef = useRef(false);
+  const recentOfflineSyncGenerationRef = useRef(0);
   const dispatch = useDispatch();
   const { toast } = useToast();
   const setupReadiness = useSetupReadiness();
@@ -192,6 +193,23 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
     ...overrides,
   });
 
+  const mapDbChatsPreservingLocalUiState = (
+    dbChats: any[],
+    currentChats: Chat[] = store.getState().chat.chats,
+  ): Chat[] => {
+    const currentByChatId = new Map(currentChats.map((chat) => [chat.id, chat]));
+    return dbChats.map((dbChat: any) => {
+      const current = currentByChatId.get(dbChat.id);
+      return mapDbChatToUiChat(dbChat, {
+        unreadCount: current?.unreadCount ?? 0,
+        fetchedOffline: current?.fetchedOffline
+          ?? (dbChat.type === 'group' ? dbChat.group_status !== 'active' : false),
+        isFetchingOffline: current?.isFetchingOffline ?? false,
+        offlineFetchNeedsSync: current?.offlineFetchNeedsSync ?? false,
+      });
+    });
+  };
+
   const syncChatCallEvidenceFromDb = async (chatId: number) => {
     const result = await window.kiyeovoAPI.getChatById(chatId);
     if (!result.success || !result.chat) {
@@ -251,6 +269,71 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
   }, [dispatch, incomingCall?.callId, incomingCall?.peerId, toast]);
 
   useEffect(() => {
+    const pendingFileToastBuffer: Array<{
+      senderId: string;
+      senderUsername: string;
+      filename: string;
+    }> = [];
+    let pendingFileToastTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const flushPendingFileToast = () => {
+      pendingFileToastTimer = null;
+      const items = pendingFileToastBuffer.splice(0);
+      if (items.length === 0) {
+        return;
+      }
+
+      if (items.length === 1) {
+        const item = items[0];
+        toast.info(`${item.senderUsername} wants to send you a file: ${item.filename}`);
+        return;
+      }
+
+      const senderIds = new Set(items.map((item) => item.senderId));
+      if (senderIds.size === 1) {
+        toast.info(`${items[0].senderUsername} sent ${items.length} file offers`);
+        return;
+      }
+
+      toast.info(`${items.length} pending file offers received`);
+    };
+
+    const enqueuePendingFileToast = (item: {
+      senderId: string;
+      senderUsername: string;
+      filename: string;
+    }) => {
+      pendingFileToastBuffer.push(item);
+      if (pendingFileToastTimer) {
+        return;
+      }
+      pendingFileToastTimer = setTimeout(flushPendingFileToast, 800);
+    };
+
+    const markPendingFileInboxAttentionIfRelevant = async (chatId: number, senderId: string) => {
+      try {
+        const result = await window.kiyeovoAPI.getPendingFileInbox();
+        if (!result.success || !result.snapshot) {
+          return;
+        }
+        const chat = store.getState().chat.chats.find((candidate) => candidate.id === chatId);
+        const senderFull = result.snapshot.senders.some((sender) => sender.full && sender.senderPeerId === senderId);
+        const directSenderFull = chat?.type === 'direct'
+          && chat.peerId === senderId
+          && senderFull;
+        const groupSenderFull = chat?.type === 'group' && senderFull;
+        if (!result.snapshot.full && !directSenderFull && !groupSenderFull) {
+          return;
+        }
+        dispatch(updateChat({
+          id: chatId,
+          updates: { pendingFileInboxAttention: true },
+        }));
+      } catch (error) {
+        console.error('[UI] Failed to refresh pending file inbox capacity:', error);
+      }
+    };
+
     const unsubKeyExchangeFailed = window.kiyeovoAPI.onKeyExchangeFailed((data) => {
       if (data.error.includes("ended pushable")) {
         toast.error(`${data.username} went offline`);
@@ -299,7 +382,9 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
         filePath: data.filePath,
         transferStatus: data.transferStatus,
         transferProgress: data.transferProgress,
-        transferError: data.transferError
+        transferError: data.transferError,
+        fileGroupDownloadTotal: data.fileGroupDownloadTotal,
+        fileGroupDownloadCompleted: data.fileGroupDownloadCompleted,
       }));
     });
 
@@ -488,33 +573,85 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
     const unsubFileTransferComplete = window.kiyeovoAPI.onFileTransferComplete((data) => {
       dispatch(updateFileTransferStatus({
         messageId: data.messageId,
-        status: 'completed',
-        filePath: data.filePath
+        status: data.status ?? 'completed',
+        filePath: data.filePath,
+        fileGroupDownloadTotal: data.groupDownloadTotal,
+        fileGroupDownloadCompleted: data.groupDownloadCompleted,
       }));
+      if (data.status === 'partially_completed') {
+        return;
+      }
       toast.success('File transfer completed');
     });
 
     const unsubFileTransferFailed = window.kiyeovoAPI.onFileTransferFailed((data) => {
       const errorText = data.error || 'Unknown error';
-      dispatch(updateFileTransferError({
-        messageId: data.messageId,
-        error: errorText
-      }));
+      if (data.status && data.status !== 'failed') {
+        dispatch(updateFileTransferStatus({
+          messageId: data.messageId,
+          status: data.status,
+          transferError: errorText,
+        }));
+        if (data.status === 'incoming_pending_user') {
+          dispatch(setPendingFileStatus({ chatId: data.chatId, hasPendingFile: true }));
+        }
+        if (data.status === 'cancelled' || data.status === 'rejected') {
+          const hasOtherPending = store.getState().chat.messages.some(
+            (message) =>
+              message.chatId === data.chatId &&
+              message.id !== data.messageId &&
+              message.transferStatus === 'incoming_pending_user',
+          );
+          dispatch(setPendingFileStatus({ chatId: data.chatId, hasPendingFile: hasOtherPending }));
+        }
+      } else {
+        dispatch(updateFileTransferError({
+          messageId: data.messageId,
+          error: errorText
+        }));
+      }
 
       if (errorText.toLowerCase().includes('download canceled by user')) {
         toast.info('File transfer canceled');
         return;
       }
 
-      toast.error('File transfer failed: ' + errorText);
+      if (data.status === 'awaiting_acceptance') {
+        return;
+      }
+
+      if (data.status === 'cancelled') {
+        toast.info('File offer cancelled');
+        return;
+      }
+
+      toast.error((data.status && data.status !== 'failed' ? 'File download not completed: ' : 'File transfer failed: ') + errorText);
     });
 
     const unsubOutgoingFileOfferPending = window.kiyeovoAPI.onOutgoingFileOfferPending((data) => {
       dispatch(updateFileTransferStatus({
         messageId: data.messageId,
         status: 'awaiting_acceptance',
-        transferExpiresAt: data.expiresAt
+        fileGroupDownloadTotal: data.groupDownloadTotal,
+        fileGroupDownloadCompleted: data.groupDownloadCompleted,
       }));
+    });
+
+    const unsubOutgoingFileOfferTerminal = window.kiyeovoAPI.onOutgoingFileOfferTerminal((data) => {
+      dispatch(updateFileTransferStatus({
+        messageId: data.messageId,
+        status: data.status,
+        transferError: data.error,
+      }));
+      const toastMessage =
+        data.status === 'rejected'
+          ? `${data.filename} was declined`
+          : data.status === 'cancelled'
+            ? `${data.filename} offer cancelled`
+            : data.error === 'Recipient file inbox is full'
+              ? 'Recipient file inbox is full. They need to accept, reject, or clear older pending file offers before you can send more.'
+              : `File offer failed: ${data.error}`;
+      toast.info(toastMessage);
     });
 
     const unsubPendingFileReceived = window.kiyeovoAPI.onPendingFileReceived((data) => {
@@ -534,7 +671,6 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
         fileSize: data.size,
         transferStatus: 'incoming_pending_user',
         transferProgress: 0,
-        transferExpiresAt: data.expiresAt,
         ...(data.replyToClientId ? { replyToClientId: data.replyToClientId } : {}),
       }));
       dispatch(updateChat({
@@ -546,27 +682,25 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
       }));
       // Unread count is handled by addMessage reducer for non-active chats.
       dispatch(setPendingFileStatus({ chatId: data.chatId, hasPendingFile: true }));
-      toast.info(`${data.senderUsername} wants to send you a file: ${data.filename}`);
+      enqueuePendingFileToast({
+        senderId: data.senderId,
+        senderUsername: data.senderUsername,
+        filename: data.filename,
+      });
+      void markPendingFileInboxAttentionIfRelevant(data.chatId, data.senderId);
+    });
 
-      const msUntilExpire = Math.max(0, data.expiresAt - Date.now());
-      setTimeout(() => {
-        const state = store.getState();
-        const message = state.chat.messages.find(m => m.id === data.fileId);
-        if (message && (message.transferStatus === 'incoming_pending_user' || message.transferStatus === 'pending')) {
-          dispatch(updateFileTransferStatus({
-            messageId: data.fileId,
-            status: 'expired',
-            transferError: 'Offer expired'
-          }));
-          const hasOtherPending = state.chat.messages.some(
-            (m) =>
-              m.chatId === data.chatId &&
-              m.id !== data.fileId &&
-              (m.transferStatus === 'incoming_pending_user' || m.transferStatus === 'pending'),
-          );
-          dispatch(setPendingFileStatus({ chatId: data.chatId, hasPendingFile: hasOtherPending }));
-        }
-      }, msUntilExpire);
+    const unsubPendingFileOfferDeferred = window.kiyeovoAPI.onPendingFileOfferDeferred((data) => {
+      dispatch(updateChat({
+        id: data.chatId,
+        updates: { pendingFileInboxAttention: true },
+      }));
+      const senderIsFull = data.pendingFromSender >= data.maxPendingPerPeer;
+      toast.info(
+        senderIsFull
+          ? `${data.senderUsername}'s file offer was skipped because you already have ${data.pendingFromSender}/${data.maxPendingPerPeer} pending offers from them. Clear older offers, then check missed messages.`
+          : `A file offer from ${data.senderUsername} was skipped because your pending files are full. Clear older offers, then check missed messages.`,
+      );
     });
 
     const unsubCallIncoming = window.kiyeovoAPI.onCallIncoming((data) => {
@@ -613,10 +747,11 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
       }
 
       if (data.signal.type === 'CALL_GROUP_STARTED') {
+        const existingSeenAt = chat.lastKnownActiveCallSeenAt ?? 0;
         if (
           chat.lastKnownActiveCallId
           && chat.lastKnownActiveCallId !== data.signal.callId
-          && chat.lastKnownActiveCallId < data.signal.callId
+          && existingSeenAt > data.signal.timestamp
         ) {
           return;
         }
@@ -727,7 +862,9 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
       unsubFileTransferComplete();
       unsubFileTransferFailed();
       unsubOutgoingFileOfferPending();
+      unsubOutgoingFileOfferTerminal();
       unsubPendingFileReceived();
+      unsubPendingFileOfferDeferred();
       unsubCallIncoming();
       unsubCallSignalReceived();
       unsubCallStateChanged();
@@ -740,18 +877,28 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
       unsubGroupCallService();
       callService.dispose();
       groupCallService.dispose();
+      if (pendingFileToastTimer) {
+        clearTimeout(pendingFileToastTimer);
+      }
     };
   }, [])
 
   const syncRecentOfflineMessages = useEffectEvent(async (wakeToken: number | null) => {
+    const syncGeneration = recentOfflineSyncGenerationRef.current + 1;
+    recentOfflineSyncGenerationRef.current = syncGeneration;
+    const isCurrentSync = () => recentOfflineSyncGenerationRef.current === syncGeneration;
+
     try {
       const result = await window.kiyeovoAPI.getChats();
+      if (!isCurrentSync()) {
+        return;
+      }
       if (!result.success) {
         console.error('[UI] Failed to fetch chats:', result.error);
         return;
       }
 
-      const mappedChats = result.chats.map((dbChat: any) => mapDbChatToUiChat(dbChat));
+      const mappedChats = mapDbChatsPreservingLocalUiState(result.chats);
 
       dispatch(setChats(mappedChats));
 
@@ -799,6 +946,9 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
         });
         try {
           const groupResult = await window.kiyeovoAPI.checkGroupOfflineMessages(topGroupChatIds);
+          if (!isCurrentSync()) {
+            return;
+          }
           if (!groupResult.success) {
             dispatch(markOfflineFetchFailed(topGroupChatIds));
             return;
@@ -816,6 +966,9 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
           }
 
           const refreshResult = await window.kiyeovoAPI.getChats();
+          if (!isCurrentSync()) {
+            return;
+          }
           if (refreshResult.success) {
             const currentChats = store.getState().chat.chats;
             const currentUnreadByChatId = new Map(currentChats.map((chat) => [chat.id, chat.unreadCount]));
@@ -841,6 +994,9 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
             toast.warning(`Detected ${groupResult.gapWarnings.length} group sequence gap(s); some old messages may be missing`);
           }
         } catch (error) {
+          if (!isCurrentSync()) {
+            return;
+          }
           dispatch(markOfflineFetchFailed(topGroupChatIds));
           console.error('[UI] Failed to check group offline messages:', error);
         }
@@ -857,12 +1013,18 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
 
         try {
           const result = await window.kiyeovoAPI.checkOfflineMessages(topDirectChatIds);
+          if (!isCurrentSync()) {
+            return;
+          }
           if (result.success) {
             const fetchedChatIds = result.checkedChatIds.length > 0 ? result.checkedChatIds : topDirectChatIds;
             console.log(`Offline message check complete - checked ${fetchedChatIds.length} chats`);
             dispatch(markOfflineFetched(fetchedChatIds));
 
             const refreshResult = await window.kiyeovoAPI.getChats();
+            if (!isCurrentSync()) {
+              return;
+            }
             if (refreshResult.success) {
               const currentChats = store.getState().chat.chats;
               const currentUnreadByChatId = new Map(currentChats.map((c) => [c.id, c.unreadCount]));
@@ -882,6 +1044,9 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
             dispatch(markOfflineFetchFailed(topDirectChatIds));
           }
         } catch (error) {
+          if (!isCurrentSync()) {
+            return;
+          }
           console.error('[UI] Failed to check offline messages:', error);
           dispatch(markOfflineFetchFailed(topDirectChatIds));
         }

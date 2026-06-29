@@ -745,6 +745,9 @@ class GroupCallService {
     if (this.session.coreState === 'joining') {
       return;
     }
+    if (!this.localPeerId) {
+      return;
+    }
 
     const pendingAdmission = this.pendingJoinAdmission;
     this.pendingJoinAdmission = null;
@@ -767,6 +770,14 @@ class GroupCallService {
   private isPeerConnectionHealthy(peerId: string): boolean {
     const peer = this.peers.get(peerId);
     return Boolean(peer && peer.connected && peer.pc.connectionState === 'connected');
+  }
+
+  private shouldKeepLocalOfferDuringGlare(remotePeerId: string): boolean {
+    if (!this.localPeerId) {
+      return false;
+    }
+
+    return this.localPeerId < remotePeerId;
   }
 
   private async startWriterReconnectProbe(peerId: string): Promise<void> {
@@ -883,6 +894,21 @@ class GroupCallService {
     log(
       `[GROUP-CALL][OFFER][IN] from=${signal.fromPeerId.slice(-8)} existing=${existing ? 'yes' : 'no'} existingConnected=${String(existing?.connected ?? false)} connState=${existing?.pc.connectionState ?? 'none'} iceState=${existing?.pc.iceConnectionState ?? 'none'} sigState=${existing?.pc.signalingState ?? 'none'}`,
     );
+    if (existing?.pc.signalingState === 'have-local-offer') {
+      if (this.shouldKeepLocalOfferDuringGlare(signal.fromPeerId)) {
+        // TEMP_LOG
+        log(
+          `[GROUP-CALL][OFFER][GLARE_DROP] from=${signal.fromPeerId.slice(-8)} reason=keep_local_offer local=${this.localPeerId?.slice(-8) ?? 'none'}`,
+        );
+        return;
+      }
+
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][OFFER][GLARE_ACCEPT] from=${signal.fromPeerId.slice(-8)} reason=remote_wins local=${this.localPeerId?.slice(-8) ?? 'none'}`,
+      );
+      this.offeredPeerIds.delete(signal.fromPeerId);
+    }
     if (existing?.connected) {
       // Do NOT drop. A peer only re-offers after tearing down and rebuilding its
       // own side (a healthy sender never re-offers)
@@ -937,6 +963,14 @@ class GroupCallService {
 
     // TEMP_LOG
     log(`[GROUP-CALL][ANSWER][APPLY] from=${signal.fromPeerId.slice(-8)} signalingState=${peer.pc.signalingState}`);
+    if (peer.pc.signalingState !== 'have-local-offer') {
+      // TEMP_LOG
+      log(
+        `[GROUP-CALL][ANSWER][DROP] from=${signal.fromPeerId.slice(-8)} reason=not_waiting_for_answer signalingState=${peer.pc.signalingState}`,
+      );
+      return;
+    }
+
     try {
       await peer.pc.setRemoteDescription({
         type: 'answer',

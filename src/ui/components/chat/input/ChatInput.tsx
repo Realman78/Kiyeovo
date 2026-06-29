@@ -8,7 +8,7 @@ import type { RootState } from "../../../state/store";
 import { SendFileDialog, type PastedImageFile } from "./SendFileDialog";
 import { SendLongMessageDialog, type PendingLongMessage } from "./SendLongMessageDialog";
 import { UploadsQuotaDialog } from "./UploadsQuotaDialog";
-import { addMessage, addSendingMessage, clearReplyTarget, finalizeSendingMessage, removeMessageById, setReplyTarget, updateChat, updateFileTransferStatus, updateLocalMessageSendState, type ReplyTarget } from "../../../state/slices/chatSlice";
+import { addMessage, addSendingMessage, clearReplyTarget, finalizeSendingMessage, updateFileTransferStatus, updateLocalMessageSendState, type ReplyTarget } from "../../../state/slices/chatSlice";
 import { EMOJI_CATEGORIES, MAX_MESSAGE_CONTENT_LENGTH, UNEXPECTED_ERROR } from "../../../constants";
 import { getGroupStatusMessage } from "../../../utils/groupStatusMessages";
 import { errStr } from '../../../../core/utils/general-error';
@@ -41,12 +41,12 @@ type FileSendOutcome =
     | { completed: true }
     | {
         completed: false;
-        reason: 'invalid_target' | 'offline' | 'busy' | 'expired' | 'rejected' | 'failed';
+        reason: 'invalid_target' | 'failed';
     };
 
 type FileSendTarget = {
     chatId: number;
-    peerId: string;
+    peerId?: string;
 };
 
 type FileSendOptions = {
@@ -172,9 +172,7 @@ export const ChatInput: FC<ChatInputProps> = ({
         m.messageType === 'file' &&
         (
             m.transferStatus === 'connecting' ||
-            m.transferStatus === 'awaiting_acceptance' ||
-            m.transferStatus === 'in_progress' ||
-            (m.transferStatus === 'pending' && m.senderPeerId === myPeerId)
+            m.transferStatus === 'in_progress'
         )
     );
     const interactionBlocked = selectionMode || searchMode;
@@ -198,12 +196,15 @@ export const ChatInput: FC<ChatInputProps> = ({
     hasActiveFileTransferRef.current = hasActiveFileTransfer;
 
     const createCurrentFileDialogSource = (): FileDialogSource | null => {
-        if (!activeChat || activeChat.type !== 'direct' || !activeChat.peerId) {
+        if (!activeChat) {
+            return null;
+        }
+        if (activeChat.type === 'direct' && !activeChat.peerId) {
             return null;
         }
         return {
             chatId: activeChat.id,
-            peerId: activeChat.peerId,
+            ...(activeChat.peerId ? { peerId: activeChat.peerId } : {}),
             ...(replyTarget ? { replyTarget } : {}),
         };
     };
@@ -218,16 +219,6 @@ export const ChatInput: FC<ChatInputProps> = ({
         delete nextTargets[chatId];
         replyTargetByChatIdRef.current = nextTargets;
         return true;
-    };
-
-    const restoreReplyTargetIfEmpty = (chatId: number, target?: ReplyTarget): void => {
-        if (!target || replyTargetByChatIdRef.current[chatId]) return;
-
-        dispatch(setReplyTarget({ chatId, target }));
-        replyTargetByChatIdRef.current = {
-            ...replyTargetByChatIdRef.current,
-            [chatId]: target,
-        };
     };
 
     // Auto-focus input when chat changes
@@ -753,10 +744,11 @@ export const ChatInput: FC<ChatInputProps> = ({
     const handleComposerPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
         if (
             !activeChat ||
-            activeChat.type !== 'direct' ||
-            !activeChat.peerId ||
             isDisabled
         ) {
+            return;
+        }
+        if (activeChat.type === 'direct' && !activeChat.peerId) {
             return;
         }
 
@@ -824,25 +816,23 @@ export const ChatInput: FC<ChatInputProps> = ({
         const targetChat = target
             ? chats.find((chat) => chat.id === target.chatId)
             : activeChat;
-        const targetPeerId = target?.peerId ?? targetChat?.peerId;
 
-        if (
-            !targetChat
-            || targetChat.type !== 'direct'
-            || !targetPeerId
-            || targetChat.peerId !== targetPeerId
-        ) {
+        if (!targetChat) {
             toast.error('No active chat selected');
             return { completed: false, reason: 'invalid_target' };
         }
+        if (targetChat.type === 'direct') {
+            const targetPeerId = target?.peerId ?? targetChat.peerId;
+            if (!targetPeerId || targetChat.peerId !== targetPeerId) {
+                toast.error('No active chat selected');
+                return { completed: false, reason: 'invalid_target' };
+            }
+        }
 
-        const previousLastMessage = targetChat.lastMessage;
-        const previousLastMessageTimestamp = targetChat.lastMessageTimestamp;
         const chatId = targetChat.id;
         const pendingMessageId =
             globalThis.crypto?.randomUUID?.() ??
             `file-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        let clearedReplyTarget = false;
         try {
             dispatch(addMessage({
                 id: pendingMessageId,
@@ -862,91 +852,36 @@ export const ChatInput: FC<ChatInputProps> = ({
                 transferProgress: 0,
                 ...(replyToCid ? { replyToClientId: replyToCid } : {}),
             }));
-            clearedReplyTarget = clearReplyTargetIfUnchanged(chatId, replyTargetForSend);
+            clearReplyTargetIfUnchanged(chatId, replyTargetForSend);
 
-            const result = await window.kiyeovoAPI.sendFile(targetPeerId, filePath, pendingMessageId, replyToCid);
+            const result = targetChat.type === 'group'
+                ? await window.kiyeovoAPI.sendGroupFile(targetChat.id, filePath, pendingMessageId, replyToCid)
+                : await window.kiyeovoAPI.sendFile(targetChat.peerId!, filePath, pendingMessageId, replyToCid);
             if (!result.success) {
-                const errorText = result.error?.toLowerCase() || '';
                 console.error(result.error);
-                const failedBeforePersist = errorText.includes('dial request has no valid addresses');
-                const transferBusy = errorText.includes('already active with this peer');
-                if (failedBeforePersist) {
-                    toast.error('Cannot send file to offline user');
-                } else if (transferBusy) {
-                    toast.error('Another file transfer is already active with this peer');
-                } else if (!errorText.includes('timeout waiting for file acceptance') && !errorText.includes('rejected')) {
-                    toast.error(result.error || 'Failed to send file');
-                }
-                if (failedBeforePersist || transferBusy) {
-                    dispatch(removeMessageById({ messageId: pendingMessageId, chatId }));
-                    dispatch(updateChat({
-                        id: chatId,
-                        updates: {
-                            lastMessage: previousLastMessage,
-                            lastMessageTimestamp: previousLastMessageTimestamp
-                        }
-                    }));
-                    if (clearedReplyTarget) {
-                        restoreReplyTargetIfEmpty(chatId, replyTargetForSend);
-                    }
-                    return {
-                        completed: false,
-                        reason: failedBeforePersist ? 'offline' : 'busy',
-                    };
-                }
-                const status =
-                    errorText.includes('timeout waiting for file acceptance') ? 'expired' :
-                        errorText.includes('rejected') ? 'rejected' :
-                            'failed';
+                toast.error(result.error || 'Failed to send file');
                 dispatch(updateFileTransferStatus({
                     messageId: pendingMessageId,
-                    status,
-                    transferError: result.error || (status === 'expired' ? 'Offer expired' : 'Offer rejected')
+                    status: 'failed',
+                    transferError: result.error || 'Failed to send file'
                 }));
                 return {
                     completed: false,
-                    reason: status,
+                    reason: 'failed',
                 };
             }
             return { completed: true };
         } catch (error) {
             console.error('Error sending file:', error);
             toast.error(errStr(error, 'Failed to send file'));
-            const errorText = error instanceof Error ? error.message.toLowerCase() : '';
-            const failedBeforePersist = errorText.includes('dial request has no valid addresses');
-            const transferBusy = errorText.includes('already active with this peer');
-            if (failedBeforePersist || transferBusy) {
-                dispatch(removeMessageById({ messageId: pendingMessageId, chatId }));
-                dispatch(updateChat({
-                    id: chatId,
-                    updates: {
-                        lastMessage: previousLastMessage,
-                        lastMessageTimestamp: previousLastMessageTimestamp
-                    }
-                }));
-                if (clearedReplyTarget) {
-                    restoreReplyTargetIfEmpty(chatId, replyTargetForSend);
-                }
-                return {
-                    completed: false,
-                    reason: failedBeforePersist ? 'offline' : 'busy',
-                };
-            }
-            const status =
-                errorText.includes('timeout waiting for file acceptance') ? 'expired' :
-                    errorText.includes('rejected') ? 'rejected' :
-                        'failed';
             dispatch(updateFileTransferStatus({
                 messageId: pendingMessageId,
-                status,
-                transferError: errStr(
-                    error,
-                    status === 'expired' ? 'Offer expired' : 'Offer rejected',
-                ),
+                status: 'failed',
+                transferError: errStr(error, 'Failed to send file'),
             }));
             return {
                 completed: false,
-                reason: status,
+                reason: 'failed',
             };
         }
     }
@@ -1015,7 +950,7 @@ export const ChatInput: FC<ChatInputProps> = ({
                 className={`flex min-h-20 items-end justify-between gap-4 px-4 py-3 ${replyTarget ? '' : 'border-t border-border'}`}
             >
                 <div ref={emojiPickerRef} className="relative flex shrink-0 items-center gap-2 self-end">
-                    {activeChat?.type !== 'group' && <Button
+                    <Button
                         type="button"
                         variant="ghost"
                         size="icon"
@@ -1030,7 +965,7 @@ export const ChatInput: FC<ChatInputProps> = ({
                         title="Files"
                     >
                         <Paperclip className="w-4 h-4" />
-                    </Button>}
+                    </Button>
                     <Button
                         type="button"
                         variant="ghost"
@@ -1115,7 +1050,7 @@ export const ChatInput: FC<ChatInputProps> = ({
                         ? {
                             target: {
                                 chatId: fileDialogSource.chatId,
-                                peerId: fileDialogSource.peerId,
+                                ...(fileDialogSource.peerId ? { peerId: fileDialogSource.peerId } : {}),
                             },
                             ...(fileDialogSource.replyTarget ? { replyTarget: fileDialogSource.replyTarget } : {}),
                         }

@@ -20,7 +20,9 @@ import {
   type FileTransferCompleteEvent,
   type FileTransferFailedEvent,
   type OutgoingFileOfferPendingEvent,
+  type OutgoingFileOfferTerminalEvent,
   type PendingFileReceivedEvent,
+  type PendingFileOfferDeferredEvent,
   type GroupChatActivatedEvent,
   type GroupMembersUpdatedEvent,
   type TorConfig,
@@ -58,6 +60,9 @@ import {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const FILE_TRANSFER_PROGRESS_FLUSH_MS = 100;
+const pendingFileTransferProgress = new Map<string, FileTransferProgressEvent>();
+let fileTransferProgressTimer: ReturnType<typeof setTimeout> | null = null;
 
 // Temporary diagnostic: prefix all main-process console output with a timestamp. 
 function installLogTimestamps(): void {
@@ -277,6 +282,11 @@ function createMainWindow() {
     enforceWindowTitle();
   });
   win.webContents.on('did-finish-load', enforceWindowTitle);
+  win.webContents.on('render-process-gone', (_event, details) => {
+    console.error(
+      `[Electron][RENDERER][GONE] reason=${details.reason} exitCode=${details.exitCode}`,
+    );
+  });
   applyWindowSecurityPolicies(win, { appEntryUrl, isDevelopment });
   setupTextContextMenu(win);
 
@@ -400,15 +410,46 @@ function sendRestoreUsername(username: string) {
   }
 }
 
-function sendFileTransferProgress(data: FileTransferProgressEvent) {
-  if (mainWindow && !mainWindow.isDestroyed()) {
+function flushFileTransferProgress(): void {
+  fileTransferProgressTimer = null;
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    pendingFileTransferProgress.clear();
+    return;
+  }
+
+  const progressEvents = Array.from(pendingFileTransferProgress.values());
+  pendingFileTransferProgress.clear();
+  for (const data of progressEvents) {
     log(`[Electron] File transfer progress: ${data.current}/${data.total} for ${data.filename}`);
     mainWindow.webContents.send(IPC_CHANNELS.FILE_TRANSFER_PROGRESS, data);
   }
 }
 
+function scheduleFileTransferProgressFlush(): void {
+  if (fileTransferProgressTimer) {
+    return;
+  }
+  fileTransferProgressTimer = setTimeout(flushFileTransferProgress, FILE_TRANSFER_PROGRESS_FLUSH_MS);
+}
+
+function clearPendingFileTransferProgress(messageId: string): void {
+  pendingFileTransferProgress.delete(messageId);
+  if (pendingFileTransferProgress.size === 0 && fileTransferProgressTimer) {
+    clearTimeout(fileTransferProgressTimer);
+    fileTransferProgressTimer = null;
+  }
+}
+
+function sendFileTransferProgress(data: FileTransferProgressEvent) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    pendingFileTransferProgress.set(data.messageId, data);
+    scheduleFileTransferProgressFlush();
+  }
+}
+
 function sendFileTransferComplete(data: FileTransferCompleteEvent) {
   if (mainWindow && !mainWindow.isDestroyed()) {
+    clearPendingFileTransferProgress(data.messageId);
     log(`[Electron] File transfer complete: ${data.filePath}`);
     mainWindow.webContents.send(IPC_CHANNELS.FILE_TRANSFER_COMPLETE, data);
   }
@@ -416,6 +457,7 @@ function sendFileTransferComplete(data: FileTransferCompleteEvent) {
 
 function sendFileTransferFailed(data: FileTransferFailedEvent) {
   if (mainWindow && !mainWindow.isDestroyed()) {
+    clearPendingFileTransferProgress(data.messageId);
     log(`[Electron] File transfer failed: ${data.error}`);
     mainWindow.webContents.send(IPC_CHANNELS.FILE_TRANSFER_FAILED, data);
   }
@@ -428,10 +470,25 @@ function sendOutgoingFileOfferPending(data: OutgoingFileOfferPendingEvent) {
   }
 }
 
+function sendOutgoingFileOfferTerminal(data: OutgoingFileOfferTerminalEvent) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    clearPendingFileTransferProgress(data.messageId);
+    log(`[Electron] Outgoing file offer terminal: ${data.messageId} status=${data.status}`);
+    mainWindow.webContents.send(IPC_CHANNELS.OUTGOING_FILE_OFFER_TERMINAL, data);
+  }
+}
+
 function sendPendingFileReceived(data: PendingFileReceivedEvent) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     log(`[Electron] Pending file received: ${data.filename} from ${data.senderUsername}`);
     mainWindow.webContents.send(IPC_CHANNELS.PENDING_FILE_RECEIVED, data);
+  }
+}
+
+function sendPendingFileOfferDeferred(data: PendingFileOfferDeferredEvent) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    log(`[Electron] Pending file offer deferred: sender=${data.senderUsername} reason=${data.reason}`);
+    mainWindow.webContents.send(IPC_CHANNELS.PENDING_FILE_OFFER_DEFERRED, data);
   }
 }
 
@@ -687,8 +744,14 @@ async function initializeP2PAfterWindow() {
       onOutgoingFileOfferPending: (data: OutgoingFileOfferPendingEvent) => {
         sendOutgoingFileOfferPending(data);
       },
+      onOutgoingFileOfferTerminal: (data: OutgoingFileOfferTerminalEvent) => {
+        sendOutgoingFileOfferTerminal(data);
+      },
       onPendingFileReceived: (data: PendingFileReceivedEvent) => {
         sendPendingFileReceived(data);
+      },
+      onPendingFileOfferDeferred: (data: PendingFileOfferDeferredEvent) => {
+        sendPendingFileOfferDeferred(data);
       },
       onGroupChatActivated: (data: GroupChatActivatedEvent) => {
         sendGroupChatActivated(data);
@@ -849,9 +912,11 @@ async function initializeApp() {
   }
 }
 
-app.whenReady().then(async () => {
-  await initializeApp();
-});
+if (gotTheLock) {
+  app.whenReady().then(async () => {
+    await initializeApp();
+  });
+}
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

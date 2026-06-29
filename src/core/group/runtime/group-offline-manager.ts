@@ -4,7 +4,7 @@ import { gzip, gunzip, gzipSync } from 'zlib';
 import { promisify } from 'util';
 import type { QueryEvent } from '@libp2p/kad-dht';
 import type { ChatNode, GroupOfflineGapWarning, MessageReceivedEvent } from '../../types.js';
-import type { ChatDatabase, Chat } from '../../db/database.js';
+import type { ChatDatabase, Chat, User } from '../../db/database.js';
 import type { EncryptedUserIdentity } from '../../identity/encrypted-user-identity.js';
 import {
   CHATS_TO_CHECK_FOR_OFFLINE_MESSAGES,
@@ -27,7 +27,11 @@ import {
   GroupMessageType,
 } from '../types.js';
 import { isGroupCallHintSystemPayload } from '../../lib/group-call-signaling.js';
-import { decodeEnvelope, isValidCid } from '../../protocol/message-envelope.js';
+import { dispatchEnvelope, isValidCid } from '../../protocol/message-envelope.js';
+import type {
+  InboundApplicationMessageContext,
+  InboundApplicationMessageHandler,
+} from '../../protocol/application-message.js';
 import { toBase64Url } from '../../utils/miscellaneous.js';
 import { errStr, generalErrorHandler } from '../../utils/general-error.js';
 import { log } from '../../../shared/logger.js';
@@ -41,6 +45,7 @@ interface GroupOfflineManagerDeps {
   userIdentity: EncryptedUserIdentity;
   myPeerId: string;
   onMessageReceived: (data: MessageReceivedEvent) => void;
+  onApplicationMessage: InboundApplicationMessageHandler;
   onGroupCallHint?: (data: { groupId: string; senderPeerId: string; timestamp: number }) => void | Promise<void>;
   onOfflineInboxCapacityChanged?: (chatId: number) => void;
   // Forces an immediate reconnect when a DHT write hits dead connections.
@@ -610,44 +615,18 @@ export class GroupOfflineManager {
                 repairedLate++;
                 continue;
               }
-              // Text bodies are versioned envelopes (cid + body + reply ref); decode
-              // to the plain body and reply ref. System bodies stay raw.
-              const isText = msg.messageType !== 'system';
-              let bodyText = content;
-              let replyToClientId: string | undefined;
-              if (isText) {
-                const envelope = decodeEnvelope(content);
-                bodyText = envelope.text;
-                replyToClientId = envelope.replyToCid;
-              }
-              const { inserted } = await this.deps.database.tryCreateMessage({
-                id: messageId,
-                chat_id: chat.id,
-                sender_peer_id: senderPeerId,
-                content: bodyText,
-                message_type: isText ? 'text' : 'system',
-                timestamp: new Date(msg.timestamp),
-                client_msg_id: messageId,
-                reply_to_client_id: replyToClientId ?? null,
-              }, { dedupe: 'any' });
+              const inserted = await this.persistIncomingGroupContent({
+                chat,
+                sender,
+                message: msg,
+                content,
+              });
               // Cursor advances regardless; counters/event only when a row was added.
               ({ lastReadTs, lastReadMessageId } = this.advanceCursor(lastReadTs, lastReadMessageId, msg));
               if (inserted) {
                 unreadAdded++;
                 deliveredForSender++;
                 repairedLate++;
-                this.deps.onMessageReceived({
-                  chatId: chat.id,
-                  messageId,
-                  content: bodyText,
-                  senderPeerId,
-                  senderUsername: sender.username,
-                  timestamp: msg.timestamp,
-                  messageSentStatus: 'offline',
-                  messageType: isText ? 'text' : 'system',
-                  clientMsgId: messageId,
-                  replyToClientId,
-                });
               }
             } catch (error: unknown) {
               console.warn(
@@ -694,44 +673,18 @@ export class GroupOfflineManager {
                 ({ lastReadTs, lastReadMessageId } = this.advanceCursor(lastReadTs, lastReadMessageId, msg));
                 continue;
               }
-              // Text bodies are versioned envelopes; decode to the plain body + reply
-              // ref. System bodies stay raw.
-              const isText = msg.messageType !== 'system';
-              let bodyText = content;
-              let replyToClientId: string | undefined;
-              if (isText) {
-                const envelope = decodeEnvelope(content);
-                bodyText = envelope.text;
-                replyToClientId = envelope.replyToCid;
-              }
-              const { inserted } = await this.deps.database.tryCreateMessage({
-                id: messageId,
-                chat_id: chat.id,
-                sender_peer_id: senderPeerId,
-                content: bodyText,
-                message_type: isText ? 'text' : 'system',
-                timestamp: new Date(msg.timestamp),
-                client_msg_id: messageId,
-                reply_to_client_id: replyToClientId ?? null,
-              }, { dedupe: 'any' });
+              const inserted = await this.persistIncomingGroupContent({
+                chat,
+                sender,
+                message: msg,
+                content,
+              });
 
               // Counters/event only when a row was actually added (a concurrent gossip
               // delivery may have inserted it first); seq/cursor advance below regardless.
               if (inserted) {
                 unreadAdded++;
                 deliveredForSender++;
-                this.deps.onMessageReceived({
-                  chatId: chat.id,
-                  messageId,
-                  content: bodyText,
-                  senderPeerId,
-                  senderUsername: sender.username,
-                  timestamp: msg.timestamp,
-                  messageSentStatus: 'offline',
-                  messageType: isText ? 'text' : 'system',
-                  clientMsgId: messageId,
-                  replyToClientId,
-                });
               }
             }
 
@@ -785,6 +738,110 @@ export class GroupOfflineManager {
       unreadAdded,
       gapWarnings,
     };
+  }
+
+  private async persistIncomingGroupContent(input: {
+    chat: Chat;
+    sender: User;
+    message: GroupContentMessage;
+    content: string;
+  }): Promise<boolean> {
+    const { chat, sender, message, content } = input;
+    if (message.messageType === 'system') {
+      const { inserted } = await this.deps.database.tryCreateMessage({
+        id: message.messageId,
+        chat_id: chat.id,
+        sender_peer_id: message.senderPeerId,
+        content,
+        message_type: 'system',
+        timestamp: new Date(message.timestamp),
+        client_msg_id: message.messageId,
+        reply_to_client_id: null,
+      }, { dedupe: 'any' });
+      if (inserted) {
+        this.deps.onMessageReceived({
+          chatId: chat.id,
+          messageId: message.messageId,
+          content,
+          senderPeerId: message.senderPeerId,
+          senderUsername: sender.username,
+          timestamp: message.timestamp,
+          messageSentStatus: 'offline',
+          messageType: 'system',
+          clientMsgId: message.messageId,
+        });
+      }
+      return inserted;
+    }
+
+    const routeNonText = (
+      applicationMessage: InboundApplicationMessageContext['message'],
+    ): boolean | Promise<boolean> => this.deps.onApplicationMessage({
+      message: applicationMessage,
+      chatId: chat.id,
+      senderPeerId: message.senderPeerId,
+      senderUsername: sender.username,
+      timestamp: message.timestamp,
+      transportMessageId: message.messageId,
+      route: 'group_offline',
+    });
+    const dispatched = await dispatchEnvelope(content, {
+      text: async ({ payload }) => {
+        const { inserted } = await this.deps.database.tryCreateMessage({
+          id: message.messageId,
+          chat_id: chat.id,
+          sender_peer_id: message.senderPeerId,
+          content: payload.text,
+          message_type: 'text',
+          timestamp: new Date(message.timestamp),
+          client_msg_id: message.messageId,
+          reply_to_client_id: payload.reply_to ?? null,
+        }, { dedupe: 'any' });
+        if (inserted) {
+          this.deps.onMessageReceived({
+            chatId: chat.id,
+            messageId: message.messageId,
+            content: payload.text,
+            senderPeerId: message.senderPeerId,
+            senderUsername: sender.username,
+            timestamp: message.timestamp,
+            messageSentStatus: 'offline',
+            messageType: 'text',
+            clientMsgId: message.messageId,
+            replyToClientId: payload.reply_to,
+          });
+        }
+        return inserted;
+      },
+      file_offer: routeNonText,
+      file_offer_cancel: routeNonText,
+      file_offer_nack: routeNonText,
+    }, { expectedCid: message.messageId });
+
+    // TEMP_LOG: temporary group offline application-message dispatch diagnostics; remove after Phase 2a delivery debugging.
+    log(
+      `[TEMP_LOG][APP-MESSAGE][GROUP-OFFLINE][DISPATCH] group=${message.groupId.slice(0, 8)} `
+      + `msgId=${message.messageId} sender=${message.senderPeerId.slice(-8)} status=${dispatched.status} `
+      + `value=${dispatched.status === 'handled' ? String(dispatched.value) : 'n/a'}`
+      + `${dispatched.status === 'unhandled' ? ` kind=${dispatched.message.kind}` : ''}`
+      + `${dispatched.status === 'rejected' ? ` reason=${dispatched.reason}` : ''}`,
+    );
+
+    if (dispatched.status === 'handled') {
+      return dispatched.value;
+    }
+    if (dispatched.status === 'rejected') {
+      log(
+        `[APP-MESSAGE][GROUP-OFFLINE][DROP] group=${message.groupId.slice(0, 8)} ` +
+        `msgId=${message.messageId} reason=${dispatched.reason}`,
+      );
+    } else {
+      log(
+        `[APP-MESSAGE][GROUP-OFFLINE][DROP] group=${message.groupId.slice(0, 8)} ` +
+        `msgId=${message.messageId} reason=unhandled_kind kind=${dispatched.message.kind}`,
+      );
+    }
+    return false;
   }
 
   private async handleHiddenSystemMessage(input: {

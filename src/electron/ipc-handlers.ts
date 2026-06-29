@@ -32,18 +32,20 @@ import {
   serializeFastRelayAddressList,
 } from '../core/network/node-relays.js';
 import { DEFAULT_WEBRTC_ICE_SERVERS } from '../core/network/default-infrastructure.js';
-import { ensureAppDataDir, formatCopyTimestamp } from '../core/utils/miscellaneous.js';
-import { basename, dirname, extname, isAbsolute, join, resolve as resolvePath } from 'path';
-import { copyFile, lstat, mkdir, readdir, realpath, rm, stat, writeFile } from 'fs/promises';
+import { ensureAppDataDir } from '../core/utils/miscellaneous.js';
+import { basename, dirname, isAbsolute, join, resolve as resolvePath } from 'path';
+import { copyFile, lstat, mkdir, readdir, realpath, rm, stat } from 'fs/promises';
 import { log } from '../shared/logger.js';
 import { isImageFile } from '../shared/file-types.js';
 import { errStr } from '../core/utils/general-error.js';
 import { ChatDatabase } from '../core/db/database.js';
+import type { PendingFileInboxSnapshot } from '../core/types.js';
 import { isNetworkConnected } from './network-connectivity.js';
 import { scheduleAppRelaunch } from './relaunch.js';
 import { createTrustedIpcMainHandle, type IpcMainHandleRegistrar } from './trusted-ipc.js';
 import { mintMediaToken } from './app-protocol.js';
 import { prepareTextUpload } from './text-upload.js';
+import { writeFileWithCopySuffix } from '../core/lib/file-storage.js';
 import type { InitialSetupStatus, SaveTextUploadResponse } from '../shared/kiyeovo-api.js';
 
 function requestAppRestart(): void {
@@ -85,26 +87,7 @@ async function writeUploadAtomically(
   fileName: string,
   bytes: Buffer,
 ): Promise<string> {
-  const extension = extname(fileName);
-  const nameWithoutExtension = basename(fileName, extension);
-
-  for (let attempt = 0; attempt < 1000; attempt += 1) {
-    const candidateName = attempt === 0
-      ? fileName
-      : `${nameWithoutExtension}_copy_${formatCopyTimestamp(new Date())}${attempt > 1 ? `_${attempt - 1}` : ''}${extension}`;
-    const candidatePath = join(uploadsDir, candidateName);
-
-    try {
-      await writeFile(candidatePath, bytes, { flag: 'wx' });
-      return candidatePath;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
-        throw error;
-      }
-    }
-  }
-
-  throw new Error('Unable to allocate a unique upload filename');
+  return writeFileWithCopySuffix(uploadsDir, fileName, bytes);
 }
 
 async function getFlatDirectorySize(directoryPath: string): Promise<number> {
@@ -3414,6 +3397,54 @@ function setupFileTransferHandlers(
   ipcMain: IpcMainHandleRegistrar,
   getP2PCore: () => P2PCore | null
 ): void {
+  let pendingFileCapacityRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const senderCountDecreased = (before: PendingFileInboxSnapshot, after: PendingFileInboxSnapshot): boolean => {
+    for (const beforeSender of before.senders) {
+      const afterSender = after.senders.find((sender) => sender.senderPeerId === beforeSender.senderPeerId);
+      if ((afterSender?.count ?? 0) < beforeSender.count) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const schedulePendingFileCapacityRecovery = (): void => {
+    if (pendingFileCapacityRecoveryTimer) {
+      clearTimeout(pendingFileCapacityRecoveryTimer);
+    }
+    pendingFileCapacityRecoveryTimer = setTimeout(() => {
+      pendingFileCapacityRecoveryTimer = null;
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return;
+      }
+      void (async () => {
+        try {
+          log('[IPC] Pending file capacity freed; checking group missed messages');
+          const result = await p2pCore.messageHandler.checkGroupOfflineMessages();
+          log(
+            `[IPC] Pending file capacity recovery complete - checked ${result.checkedChatIds.length} group chats`,
+          );
+        } catch (error) {
+          console.error('[IPC] Pending file capacity recovery failed:', error);
+        }
+      })();
+    }, 1000);
+  };
+
+  const maybeSchedulePendingFileCapacityRecovery = (
+    before: PendingFileInboxSnapshot,
+    after: PendingFileInboxSnapshot,
+  ): void => {
+    if (!(before.full || before.hasFullSender || pendingFileCapacityRecoveryTimer)) {
+      return;
+    }
+    if (after.total < before.total || senderCountDecreased(before, after)) {
+      schedulePendingFileCapacityRecovery();
+    }
+  };
+
   // Send file
   ipcMain.handle(IPC_CHANNELS.SEND_FILE_REQUEST, async (_event, peerId: string, filePath: string, fileId?: string, replyToCid?: string) => {
     try {
@@ -3440,6 +3471,28 @@ function setupFileTransferHandlers(
     }
   });
 
+  // Send file to a group chat
+  ipcMain.handle(IPC_CHANNELS.SEND_GROUP_FILE_REQUEST, async (_event, chatId: number, filePath: string, fileId?: string, replyToCid?: string) => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { success: false, error: 'P2P core not initialized' };
+      }
+      if (!Number.isInteger(chatId) || chatId <= 0) {
+        return { success: false, error: 'Invalid group chat' };
+      }
+
+      log(`[IPC] Sending file ${filePath} to group chat ${chatId}`);
+
+      await p2pCore.messageHandler.getFileHandler().sendGroupFile(chatId, filePath, fileId, replyToCid);
+
+      return { success: true, error: null };
+    } catch (error) {
+      console.error('[IPC] Failed to send group file:', error);
+      return { success: false, error: errStr(error, 'Failed to send group file') };
+    }
+  });
+
   // Accept file
   ipcMain.handle(IPC_CHANNELS.ACCEPT_FILE, async (_event, fileId: string) => {
     try {
@@ -3449,7 +3502,11 @@ function setupFileTransferHandlers(
       }
 
       log(`[IPC] Accepting file: ${fileId}`);
-      p2pCore.messageHandler.getFileHandler().acceptPendingFile(fileId);
+      const fileHandler = p2pCore.messageHandler.getFileHandler();
+      const capacityBefore = fileHandler.getPendingFileInboxSnapshot();
+      fileHandler.acceptPendingFile(fileId);
+      const capacityAfter = fileHandler.getPendingFileInboxSnapshot();
+      maybeSchedulePendingFileCapacityRecovery(capacityBefore, capacityAfter);
 
       return { success: true, error: null };
     } catch (error) {
@@ -3467,12 +3524,35 @@ function setupFileTransferHandlers(
       }
 
       log(`[IPC] Rejecting file: ${fileId}`);
-      p2pCore.messageHandler.getFileHandler().rejectPendingFile(fileId);
+      const fileHandler = p2pCore.messageHandler.getFileHandler();
+      const capacityBefore = fileHandler.getPendingFileInboxSnapshot();
+      const rejected = fileHandler.rejectPendingFile(fileId);
+      if (!rejected) {
+        return { success: false, error: 'Pending file offer not found' };
+      }
+      const capacityAfter = fileHandler.getPendingFileInboxSnapshot();
+      maybeSchedulePendingFileCapacityRecovery(capacityBefore, capacityAfter);
 
       return { success: true, error: null };
     } catch (error) {
       console.error('[IPC] Failed to reject file:', error);
       return { success: false, error: errStr(error, 'Failed to reject file') };
+    }
+  });
+
+  // Current pending file-offer capacity snapshot
+  ipcMain.handle(IPC_CHANNELS.GET_PENDING_FILE_INBOX, async () => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { success: false, snapshot: null, error: 'P2P core not initialized' };
+      }
+
+      const snapshot = p2pCore.messageHandler.getFileHandler().getPendingFileInboxSnapshot();
+      return { success: true, snapshot, error: null };
+    } catch (error) {
+      console.error('[IPC] Failed to get pending file inbox:', error);
+      return { success: false, snapshot: null, error: errStr(error, 'Failed to get pending file inbox') };
     }
   });
 
@@ -3484,7 +3564,7 @@ function setupFileTransferHandlers(
         return { success: false, error: "P2P core not initialized" };
       }
 
-      const canceled = p2pCore.messageHandler.getFileHandler().cancelIncomingFileDownload(fileId);
+      const canceled = await p2pCore.messageHandler.getFileHandler().cancelIncomingFileDownload(fileId);
       if (!canceled) {
         return { success: false, error: "No active incoming download found" };
       }
@@ -3496,21 +3576,23 @@ function setupFileTransferHandlers(
     }
   });
 
-  // Get pending files
-  ipcMain.handle(IPC_CHANNELS.GET_PENDING_FILES, async (_event) => {
+  // Withdraw an outgoing, still-pending file offer
+  ipcMain.handle(IPC_CHANNELS.CANCEL_FILE_OFFER, async (_event, fileId: string) => {
     try {
       const p2pCore = getP2PCore();
       if (!p2pCore) {
-        return { success: false, files: [], error: 'P2P core not initialized' };
+        return { success: false, error: "P2P core not initialized" };
       }
 
-      const files = p2pCore.messageHandler.getFileHandler().getPendingFiles();
-      log(`[IPC] Get pending files: ${files.length} files`);
+      const cancelled = await p2pCore.messageHandler.getFileHandler().cancelOutgoingFileOffer(fileId);
+      if (!cancelled) {
+        return { success: false, error: "Active outgoing file offer not found" };
+      }
 
-      return { success: true, files, error: null };
+      return { success: true, error: null };
     } catch (error) {
-      console.error('[IPC] Failed to get pending files:', error);
-      return { success: false, files: [], error: errStr(error, 'Failed to get pending files') };
+      console.error("[IPC] Failed to cancel file offer:", error);
+      return { success: false, error: errStr(error, "Failed to cancel file offer") };
     }
   });
 

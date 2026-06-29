@@ -308,7 +308,6 @@ export const OFFLINE_MESSAGE_LIMIT = 50; // 50 messages
 export const OFFLINE_MESSAGE_CHECK_INTERVAL = 5 * MINUTE; // 5 minutes
 export const KEY_ROTATION_TIMEOUT = 30 * SECOND; // 30 seconds
 export const PENDING_KEY_EXCHANGE_EXPIRATION = 5 * MINUTE; // 5 minutes
-export const FILE_ACCEPTANCE_TIMEOUT = 5 * MINUTE; // 5 minutes
 export const DATABASE_CLEANUP_INTERVAL = 30 * MINUTE; // 30 minutes
 export const MAX_MESSAGES_PER_STORE = 41; // Hard cap for one offline DHT store payload (incl. ack reserve)
 export const OFFLINE_CONTROL_MESSAGE_RESERVE = 10; // Slots reserved for offline control traffic
@@ -322,9 +321,6 @@ export const PROFILE_SCRYPT_N = 2 ** 17; // slightly less because of less sensit
 /**
  * Other
  */
-export const FILE_OFFER = 'file_offer';
-export const FILE_OFFER_RESPONSE = 'file_offer_response';
-export const FILE_TRANSFER_CONFIRM = 'file_transfer_confirm';
 export const CHUNK_SIZE = 32 * 1024; // 32KB
 export const DOWNLOADS_DIR = 'kiyeovo-downloads';
 export const UPLOADS_DIR = 'kiyeovo-uploads';
@@ -338,7 +334,19 @@ export const FILE_OFFER_RATE_LIMIT = 5; // Max file offers per peer in time wind
 export const FILE_OFFER_RATE_LIMIT_WINDOW = 1 * MINUTE; // 1 minute
 export const MAX_PENDING_FILES_PER_PEER = 5; // Max unanswered file offers per peer
 export const MAX_PENDING_FILES_TOTAL = 10; // Max unanswered file offers globally
-export const FILE_REJECTION_COUNTER_RESET_INTERVAL = 10 * MINUTE; // Reset rejection counters every 10 minutes
+export const MAX_ACTIVE_FILE_OFFERS_PER_CHAT = 5; // Sender cap: live served-file offers per chat (in-RAM registry)
+
+// Pull-transfer (1d) operational bounds.
+export const MAX_CONCURRENT_FILE_SERVES = 15; // Global concurrent serve leases (bound to 10MB MAX_FILE_SIZE → ~150MB RAM)
+export const MAX_CONCURRENT_FILE_SERVES_PER_PEER = 5; // …and per peer; matches MAX_ACTIVE_FILE_OFFERS_PER_CHAT so a peer can pull all their offers at once without a gratuitous busy
+export const MAX_PREAUTH_STREAMS_GLOBAL = 32; // Concurrent unauthenticated inbound pull streams, globally
+export const MAX_PREAUTH_STREAMS_PER_PEER = 2; // …and per peer, so one peer can't consume all handshake capacity
+export const FILE_PULL_FIRST_FRAME_TIMEOUT_FAST = 10 * SECOND; // Stream opened but no FilePullInit (fast mode)
+export const FILE_PULL_FIRST_FRAME_TIMEOUT_ANON = 30 * SECOND; // …anonymous mode (higher latency)
+export const FILE_PULL_AUTH_TIMEOUT_FAST = 10 * SECOND; // FilePullChallenge sent, awaiting FilePullAuth (fast mode)
+export const FILE_PULL_AUTH_TIMEOUT_ANON = 30 * SECOND; // …anonymous mode
+export const FILE_PULL_CONFIRM_TIMEOUT = 30 * SECOND; // Last chunk sent, awaiting FileTransferConfirm
+// Chunk idle (CHUNK_IDLE_TIMEOUT) and total-transfer (CHUNK_RECEIVE_TIMEOUT) bounds are reused.
 export const SILENT_REJECTION_THRESHOLD_GLOBAL = 20; // After N global rejections, stop responding (bandwidth optimization)
 export const SILENT_REJECTION_THRESHOLD_PER_PEER = 5; // After N rejections to same peer, stop responding (bandwidth optimization)
 export const CHATS_TO_CHECK_FOR_OFFLINE_MESSAGES = 10; // Max chats scanned per offline-message check pass

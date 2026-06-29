@@ -21,7 +21,8 @@ interface FileMessageProps {
   transferStatus: FileTransferStatus;
   transferProgress?: number;
   transferError?: string;
-  transferExpiresAt?: number;
+  fileGroupDownloadTotal?: number;
+  fileGroupDownloadCompleted?: number;
   isFromCurrentUser: boolean;
 }
 
@@ -149,54 +150,30 @@ export const FileMessage: React.FC<FileMessageProps> = ({
   transferStatus,
   transferProgress = 0,
   transferError,
-  transferExpiresAt,
+  fileGroupDownloadTotal,
+  fileGroupDownloadCompleted,
   isFromCurrentUser
 }) => {
   const dispatch = useDispatch();
   const messages = useSelector((state: RootState) => state.chat.messages);
-  const isAwaitingApproval =
-    transferStatus === 'awaiting_acceptance' ||
-    (transferStatus === 'pending' && isFromCurrentUser);
-  const isIncomingPendingDecision =
-    transferStatus === 'incoming_pending_user' ||
-    (transferStatus === 'pending' && !isFromCurrentUser);
-  const showsDecisionDeadline = isAwaitingApproval || isIncomingPendingDecision;
-  const [timeLeftMs, setTimeLeftMs] = useState(() => {
-    if (showsDecisionDeadline && transferExpiresAt) {
-      return Math.max(0, transferExpiresAt - Date.now());
-    }
-    return 0;
-  });
+  const chat = useSelector((state: RootState) => state.chat.chats.find((item) => item.id === chatId));
+  const isGroupChat = chat?.type === 'group';
+  const isAwaitingApproval = transferStatus === 'awaiting_acceptance';
+  const isIncomingPendingDecision = transferStatus === 'incoming_pending_user';
+  const isOutgoingPendingOffer = isFromCurrentUser && isAwaitingApproval;
+  const isGroupSenderOffer = isFromCurrentUser
+    && isGroupChat
+    && fileGroupDownloadTotal !== undefined
+    && fileGroupDownloadTotal > 0;
+  const showsDecisionStatus = isAwaitingApproval || isIncomingPendingDecision;
+  const showsGroupSenderStandaloneStatus = isGroupSenderOffer
+    && (
+      transferStatus === 'in_progress'
+      || transferStatus === 'completed'
+      || transferStatus === 'partially_completed'
+      || transferStatus === 'cancelled'
+    );
   const [isCancelling, setIsCancelling] = useState(false);
-
-  useEffect(() => {
-    if (!showsDecisionDeadline || !transferExpiresAt) {
-      return;
-    }
-
-    const tick = () => {
-      const remaining = Math.max(0, transferExpiresAt - Date.now());
-      setTimeLeftMs(remaining);
-      if (remaining === 0 && isIncomingPendingDecision) {
-        dispatch(updateFileTransferStatus({
-          messageId: fileId,
-          status: 'expired',
-          transferError: 'Offer expired'
-        }));
-        const hasOtherPending = messages.some(
-          (m) =>
-            m.chatId === chatId &&
-            m.id !== fileId &&
-            (m.transferStatus === 'incoming_pending_user' || m.transferStatus === 'pending'),
-        );
-        dispatch(setPendingFileStatus({ chatId, hasPendingFile: hasOtherPending }));
-      }
-    };
-
-    tick();
-    const intervalId = setInterval(tick, 1000);
-    return () => clearInterval(intervalId);
-  }, [showsDecisionDeadline, transferExpiresAt, isIncomingPendingDecision, fileId, chatId, messages, dispatch]);
 
   const formatFileSize = (bytes: number): string => {
     if (bytes === 0) return '0 B';
@@ -204,13 +181,6 @@ export const FileMessage: React.FC<FileMessageProps> = ({
     const sizes = ['B', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
-  };
-
-  const formatTimeLeft = (ms: number): string => {
-    const totalSeconds = Math.ceil(ms / 1000);
-    const minutes = Math.floor(totalSeconds / 60);
-    const seconds = totalSeconds % 60;
-    return `${minutes}:${seconds.toString().padStart(2, '0')}`;
   };
 
   const handleAccept = async () => {
@@ -225,14 +195,24 @@ export const FileMessage: React.FC<FileMessageProps> = ({
           (m) =>
             m.chatId === chatId &&
             m.id !== fileId &&
-            (m.transferStatus === 'incoming_pending_user' || m.transferStatus === 'pending'),
+            m.transferStatus === 'incoming_pending_user',
         );
         dispatch(setPendingFileStatus({ chatId, hasPendingFile: hasOtherPending }));
       } else {
         console.error('Failed to accept file:', result.error);
+        dispatch(updateFileTransferStatus({
+          messageId: fileId,
+          status: 'incoming_pending_user',
+          transferError: result.error || 'Failed to accept file'
+        }));
       }
     } catch (error) {
       console.error('Error accepting file:', error);
+      dispatch(updateFileTransferStatus({
+        messageId: fileId,
+        status: 'incoming_pending_user',
+        transferError: error instanceof Error ? error.message : 'Failed to accept file'
+      }));
     }
   };
 
@@ -249,7 +229,7 @@ export const FileMessage: React.FC<FileMessageProps> = ({
           (m) =>
             m.chatId === chatId &&
             m.id !== fileId &&
-            (m.transferStatus === 'incoming_pending_user' || m.transferStatus === 'pending'),
+            m.transferStatus === 'incoming_pending_user',
         );
         dispatch(setPendingFileStatus({ chatId, hasPendingFile: hasOtherPending }));
       } else {
@@ -283,6 +263,23 @@ export const FileMessage: React.FC<FileMessageProps> = ({
     }
   };
 
+  const handleCancelOffer = async () => {
+    if (isCancelling) return;
+
+    setIsCancelling(true);
+    try {
+      const result = await window.kiyeovoAPI.cancelFileOffer(fileId);
+      if (!result.success) {
+        console.error('Failed to cancel file offer:', result.error);
+        return;
+      }
+    } catch (error) {
+      console.error('Error canceling file offer:', error);
+    } finally {
+      setIsCancelling(false);
+    }
+  };
+
   const handleOpenFile = async () => {
     if (filePath && transferStatus === 'completed') {
       const result = await window.kiyeovoAPI.openFileLocation(filePath);
@@ -311,15 +308,30 @@ export const FileMessage: React.FC<FileMessageProps> = ({
   };
 
   const getStatusText = () => {
+    if (isGroupSenderOffer) {
+      if (transferStatus === 'completed') {
+        return 'Completed';
+      }
+      if (transferStatus === 'cancelled') {
+        return 'Cancelled';
+      }
+      if (
+        transferStatus === 'awaiting_acceptance'
+        || transferStatus === 'in_progress'
+        || transferStatus === 'partially_completed'
+      ) {
+        const completed = Math.max(0, Math.min(fileGroupDownloadCompleted ?? 0, fileGroupDownloadTotal));
+        return `Downloaded by ${completed}/${fileGroupDownloadTotal}`;
+      }
+    }
+
     switch (transferStatus) {
       case 'connecting':
         return 'Connecting...';
       case 'awaiting_acceptance':
-        return 'Waiting for approval';
+        return isGroupChat ? 'Group file offered' : 'File offered';
       case 'incoming_pending_user':
         return 'Waiting for your decision';
-      case 'pending':
-        return isFromCurrentUser ? 'Waiting for approval' : 'Waiting for your decision';
       case 'in_progress':
         if (isFromCurrentUser && transferProgress >= 100) {
           return 'Awaiting recipient confirmation';
@@ -327,12 +339,14 @@ export const FileMessage: React.FC<FileMessageProps> = ({
         return `${transferProgress}%`;
       case 'completed':
         return 'Completed';
+      case 'partially_completed':
+        return 'Partially completed';
       case 'failed':
         return 'Failed';
-      case 'expired':
-        return 'Offer expired';
       case 'rejected':
         return 'Offer rejected';
+      case 'cancelled':
+        return 'Offer cancelled';
       default:
         return '';
     }
@@ -366,12 +380,15 @@ export const FileMessage: React.FC<FileMessageProps> = ({
     if (transferError?.toLowerCase().includes('download canceled by user')) {
       return 'Download canceled';
     }
+    if (transferError?.toLowerCase().includes('offer cancelled')) {
+      return 'Offer cancelled';
+    }
     return transferError;
   };
 
   const transferStatusContent = (
     <>
-      {transferStatus === 'in_progress' && (
+      {transferStatus === 'in_progress' && !isGroupSenderOffer && (
         <div className="w-full">
           <div className="flex items-center gap-2">
             <div className="flex-1 bg-background/20 rounded-full h-1.5 overflow-hidden">
@@ -398,13 +415,19 @@ export const FileMessage: React.FC<FileMessageProps> = ({
         </div>
       )}
 
+      {showsGroupSenderStandaloneStatus && (
+        <div className="text-xs opacity-70">
+          {getStatusText()}
+        </div>
+      )}
+
       {transferStatus === 'failed' && (
         <div className="text-xs">
           {specificErrorText() || 'Transfer failed'}
         </div>
       )}
 
-      {(transferStatus === 'expired' || transferStatus === 'rejected') && (
+      {(transferStatus === 'rejected' || (transferStatus === 'cancelled' && !isGroupSenderOffer)) && (
         <div className="text-xs opacity-70">
           {getStatusText()}
         </div>
@@ -416,11 +439,11 @@ export const FileMessage: React.FC<FileMessageProps> = ({
         </div>
       )}
 
-      {showsDecisionDeadline && (
+      {showsDecisionStatus && (
         <div className="text-xs opacity-70">
           <div>{getStatusText()}</div>
-          {transferExpiresAt && (
-            <div>Expires in {formatTimeLeft(timeLeftMs)}</div>
+          {isIncomingPendingDecision && transferError && (
+            <div className="mt-1">{specificErrorText()}</div>
           )}
         </div>
       )}
@@ -443,6 +466,17 @@ export const FileMessage: React.FC<FileMessageProps> = ({
             Reject
           </Button>
         </div>
+      )}
+
+      {isOutgoingPendingOffer && (
+        <Button
+          onClick={handleCancelOffer}
+          size="sm"
+          variant="outline"
+          disabled={isCancelling}
+        >
+          Cancel offer
+        </Button>
       )}
     </>
   );

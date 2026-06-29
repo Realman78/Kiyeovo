@@ -32,7 +32,9 @@ import type {
   FileTransferCompleteEvent,
   FileTransferFailedEvent,
   OutgoingFileOfferPendingEvent,
+  OutgoingFileOfferTerminalEvent,
   PendingFileReceivedEvent,
+  PendingFileOfferDeferredEvent,
   GroupChatActivatedEvent,
   GroupMembersUpdatedEvent,
   NetworkMode,
@@ -93,7 +95,9 @@ export interface P2PCoreConfig {
   onFileTransferComplete: (data: FileTransferCompleteEvent) => void;
   onFileTransferFailed: (data: FileTransferFailedEvent) => void;
   onOutgoingFileOfferPending: (data: OutgoingFileOfferPendingEvent) => void;
+  onOutgoingFileOfferTerminal: (data: OutgoingFileOfferTerminalEvent) => void;
   onPendingFileReceived: (data: PendingFileReceivedEvent) => void;
+  onPendingFileOfferDeferred: (data: PendingFileOfferDeferredEvent) => void;
   onGroupChatActivated: (data: GroupChatActivatedEvent) => void;
   onGroupMembersUpdated: (data: GroupMembersUpdatedEvent) => void;
   onOfflineMessagesFetchComplete: (chatIds: number[]) => void;
@@ -128,7 +132,9 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     onFileTransferComplete,
     onFileTransferFailed,
     onOutgoingFileOfferPending,
+    onOutgoingFileOfferTerminal,
     onPendingFileReceived,
+    onPendingFileOfferDeferred,
     onGroupChatActivated,
     onGroupMembersUpdated,
     onOfflineMessagesFetchComplete,
@@ -423,8 +429,16 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     onOutgoingFileOfferPending(data);
   };
 
+  const sendOutgoingFileOfferTerminal = (data: OutgoingFileOfferTerminalEvent) => {
+    onOutgoingFileOfferTerminal(data);
+  };
+
   const sendPendingFileReceived = (data: PendingFileReceivedEvent) => {
     onPendingFileReceived(data);
+  };
+
+  const sendPendingFileOfferDeferred = (data: PendingFileOfferDeferredEvent) => {
+    onPendingFileOfferDeferred(data);
   };
 
   let groupCallOrchestrator: GroupCallOrchestrator | null = null;
@@ -505,7 +519,9 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     sendFileTransferComplete,
     sendFileTransferFailed,
     sendOutgoingFileOfferPending,
+    sendOutgoingFileOfferTerminal,
     sendPendingFileReceived,
+    sendPendingFileOfferDeferred,
     sendGroupChatActivated,
     sendGroupMembersUpdated,
     sendOfflineMessagesFetchComplete,

@@ -36,7 +36,8 @@ export interface ChatMessage {
   transferStatus?: FileTransferStatus;
   transferProgress?: number; // Percentage 0-100
   transferError?: string;
-  transferExpiresAt?: number;
+  fileGroupDownloadTotal?: number;
+  fileGroupDownloadCompleted?: number;
   localSendState?: 'queued' | 'sending' | 'failed';
   // 'offline_backup' = delivered online, only the DHT backup failed (retry re-stores, not re-sends)
   failedReason?: 'group_rekeying' | 'other' | 'offline_backup';
@@ -66,6 +67,7 @@ export interface Chat {
   muted?: boolean; // Whether notifications and sounds are muted for this chat
   blocked?: boolean; // Whether the other user is blocked
   hasPendingFile?: boolean; // Whether chat has a pending file request
+  pendingFileInboxAttention?: boolean; // A group file offer was skipped locally because pending file capacity is full
   groupStatus?: string; // Group-specific status (invited_pending, active, etc.)
   needsRemovedCatchup?: boolean; // Removed-group startup one-time catchup flag
   lastKnownActiveCallId?: string | null;
@@ -556,7 +558,13 @@ const chatSlice = createSlice({
     updateFileTransferProgress: (state, action: PayloadAction<{ messageId: string; progress: number; chatId: number; filename: string; size: number }>) => {
       const message = state.messages.find((m) => m.id === action.payload.messageId);
       if (message) {
-        if (message.transferStatus === 'completed' || message.transferStatus === 'failed' || message.transferStatus === 'expired' || message.transferStatus === 'rejected') {
+        if (
+          message.transferStatus === 'completed'
+          || message.transferStatus === 'partially_completed'
+          || message.transferStatus === 'failed'
+          || message.transferStatus === 'rejected'
+          || message.transferStatus === 'cancelled'
+        ) {
           return;
         }
         message.fileName = action.payload.filename;
@@ -572,18 +580,25 @@ const chatSlice = createSlice({
       status: FileTransferStatus;
       filePath?: string;
       transferError?: string;
-      transferExpiresAt?: number;
+      fileGroupDownloadTotal?: number;
+      fileGroupDownloadCompleted?: number;
     }>) => {
       const message = state.messages.find((m) => m.id === action.payload.messageId);
       if (message) {
         message.transferStatus = action.payload.status;
-        if (action.payload.transferExpiresAt !== undefined) {
-          message.transferExpiresAt = action.payload.transferExpiresAt;
+        if (action.payload.fileGroupDownloadTotal !== undefined) {
+          message.fileGroupDownloadTotal = action.payload.fileGroupDownloadTotal;
         }
-        if (action.payload.status === 'completed' && action.payload.filePath) {
+        if (action.payload.fileGroupDownloadCompleted !== undefined) {
+          message.fileGroupDownloadCompleted = action.payload.fileGroupDownloadCompleted;
+        }
+        if (
+          (action.payload.status === 'completed' || action.payload.status === 'partially_completed')
+          && action.payload.filePath
+        ) {
           message.filePath = action.payload.filePath;
         }
-        if (action.payload.status === 'completed') {
+        if (action.payload.status === 'completed' || action.payload.status === 'partially_completed') {
           message.transferProgress = 100;
         }
         if (action.payload.transferError) {

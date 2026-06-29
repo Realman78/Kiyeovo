@@ -284,6 +284,12 @@ export class GroupCallOrchestrator {
   }
 
   cleanup(): void {
+    if (this.session) {
+      this.endLocalSession('cleanup');
+    } else {
+      this.clearPendingJoinResponse();
+      this.clearPendingRosterBroadcast();
+    }
     this.node.removeEventListener('peer:connect', this.peerConnectHandler);
     this.node.removeEventListener('peer:disconnect', this.peerDisconnectHandler);
     this.node.removeEventListener('self:peer:update', this.selfPeerUpdateHandler);

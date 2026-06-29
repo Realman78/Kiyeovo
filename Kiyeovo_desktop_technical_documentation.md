@@ -31,12 +31,10 @@ Its goal is to provide complete context quickly in new AI conversations without 
   - key epoch rotation
   - encrypted group-info metadata in DHT versioned records
   - replies (quote + jump-to), reusing the shared group `messageId` as the cross-peer id (§5.4)
-- Calls are implemented for fast mode direct chats:
-  - 1:1 audio/video
-  - screen sharing for active calls
-  - signaling over `call-signal` protocol
-  - WebRTC media path in renderer
-- File transfer uses a dedicated protocol with offer/accept/reject, chunked encrypted transfer, cancellation, and per-peer active-transfer limits.
+- Calls are fast-mode only, WebRTC media in the renderer over the signed `call-signal` protocol:
+  - 1:1 audio-first with optional camera + screen sharing (§8.1)
+  - group mesh audio with optional per-participant camera, coordinated by a writer/roster model (§8.2)
+- File sharing uses signed typed offer messages plus a recipient-initiated pull protocol over Noise, for both direct and group offers (§7).
 
 ---
 
@@ -108,17 +106,18 @@ Mode switch is done in settings and requires app restart (no hot stack replaceme
 
 ### 3. Startup and lifecycle flow
 
-1. Electron app starts and creates the window.
+1. Electron app acquires the single-instance lock. A secondary process exits before window/core initialization.
+2. Electron app starts and creates the window.
    - privileged application and local-media URL schemes are registered before Electron becomes ready
-2. Main process reads DB settings (`network_mode`, onboarding flag).
-3. If onboarding requires explicit mode selection, initialization is gated until user picks mode.
-4. Tor manager starts only for `anonymous` mode.
-5. Encrypted identity for active mode is loaded/unlocked.
-6. Libp2p node is created with mode-specific stack and validators.
-7. Bootstrap/relay connectivity is established.
-8. DHT status checker and periodic maintenance start.
-9. Username registry, message/group/file/call handlers activate.
-10. UI hydrates from init state and live IPC events.
+3. Main process reads DB settings (`network_mode`, onboarding flag).
+4. If onboarding requires explicit mode selection, initialization is gated until user picks mode.
+5. Tor manager starts only for `anonymous` mode.
+6. Encrypted identity for active mode is loaded/unlocked.
+7. Libp2p node is created with mode-specific stack and validators.
+8. Bootstrap/relay connectivity is established.
+9. DHT status checker and periodic maintenance start.
+10. Username registry, message/group/file/call handlers activate.
+11. UI hydrates from init state and live IPC events.
 
 ---
 
@@ -168,9 +167,7 @@ Trusted profile import/export is also supported for out-of-band onboarding:
 
 Direct and group text messages are limited to 2,048 characters. The
 renderer rejects oversized sends, IPC validation enforces the same core limit,
-and inbound envelope decoding defensively clamps text to that limit. During a
-mixed-version rollout, a peer still using the previous 1,024-character limit
-will silently clamp longer inbound messages until it updates.
+and inbound typed-envelope validation rejects oversized text payloads.
 
 Inbound first-contact behavior depends on contact mode:
 - `active` - emits a pending contact request to UI and waits for accept/reject/timeout
@@ -212,17 +209,19 @@ Cross-peer identity:
 - message row IDs are minted independently per peer, so replies anchor to a **`client_msg_id` (cid)** — a stable id that is the *same value on both sides* of a message. The sender mints it; it rides inside the encrypted body and the recipient persists the same value. File/image rows reuse the shared `fileId` as their cid (so files are reply-/jump-able too).
 - a reply stores only `reply_to_client_id` (the target cid). **No quoted-content snapshot is kept** — the quote is resolved by live lookup, so deleting the original leaves no recoverable copy. When the target can't be resolved (deleted, or never received — e.g. a group reply to a message that predates your join), the quote renders a neutral, non-interactive *"Original message unavailable."*
 
-Wire format — the plaintext that gets encrypted is a small versioned **envelope** rather than a bare string: `{ v, cid, text, reply_to? }`. This keeps the cid + reply linkage private on the transport **and** in the offline DHT-at-rest payload. The recipient decodes and validates it (bounded cid shape/length, clamped text) and falls back to plain text for any non-envelope body. The envelope + cid are built **once per send** and reused across every delivery route (online, non-blocking offline queue, synchronous offline fallback), so the same cid arrives regardless of path.
+Wire format — the plaintext that gets encrypted is a strict version-1 **application-message envelope** rather than a bare string: `{ v: 1, cid, kind, payload }`. Supported kinds are `text`, `file_offer`, `file_offer_cancel`, and `file_offer_nack`; a text payload contains `{ text, reply_to? }`. This keeps the cid, message kind, payload, and reply linkage private on the transport **and** in offline DHT-at-rest payloads. Payloads are shape- and bounds-validated before dispatch. Bare text, missing/unknown kinds, unsupported versions, and malformed envelopes are ignored and never rendered as text. Kiyeovo has no pre-1.0 peer compatibility path.
 
-Direct file replies use the file-transfer protocol rather than the text envelope. A signed `file_offer` may carry optional `replyToCid` metadata, validated with the same cid shape/length rules and included in the signed offer payload. When present, both outgoing file rows and incoming pending-offer rows persist it as `reply_to_client_id`; the live pending-file event carries the same value so the renderer can show the quote before acceptance.
+One shared codec/dispatcher is used by direct realtime, direct offline, group GossipSub, and group offline catch-up/late-gap repair. The envelope + cid are built **once per send** and reused across delivery routes, so online/offline overlap dedupes on the same id. The outbound application-message API requires a caller-supplied id and encodes persistence ownership in its request type: text is transport-owned, a file offer is caller-owned (the file subsystem persists its row), and cancel/nack controls own no visible row. Direct application messages reuse the established direct session or existing offline bucket; group application messages retain the normal GossipSub + signed offline-backup behavior. Caller-owned rows must exist before transport begins, while invisible controls never create a `messages` row.
+
+File replies use the file-transfer protocol rather than the text envelope. A signed `file_offer` may carry optional `replyToCid` metadata, validated with the same cid shape/length rules and included in the signed offer payload. When present, both outgoing file rows and incoming pending-offer rows persist it as `reply_to_client_id`; the live pending-file event carries the same value so the renderer can show the quote before acceptance. Direct files are fully downloadable; group file offers preserve reply metadata through offer delivery and can be accepted by group members through the same pull protocol.
 
 Dedup: a `UNIQUE(chat_id, client_msg_id)` index makes the same logical message delivered over two channels (online + offline) collapse to one row. Inbound inserts (`tryCreateMessage`) skip the "received" event when no row was inserted; outbound inserts use a plain insert that **throws** on a cid collision (an invariant violation, never expected). This complements the pre-existing offline-message-UUID dedup.
 
-Groups: a group content message's `messageId` is already identical on every member, so it doubles as the shared cid — **`client_msg_id = messageId`** (no separate mint), and a reply just carries the target `messageId` inside the same envelope (`cid = messageId`), encrypted into `encryptedContent`. Both receive paths — gossip realtime and offline catch-up / late-gap repair — decode the envelope (text only; hidden call-hint system bodies stay raw), validate `messageId` (`isValidCid`, enforced in `isGroupChatMessage` for gossip and at the offline parse gate), and persist the cid + reply ref. Because `id == messageId == client_msg_id` for groups, the inbound insert uses a **targetless `ON CONFLICT DO NOTHING`** (covers the PK), and sequence/cursor state advances even for a deduped duplicate — only unread + the "received" event are gated on insertion. The reply envelope lives inside the signed offline backup, so catch-up carries it automatically.
+Groups: a group content message's `messageId` is already identical on every member, so it doubles as the shared cid — **`client_msg_id = messageId`** (no separate mint), and a reply carries the target `messageId` inside the text payload (`cid = messageId`), encrypted into `encryptedContent`. Both receive paths — gossip realtime and offline catch-up / late-gap repair — run the shared application-message dispatcher; hidden call-hint system bodies remain on the separate system path. They validate `messageId` (`isValidCid`, enforced in `isGroupChatMessage` for gossip and at the offline parse gate), require a typed envelope's `cid` to match that outer `messageId`, and persist text cid + reply data only after dispatch. Because `id == messageId == client_msg_id` for groups, the inbound insert uses a **targetless `ON CONFLICT DO NOTHING`** (covers the PK), and sequence/cursor state advances even for a deduped, rejected, or currently unhandled application message — only unread + the "received" event are gated on insertion. The envelope lives inside the signed offline backup, so catch-up carries it automatically.
 
 UI: a hover **Reply** action (available in direct and group chats; hidden on un-settled/failed sends, and on files until transfer completes) opens a composer reply bar, transfers focus to the composer, and survives chat switches (`Esc`/✕ cancels). The quote renders above the bubble; clicking it scrolls to the original, waits until the target is visible and scrolling has settled, then starts a 2.5-second accent **highlight pulse**. If the target is not loaded, the renderer first requests one bottom-anchored jump window: the database locates the target cid, counts newer messages, and returns the latest history through the target plus 20 older context rows in one transaction/IPC round-trip. The window is capped at 200 rows to keep that single synchronous (non-virtualized) DOM render cheap; targets deeper than the cap report `too_deep` and fall back to the older page-by-page paging instead. Replacing the history window preserves messages that arrived during the request and resets the database pagination offset to the returned row count. Jump ownership remains scoped to the active chat and a request generation, so chat switches or newer jumps cancel stale work; only confirmed absence/exhaustion reports that the original is unavailable.
 
-Direct file-like sends — manual files, pasted images, and generated long-message `.txt` files — capture the current reply target when their confirmation/conversion dialog opens. The dialog shows that reply context, the optimistic file row carries `reply_to_client_id`, and the send path passes the cid into the signed `file_offer`; incoming pending file offers also carry the cid into the live Redux row so the quote is visible before acceptance. Once an optimistic file row exists, the composer reply target is cleared. If the offer fails before a durable row should remain (offline or peer-busy), the row is removed and the captured reply target is restored only when the user has not selected a newer reply target for that chat.
+File-like sends capture the current reply target when their confirmation/conversion dialog opens. Direct manual files, pasted images, and generated long-message `.txt` files use the direct file path; group manual files and pasted images use the group file-offer path. The dialog shows that reply context, the optimistic file row carries `reply_to_client_id`, and the send path passes the cid into the signed `file_offer`; incoming pending file offers also carry the cid into the live Redux row so the quote is visible before acceptance. Once an optimistic file row exists, the composer reply target is cleared. If the offer fails before a durable row should remain (offline or peer-busy), the row is removed and the captured reply target is restored only when the user has not selected a newer reply target for that chat.
 
 ---
 
@@ -288,28 +287,51 @@ Bucket nudges are best-effort acceleration hints (not a correctness dependency):
 
 ### 7. File transfer
 
-File transfer uses dedicated `fileTransferProtocol`.
+File transfer reserves dedicated `fileTransferProtocol` for the recipient-initiated pull stream. The obsolete sender-initiated push handler is not registered and its held-open acceptance flow has been removed.
 
-Flow:
-1. sender emits signed `file_offer` with timeout and optional signed reply metadata
-2. receiver accepts/rejects
-3. accepted transfer sends encrypted chunks
-4. progress/completion/failure events update UI and DB
+Direct and group file sharing are built on signed typed offer messages plus recipient-initiated pull. The direct offer path persists a caller-owned sender row containing `file_offer_id`, checksum, chunk count, and protocol version, then sends a signed typed `file_offer` through the ordinary direct online/offline transport. Group sends use a separate `sendGroupFile(chatId, ...)` entry point: `FileHandler` persists the caller-owned group file row first, snapshots the active group roster minus self into the in-RAM `authorizedPullers` map, stores `file_group_download_total`/`file_group_download_completed` on the sender message row, and sends the same signed typed `file_offer` through the existing group application-message path (GossipSub plus signed DHT offline backup). Recipients route both direct and group non-text offers into `FileHandler`, validate the sender, signature, ids, portable basename, size, checksum, chunk count, rate/pending limits, and persist an `incoming_pending_user` row. Acceptance countdowns are removed and recipient pending rows survive restart. Reject conditionally changes that row to terminal `rejected` and best-effort sends a domain-separated, app-key-signed `file_offer_nack` with `reason:'declined'`: direct rejects send it through the direct channel and a verified NACK terminalizes the one-recipient sender row as `rejected`, while group rejects send it through the group application-message channel and a verified NACK removes only that rejecting member from the sender's `authorizedPullers`. Sender withdrawal changes the matching outgoing row, releases the sender registry slot, and best-effort sends a signed `file_offer_cancel`: direct withdrawal terminalizes as `cancelled`; group withdrawal terminalizes as `cancelled` if nobody downloaded yet or `partially_completed` if at least one member already downloaded. Recipients verify the sender app key, tombstone the cancelled `offerId`, and change a still-pending incoming row to `cancelled`. Accepting a direct or group pending offer opens the pull stream and runs the recipient-initiated transfer. On the sender, direct success releases the whole offer. Group success removes only the requesting member from `authorizedPullers` and increments the persisted completed count once. When the last authorized puller is gone, the group sender row terminalizes from the aggregate count, not from the last action: `completed` when every intended recipient downloaded, `partially_completed` when at least one but not all downloaded, and `cancelled` when nobody downloaded.
 
-Current operational behavior:
-- one active transfer per peer at a time (prevents stream contention)
-- incoming download can be canceled by user
-- non-terminal transfers are marked failed on app restart/close
-- duplicate filename handling uses copy-style timestamped filenames
+Core flow:
+1. sender atomically reserves one of five per-chat live-offer slots in an ephemeral registry,
+   persists serving metadata, and emits a signed typed `file_offer`; a sixth live offer fails
+   locally without evicting an older offer or creating a message row
+2. receiver persists the offer notification and independently chooses whether to download
+3. acceptance opens a pull stream and authenticates with an app-key challenge-response
+4. sender streams plaintext application chunks over Noise; progress/completion/failure update UI and DB
+
+The sender cap and recipient caps are deliberately independent. `ServedFileRegistry` owns the
+sender's `MAX_ACTIVE_FILE_OFFERS_PER_CHAT = 5` limit (a group offer counts once for its chat, not
+once per authorized member), reserving the slot synchronously before any file I/O, and releases it
+only when that serving authority is removed: by sender withdrawal, failed-send rollback, lifecycle
+cleanup, or process exit, and additionally — for a direct offer — on terminal NACK or successful
+consumption, or — for a group offer — once every still-authorized member has pulled or declined,
+or via membership revocation, never on the first. The recipient continues to enforce five fresh pending offers per sender and ten fresh pending offers total
+for every realtime and offline-catch-up offer, because remote clients are untrusted. Retryable/error pending rows stay visible for retry or rejection but no longer consume the recipient capacity budget. Neither side
+automatically evicts the oldest offer.
+
+Current direct/group behavior:
+- direct offers can be delivered in realtime or through the existing offline bucket
+- recipient pending offers are persisted and survive app restart/close
+- a valid direct offer that exceeds fresh pending capacity receives an `inbox_full` NACK; retryable pending rows with `transfer_error` are ignored by this capacity check. A rate-limited peer receives at most one signed rejection attempt per rate window and later excess traffic is dropped silently
+- rejecting a direct offer is locally terminal and immediately frees the recipient pending slot; a signed best-effort decline NACK updates the sender when delivery succeeds
+- unknown, duplicate, wrongly signed, cross-chat, and late decline NACKs cannot change an outgoing row
+- sender rows in `awaiting_acceptance` become `failed` on restart/close because the sender-side serving authority is intentionally ephemeral
+- sending a direct offer reserves one of five per-chat live slots in the in-RAM `ServedFileRegistry` **synchronously, before any file I/O or persistence**, snapshotting the recipient's app signing key into the entry's `authorizedPullers`; the sixth concurrent offer to a chat fails locally with no message row or network message, and a failed send rolls the reservation back so no slot leaks. Sender withdrawal and a terminal decline NACK both free the offer's slot. Registry entries are process-bound and cleared on shutdown
+- sending a group offer uses the same synchronous per-chat sender-cap reservation, snapshots the active group participants' app signing keys (excluding self) into `authorizedPullers`, persists an outgoing `awaiting_acceptance` group file row with `file_group_download_total = rosterMinusSelf` and `file_group_download_completed = 0`, and sends a caller-owned typed group application message. A group offer counts once against the chat's five-offer cap regardless of roster size. Same-offer group pulls are allowed concurrently for different requesters, while a duplicate concurrent pull from the same requester receives `busy` and can retry
+- incoming group offers arrive through realtime group gossip or group offline catch-up, persist as pending group file rows, and emit the same pending-file renderer event. Group capacity/rate rejection still sends no sender NACK, but a capacity-full drop emits a local pending-file deferred event so the recipient UI can show the pending-file manager and explain that clearing older offers can recover skipped group offers. When a successful Accept or Reject relieves a previously full pending-file capacity condition, Electron debounces for one second and then silently checks group missed messages so deferred group offers can be reprocessed without a manual click. Group Reject is locally terminal and also emits a signed group `file_offer_nack` with `reason:'declined'`; the sender applies it only when the offer is active in that same group and the rejecting peer is still an authorized puller. Group Accept runs the same app-key-authenticated pull protocol as direct offers
+- an outgoing `awaiting_acceptance` offer exposes **Cancel offer**. The IPC resolves `fileId → offerId`, refuses while that offer is actively being served, releases the registry entry, and sends a signed invisible `file_offer_cancel` control. Direct rows become terminal `cancelled`; group rows become `cancelled` when no member downloaded yet or `partially_completed` when at least one member already downloaded. The recipient records a bounded, mode-scoped cancellation tombstone (`MESSAGE_TTL`) for valid cancels so cancel-before-offer online/offline reordering suppresses the late offer instead of recreating a pending bubble
+- the sender **serve handler is registered** on `fileTransferProtocol`: a recipient dials, the sender issues a per-stream challenge, verifies a domain-separated (`kiyeovo-file-pull-v2`) app-key signature against the offer-time snapshot, then (only after auth) takes a global+per-peer serve lease plus an offer serve lock (direct offers are exclusive per offer; group offers are exclusive only per requester so different group members can pull the same offer concurrently), re-reads and re-verifies the file (`source_changed` on mismatch), and streams plaintext chunks with backpressure before reading `FileTransferConfirm`. Reads are bounded by one absolute deadline per frame, a chunk-idle watchdog, and a total-transfer cap; the declared frame body is capped before frame-body allocation, and source chunks are segmented rather than concatenated wholesale. Terminal sender transitions are compare-and-set against the active serving state so a serve completion can never overwrite an earlier signed decline. A missing/malformed confirm, stream interruption before confirm, or recipient `disk`/`other` negative confirm keeps the offer alive and moves the visible sender row back to `awaiting_acceptance`; an explicit recipient `canceled` confirm is terminal for direct offers and removes only the requester for group offers unless that requester was last. Group sender rows do not emit per-chunk upload progress to the renderer; their main bubble status is count-based (`Downloaded by N/M`, `Completed`, or `Cancelled`), with internal `partially_completed` rows rendered as `Downloaded by N/M`. Serve streams are drained on shutdown before the database closes
+- Electron main coalesces file-transfer progress IPC to the renderer and drops any queued progress for a message before sending that message's terminal event (`completed`, `partially_completed`, `failed`, or outgoing terminal). This prevents a large backlog of stale chunk-progress updates from delaying cancel/failure/completion UI state
+- the recipient **pull path is active** for direct offers: `acceptPendingFile(fileId)` CAS-claims the pending row, dials the sender, sends `FilePullInit`, signs the sender challenge with the recipient app key, reassembles contiguous chunks with per-chunk BLAKE3 plus final checksum verification, writes the completed file to the configured downloads directory using collision-safe `flag:'wx'` copy suffix allocation, sends `FileTransferConfirm`, then marks the row `completed` with `file_path`. Retryable failures (`busy`, dial failure, mid-transfer disconnect, disk-save failure) return the row to `incoming_pending_user` with an error so the user can tap Download again; terminal failures (`unauthorized`, `unavailable`, `source_changed`, integrity/checksum failure) mark the row `failed`. Active download cancellation is guarded by the `in_progress` state, best-effort sends `FileTransferConfirm{success:false, reason:'canceled'}` before aborting the stream, and cannot overwrite a completed or otherwise terminal row
 - completed image files render inline for both sender and receiver; receivers retain the existing file card until completion, and non-previewable transfer states also remain cards
 - outgoing image sends keep the sender's trusted selection/upload capability in renderer state, so the sender sees the image immediately with connecting/approval/progress/failure status beneath it; receivers still see the file-offer card until the transfer completes
 - clicking an inline image opens a viewport-sized preview dialog using the same capability-backed media URL; Escape, the close control, and backdrop clicks close it
 - inline images keep a compact searchable filename/size caption; completed files retain show-in-folder as a secondary action in both the message caption and preview dialog, while sender-only pending previews do not expose filesystem actions
-- completed local image messages expose **Copy image** from the message row menu/right-click menu and the fullscreen preview dialog. The renderer passes only the message id; the main process revalidates that the row is a completed image message in the active network mode, rejects symlink paths, canonicalizes the stored path, decodes it with Electron's native image loader, and writes the decoded bitmap to the OS clipboard. Non-image files, pending offers, failed/expired/rejected transfers, and sender-only pending previews do not expose image copy
+- completed local image messages expose **Copy image** from the message row menu/right-click menu and the fullscreen preview dialog. The renderer passes only the message id; the main process revalidates that the row is a completed image message in the active network mode, rejects symlink paths, canonicalizes the stored path, decodes it with Electron's native image loader, and writes the decoded bitmap to the OS clipboard. Non-image files, pending offers, failed/rejected/cancelled transfers, and sender-only pending previews do not expose image copy
 - unavailable inline media falls back to the file card
 - images selected through the paperclip flow show a capability-backed preview in the confirmation dialog, while non-image selections keep the existing dialog layout
-- direct file confirmation/conversion dialogs show the captured reply context when opened from a reply draft, and the resulting file offer carries that reply cid
-- pasting a supported image MIME into a direct-chat composer opens the same confirmation dialog with a renderer-owned blob preview URL created from the clipboard `Blob` and revoked when the pasted file leaves dialog state; group chats and unsupported clipboard content retain normal paste behavior
+- direct file confirmation/conversion dialogs and group file confirmation dialogs show the captured reply context when opened from a reply draft, and the resulting file offer carries that reply cid
+- pasting a supported image MIME into a direct or group composer opens the same confirmation dialog with a renderer-owned blob preview URL created from the clipboard `Blob` and revoked when the pasted file leaves dialog state; unsupported clipboard content retains normal paste behavior
 - pasted bytes are not re-encoded or compressed; after confirmation, the main process validates the image extension and configured file-size limit, writes the file atomically without overwriting, and then hands the resulting path to the unchanged file-transfer pipeline
 - pasted images persist in `kiyeovo-uploads/`, resolved as a sibling of the configured downloads directory; generated names use `pasted-image-YYYYMMDD-HHMMSS.<ext>` and collision copies receive timestamped suffixes
 - generated-text upload preparation has a separate main-process IPC boundary: the renderer supplies text plus a proposed basename, while the main process trims the text, requires a portable `.txt` filename, measures UTF-8 bytes against the configured file-size limit, and atomically creates the file without accepting a destination path
@@ -320,7 +342,7 @@ Current operational behavior:
 Protections:
 - rate limits (per peer + global)
 - max pending offers (per peer + global)
-- silent rejection thresholds for abuse
+- malformed, unauthorized, duplicate, over-limit, and rate-limited offers are dropped without creating a row
 - path traversal and file-size guards
 - backend remains authoritative even if UI pre-checks exist
 
@@ -338,7 +360,11 @@ Local image delivery foundation:
 
 ---
 
-### 8. Direct 1:1 Calls
+### 8. Calls
+
+Calls are fast-mode only (no anonymous/Tor calling; no offline call queue — unreachable peers fail immediately).
+
+#### 8.1 Direct 1:1 calls
 
 Direct-call support is implemented for direct chats in fast mode.
 
@@ -357,7 +383,7 @@ Architecture:
 
 Behavior highlights:
 - direct 1:1 calls are a single `Call` product; new outgoing offers are audio-only
-- incoming legacy start-time `video` offers are explicitly rejected as unsupported (`policy`)
+- call offers must use the audio-start signaling schema; camera is enabled later through call-control signals
 - pre-check for direct contact and active connectivity before offer
 - outgoing ring timeout (30s)
 - busy/reject/end handling with local cleanup on both sides
@@ -385,6 +411,17 @@ Camera and screen-share implementation notes:
 - remote screen-share UI is driven by signed STARTED/STOPPED call signals, not only by WebRTC track `ended`/`mute` state
 - macOS and supported portal-backed Linux environments can use the system picker; Linux fallback uses Electron `desktopCapturer` plus Kiyeovo's in-app source picker
 - if the source picker is cancelled or the call ends while it is open, captured tracks are stopped and no sharing state is committed
+
+#### 8.2 Group calls
+
+Group calls are fast-mode mesh WebRTC audio with optional per-participant camera: each participant holds one `RTCPeerConnection` per peer. The renderer `groupCallService` owns the mesh; the core `GroupCallOrchestrator` coordinates membership. Control and per-pair (offer/answer/ICE/camera) signals reuse the signed `call-signal` protocol with age/skew/replay-dedupe guards — no separate protocol ID.
+
+Coordination model:
+- one **writer** owns the authoritative roster and admits joiners with signed **admission tokens**; all other members are participants
+- **convergence:** a starter/joiner queries members, and a deterministic *smallest-`callId`-wins* rule — applied in core discovery resolution, started-signal supersession, and persistent call evidence — collapses simultaneous starts into one call without a consensus protocol. This is an election tie-break, not a time-ordering claim
+- **writer continuity:** a graceful leave hands authority to a deterministic successor (group creator if present, else lowest-sorted participant) with a roster-version bump; a writer crash uses the same deterministic failover, so peers with the same roster pick the same successor. Rosters are signed and reconciled by version, and a roster naming a writer other than the deterministic failover for its participant set is rejected
+- **no-renegotiation video:** a `sendrecv` video transceiver is pre-negotiated so camera toggles ride `replaceTrack` plus an app-level camera-state signal, never mid-call SDP renegotiation (same approach as 1:1)
+- recovery spans network change, peer crash, libp2p reconnect blips, and pure WebRTC failure; the renderer-side glare tie-break, timestamp-based call ordering, and cleanup-ends-session behavior are described in §12
 
 ---
 
@@ -438,10 +475,9 @@ Core tables include:
 - `group_pending_info_publishes`
 - `group_invite_delivery_acks`
 - `group_sender_seq`, `group_member_seq`, `group_epoch_boundaries`
-- `file_transfers`
 - `bootstrap_nodes`
 
-Reply feature adds two columns to `messages`: `client_msg_id` (cross-peer stable id / cid, defaults to the row id; file rows use `fileId`) and `reply_to_client_id` (the cid a reply points at). A `UNIQUE(chat_id, client_msg_id)` index backs cross-channel (online + offline) dedup. Migrations follow the repo's `ensureColumnExists` + `CREATE INDEX IF NOT EXISTS` pattern (no formal migration framework).
+File transfer rows live in `messages`; there is no separate `file_transfers` table. File offers use nullable `file_offer_id`, `file_checksum`, `file_total_chunks`, and `file_protocol_version` columns so a recipient can pull and verify after its own restart without relying on transient sender metadata. Reply support adds `client_msg_id` (cross-peer stable id / cid, defaults to the row id; file rows use `fileId`) and `reply_to_client_id` (the cid a reply points at). A `UNIQUE(chat_id, client_msg_id)` index backs cross-channel (online + offline) dedup, and `file_offer_id` is indexed for capability lookup. Signed sender withdrawals use `file_offer_cancellation_tombstones(network_mode, offer_id, sender_peer_id, created_at, expires_at)` to suppress cancel-before-offer reorderings until `MESSAGE_TTL`. Migrations follow the repo's `ensureColumnExists` + `CREATE INDEX IF NOT EXISTS` pattern (no formal migration framework).
 
 Conversation search adds a full-text index, `messages_fts`: an **external-content** FTS5 table (`content='messages'`, no duplicated content column) over `content` + `file_name`, keyed on the `messages` integer `rowid`, using the **`trigram`** tokenizer for case-insensitive substring matching. Three triggers keep it in sync — `AFTER INSERT`, `AFTER DELETE`, and `AFTER UPDATE OF content, file_name` (guarded by a value-change `WHEN` so routine `transfer_status`/`local_send_state`/receipt writes don't churn the index). It is created idempotently with a one-time `'rebuild'` backfill on first creation only. The trigram tokenizer keeps an indexed copy of derived 3-gram posting data in shadow tables (`messages_fts_data`/`_idx`/`_docsize`/`_config`); this lives in the same plaintext DB file under the same OS-disk-encryption trust model. Search itself is exposed via `searchChatMessages(chatId, query, { limit, snapshotMaxRowid, cursor })` (IPC `messages:searchInChat`), scoped to one chat, excluding system messages, newest-first. Column scope: text messages match `content`, file/image messages match `file_name` only. Queries ≥3 chars use the indexed trigram MATCH (refined by a type-scoped LIKE); 1–2 char queries fall back to a chat-scoped LIKE (trigram cannot index <3-char terms). Pagination is **keyset** on `(timestamp, rowid)` — not OFFSET — so a message deleted mid-search cannot shift later pages; `snapshotMaxRowid` additionally freezes the searchable universe and total for the life of one query.
 
@@ -485,7 +521,7 @@ The main window sidebar is now split into:
 - utility rail actions at the bottom for `Profile`, `Settings`, and `Help`
 
 Current navigation rollout status:
-- `Chats` shows the legacy mixed sidebar content (direct chats, group chats, and request/invite sections)
+- `Chats` shows mixed sidebar content (direct chats, group chats, and request/invite sections)
 - `Groups` shows group invites plus a groups-only chat list
 - `Setup` shows mode-aware context navigation for bootstrap, relay, and ICE configuration
 - the Bootstrap Setup pane is a page-native workspace with separate status, configured-server, and add-server sections; it supports listing, adding, removing, ordering, copying, retrying, and viewing current liveness
@@ -506,7 +542,6 @@ Current navigation rollout status:
 - the `Profile` rail action shows an amber attention dot while no username is registered, nudging first-run users toward registration; the dot uses a profile-specific accessibility label rather than the Setup wording
 - the sidebar footer adapts to identity state: a registered user's identity chip is a shortcut into the `Profile` tab, while an unregistered user's Register button opens the registration modal in place (it does not navigate to the tab); the empty chat-area and chat-list "Register" calls-to-action route to the `Profile` tab instead of opening a modal directly
 - registration logic is owned by a single shared `RegisterIdentityDialog` wrapper (register handler, loading/error state, and Redux updates) used by both the footer and the `Profile` tab, so the two entry points cannot diverge
-- `Help` remains a placeholder pane
 - the left rail remains visible while the adjacent sidebar pane can collapse independently
 - the left rail may expand on hover/focus as an overlay to reveal labels without shifting the main layout
 - `Main` owns the active rail section and active Setup subsection so the sidebar context pane and main content area use the same navigation state
@@ -615,12 +650,12 @@ Composer behavior:
 - `Enter` sends the current message while `Shift+Enter` inserts a newline
 - drafts auto-expand up to five visible lines, then switch to internal scrolling
 - direct and group text messages have a 2,048-character send limit
-- sending a trimmed direct-chat draft above 2,048 characters opens a text-file conversion dialog before the offline text-mailbox capacity check; group chats keep the hard-limit error because group file transfer is not supported
-- the conversion dialog shows the trimmed character count and UTF-8 byte size, warns that the recipient must be online, preselects an editable `long-message-YYYYMMDD-HHMMSS.txt` filename, and disables confirmation while another transfer is active or the configured file-size limit is exceeded
-- after generated text is saved, the existing direct file-offer path remains the sole owner of the optimistic file row and transfer state. The original draft stays visible until the awaited file transfer confirms completion; offline/busy failure, rejection, expiry, save failure, and transfer failure preserve it
+- sending a trimmed direct-chat draft above 2,048 characters opens a text-file conversion dialog before the offline text-mailbox capacity check; group chats still keep the text hard-limit error for generated `.txt` conversion, even though manual files and pasted images can now be offered to groups
+- the conversion dialog shows the trimmed character count and UTF-8 byte size, explains that the offer can arrive offline while the later download requires both peers online, preselects an editable `long-message-YYYYMMDD-HHMMSS.txt` filename, and disables confirmation while another transfer is actively connecting/transferring or the configured file-size limit is exceeded
+- after generated text is saved, the existing direct file-offer path remains the sole owner of the optimistic file row and transfer state. The original draft is cleared once the typed offer is delivered online or stored for offline pickup; preparation or offer-delivery failure preserves it
 - composer drafts have an in-memory monotonic revision per chat. Successful generated-text transfer clears the source chat's draft only when its revision is unchanged from conversion start, so editing and later restoring the same text still prevents automatic clearing
-- long-message sends capture the source chat and peer explicitly, preventing a later chat switch from retargeting the generated file; switching chats while the confirmation dialog is open closes it without changing the draft
-- message selection mode is entered either from **Select messages** in the direct/group chat header menu or from a message's hover/focus chevron menu; choosing the row action enters the mode with that message selected. The chevron fades/slides in, and its menu opens downward in the upper viewport half or upward in the lower half; right-clicking the message bubble/card opens the same row menu unless the target is editable text or inside the active text selection, in which case the native text context menu is allowed instead. Empty row space does not open the message menu. The same row menu holds **Reply** when the message is replyable, **Copy** for text messages, plus other eligible row actions. While selection mode is active the chat header's right-side controls (call / group-call / overflow menu) are replaced by a single **Cancel** button; the composer area keeps `ChatInput` mounted but hidden/inert (preserving drafts and in-flight send queues) and shows a selection bar with the left-aligned `N selected` count and the **Delete** action. The mode exits on **Cancel**, on `Esc`, on leaving the chat, or on switching out of the Chats/Groups section (the `ChatWrapper` stays mounted when hidden, so `Main` passes an `active` flag that cancels selection when the section is left). Settled and failed text messages are selectable. File/image rows are selectable only after reaching a terminal state (`completed`, `failed`, `expired`, or `rejected`); queued/sending messages and active file transfers remain protected. Reply, copy, jump, retry, and file controls are inert while selection mode is active.
+- long-message sends capture the source direct chat and peer explicitly, preventing a later chat switch from retargeting the generated file; switching chats while the confirmation dialog is open closes it without changing the draft
+- message selection mode is entered either from **Select messages** in the direct/group chat header menu or from a message's hover/focus chevron menu; choosing the row action enters the mode with that message selected. The chevron fades/slides in, and its menu opens downward in the upper viewport half or upward in the lower half; right-clicking the message bubble/card opens the same row menu unless the target is editable text or inside the active text selection, in which case the native text context menu is allowed instead. Empty row space does not open the message menu. The same row menu holds **Reply** when the message is replyable, **Copy** for text messages, plus other eligible row actions. While selection mode is active the chat header's right-side controls (call / group-call / overflow menu) are replaced by a single **Cancel** button; the composer area keeps `ChatInput` mounted but hidden/inert (preserving drafts and in-flight send queues) and shows a selection bar with the left-aligned `N selected` count and the **Delete** action. The mode exits on **Cancel**, on `Esc`, on leaving the chat, or on switching out of the Chats/Groups section (the `ChatWrapper` stays mounted when hidden, so `Main` passes an `active` flag that cancels selection when the section is left). Settled and failed text messages are selectable. File/image rows are selectable only after reaching a terminal state (`completed`, `partially_completed`, `failed`, `rejected`, or `cancelled`); queued/sending messages and active file transfers remain protected. Reply, copy, jump, retry, and file controls are inert while selection mode is active.
 - conversation search is entered from **Search messages** in the direct/group chat header menu or with `Ctrl+F` / `Cmd+F`. The shortcut refocuses an open search and is consumed without leaving message-selection mode. Search replaces the complete chat header with an auto-focused search field and **Cancel**, while `ChatInput` remains mounted but hidden/inert so drafts and send queues survive. The search header owns the live input locally and emits only a 250 ms debounced query to `ChatWrapper`, preventing each keystroke from re-rendering the full message tree. Settled queries search the entire local chat history through `messages:searchInChat`; the composer area shows `N of total` on the left and previous/next controls on the right. Results are newest-first, fetched in cursor pages only when navigation crosses the loaded boundary, and each result reuses the bounded message jump-window path described in §5.4. `Enter` / `Shift+Enter` step to the next / previous match and `Esc` cancels search (the keyboard listeners are mounted only while search is open, so normal composer `Enter`-to-send is untouched). While search is open every loaded message highlights the matched query fragments inline — in text bubbles and filenames, rendered as React text segments only (never HTML injection) — and the active search result additionally keeps a persistent accent border until navigation or search cancellation. That border is drawn with `outline` rather than `box-shadow` so it stays visible immediately and throughout the reply-pulse, which animates `box-shadow` on the same bubble; the transient pulse starts only after the target row is visible and scrolling has settled. Search requests and jumps carry renderer generations/request IDs so rapid typing, cancellation, chat changes, or section changes cannot apply stale results or leave navigation pending. Search and selection are structurally exclusive because both entry actions live in the normal header menu, which is absent while either mode is active.
 - **Delete for me** requires confirmation and removes selected message rows only from local state/storage; it sends no peer notification or protocol tombstone and does not delete transferred files. Renderer-only failed optimistic rows are removed without IPC. Persisted rows are revalidated and deleted in one database transaction, together with any durable direct-send or group-backup retry record they own; matching in-memory group retry state is then discarded. Stale, duplicate, cross-chat, newly active, or otherwise ineligible selections fail without partial deletion. The renderer updates only after transaction success, clears a reply target that referenced a deleted message, and reconciles the chat preview against both the latest remaining settled database row and any newer settled message already in Redux; unsent rows are excluded from this preview. It then invalidates pagination and refetches the visible history window, merging messages that arrived during the request before resetting the database offset. Selection remains active on failure and exits on success; while its confirmation dialog is open, the dialog owns `Esc`.
 - pasted line breaks are preserved in both the draft and rendered text messages
@@ -630,19 +665,30 @@ Composer behavior:
 - completed inline image messages expose **Copy image** through the hover/focus/right-click row menu and the fullscreen preview dialog
 - messages can be **replied to**: a hover reply affordance and the message row dropdown's **Reply** action quote a specific message and focus the composer; the composer shows a cancelable reply bar (survives chat switches, `Esc`/✕ to cancel); the quote renders as a full-width header enclosed inside the reply bubble (resolved by live lookup, shows *"Original message unavailable."* if the original is gone), so the quote and reply share the width of whichever is wider. Clicking the quote jumps to the original before starting a 2.5-second highlight pulse once the target is visible, paging older history in if needed. Reply works in both direct and group chats; it is hidden only on un-settled/failed sends (and on files until transfer completes). When the viewport is away from the latest message, a floating down-chevron returns it to the bottom. See §5.4.
 - inbound message notifications are batched over a short renderer-side window so offline/startup bursts produce one sound and one summary desktop notification instead of one per message
+- pending-file offer toasts are also batched over a short renderer-side window so login/offline catch-up bursts produce one in-app toast instead of one toast per offer
 
 UI is event-driven while core remains authoritative.
 
 Wake/resume behavior:
 - on OS `resume` / `unlock-screen`, the renderer shows a temporary banner: `Waking up... give me 30 more seconds`
 - the banner hides early when the wake-triggered reconnect and recent-chat offline sync both settle; otherwise it auto-hides after 30 seconds
+- recent-chat offline sync preserves renderer-local unread counts and transient offline-fetch flags when it refreshes the chat list from the database, and overlapping reconnect/wake syncs use a renderer generation guard so an older run cannot apply a stale chat snapshot after a newer run has started
 
 Offline inbox capacity panel behavior:
 - the panel auto-opens for confirmed offline delivery, full-inbox errors, or explicit user open; it does not auto-open for the provisional non-blocking `sending` state before a direct message has actually fallen back to offline
 
+Pending file manager behavior:
+- the pending-file manager is separate from the offline inbox capacity panel because it reflects local recipient-side file-offer slots, not DHT bucket slots
+- it appears in every chat when fresh pending file-offer capacity is full globally; when only one sender is full, it appears in that sender's direct chat and in groups containing that sender; and when a group file offer was locally deferred because capacity was full, it appears in that group as a recovery hint
+- the manager lists pending incoming file offers grouped by sender and supports Accept, Reject, and Reject all from sender; Reject all is intentionally provided for slot cleanup, while Accept all is intentionally absent to avoid starting multiple pulls at once
+- a capacity-full group deferral is local and recoverable: the sender is not NACKed, no chat-history system message is persisted, and after clearing older offers Electron silently debounces a group missed-message check to reprocess skipped group offers; the manual missed-message action remains a fallback
+
 Call UI state:
 - Redux tracks active call state plus screen-share local lifecycle (`idle` / `starting` / `sharing` / `stopping`) and remote sharing state
-- `CallService` remains the owner of `RTCPeerConnection`, local/remote `MediaStream`s, display capture tracks, and sender replacement
+- `CallService` owns direct-call `RTCPeerConnection`, local/remote `MediaStream`s, display capture tracks, and sender replacement; `GroupCallService` owns the group-call peer mesh in the renderer
+- group call IDs are random UUIDs: core uses them as call identities and deterministic election tie-breakers, not as timestamps; renderer UI ordering for `CALL_GROUP_STARTED` uses `timestamp` / `lastKnownActiveCallSeenAt` rather than lexicographic call-id comparison
+- group call mesh setup normally has a single offer initiator per peer pair, but the renderer also handles accidental simultaneous offers deterministically: one side keeps its local offer by peer-id tie-break, the other side replaces its pending local offer and answers; stale answers are ignored unless the peer connection is waiting for an answer
+- group call orchestrator cleanup ends any active local session before removing listeners and clearing timers, so pending join-response/roster-broadcast timers cannot fire against a stale session during non-process teardown
 - fullscreen call controls sit above the fullscreen video surface, fade after idle, and reappear on user activity
 - dialogs are layered above call fullscreen controls so source pickers and safety prompts remain reachable
 
@@ -714,6 +760,7 @@ Current resilience layers:
 - durable offline-send / group-backup queues with crash-safe (transactional) state and manual retry
 - group offline check orchestration with single-flight style guards
 - startup cleanup of interrupted file transfers (and reconciliation of interrupted offline sends → `failed`)
+- main-process logging for renderer process termination (`render-process-gone`) so renderer crashes are visible in operational logs
 
 ---
 
@@ -723,7 +770,8 @@ Current resilience layers:
 - Single SQLite file increases mode-scoping complexity.
 - Offline behavior is eventual consistency over DHT propagation.
 - Group control delivery is ACK/republish based (not strict real-time consensus).
-- Direct 1:1 calls are currently fast-mode only.
+- Group-call writer failover is deterministic, not consensus-based; a brief divergent-roster window can transiently disagree but is recovered by query conflict detection and roster reconciliation.
+- Calls (1:1 and group) are currently fast-mode only.
 - Screen sharing currently sends display video only; system/window audio sharing is intentionally out of scope for the current phase.
 - STUN/TURN reachability tests are manual point-in-time snapshots; there is no continuous ICE health monitoring.
 - On some Linux environments, sandboxed unpackaged Electron runs may still require host-specific sandbox-helper setup during development.
@@ -759,6 +807,6 @@ Kiyeovo Desktop MVP combines:
 - robust offline fallback
 - group state reconciliation and encrypted group metadata distribution
 - controlled file transfer pipeline
-- fast-mode direct calling with optional camera and screen sharing
+- fast-mode 1:1 calling (camera + screen sharing) and group mesh calling (camera)
 
 The main engineering priorities going forward are preserving mode isolation, keeping flow complexity manageable in message/group handlers, and documenting trust/identity/DHT-semantic changes as first-class artifacts.

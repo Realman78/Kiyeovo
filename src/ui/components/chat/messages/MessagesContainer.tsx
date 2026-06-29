@@ -8,7 +8,7 @@ import { PendingNotifications } from "./PendingNotifications";
 import { MessageRow } from "./MessageRow";
 import type { MessageSentStatus } from "../../../types";
 import type { FileTransferStatus } from "../../../../core/types";
-import { FILE_ACCEPTANCE_TIMEOUT, INITIAL_MESSAGES_LIMIT, LOAD_MORE_MESSAGES_LIMIT } from "../../../constants";
+import { INITIAL_MESSAGES_LIMIT, LOAD_MORE_MESSAGES_LIMIT } from "../../../constants";
 import { useToast } from "../../ui/use-toast";
 import { useOfflineSendWarning } from "../../../hooks/useOfflineSendWarning";
 import type { Message } from "../../../../core/db/database";
@@ -51,9 +51,10 @@ export type MessageJumpOutcome = 'completed' | 'unavailable' | 'cancelled' | 'er
 type LoadMoreResult = 'loaded' | 'exhausted' | 'cancelled' | 'error';
 const TERMINAL_FILE_TRANSFER_STATUSES = new Set<FileTransferStatus>([
   'completed',
+  'partially_completed',
   'failed',
-  'expired',
   'rejected',
+  'cancelled',
 ]);
 
 function mapDbMessage(msg: Message & { sender_username?: string }): ChatMessage {
@@ -69,15 +70,6 @@ function mapDbMessage(msg: Message & { sender_username?: string }): ChatMessage 
   const inferredTransferStatus =
     msg.transfer_status ??
     (msg.message_type === 'file' ? 'completed' : undefined);
-
-  const transferExpiresAt =
-    msg.message_type === 'file' && (
-      msg.transfer_status === 'pending' ||
-      msg.transfer_status === 'awaiting_acceptance' ||
-      msg.transfer_status === 'incoming_pending_user'
-    )
-      ? msg.timestamp.getTime() + FILE_ACCEPTANCE_TIMEOUT
-      : undefined;
 
   return {
     id: msg.id,
@@ -97,7 +89,8 @@ function mapDbMessage(msg: Message & { sender_username?: string }): ChatMessage 
     transferStatus: inferredTransferStatus as FileTransferStatus | undefined,
     transferProgress: msg.transfer_progress,
     transferError: msg.transfer_error,
-    transferExpiresAt,
+    fileGroupDownloadTotal: msg.file_group_download_total ?? undefined,
+    fileGroupDownloadCompleted: msg.file_group_download_completed ?? undefined,
     // Restore outbound send lifecycle (incl. the retry cooldown, so a
     // group-rekey block survives a restart instead of becoming immediately
     // retryable).

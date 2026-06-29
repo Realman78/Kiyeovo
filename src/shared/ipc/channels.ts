@@ -180,10 +180,12 @@ export const IPC_CHANNELS = {
   SAVE_UPLOAD: 'file:saveUpload',
   SAVE_TEXT_UPLOAD: 'file:saveTextUpload',
   SEND_FILE_REQUEST: 'file:send',
+  SEND_GROUP_FILE_REQUEST: 'file:sendGroup',
   ACCEPT_FILE: 'file:accept',
   REJECT_FILE: 'file:reject',
+  GET_PENDING_FILE_INBOX: 'file:getPendingInbox',
   CANCEL_FILE_DOWNLOAD: 'file:cancelDownload',
-  GET_PENDING_FILES: 'file:getPending',
+  CANCEL_FILE_OFFER: 'file:cancelOffer',
   OPEN_FILE_LOCATION: 'file:openLocation',
 
   // File transfer events
@@ -191,7 +193,9 @@ export const IPC_CHANNELS = {
   FILE_TRANSFER_COMPLETE: 'file:complete',
   FILE_TRANSFER_FAILED: 'file:failed',
   OUTGOING_FILE_OFFER_PENDING: 'file:outgoingOfferPending',
+  OUTGOING_FILE_OFFER_TERMINAL: 'file:outgoingOfferTerminal',
   PENDING_FILE_RECEIVED: 'file:pendingReceived',
+  PENDING_FILE_OFFER_DEFERRED: 'file:pendingOfferDeferred',
 
   // Group chats
   GET_CONTACTS: 'group:getContacts',

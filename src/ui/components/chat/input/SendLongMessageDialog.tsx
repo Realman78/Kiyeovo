@@ -203,8 +203,8 @@ const SendLongMessageDialogContent: React.FC<SendLongMessageDialogContentProps> 
           </div>
         )}
 
-        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-300">
-          This will only work if {pendingMessage?.recipientName || 'the recipient'} is online right now.
+        <div className="rounded-lg border border-primary/30 bg-primary/10 p-3 text-sm text-foreground/80">
+          {pendingMessage?.recipientName || 'The recipient'} can receive this offer later. The download starts when both of you are online.
         </div>
 
         {transferBlocked && (
