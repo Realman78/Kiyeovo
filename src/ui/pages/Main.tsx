@@ -602,6 +602,19 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
       toast.info(`${data.senderUsername} wants to send you a file: ${data.filename}`);
     });
 
+    const unsubPendingFileOfferDeferred = window.kiyeovoAPI.onPendingFileOfferDeferred((data) => {
+      dispatch(updateChat({
+        id: data.chatId,
+        updates: { pendingFileInboxAttention: true },
+      }));
+      const senderIsFull = data.pendingFromSender >= data.maxPendingPerPeer;
+      toast.info(
+        senderIsFull
+          ? `${data.senderUsername}'s file offer was skipped because you already have ${data.pendingFromSender}/${data.maxPendingPerPeer} pending offers from them. Clear older offers, then check missed messages.`
+          : `A file offer from ${data.senderUsername} was skipped because your pending files are full. Clear older offers, then check missed messages.`,
+      );
+    });
+
     const unsubCallIncoming = window.kiyeovoAPI.onCallIncoming((data) => {
       const peerName = resolvePeerName(data.signal.fromPeerId);
       dispatch(setIncomingCall({
@@ -762,6 +775,7 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
       unsubOutgoingFileOfferPending();
       unsubOutgoingFileOfferTerminal();
       unsubPendingFileReceived();
+      unsubPendingFileOfferDeferred();
       unsubCallIncoming();
       unsubCallSignalReceived();
       unsubCallStateChanged();

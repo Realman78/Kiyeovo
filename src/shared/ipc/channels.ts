@@ -183,6 +183,7 @@ export const IPC_CHANNELS = {
   SEND_GROUP_FILE_REQUEST: 'file:sendGroup',
   ACCEPT_FILE: 'file:accept',
   REJECT_FILE: 'file:reject',
+  GET_PENDING_FILE_INBOX: 'file:getPendingInbox',
   CANCEL_FILE_DOWNLOAD: 'file:cancelDownload',
   CANCEL_FILE_OFFER: 'file:cancelOffer',
   OPEN_FILE_LOCATION: 'file:openLocation',
@@ -194,6 +195,7 @@ export const IPC_CHANNELS = {
   OUTGOING_FILE_OFFER_PENDING: 'file:outgoingOfferPending',
   OUTGOING_FILE_OFFER_TERMINAL: 'file:outgoingOfferTerminal',
   PENDING_FILE_RECEIVED: 'file:pendingReceived',
+  PENDING_FILE_OFFER_DEFERRED: 'file:pendingOfferDeferred',
 
   // Group chats
   GET_CONTACTS: 'group:getContacts',

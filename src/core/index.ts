@@ -34,6 +34,7 @@ import type {
   OutgoingFileOfferPendingEvent,
   OutgoingFileOfferTerminalEvent,
   PendingFileReceivedEvent,
+  PendingFileOfferDeferredEvent,
   GroupChatActivatedEvent,
   GroupMembersUpdatedEvent,
   NetworkMode,
@@ -96,6 +97,7 @@ export interface P2PCoreConfig {
   onOutgoingFileOfferPending: (data: OutgoingFileOfferPendingEvent) => void;
   onOutgoingFileOfferTerminal: (data: OutgoingFileOfferTerminalEvent) => void;
   onPendingFileReceived: (data: PendingFileReceivedEvent) => void;
+  onPendingFileOfferDeferred: (data: PendingFileOfferDeferredEvent) => void;
   onGroupChatActivated: (data: GroupChatActivatedEvent) => void;
   onGroupMembersUpdated: (data: GroupMembersUpdatedEvent) => void;
   onOfflineMessagesFetchComplete: (chatIds: number[]) => void;
@@ -132,6 +134,7 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     onOutgoingFileOfferPending,
     onOutgoingFileOfferTerminal,
     onPendingFileReceived,
+    onPendingFileOfferDeferred,
     onGroupChatActivated,
     onGroupMembersUpdated,
     onOfflineMessagesFetchComplete,
@@ -434,6 +437,10 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     onPendingFileReceived(data);
   };
 
+  const sendPendingFileOfferDeferred = (data: PendingFileOfferDeferredEvent) => {
+    onPendingFileOfferDeferred(data);
+  };
+
   let groupCallOrchestrator: GroupCallOrchestrator | null = null;
 
   const sendGroupChatActivated = (data: GroupChatActivatedEvent) => {
@@ -514,6 +521,7 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
     sendOutgoingFileOfferPending,
     sendOutgoingFileOfferTerminal,
     sendPendingFileReceived,
+    sendPendingFileOfferDeferred,
     sendGroupChatActivated,
     sendGroupMembersUpdated,
     sendOfflineMessagesFetchComplete,

@@ -13,6 +13,7 @@ import {
 } from '../protocol/file-offer-control.js';
 import { createFileOfferSignaturePayload } from '../protocol/file-offer-validation.js';
 import type { ChatNode } from '../types.js';
+import type { PendingFileOfferDeferredEvent } from '../types.js';
 import type { MessageHandler } from './message-handler.js';
 import type { InboundApplicationMessageContext } from '../protocol/application-message.js';
 
@@ -67,6 +68,7 @@ async function createHarness(t: { after: (fn: () => void) => void }): Promise<{
     payload: unknown;
   }>;
   pendingFileEvents: Array<{ chatId: number; fileId: string; filename: string; senderId: string }>;
+  pendingFileDeferredEvents: PendingFileOfferDeferredEvent[];
   outgoingPendingEvents: Array<{
     chatId: number;
     messageId: string;
@@ -148,6 +150,7 @@ async function createHarness(t: { after: (fn: () => void) => void }): Promise<{
   } as unknown as MessageHandler;
   const noop = () => {};
   const pendingFileEvents: Array<{ chatId: number; fileId: string; filename: string; senderId: string }> = [];
+  const pendingFileDeferredEvents: PendingFileOfferDeferredEvent[] = [];
   const outgoingPendingEvents: Array<{
     chatId: number;
     messageId: string;
@@ -173,6 +176,7 @@ async function createHarness(t: { after: (fn: () => void) => void }): Promise<{
     (event) => outgoingPendingEvents.push(event),
     noop,
     (event) => pendingFileEvents.push(event),
+    (event) => pendingFileDeferredEvents.push(event),
   );
   t.after(() => database.close());
   return {
@@ -181,6 +185,7 @@ async function createHarness(t: { after: (fn: () => void) => void }): Promise<{
     chatId,
     sentApplicationMessages,
     pendingFileEvents,
+    pendingFileDeferredEvents,
     outgoingPendingEvents,
     completeEvents,
     failedEvents,
@@ -699,8 +704,8 @@ test('incoming group file offers persist as pending group file rows', async (t) 
   assert.equal(event.fileId, 'group_file_in');
 });
 
-test('group file offer capacity rejection is silent', async (t) => {
-  const { database, fileHandler, chatId, sentApplicationMessages } = await createHarness(t);
+test('group file offer capacity rejection emits a local deferred warning without NACKing', async (t) => {
+  const { database, fileHandler, chatId, sentApplicationMessages, pendingFileDeferredEvents } = await createHarness(t);
   const groupChatId = await createGroupChat(database);
 
   for (let i = 0; i < 5; i++) {
@@ -734,4 +739,15 @@ test('group file offer capacity rejection is silent', async (t) => {
     sentApplicationMessages.some((message) => message.kind === 'file_offer_nack'),
     false,
   );
+  assert.equal(pendingFileDeferredEvents.length, 1);
+  assert.deepEqual(pendingFileDeferredEvents[0], {
+    chatId: groupChatId,
+    senderId: RECIPIENT_PEER,
+    senderUsername: 'recipient',
+    reason: 'inbox_full',
+    pendingTotal: 5,
+    maxPendingTotal: 10,
+    pendingFromSender: 5,
+    maxPendingPerPeer: 5,
+  });
 });

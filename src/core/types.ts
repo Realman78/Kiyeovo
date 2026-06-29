@@ -706,6 +706,49 @@ export interface PendingFileReceivedEvent {
   replyToClientId?: string;
 }
 
+export interface PendingFileOfferDeferredEvent {
+  chatId: number;
+  senderId: string;
+  senderUsername: string;
+  reason: 'inbox_full';
+  pendingTotal: number;
+  maxPendingTotal: number;
+  pendingFromSender: number;
+  maxPendingPerPeer: number;
+}
+
+export interface PendingFileInboxOffer {
+  fileId: string;
+  chatId: number;
+  chatName: string;
+  chatType: 'direct' | 'group';
+  senderPeerId: string;
+  senderUsername: string;
+  filename: string;
+  size: number;
+  offeredAt: number;
+  countsTowardCapacity: boolean;
+  transferError?: string;
+}
+
+export interface PendingFileInboxSenderSummary {
+  senderPeerId: string;
+  senderUsername: string;
+  count: number;
+  limit: number;
+  full: boolean;
+  offers: PendingFileInboxOffer[];
+}
+
+export interface PendingFileInboxSnapshot {
+  total: number;
+  totalLimit: number;
+  full: boolean;
+  hasFullSender: boolean;
+  senders: PendingFileInboxSenderSummary[];
+  offers: PendingFileInboxOffer[];
+}
+
 export type CallSignalType =
   | 'CALL_OFFER'
   | 'CALL_ANSWER'

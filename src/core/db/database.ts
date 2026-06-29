@@ -4,7 +4,12 @@ import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as path from 'path';
 import { errStr, generalErrorHandler } from '../utils/general-error.js';
-import type { FileTransferStatus, NetworkMode, OfflineMessage } from '../types.js';
+import type {
+    FileTransferStatus,
+    NetworkMode,
+    OfflineMessage,
+    PendingFileInboxSnapshot,
+} from '../types.js';
 import type { AckMessageType, GroupContentMessage, GroupStatus } from '../group/types.js';
 import { assertGroupTransition, isGroupStatus } from '../group/runtime/group-state-machine.js';
 import { DEFAULT_BOOTSTRAP_NODES, DEFAULT_FAST_RELAY_MULTIADDRS } from '../network/default-infrastructure.js';
@@ -2291,6 +2296,100 @@ export class ChatDatabase {
             event_timestamp: row.event_timestamp ? new Date(row.event_timestamp) : null,
             created_at: new Date(row.created_at),
         }));
+    }
+
+    getPendingFileInboxSnapshot(input: {
+        maxPendingFilesPerPeer: number;
+        maxPendingFilesTotal: number;
+    }): PendingFileInboxSnapshot {
+        const rows = this.db.prepare(`
+            SELECT
+                m.id,
+                m.chat_id,
+                m.sender_peer_id,
+                m.file_name,
+                m.file_size,
+                m.timestamp,
+                m.transfer_error,
+                c.name AS chat_name,
+                c.type AS chat_type,
+                u.username AS sender_username
+            FROM messages m
+            JOIN chats c ON c.id = m.chat_id
+            LEFT JOIN users u
+              ON u.peer_id = m.sender_peer_id
+             AND u.network_mode = c.network_mode
+            WHERE c.network_mode = ?
+              AND m.message_type = 'file'
+              AND m.transfer_status = 'incoming_pending_user'
+            ORDER BY m.timestamp ASC
+        `).all(this.sessionNetworkMode) as Array<{
+            id: string;
+            chat_id: number;
+            sender_peer_id: string;
+            file_name: string | null;
+            file_size: number | null;
+            timestamp: string;
+            transfer_error: string | null;
+            chat_name: string | null;
+            chat_type: 'direct' | 'group';
+            sender_username: string | null;
+        }>;
+
+        const offers = rows.map((row) => ({
+            fileId: row.id,
+            chatId: row.chat_id,
+            chatName: row.chat_name ?? 'Unknown chat',
+            chatType: row.chat_type,
+            senderPeerId: row.sender_peer_id,
+            senderUsername: row.sender_username ?? row.sender_peer_id,
+            filename: row.file_name ?? 'Unknown file',
+            size: row.file_size ?? 0,
+            offeredAt: new Date(row.timestamp).getTime(),
+            countsTowardCapacity: !row.transfer_error,
+            ...(row.transfer_error ? { transferError: row.transfer_error } : {}),
+        }));
+
+        const senderMap = new Map<string, PendingFileInboxSnapshot['senders'][number]>();
+        for (const offer of offers) {
+            let summary = senderMap.get(offer.senderPeerId);
+            if (!summary) {
+                summary = {
+                    senderPeerId: offer.senderPeerId,
+                    senderUsername: offer.senderUsername,
+                    count: 0,
+                    limit: input.maxPendingFilesPerPeer,
+                    full: false,
+                    offers: [],
+                };
+                senderMap.set(offer.senderPeerId, summary);
+            }
+            summary.offers.push(offer);
+            if (offer.countsTowardCapacity) {
+                summary.count += 1;
+            }
+        }
+
+        const senders = [...senderMap.values()]
+            .map((summary) => ({
+                ...summary,
+                full: summary.count >= input.maxPendingFilesPerPeer,
+            }))
+            .sort((a, b) => {
+                if (a.full !== b.full) return a.full ? -1 : 1;
+                if (a.count !== b.count) return b.count - a.count;
+                return a.senderUsername.localeCompare(b.senderUsername);
+            });
+
+        const total = offers.filter((offer) => offer.countsTowardCapacity).length;
+        return {
+            total,
+            totalLimit: input.maxPendingFilesTotal,
+            full: total >= input.maxPendingFilesTotal,
+            hasFullSender: senders.some((sender) => sender.full),
+            senders,
+            offers,
+        };
     }
 
     rejectPendingIncomingFileOffer(messageId: string): {

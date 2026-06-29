@@ -84,6 +84,56 @@ test('rejects a persisted pending incoming offer exactly once', async (t) => {
   assert.equal(database.rejectPendingIncomingFileOffer('incoming_file'), null);
 });
 
+test('pending file inbox snapshot mirrors capacity counting', async (t) => {
+  const { database, chatId } = await createFileOfferDatabase();
+  t.after(() => database.close());
+
+  await database.createMessage({
+    id: 'incoming_counted',
+    client_msg_id: 'incoming_counted',
+    chat_id: chatId,
+    sender_peer_id: 'sender_peer',
+    content: 'counted.pdf (10 bytes)',
+    message_type: 'file',
+    file_name: 'counted.pdf',
+    file_size: 10,
+    file_offer_id: 'offer_counted',
+    transfer_status: 'incoming_pending_user',
+    transfer_progress: 0,
+    timestamp: new Date(1_000),
+  });
+  await database.createMessage({
+    id: 'incoming_errored',
+    client_msg_id: 'incoming_errored',
+    chat_id: chatId,
+    sender_peer_id: 'sender_peer',
+    content: 'errored.pdf (10 bytes)',
+    message_type: 'file',
+    file_name: 'errored.pdf',
+    file_size: 10,
+    file_offer_id: 'offer_errored',
+    transfer_status: 'incoming_pending_user',
+    transfer_progress: 0,
+    transfer_error: 'No longer available',
+    timestamp: new Date(2_000),
+  });
+
+  const snapshot = database.getPendingFileInboxSnapshot({
+    maxPendingFilesPerPeer: 1,
+    maxPendingFilesTotal: 2,
+  });
+
+  assert.equal(snapshot.total, 1);
+  assert.equal(snapshot.full, false);
+  assert.equal(snapshot.hasFullSender, true);
+  assert.equal(snapshot.offers.length, 2);
+  assert.equal(snapshot.senders.length, 1);
+  assert.equal(snapshot.senders[0]?.count, 1);
+  assert.equal(snapshot.senders[0]?.full, true);
+  assert.equal(snapshot.senders[0]?.offers.length, 2);
+  assert.equal(snapshot.offers.find((offer) => offer.fileId === 'incoming_errored')?.countsTowardCapacity, false);
+});
+
 test('cancels an active outgoing offer exactly once and resolves the target peer', async (t) => {
   const { database, chatId } = await createOutgoingOfferDatabase();
   t.after(() => database.close());

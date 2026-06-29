@@ -3483,6 +3483,22 @@ function setupFileTransferHandlers(
     }
   });
 
+  // Current pending file-offer capacity snapshot
+  ipcMain.handle(IPC_CHANNELS.GET_PENDING_FILE_INBOX, async () => {
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { success: false, snapshot: null, error: 'P2P core not initialized' };
+      }
+
+      const snapshot = p2pCore.messageHandler.getFileHandler().getPendingFileInboxSnapshot();
+      return { success: true, snapshot, error: null };
+    } catch (error) {
+      console.error('[IPC] Failed to get pending file inbox:', error);
+      return { success: false, snapshot: null, error: errStr(error, 'Failed to get pending file inbox') };
+    }
+  });
+
   // Cancel active download
   ipcMain.handle(IPC_CHANNELS.CANCEL_FILE_DOWNLOAD, async (_event, fileId: string) => {
     try {

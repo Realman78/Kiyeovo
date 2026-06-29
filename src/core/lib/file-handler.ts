@@ -1,4 +1,4 @@
-import { ChatNode, FileTransferProgressEvent, FileTransferCompleteEvent, FileTransferFailedEvent, OutgoingFileOfferPendingEvent, OutgoingFileOfferTerminalEvent, PendingFileReceivedEvent, StreamHandlerContext } from "../types";
+import { ChatNode, FileTransferProgressEvent, FileTransferCompleteEvent, FileTransferFailedEvent, OutgoingFileOfferPendingEvent, OutgoingFileOfferTerminalEvent, PendingFileReceivedEvent, PendingFileOfferDeferredEvent, PendingFileInboxSnapshot, StreamHandlerContext } from "../types";
 import type { Stream } from "@libp2p/interface";
 import { peerIdFromString } from "@libp2p/peer-id";
 import { ChatDatabase } from "../db/database";
@@ -134,6 +134,7 @@ export class FileHandler {
   private onOutgoingFileOfferPending: (data: OutgoingFileOfferPendingEvent) => void;
   private onOutgoingFileOfferTerminal: (data: OutgoingFileOfferTerminalEvent) => void;
   private onPendingFileReceived: (data: PendingFileReceivedEvent) => void;
+  private onPendingFileOfferDeferred: (data: PendingFileOfferDeferredEvent) => void;
 
   constructor(
     node: ChatNode,
@@ -144,7 +145,8 @@ export class FileHandler {
     onFileTransferFailed: (data: FileTransferFailedEvent) => void,
     onOutgoingFileOfferPending: (data: OutgoingFileOfferPendingEvent) => void,
     onOutgoingFileOfferTerminal: (data: OutgoingFileOfferTerminalEvent) => void,
-    onPendingFileReceived: (data: PendingFileReceivedEvent) => void
+    onPendingFileReceived: (data: PendingFileReceivedEvent) => void,
+    onPendingFileOfferDeferred: (data: PendingFileOfferDeferredEvent) => void
   ) {
     this.node = node;
     this.messageHandler = messageHandler;
@@ -155,6 +157,7 @@ export class FileHandler {
     this.onOutgoingFileOfferPending = onOutgoingFileOfferPending;
     this.onOutgoingFileOfferTerminal = onOutgoingFileOfferTerminal;
     this.onPendingFileReceived = onPendingFileReceived;
+    this.onPendingFileOfferDeferred = onPendingFileOfferDeferred;
     this.fileTransferProtocol = getNetworkModeRuntime(this.database.getSessionNetworkMode()).config.fileTransferProtocol;
     const failedCount = this.database.failNonTerminalFileTransfers('Transfer interrupted (app restart/close)');
     if (failedCount > 0) {
@@ -182,6 +185,13 @@ export class FileHandler {
   private getMaxPendingFilesTotal(): number {
     const setting = this.database.getSetting('max_pending_files_total');
     return setting ? parseInt(setting, 10) : MAX_PENDING_FILES_TOTAL;
+  }
+
+  getPendingFileInboxSnapshot(): PendingFileInboxSnapshot {
+    return this.database.getPendingFileInboxSnapshot({
+      maxPendingFilesPerPeer: this.getMaxPendingFilesPerPeer(),
+      maxPendingFilesTotal: this.getMaxPendingFilesTotal(),
+    });
   }
 
   private trace(scope: 'SEND' | 'RECV' | 'CORE', peerId: string, fileId: string | null, event: string, extra?: string): void {
@@ -1490,6 +1500,17 @@ export class FileHandler {
     if (pendingCapacityFull) {
       if (isDirectRoute) {
         void this.#sendFileOfferNack(context.senderPeerId, offer.offerId, 'inbox_full');
+      } else {
+        this.onPendingFileOfferDeferred({
+          chatId: chat.id,
+          senderId: context.senderPeerId,
+          senderUsername: sender.username,
+          reason: 'inbox_full',
+          pendingTotal: pending.length,
+          maxPendingTotal,
+          pendingFromSender,
+          maxPendingPerPeer,
+        });
       }
       this.tempOfferDiag(
         'drop_capacity_full',

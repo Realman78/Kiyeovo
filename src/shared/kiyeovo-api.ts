@@ -36,7 +36,9 @@ import type {
   OutgoingFileOfferPendingEvent,
   OutgoingFileOfferTerminalEvent,
   PasswordRequest,
+  PendingFileInboxSnapshot,
   PendingFileReceivedEvent,
+  PendingFileOfferDeferredEvent,
   RelayRetryResponse,
   SendMessageResponse,
 } from '../core/types.js';
@@ -530,6 +532,7 @@ export interface KiyeovoAPI {
   sendGroupFile: (chatId: number, filePath: string, fileId?: string, replyToCid?: string) => Promise<{ success: boolean; error: string | null }>;
   acceptFile: (fileId: string) => Promise<{ success: boolean; error: string | null }>;
   rejectFile: (fileId: string) => Promise<{ success: boolean; error: string | null }>;
+  getPendingFileInbox: () => Promise<{ success: boolean; snapshot: PendingFileInboxSnapshot | null; error: string | null }>;
   cancelFileDownload: (fileId: string) => Promise<{ success: boolean; error: string | null }>;
   cancelFileOffer: (fileId: string) => Promise<{ success: boolean; error: string | null }>;
   openFileLocation: (filePath: string) => Promise<{ success: boolean; error: string | null }>;
@@ -539,6 +542,7 @@ export interface KiyeovoAPI {
   onOutgoingFileOfferPending: (callback: (data: OutgoingFileOfferPendingEvent) => void) => Unsubscribe;
   onOutgoingFileOfferTerminal: (callback: (data: OutgoingFileOfferTerminalEvent) => void) => Unsubscribe;
   onPendingFileReceived: (callback: (data: PendingFileReceivedEvent) => void) => Unsubscribe;
+  onPendingFileOfferDeferred: (callback: (data: PendingFileOfferDeferredEvent) => void) => Unsubscribe;
 
   getContacts: () => Promise<{ success: boolean; contacts: Array<{ peerId: string; username: string }>; error: string | null }>;
   createGroup: (groupName: string, peerIds: string[]) => Promise<{

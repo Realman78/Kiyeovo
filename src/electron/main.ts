@@ -22,6 +22,7 @@ import {
   type OutgoingFileOfferPendingEvent,
   type OutgoingFileOfferTerminalEvent,
   type PendingFileReceivedEvent,
+  type PendingFileOfferDeferredEvent,
   type GroupChatActivatedEvent,
   type GroupMembersUpdatedEvent,
   type TorConfig,
@@ -484,6 +485,13 @@ function sendPendingFileReceived(data: PendingFileReceivedEvent) {
   }
 }
 
+function sendPendingFileOfferDeferred(data: PendingFileOfferDeferredEvent) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    log(`[Electron] Pending file offer deferred: sender=${data.senderUsername} reason=${data.reason}`);
+    mainWindow.webContents.send(IPC_CHANNELS.PENDING_FILE_OFFER_DEFERRED, data);
+  }
+}
+
 function sendGroupChatActivated(data: GroupChatActivatedEvent) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     log(`[Electron] Group chat activated: chatId=${data.chatId}`);
@@ -741,6 +749,9 @@ async function initializeP2PAfterWindow() {
       },
       onPendingFileReceived: (data: PendingFileReceivedEvent) => {
         sendPendingFileReceived(data);
+      },
+      onPendingFileOfferDeferred: (data: PendingFileOfferDeferredEvent) => {
+        sendPendingFileOfferDeferred(data);
       },
       onGroupChatActivated: (data: GroupChatActivatedEvent) => {
         sendGroupChatActivated(data);

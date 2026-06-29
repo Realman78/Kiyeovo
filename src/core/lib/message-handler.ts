@@ -27,6 +27,7 @@ import type {
   OutgoingFileOfferPendingEvent,
   OutgoingFileOfferTerminalEvent,
   PendingFileReceivedEvent,
+  PendingFileOfferDeferredEvent,
   GroupChatActivatedEvent,
   GroupMembersUpdatedEvent,
   GroupOfflineGapWarning,
@@ -266,6 +267,7 @@ export class MessageHandler {
     onOutgoingFileOfferPending: (data: OutgoingFileOfferPendingEvent) => void,
     onOutgoingFileOfferTerminal: (data: OutgoingFileOfferTerminalEvent) => void,
     onPendingFileReceived: (data: PendingFileReceivedEvent) => void,
+    onPendingFileOfferDeferred: (data: PendingFileOfferDeferredEvent) => void,
     onGroupChatActivated: (data: GroupChatActivatedEvent) => void,
     onGroupMembersUpdated: (data: GroupMembersUpdatedEvent) => void,
     onOfflineMessagesFetchComplete?: (chatIds: number[]) => void,
@@ -312,6 +314,7 @@ export class MessageHandler {
       onOutgoingFileOfferPending,
       onOutgoingFileOfferTerminal,
       onPendingFileReceived,
+      onPendingFileOfferDeferred,
     );
     const sessionNetworkMode = database.getSessionNetworkMode();
     const modeConfig = getNetworkModeRuntime(sessionNetworkMode).config;

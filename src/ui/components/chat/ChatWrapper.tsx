@@ -15,9 +15,10 @@ import { EmptyState } from "./messages/EmptyState";
 import { PendingKxManager } from "./input/PendingKxManager";
 import { getGroupCreatorLinkState, type GroupCreatorLinkState } from "../../utils/groupCreatorLinkHealth";
 import { OfflineInboxCapacity } from "./OfflineInboxCapacity";
+import { PendingFileInboxIndicator } from "./PendingFileInboxIndicator";
 import { MessageSelectionBar } from "./MessageSelectionBar";
 import { DeleteSelectedMessagesDialog } from "./DeleteSelectedMessagesDialog";
-import { applyPinnedMessage, removeMessagesByIds, removeSendingMessagesByIds, type ChatMessage } from "../../state/slices/chatSlice";
+import { applyPinnedMessage, removeMessagesByIds, removeSendingMessagesByIds, updateChat, type ChatMessage } from "../../state/slices/chatSlice";
 import { useToast } from "../ui/use-toast";
 import { ConversationSearchNavigation } from "./ConversationSearchNavigation";
 import { PinnedMessageBar } from "./messages/PinnedMessageBar";
@@ -77,6 +78,7 @@ const ChatWrapper = ({ active = true }: { active?: boolean }) => {
   const chats = useSelector((state: RootState) => state.chat.chats);
   const myPeerId = useSelector((state: RootState) => state.user.peerId);
   const [offlineInboxExpandedByChatId, setOfflineInboxExpandedByChatId] = useState<Record<number, boolean>>({});
+  const [pendingFileInboxExpandedByChatId, setPendingFileInboxExpandedByChatId] = useState<Record<number, boolean>>({});
   const [messageSelection, setMessageSelection] = useState<MessageSelectionState | null>(null);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [isDeletingMessages, setIsDeletingMessages] = useState(false);
@@ -128,6 +130,8 @@ const ChatWrapper = ({ active = true }: { active?: boolean }) => {
     : groupCreatorLinkState.creatorPeerId;
 
   const isOfflineInboxExpanded = activeChat ? !!offlineInboxExpandedByChatId[activeChat.id] : false;
+  const isPendingFileInboxExpanded = activeChat ? !!pendingFileInboxExpandedByChatId[activeChat.id] : false;
+  const isBottomOverlayExpanded = isOfflineInboxExpanded || isPendingFileInboxExpanded;
 
   const toggleOfflineInbox = useCallback(() => {
     if (!activeChat) return;
@@ -136,6 +140,22 @@ const ChatWrapper = ({ active = true }: { active?: boolean }) => {
       [activeChat.id]: !prev[activeChat.id],
     }));
   }, [activeChat]);
+
+  const togglePendingFileInbox = useCallback(() => {
+    if (!activeChat) return;
+    setPendingFileInboxExpandedByChatId((prev) => ({
+      ...prev,
+      [activeChat.id]: !prev[activeChat.id],
+    }));
+  }, [activeChat]);
+
+  const clearPendingFileInboxAttention = useCallback(() => {
+    if (!activeChat?.pendingFileInboxAttention) return;
+    dispatch(updateChat({
+      id: activeChat.id,
+      updates: { pendingFileInboxAttention: false },
+    }));
+  }, [activeChat, dispatch]);
 
   const openOfflineInbox = useCallback(() => {
     if (!activeChat) return;
@@ -871,7 +891,7 @@ const ChatWrapper = ({ active = true }: { active?: boolean }) => {
               searchHighlightQuery={searchMode ? conversationSearch.query.trim() : ''}
               onOfflineInboxRelevant={openOfflineInbox}
               bottomOverlayClearancePx={activeChat
-                ? (isOfflineInboxExpanded
+                ? (isBottomOverlayExpanded
                   ? OFFLINE_INBOX_EXPANDED_CLEARANCE_PX
                   : OFFLINE_INBOX_COLLAPSED_CLEARANCE_PX)
                 : 0}
@@ -880,11 +900,18 @@ const ChatWrapper = ({ active = true }: { active?: boolean }) => {
             <div className="relative">
               {activeChat && (
                 <div className="pointer-events-none absolute bottom-full left-0 z-30">
-                  <div className="pointer-events-auto">
+                  <div className="pointer-events-auto flex items-end gap-0">
                     <OfflineInboxCapacity
                       chatId={activeChat.id}
                       expanded={isOfflineInboxExpanded}
                       onToggle={toggleOfflineInbox}
+                    />
+                    <PendingFileInboxIndicator
+                      chatId={activeChat.id}
+                      attention={!!activeChat.pendingFileInboxAttention}
+                      expanded={isPendingFileInboxExpanded}
+                      onToggle={togglePendingFileInbox}
+                      onClearAttention={clearPendingFileInboxAttention}
                     />
                   </div>
                 </div>

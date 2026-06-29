@@ -190,6 +190,7 @@ const kiyeovoAPI: KiyeovoAPI = {
   sendGroupFile: (chatId, filePath, fileId, replyToCid) => invoke(IPC_CHANNELS.SEND_GROUP_FILE_REQUEST, chatId, filePath, fileId, replyToCid),
   acceptFile: (fileId) => invoke(IPC_CHANNELS.ACCEPT_FILE, fileId),
   rejectFile: (fileId) => invoke(IPC_CHANNELS.REJECT_FILE, fileId),
+  getPendingFileInbox: () => invoke(IPC_CHANNELS.GET_PENDING_FILE_INBOX),
   cancelFileDownload: (fileId) => invoke(IPC_CHANNELS.CANCEL_FILE_DOWNLOAD, fileId),
   cancelFileOffer: (fileId) => invoke(IPC_CHANNELS.CANCEL_FILE_OFFER, fileId),
   openFileLocation: (filePath) => invoke(IPC_CHANNELS.OPEN_FILE_LOCATION, filePath),
@@ -199,6 +200,7 @@ const kiyeovoAPI: KiyeovoAPI = {
   onOutgoingFileOfferPending: (callback) => subscribe(IPC_CHANNELS.OUTGOING_FILE_OFFER_PENDING, callback),
   onOutgoingFileOfferTerminal: (callback) => subscribe(IPC_CHANNELS.OUTGOING_FILE_OFFER_TERMINAL, callback),
   onPendingFileReceived: (callback) => subscribe(IPC_CHANNELS.PENDING_FILE_RECEIVED, callback),
+  onPendingFileOfferDeferred: (callback) => subscribe(IPC_CHANNELS.PENDING_FILE_OFFER_DEFERRED, callback),
 
   getContacts: () => invoke(IPC_CHANNELS.GET_CONTACTS),
   createGroup: (groupName, peerIds) => invoke(IPC_CHANNELS.CREATE_GROUP, groupName, peerIds),
