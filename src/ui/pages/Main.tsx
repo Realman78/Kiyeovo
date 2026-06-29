@@ -251,6 +251,20 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
   }, [dispatch, incomingCall?.callId, incomingCall?.peerId, toast]);
 
   useEffect(() => {
+    const markPendingFileInboxAttentionIfFull = async (chatId: number) => {
+      try {
+        const result = await window.kiyeovoAPI.getPendingFileInbox();
+        if (result.success && result.snapshot && (result.snapshot.full || result.snapshot.hasFullSender)) {
+          dispatch(updateChat({
+            id: chatId,
+            updates: { pendingFileInboxAttention: true },
+          }));
+        }
+      } catch (error) {
+        console.error('[UI] Failed to refresh pending file inbox capacity:', error);
+      }
+    };
+
     const unsubKeyExchangeFailed = window.kiyeovoAPI.onKeyExchangeFailed((data) => {
       if (data.error.includes("ended pushable")) {
         toast.error(`${data.username} went offline`);
@@ -600,6 +614,7 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
       // Unread count is handled by addMessage reducer for non-active chats.
       dispatch(setPendingFileStatus({ chatId: data.chatId, hasPendingFile: true }));
       toast.info(`${data.senderUsername} wants to send you a file: ${data.filename}`);
+      void markPendingFileInboxAttentionIfFull(data.chatId);
     });
 
     const unsubPendingFileOfferDeferred = window.kiyeovoAPI.onPendingFileOfferDeferred((data) => {
