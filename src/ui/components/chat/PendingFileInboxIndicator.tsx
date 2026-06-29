@@ -256,12 +256,6 @@ export const PendingFileInboxIndicator = ({
     : null);
   const oldestAge = snapshot ? getOldestOfferAge(snapshot.offers) : null;
 
-  useEffect(() => {
-    if (!loading && expanded && !manageOpen && !isRelevant && snapshot) {
-      onToggle();
-    }
-  }, [expanded, isRelevant, loading, manageOpen, onToggle, snapshot]);
-
   const handleToggle = () => {
     if (!expanded) {
       void loadSnapshot();
@@ -270,6 +264,13 @@ export const PendingFileInboxIndicator = ({
       onClearAttention();
     }
     onToggle();
+  };
+
+  const handleManageOpenChange = (nextOpen: boolean) => {
+    setManageOpen(nextOpen);
+    if (!nextOpen && expanded && !isRelevant) {
+      onToggle();
+    }
   };
 
   const refreshAfterAction = async () => {
@@ -434,7 +435,7 @@ export const PendingFileInboxIndicator = ({
         </div>
       </div>
 
-      <Dialog open={manageOpen} onOpenChange={setManageOpen}>
+      <Dialog open={manageOpen} onOpenChange={handleManageOpenChange}>
         <DialogContent className="max-w-3xl">
           <DialogHeader>
             <DialogTitle>Manage pending files</DialogTitle>
@@ -522,7 +523,7 @@ export const PendingFileInboxIndicator = ({
             <Button
               type="button"
               variant="secondary"
-              onClick={() => setManageOpen(false)}
+              onClick={() => handleManageOpenChange(false)}
               disabled={busyKey !== null}
             >
               Close
