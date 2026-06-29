@@ -2127,33 +2127,49 @@ export class ChatDatabase {
         return this.db.prepare('SELECT * FROM pending_offline_sends').all() as PendingOfflineSend[];
     }
 
-    // Atomic settle of delivered sends: drop the queue rows AND clear the matching
-    // chat rows' send-state in one transaction, so a crash can never split them
-    // (leaving a row stuck on `sending`).
+    // Atomic settle of delivered sends: consume queued rows AND clear the matching
+    // chat rows' send-state in one transaction. Failed rows require an explicit
+    // retry/requeue before they can be delivered, so late success cannot overwrite
+    // a first terminal failure.
     settlePendingOfflineSendsDelivered(messageIds: string[]): void {
         if (messageIds.length === 0) return;
-        const placeholders = messageIds.map(() => '?').join(',');
+        const inputPlaceholders = messageIds.map(() => '?').join(',');
         const tx = this.db.transaction((ids: string[]) => {
-            this.db.prepare(`DELETE FROM pending_offline_sends WHERE message_id IN (${placeholders})`).run(...ids);
+            const rows = this.db.prepare(
+                `SELECT message_id FROM pending_offline_sends WHERE message_id IN (${inputPlaceholders}) AND status = 'queued'`,
+            ).all(...ids) as Array<{ message_id: string }>;
+            const queuedIds = rows.map(row => row.message_id);
+            if (queuedIds.length === 0) return;
+
+            const queuedPlaceholders = queuedIds.map(() => '?').join(',');
+            this.db.prepare(`DELETE FROM pending_offline_sends WHERE message_id IN (${queuedPlaceholders}) AND status = 'queued'`).run(...queuedIds);
             this.db.prepare(
-                `UPDATE messages SET local_send_state = NULL, failed_reason = NULL, retry_after_ts = NULL WHERE id IN (${placeholders})`,
-            ).run(...ids);
+                `UPDATE messages SET local_send_state = NULL, failed_reason = NULL, retry_after_ts = NULL WHERE id IN (${queuedPlaceholders})`,
+            ).run(...queuedIds);
         });
         tx(messageIds);
     }
 
-    // Atomic settle of failed sends: mark the queue rows failed AND the chat rows
-    // failed in one transaction.
+    // Atomic settle of failed sends: consume queued rows and mark their chat rows
+    // failed in one transaction. Already delivered rows have no pending row, and
+    // already failed rows must be explicitly requeued before another attempt.
     settlePendingOfflineSendsFailed(messageIds: string[], lastError?: string): void {
         if (messageIds.length === 0) return;
-        const placeholders = messageIds.map(() => '?').join(',');
+        const inputPlaceholders = messageIds.map(() => '?').join(',');
         const tx = this.db.transaction((ids: string[]) => {
+            const rows = this.db.prepare(
+                `SELECT message_id FROM pending_offline_sends WHERE message_id IN (${inputPlaceholders}) AND status = 'queued'`,
+            ).all(...ids) as Array<{ message_id: string }>;
+            const queuedIds = rows.map(row => row.message_id);
+            if (queuedIds.length === 0) return;
+
+            const queuedPlaceholders = queuedIds.map(() => '?').join(',');
             this.db.prepare(
-                `UPDATE pending_offline_sends SET status = 'failed', attempts = attempts + 1, last_error = ? WHERE message_id IN (${placeholders})`,
-            ).run(lastError ?? null, ...ids);
+                `UPDATE pending_offline_sends SET status = 'failed', attempts = attempts + 1, last_error = ? WHERE message_id IN (${queuedPlaceholders}) AND status = 'queued'`,
+            ).run(lastError ?? null, ...queuedIds);
             this.db.prepare(
-                `UPDATE messages SET local_send_state = 'failed', failed_reason = COALESCE(NULLIF(failed_reason, ''), 'other') WHERE id IN (${placeholders})`,
-            ).run(...ids);
+                `UPDATE messages SET local_send_state = 'failed', failed_reason = COALESCE(NULLIF(failed_reason, ''), 'other') WHERE id IN (${queuedPlaceholders})`,
+            ).run(...queuedIds);
         });
         tx(messageIds);
     }
@@ -4530,7 +4546,10 @@ export class ChatDatabase {
 
             const tables = this.db.prepare(`
                 SELECT name FROM sqlite_master
-                WHERE type='table' AND name NOT LIKE 'sqlite_%'
+                WHERE type='table'
+                  AND name NOT LIKE 'sqlite_%'
+                  AND name != 'messages_fts'
+                  AND name NOT LIKE 'messages_fts_%'
             `).all() as Array<{ name: string }>;
 
             this.db.exec('BEGIN TRANSACTION');
@@ -4539,6 +4558,11 @@ export class ChatDatabase {
                 log(`[DATABASE] Deleting data from table: ${table.name}`);
                 this.db.prepare(`DELETE FROM ${table.name}`).run();
             }
+
+            // FTS5 shadow tables are maintained by SQLite and cannot be deleted
+            // directly. Rebuild the external-content index from the emptied
+            // messages table to guarantee search state is wiped as well.
+            this.db.exec(`INSERT INTO messages_fts(messages_fts) VALUES('rebuild')`);
 
             this.db.exec('COMMIT');
 

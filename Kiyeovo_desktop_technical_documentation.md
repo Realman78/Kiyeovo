@@ -757,7 +757,7 @@ Current resilience layers:
 - bootstrap/relay retry mechanisms
 - pending-ACK republish cycles (including retirement/reactivation behavior)
 - per-bucket mutation locks for offline store writes
-- durable offline-send / group-backup queues with crash-safe (transactional) state and manual retry
+- durable offline-send / group-backup queues with crash-safe (transactional) state, manual retry, and queued-row settlement guards so late delivered/failed results cannot overwrite a first terminal offline-send outcome
 - group offline check orchestration with single-flight style guards
 - startup cleanup of interrupted file transfers (and reconciliation of interrupted offline sends → `failed`)
 - main-process logging for renderer process termination (`render-process-gone`) so renderer crashes are visible in operational logs
