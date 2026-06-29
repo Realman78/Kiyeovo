@@ -162,6 +162,7 @@ export const PendingFileInboxIndicator = ({
   const [loading, setLoading] = useState(true);
   const [manageOpen, setManageOpen] = useState(false);
   const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [groupMemberPeerIds, setGroupMemberPeerIds] = useState<Set<string>>(new Set());
   const lastSyncedChatIds = useRef<Set<number>>(new Set());
 
   const syncPendingFlags = useCallback((nextSnapshot: PendingFileInboxSnapshot) => {
@@ -199,6 +200,38 @@ export const PendingFileInboxIndicator = ({
   }, [chatId, loadSnapshot]);
 
   useEffect(() => {
+    let cancelled = false;
+
+    const loadGroupMembers = async () => {
+      if (chatType !== "group") {
+        setGroupMemberPeerIds(new Set());
+        return;
+      }
+      try {
+        const result = await window.kiyeovoAPI.getGroupMembers(chatId);
+        if (cancelled) return;
+        setGroupMemberPeerIds(new Set(
+          result.success
+            ? result.members
+              .filter((member) => member.status !== "pending")
+              .map((member) => member.peerId)
+            : [],
+        ));
+      } catch (error) {
+        console.error("[PendingFileInboxIndicator] Failed to load group members:", error);
+        if (!cancelled) {
+          setGroupMemberPeerIds(new Set());
+        }
+      }
+    };
+
+    void loadGroupMembers();
+    return () => {
+      cancelled = true;
+    };
+  }, [chatId, chatType]);
+
+  useEffect(() => {
     if (attention || expanded || manageOpen) {
       void loadSnapshot();
     }
@@ -210,8 +243,14 @@ export const PendingFileInboxIndicator = ({
       : null,
     [chatType, peerId, snapshot],
   );
-  const visible = attention || expanded || manageOpen || !!snapshot?.full || !!directChatFullSender;
-  const fullSender = directChatFullSender ?? (snapshot?.full
+  const groupMemberFullSender = useMemo(
+    () => chatType === "group"
+      ? snapshot?.senders.find((sender) => sender.full && groupMemberPeerIds.has(sender.senderPeerId)) ?? null
+      : null,
+    [chatType, groupMemberPeerIds, snapshot],
+  );
+  const visible = attention || expanded || manageOpen || !!snapshot?.full || !!directChatFullSender || !!groupMemberFullSender;
+  const fullSender = directChatFullSender ?? groupMemberFullSender ?? (snapshot?.full
     ? snapshot.senders.find((sender) => sender.full) ?? null
     : null);
   const oldestAge = snapshot ? getOldestOfferAge(snapshot.offers) : null;

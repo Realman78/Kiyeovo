@@ -258,10 +258,12 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
           return;
         }
         const chat = store.getState().chat.chats.find((candidate) => candidate.id === chatId);
+        const senderFull = result.snapshot.senders.some((sender) => sender.full && sender.senderPeerId === senderId);
         const directSenderFull = chat?.type === 'direct'
           && chat.peerId === senderId
-          && result.snapshot.senders.some((sender) => sender.full && sender.senderPeerId === senderId);
-        if (!result.snapshot.full && !directSenderFull) {
+          && senderFull;
+        const groupSenderFull = chat?.type === 'group' && senderFull;
+        if (!result.snapshot.full && !directSenderFull && !groupSenderFull) {
           return;
         }
         dispatch(updateChat({
