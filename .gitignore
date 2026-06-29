@@ -26,10 +26,15 @@ dist-ssr
 
 dist-ui
 dist-electron
+dist-server
 
 .env
-bootstrap-peer-id.bin
+bootstrap-peer-id*.bin
 bootstrap-datastore
+relay-peer-id.bin
+
+# Server runtime metadata (public, regenerated each start)
+*.runtime.json
 
 .claude
 .codex

@@ -492,15 +492,17 @@ Practical rule: relationship/context (`chats`, participants, statuses) is author
 `npm run bootstrap` launches a mode-aware validator node.
 
 Current behavior:
-- persistent Level datastore at `./bootstrap-datastore/<mode>`
+- persistent Level datastore at `./bootstrap-datastore/<mode>`, overridable with `BOOTSTRAP_DATASTORE_PATH` (used verbatim when set; the `<mode>` subdirectory only applies to the default)
 - validator stack active for username, direct offline, group offline, group info records
 - startup mode comes from `BOOTSTRAP_NETWORK_MODE=fast|anonymous`
 - announce addresses come from `BOOTSTRAP_ANNOUNCE_ADDRS` as a comma-separated list
+- identity persists at `BOOTSTRAP_PEER_ID_FILE` (default `./bootstrap-peer-id.bin`, `-anonymous` suffixed in anonymous mode)
 
 Operational notes:
 - bootstrap announce addresses are raw announce multiaddrs, not client-facing `/p2p/...` addresses
 - the process prints its Peer ID on startup; client-facing bootstrap entries are formed as `<announce_addr>/p2p/<peerId>`
 - anonymous bootstrap does not spawn Tor by itself; if you run `BOOTSTRAP_NETWORK_MODE=anonymous`, your onion service must forward the announced onion address to the local bootstrap listener (default: TCP 9001)
+- in deployment mode (see 11.6) a missing or invalid announce address aborts startup, and a corrupt identity file aborts instead of rotating the Peer ID
 
 #### 11.2 Relay node
 
@@ -509,8 +511,10 @@ Operational notes:
 Operational notes:
 - relay listen address defaults to `/ip4/0.0.0.0/tcp/4002`
 - announce addresses come from `RELAY_ANNOUNCE_ADDRS`
+- identity persists at `RELAY_PEER_ID_FILE` (default `./relay-peer-id.bin`)
 - the process prints its Peer ID on startup; client-facing relay entries are formed as `<announce_addr>/p2p/<peerId>`
 - optional tuning env vars include `RELAY_MAX_RESERVATIONS`, `RELAY_RESERVATION_TTL_MS`, `RELAY_DEFAULT_DURATION_LIMIT_MS`, and `RELAY_DEFAULT_DATA_LIMIT_BYTES`
+- in deployment mode (see 11.6) a missing or invalid announce address aborts startup, and a corrupt identity file aborts instead of rotating the Peer ID
 - there is no relay layer in anonymous mode
 
 #### 11.3 Client connectivity UX
@@ -625,6 +629,76 @@ Notes:
 - test results describe the last explicit test rather than continuous health; they remain in memory for the app session and display how long ago the test completed
 - if an ICE entry list is saved, that runtime list is used instead of the empty default constant
 - users may acknowledge the missing-ICE Setup warning if they do not plan to use calls; call setup remains visibly unconfigured
+
+#### 11.6 Deployment contracts (containerised / CLI-managed servers)
+
+The bootstrap and relay entrypoints gain explicit, machine-readable contracts so
+the `kiyeovo-infra` CLI and a container supervisor can manage them without
+scraping logs or relying on default paths. None of this changes local
+`npm run bootstrap` / `npm run relay` or a hand-rolled systemd unit: every new
+behaviour is gated behind opt-in environment variables.
+
+Deployment mode:
+- `KIYEOVO_DEPLOY_MODE=1` (truthy: `1`/`true`/`yes`/`on`) switches both servers to
+  strict, fail-closed semantics. The CLI / Compose stack sets it; everything else
+  leaves it unset and keeps the lenient legacy behaviour.
+- Fail-closed identity: a present-but-unreadable/undecodable identity file aborts
+  startup instead of generating a new key and overwriting the file (which would
+  silently rotate the Peer ID). A genuinely absent file is still created on first
+  run — but if that first-run key cannot be saved (e.g. a missing or unwritable
+  bind mount) startup also aborts, rather than running with an ephemeral Peer ID
+  that would rotate on the next restart. Implemented as an opt-in `failClosed`
+  flag on `PeerIdManager.loadOrCreate`; the desktop's separate encrypted-identity
+  path is untouched.
+- Fail-fast announce: at least one valid announce address is required (both fast
+  and anonymous), and any invalid/wrong-mode announce aborts startup rather than
+  being silently dropped.
+
+Runtime metadata output (`src/core/server/runtime-metadata.ts`):
+- When `KIYEOVO_RUNTIME_FILE` is set, the process writes a single public-only JSON
+  file describing itself; unset means no file is written.
+- Lifecycle: any stale file is removed on startup before the node is healthy, the
+  fresh file is written once the node has started and addresses are known, and the
+  file is removed again on graceful shutdown — so a reader never sees stale or
+  half-written data (writes are atomic via temp-file + rename in the same
+  directory).
+- In deployment mode the startup stale-removal and the healthy write are
+  **required**: if either fails, startup aborts, because the JSON is the CLI's
+  control-plane contract — a "running" service whose metadata is stale or absent
+  must surface as a failure. Shutdown removal stays best-effort (the process is
+  already exiting). Outside deployment mode the whole lifecycle is best-effort
+  (logged, never fatal).
+- The file carries no secrets (never the private key or a TURN credential).
+- Schema (`schemaVersion: 1`):
+
+  ```json
+  {
+    "schemaVersion": 1,
+    "role": "bootstrap",
+    "networkMode": "fast",
+    "peerId": "12D3KooW...",
+    "announceAddrs": ["/ip4/203.0.113.10/tcp/9000"],
+    "clientAddrs": ["/ip4/203.0.113.10/tcp/9000/p2p/12D3KooW..."],
+    "version": "0.1.0",
+    "startedAt": "2026-06-27T12:00:00Z"
+  }
+  ```
+
+- `version` comes from `KIYEOVO_SERVER_VERSION` (the independent infra server
+  version, baked at image build), defaulting to `unknown`. It is independent of
+  the desktop app version.
+
+Server build target:
+- `npm run build:server` (`tsconfig.server.json`) compiles only the bootstrap and
+  relay entrypoints and their transitive imports to plain Node ESM under
+  `dist-server/`, with no Electron, renderer, `tsx`, or other dev tooling at
+  runtime. Listing just the two entrypoints in `include` lets `tsc` pull in
+  exactly the files the servers reference; the desktop-only modules (SQLite DB,
+  keytar identity, React) are confirmed absent from the compiled graph.
+- `scripts/postinstall.mjs` already skips the Electron / `better-sqlite3` rebuild
+  when `ROLE=bootstrap|relay` or `KIYEOVO_SKIP_ELECTRON_REBUILD=1`. `patch-package`
+  (which applies the required `@libp2p/kad-dht` patch the servers depend on) is a
+  runtime dependency so a production `npm ci --omit=dev` install still applies it.
 
 ---
 
