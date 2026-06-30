@@ -8,6 +8,7 @@ import './lib/file-transfer.test.js';
 import './lib/frame-stream.test.js';
 import './lib/file-storage.test.js';
 import './lib/file-handler.test.js';
+import './network/reconnect-controller.test.js';
 import './db/database.file-offer.test.js';
 import '../electron/ipc-handler-helpers.test.js';
 import '../electron/text-upload.test.js';
