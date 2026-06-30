@@ -33,6 +33,7 @@ Some of the most notable added features:
 - Offline file sharing
 - Electron security hardening
 - Huge UX improvements such as: home screen redesign, first-time user onboard, typical messaging features
+- Lot of effort poured into making this "technical" app be simple enough for less-technical users
 - etc.
 
 What's left:
