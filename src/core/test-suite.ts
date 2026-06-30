@@ -15,6 +15,7 @@ import './identity/profile-manager.test.js';
 import '../electron/ipc-handler-helpers.test.js';
 import '../electron/text-upload.test.js';
 import '../electron/trusted-ipc.test.js';
+import '../electron/electron-security-smoke.test.js';
 import '../ui/state/slices/chatSlice.test.js';
 import '../ui/state/slices/setupNodesSlice.test.js';
 import './db/database.persistence.test.js';

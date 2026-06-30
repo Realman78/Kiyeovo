@@ -11,6 +11,7 @@ import {
   MEDIA_PROTOCOL_HOST,
   MEDIA_PROTOCOL_SCHEME,
 } from './constants.js';
+export { getPackagedAppEntryUrl } from './app-entry-url.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -21,10 +22,6 @@ let appProtocolHandlerRegistered = false;
 let mediaProtocolHandlerRegistered = false;
 const mediaPathByToken = new Map<string, string>();
 const mediaTokenByPath = new Map<string, string>();
-
-export function getPackagedAppEntryUrl(): string {
-  return `${APP_PROTOCOL_SCHEME}://${APP_PROTOCOL_HOST}/index.html`;
-}
 
 export function registerProtocolSchemes(): void {
   if (protocolSchemesRegistered) {

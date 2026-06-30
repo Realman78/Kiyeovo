@@ -23,3 +23,9 @@ This file captures suspicious or unresolved behavior noticed while adding the ri
 - `chatSlice.addMessage` updates chat preview metadata from the incoming payload even when the message is a duplicate or older than the current latest message. That may let late offline/history arrivals regress the sidebar preview unless all callers avoid this path for older messages.
 - `removeMessagesByIds` sets `lastMessage` to `SYSTEM: No messages yet` when no preview remains, but leaves the previous `lastMessageTimestamp` in place. Empty chats may keep stale sort timestamps after local deletion.
 - `removeChat` clears active chat/messages but does not clear `replyTargetByChatId` for the removed chat, leaving stale renderer-local reply state until overwritten or cleared elsewhere.
+
+## Phase 7: Small Electron Smoke Tests
+
+- The Phase 7 tests are still unit-level Electron smoke coverage. They do not launch a real BrowserWindow, load the bundled renderer, exercise preload injection in a renderer process, or verify app startup through identity setup.
+- The preload bridge is not yet smoke-tested against the runtime `contextBridge` surface. A launched Electron or isolated preload harness should verify that `window.kiyeovoAPI` exposes only the intended whitelist and that representative calls cross IPC successfully.
+- App/custom protocol handlers are not registered in the shared unit process because Electron protocol registration is global and module-stateful. A later isolated smoke process should verify `kiyeovo://app/index.html` and `kiyeovo-media://media/<token>` responses end to end.
