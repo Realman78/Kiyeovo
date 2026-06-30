@@ -18,12 +18,19 @@ ARG NODE_IMAGE=node:22-bookworm-slim@sha256:813a7480f28fdadac1f7f5c824bcdad435b5
 FROM --platform=linux/amd64 ${NODE_IMAGE} AS builder
 WORKDIR /app
 
-# Install deps without running any lifecycle scripts. This skips the desktop
-# electron-rebuild, the better-sqlite3/keytar native builds, and the electron
-# binary download. classic-level (the only native module the server graph
-# needs) ships a linux-x64 prebuild that loads at runtime, so no toolchain is
-# required. patch-package is then run explicitly to apply the kad-dht patch.
-COPY package.json package-lock.json ./
+# Install from the dedicated SERVER dependency manifest (infrastructure/
+# server.package.json + its lockfile), not the root package — so the image
+# carries only the bootstrap/relay runtime graph, never the desktop/UI deps
+# (React/Redux/Radix/Tailwind, better-sqlite3, keytar, electron, …). The
+# manifest is kept in sync with the server's real imports by
+# infrastructure/scripts/check-server-deps.mjs.
+#
+# --ignore-scripts skips all lifecycle scripts; classic-level (the only native
+# module the server graph needs) ships a linux-x64 prebuild that loads at
+# runtime, so no toolchain is required. patch-package then applies the kad-dht
+# patch explicitly.
+COPY infrastructure/server.package.json ./package.json
+COPY infrastructure/server.package-lock.json ./package-lock.json
 COPY patches ./patches
 RUN npm ci --ignore-scripts \
  && ./node_modules/.bin/patch-package
@@ -33,16 +40,9 @@ COPY tsconfig.server.json ./
 COPY src ./src
 RUN npm run build:server
 
-# Reduce node_modules to the runtime set: drop dev deps, then remove the
-# desktop-only native modules the server provably never imports.
-#
-# KNOWN PHASE 2 DEBT: the root package.json lists React/Redux/Radix/Tailwind and
-# other UI deps under "dependencies", so they survive `prune --omit=dev` and ship
-# as dead (never-imported) JS in the image. Harmless at runtime, but not yet
-# "truly server-only". The real fix (a dedicated server dependency manifest) is
-# deferred to Phase 5 release prep, before any image is published to GHCR.
-RUN npm prune --omit=dev \
- && rm -rf node_modules/better-sqlite3 node_modules/keytar
+# Drop dev deps (typescript, patch-package, @types/node); the runtime set is
+# exactly the server manifest's dependencies.
+RUN npm prune --omit=dev
 
 # ---------- runtime ----------
 FROM --platform=linux/amd64 ${NODE_IMAGE} AS runtime

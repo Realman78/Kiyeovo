@@ -19,6 +19,7 @@
     "bootstrap": "tsx src/core/bootstrap.ts",
     "relay": "tsx src/core/relay.ts",
     "build:server": "tsc -p tsconfig.server.json",
+    "check:server-deps": "node infrastructure/scripts/check-server-deps.mjs",
     "preview": "vite preview",
     "clean:electron": "node -e \"require('fs').rmSync('dist-electron', { recursive: true, force: true })\"",
     "transpile:electron": "npm run clean:electron && tsc -p src/electron/tsconfig.json && node scripts/build-preload.mjs",

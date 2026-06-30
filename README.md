@@ -103,7 +103,41 @@ If your machine is not low-end, consider increasing `IDENTITY_SCRYPT_N` and `PRO
 
 ## Bootstrap and relay setup
 
-### Fast mode
+The recommended way to self-host is the **`kiyeovo-infra` CLI** in
+`infrastructure/`. It runs the bootstrap, relay, optional Tor onion (anonymous
+mode), and optional coturn TURN server as pinned Docker containers, owns their
+lifecycle (start/stop/restart/auto-restart) through Docker Compose, and prints the
+exact addresses to paste into Kiyeovo's Setup pages. You do not need to clone the
+repo or install Node — a released bundle ships the CLI + compose files + systemd
+templates and pulls the published images.
+
+### Recommended: `kiyeovo-infra` (Docker)
+
+Prerequisites: Docker Engine + the Compose plugin.
+
+```bash
+cd infrastructure          # or unpack the released kiyeovo-infra-<version>.tar.gz
+
+./kiyeovo-infra init       # choose fast or anonymous; for fast you can add coturn
+./kiyeovo-infra firewall   # prints the ports to open (makes no changes)
+./kiyeovo-infra up         # start the stack
+./kiyeovo-infra status     # check health
+./kiyeovo-infra addresses  # copy the printed multiaddrs into Kiyeovo's Setup pages
+```
+
+- **Fast mode** runs bootstrap + relay (and optional TURN); **anonymous mode**
+  runs a Tor onion bootstrap (no relay, nothing published on the host).
+- For reboot survival: `sudo systemctl enable docker` (the containers use
+  `restart: unless-stopped`).
+- Operators who do not want Docker can use the advanced manual path below; the
+  same servers can also run under systemd via the templates in
+  `infrastructure/config/`.
+
+### Advanced: manual setup (no Docker)
+
+The steps below run the servers by hand and are the alternative to the CLI above.
+
+#### Fast mode
 
 1. Install dependencies
 
@@ -135,7 +169,7 @@ npm run relay
 4002  # relay
 ```
 
-5. You should be all set now. You can add the addresses to the list of known bootstrap and/or relay addresses in Kiyeovo by clicking on the network status text in the sidebar header - a dialog shall open up:
+5. You should be all set now. To register the servers in Kiyeovo, open the **Setup** tab in the left sidebar rail, then add each multiaddress with **Add server** — the bootstrap address under **Bootstrap servers** and the relay address under **Relay servers**:
 
 ```text
 /ip4/YOUR_PUBLIC_IP/tcp/9000/p2p/<BOOTSTRAP_PEER_ID>
@@ -143,7 +177,7 @@ npm run relay
 ```
 
 
-### Anonymous mode
+#### Anonymous mode
 
 1. Run the setup script
 
@@ -183,7 +217,7 @@ npm run bootstrap
 
 If you host both fast and anonymous bootstrap nodes on the same machine, keep fast mode on `0.0.0.0:9000` and anonymous mode on local `127.0.0.1:9001`.
 
-5. The setup is done. Now you can add the address to the list of known bootstrap addresses in Kiyeovo by clicking on the network status text in the sidebar header - a dialog shall open up:
+5. The setup is done. To register the server in Kiyeovo, open the **Setup** tab in the left sidebar rail, go to **Bootstrap servers**, and add the address with **Add server**:
 
 ```text
 /onion3/YOUR_ONION_HOST:9000/p2p/<BOOTSTRAP_PEER_ID>
@@ -191,7 +225,7 @@ If you host both fast and anonymous bootstrap nodes on the same machine, keep fa
 
 The relay is not needed in anonymous mode.
 
-### (Optional) STUN/TURN for calls in Fast mode
+#### (Optional) STUN/TURN for calls in Fast mode
 
 Calls are currently fast-mode direct 1:1 calls.
 
@@ -220,7 +254,7 @@ no-cli
 
 3. Run `systemctl enable --now coturn`
 
-4. The servers should be running now. You can add the server addresses inside Kiyeovo by clicking on the network status text in the sidebar header - a dialog shall open up:
+4. The servers should be running now. To register them in Kiyeovo, open the **Setup** tab in the left sidebar rail and go to **STUN/TURN servers**, then add each entry with **Add server**.
 
 You can add multiple ICE servers. Kiyeovo supports `stun`, `turn`, and `turns` entries.
 

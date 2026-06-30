@@ -621,7 +621,7 @@ Current behavior:
 
 Practical self-hosting path:
 - run a TURN server such as coturn
-- open `3478/tcp`, `3478/udp`, and the relay port range you configure (for example `49160-49200` on both TCP and UDP)
+- open `3478/tcp`, `3478/udp`, and the UDP relay media port range you configure (for example `49160-49200/udp`)
 - add matching STUN/TURN URLs in the app UI instead of rebuilding
 
 Notes:
@@ -711,17 +711,20 @@ Image (`infrastructure/Dockerfile.server`):
 - One `amd64` image, role (`bootstrap`|`relay`) selected by the entrypoint
   argument. Base is `node:22-bookworm-slim` pinned by digest (glibc, so
   `classic-level`'s bundled `linux-x64` prebuild loads without a toolchain).
-- Multi-stage: the builder installs deps with `--ignore-scripts` (skipping the
-  desktop electron-rebuild and the `better-sqlite3`/`keytar` native builds),
-  applies the kad-dht patch, compiles `dist-server`, prunes dev deps, and removes
-  the desktop-only natives `better-sqlite3` and `keytar`. The runtime stage copies
-  only the patched production `node_modules` + `dist-server`, with no compilers or
-  install tooling.
-- Known Phase 2 debt: UI/desktop JS deps (React, Redux, Radix, Tailwind, …) live
-  under root `dependencies`, so they survive `prune --omit=dev` and ship as dead,
-  never-imported JS in the image (harmless at runtime, not security-relevant). The
-  real "server-only" dependency boundary (a dedicated server manifest) is deferred
-  to Phase 5 release prep, before any image is published to GHCR.
+- **Server-only dependency boundary.** The image installs from a dedicated
+  manifest (`infrastructure/server.package.json` + `server.package-lock.json`),
+  **not** the root package — so it carries only the bootstrap/relay runtime graph
+  (16 deps + transitives), never the desktop/UI deps (React, Redux, Radix,
+  Tailwind, `better-sqlite3`, `keytar`, electron, …). The manifest pins each dep to
+  the version root resolves and mirrors root's `@libp2p/interface` override so the
+  tree dedupes the way the app is tested; `infrastructure/scripts/check-server-deps.mjs`
+  (`npm run check:server-deps`) fails the build if a server import is undeclared,
+  a pin drifts from root, or that override is dropped.
+- Multi-stage: the builder installs with `--ignore-scripts`, applies the kad-dht
+  patch, compiles `dist-server`, and prunes dev deps. The runtime stage copies only
+  the patched production `node_modules` + `dist-server` (+ the server manifest's
+  `package.json` for `type:module`), with no compilers or install tooling. The
+  result is a noticeably smaller image (~278 MB vs the earlier ~445 MB fat build).
 
 Ownership boundary (`infrastructure/docker-entrypoint.sh`):
 - The container starts as root **only** to `mkdir`/`chown` the bind-mounted data
@@ -760,10 +763,11 @@ Peer IDs survive `restart`, recreation, and image changes.
 `infrastructure/kiyeovo-infra` is a Bash operations front-end over the Compose
 stack. It collects configuration and delegates the whole service lifecycle to
 Docker Compose — it is not a second supervisor and holds no state of its own. It
-is mode-aware (Fast and Anonymous, picked from `KIYEOVO_MODE` in `.env`, see 11.9);
-coturn/TURN arrives in a later phase. `up`/`down` pass `--remove-orphans` so a
-container from a previous mode (e.g. a Fast relay after switching to anonymous)
-can't linger, and `status` warns if an unexpected project container is present.
+is mode-aware (Fast and Anonymous, picked from `KIYEOVO_MODE` in `.env`, see 11.9)
+and can additionally run an optional coturn TURN server in Fast mode (see below).
+`up`/`down` pass `--remove-orphans` so a container from a previous mode (e.g. a
+Fast relay after switching to anonymous) can't linger, and `status` warns if an
+unexpected project container is present.
 
 Commands:
 - `init` — interactive wizard (or `--non-interactive` with `--public-address`,
@@ -775,8 +779,10 @@ Commands:
   runtime JSON after the container chowns its contents to its own uid; `data/` is
   `0700` since it holds the identity private key + datastore that only the
   in-container service user needs. Ports are validated to `1..65535` and must differ.
-- `firewall` — prints the inbound TCP rules to open and, if it detects
+- `firewall` — prints the inbound rules to open and, if it detects
   `ufw`/`firewalld`/`iptables`, the matching commands. It makes **no** changes.
+  Lists the bootstrap/relay TCP ports, plus (when TURN is enabled) `3478/tcp+udp`
+  and the UDP relay media range (`49160-49200/udp`).
 - `up` / `down` / `restart` — thin wrappers over `docker compose`. `up` reminds the
   operator to `systemctl enable docker` for reboot survival; `down` never passes
   `-v` and the data lives in bind mounts, so identity + datastore are preserved.
@@ -787,8 +793,26 @@ Commands:
   `/p2p/<peerId>` multiaddrs to paste into Kiyeovo's Setup pages. It trusts the JSON
   only for a running + healthy container; if the service is unhealthy/stopped but a
   file remains (e.g. after a crash that skipped graceful cleanup), the address is
-  shown labelled as stale "last known", not as current. Accepts
-  `--show-turn-credential` for forward compatibility (no TURN until a later phase).
+  shown labelled as stale "last known", not as current. When TURN is enabled it also
+  prints the ICE `turn:` URL + username (credential redacted unless
+  `--show-turn-credential`), shown only while coturn is running.
+
+#### 11.8.1 Optional TURN (coturn) for Fast-mode calls
+
+`init` (Fast mode) can additionally configure an optional coturn TURN server for
+calls. It is a Compose `turn` profile service that the CLI activates only when
+`KIYEOVO_TURN=1` in `.env`; it uses host networking because coturn's UDP relay
+media port range makes per-port Docker mapping impractical. coturn needs a numeric
+`external-ip` (it cannot derive one from a DNS name), so `init` defaults it to an
+IPv4 public address or otherwise requires `--turn-external-ip`. The credential is
+prompted for (`lt-cred-mech`, `realm=kiyeovo`) and written only to
+`infrastructure/secrets/turnserver.conf`, never to `.env`, env vars, the image, or
+Compose args. That file is `0644` inside the `0700` `infrastructure/secrets/`
+directory: coturn runs as an unprivileged user (`nobody`) and the file is
+bind-mounted straight into the container, so it must be world-readable, while the
+`0700` directory keeps other local host users from reading it. `down` always
+activates the `turn` profile so a coturn container is torn down even if TURN was
+later disabled.
 
 #### 11.9 Anonymous mode (Tor onion bootstrap)
 

@@ -1,6 +1,7 @@
 # Keep the server image build context small and free of host secrets/state.
-# The Dockerfile only needs package.json, package-lock.json, patches/,
-# tsconfig.server.json and src/.
+# The Dockerfile only needs infrastructure/server.package.json + its lockfile,
+# patches/, tsconfig.server.json, src/, and the infrastructure/ entrypoint +
+# tor assets.
 
 .git
 node_modules
@@ -8,6 +9,7 @@ dist
 dist-ui
 dist-electron
 dist-server
+dist-release
 
 # Secrets, identities, local datastores, runtime output
 .env
@@ -29,7 +31,8 @@ kiyeovo-uploads
 .vscode
 .idea
 
-# Local infra test data
+# Local infra test data + secrets (never send to the build daemon)
 infrastructure/.env
 infrastructure/data
 infrastructure/run
+infrastructure/secrets

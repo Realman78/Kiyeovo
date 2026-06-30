@@ -27,6 +27,7 @@ dist-ssr
 dist-ui
 dist-electron
 dist-server
+dist-release
 
 .env
 bootstrap-peer-id*.bin
@@ -36,10 +37,11 @@ relay-peer-id.bin
 # Server runtime metadata (public, regenerated each start)
 *.runtime.json
 
-# Local infra deployment data (identities, datastores, runtime output)
+# Local infra deployment data (identities, datastores, runtime output, secrets)
 infrastructure/.env
 infrastructure/data
 infrastructure/run
+infrastructure/secrets
 
 .claude
 .codex

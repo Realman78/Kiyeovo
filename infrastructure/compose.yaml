@@ -91,3 +91,22 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  # Optional TURN server for Fast-mode calls. Started only with the `turn`
+  # profile (the CLI enables it when KIYEOVO_TURN=1). Host networking because the
+  # relay media port range makes per-port Docker mapping impractical. The
+  # credential lives only in the mounted turnserver.conf secret — never in the
+  # image, args, or env.
+  coturn:
+    image: coturn/coturn:4@sha256:0c0e8fc0c263b85a134e9e4242b5e46e1f4c077c5029633511191c05b5c2c814
+    profiles: ["turn"]
+    network_mode: host
+    restart: unless-stopped
+    command: ["-c", "/etc/coturn/turnserver.conf"]
+    volumes:
+      - ./secrets/turnserver.conf:/etc/coturn/turnserver.conf:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
