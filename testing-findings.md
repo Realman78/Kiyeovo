@@ -17,3 +17,9 @@ This file captures suspicious or unresolved behavior noticed while adding the ri
 - Key exchange remains mostly untested at the protocol-state level because the current implementation is tightly coupled to libp2p streams, DHT lookup, database writes, and UI callbacks. A later phase should extract or harness the pure authority decisions around accept/reject/resume/reset.
 - Trusted profile import does not reject a profile whose `peerId` is the local user's own peer id. That may allow a self-contact/self-chat if the UI or caller supplies the user's own exported profile.
 - Trusted profile import validates custom-name length but does not trim or normalize it in main/core. The UI passes the raw field value, so leading/trailing spaces can become part of the stored contact name.
+
+## Phase 6: Complex UI State
+
+- `chatSlice.addMessage` updates chat preview metadata from the incoming payload even when the message is a duplicate or older than the current latest message. That may let late offline/history arrivals regress the sidebar preview unless all callers avoid this path for older messages.
+- `removeMessagesByIds` sets `lastMessage` to `SYSTEM: No messages yet` when no preview remains, but leaves the previous `lastMessageTimestamp` in place. Empty chats may keep stale sort timestamps after local deletion.
+- `removeChat` clears active chat/messages but does not clear `replyTargetByChatId` for the removed chat, leaving stale renderer-local reply state until overwritten or cleared elsewhere.
