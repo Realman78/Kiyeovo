@@ -2715,7 +2715,7 @@ export class ChatDatabase {
             JOIN chats c ON c.id = m.chat_id
             WHERE m.id = ?
               AND c.network_mode = ?
-              AND m.message_type = 'file'
+              AND m.message_type IN ('file', 'image')
               AND m.transfer_status = 'completed'
               AND m.file_path IS NOT NULL
               AND m.file_path != ''
@@ -2733,6 +2733,20 @@ export class ChatDatabase {
             filePath: row.file_path,
             fileName: row.file_name || path.basename(row.file_path),
         };
+    }
+
+    hasCompletedFilePath(filePath: string): boolean {
+        const row = this.db.prepare(`
+            SELECT 1
+            FROM messages m
+            JOIN chats c ON c.id = m.chat_id
+            WHERE m.file_path = ?
+              AND c.network_mode = ?
+              AND m.message_type IN ('file', 'image')
+              AND m.transfer_status = 'completed'
+            LIMIT 1
+        `).get(filePath, this.sessionNetworkMode);
+        return !!row;
     }
 
     /**
