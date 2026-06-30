@@ -28,16 +28,16 @@ services:
       KIYEOVO_DEPLOY_MODE: "1"
       KIYEOVO_SERVER_VERSION: "0.1.0"
       BOOTSTRAP_NETWORK_MODE: fast
-      BOOTSTRAP_LISTEN_ADDRESS: /ip4/0.0.0.0/tcp/9000
+      BOOTSTRAP_LISTEN_ADDRESS: /ip4/0.0.0.0/tcp/${BOOTSTRAP_PORT:-9000}
       BOOTSTRAP_ANNOUNCE_ADDRS: ${BOOTSTRAP_ANNOUNCE_ADDRS:?set in infrastructure/.env, e.g. /ip4/<public-ip>/tcp/9000}
       BOOTSTRAP_PEER_ID_FILE: /data/bootstrap-peer-id.bin
       BOOTSTRAP_DATASTORE_PATH: /data/datastore
       KIYEOVO_RUNTIME_FILE: /run/kiyeovo/bootstrap.runtime.json
       KIYEOVO_DATA_DIR: /data
       KIYEOVO_RUNTIME_DIR: /run/kiyeovo
-      KIYEOVO_HEALTHCHECK_PORT: "9000"
+      KIYEOVO_HEALTHCHECK_PORT: "${BOOTSTRAP_PORT:-9000}"
     ports:
-      - "9000:9000"
+      - "${BOOTSTRAP_PORT:-9000}:${BOOTSTRAP_PORT:-9000}"
     volumes:
       - ./data/bootstrap:/data
       - ./run/bootstrap:/run/kiyeovo
@@ -66,15 +66,15 @@ services:
     environment:
       KIYEOVO_DEPLOY_MODE: "1"
       KIYEOVO_SERVER_VERSION: "0.1.0"
-      RELAY_LISTEN_ADDRESS: /ip4/0.0.0.0/tcp/4002
+      RELAY_LISTEN_ADDRESS: /ip4/0.0.0.0/tcp/${RELAY_PORT:-4002}
       RELAY_ANNOUNCE_ADDRS: ${RELAY_ANNOUNCE_ADDRS:?set in infrastructure/.env, e.g. /ip4/<public-ip>/tcp/4002}
       RELAY_PEER_ID_FILE: /data/relay-peer-id.bin
       KIYEOVO_RUNTIME_FILE: /run/kiyeovo/relay.runtime.json
       KIYEOVO_DATA_DIR: /data
       KIYEOVO_RUNTIME_DIR: /run/kiyeovo
-      KIYEOVO_HEALTHCHECK_PORT: "4002"
+      KIYEOVO_HEALTHCHECK_PORT: "${RELAY_PORT:-4002}"
     ports:
-      - "4002:4002"
+      - "${RELAY_PORT:-4002}:${RELAY_PORT:-4002}"
     volumes:
       - ./data/relay:/data
       - ./run/relay:/run/kiyeovo

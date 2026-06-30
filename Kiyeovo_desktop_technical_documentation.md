@@ -704,7 +704,7 @@ Server build target:
 
 `infrastructure/` holds the Docker artefacts for self-hosting Fast bootstrap +
 relay. Docker Compose owns the service lifecycle (start/stop/restart/auto-restart);
-the future `kiyeovo-infra` CLI is a thin front-end over this, never a second
+the `kiyeovo-infra` CLI (11.8) is a thin front-end over this, never a second
 supervisor.
 
 Image (`infrastructure/Dockerfile.server`):
@@ -754,6 +754,39 @@ Healthcheck (`infrastructure/healthcheck.mjs`):
 `down` preserves state: stopping/removing the containers leaves the bind-mounted
 `./data` and `./run` directories (identity, datastore, last runtime JSON) intact;
 Peer IDs survive `restart`, recreation, and image changes.
+
+#### 11.8 `kiyeovo-infra` CLI
+
+`infrastructure/kiyeovo-infra` is a Bash operations front-end over the Compose
+stack. It collects configuration and delegates the whole service lifecycle to
+Docker Compose — it is not a second supervisor and holds no state of its own. This
+MVP handles **Fast mode only**; Anonymous mode and coturn/TURN arrive in later
+phases.
+
+Commands:
+- `init` — interactive wizard (or `--non-interactive` with `--public-address`,
+  `--bootstrap-port`, `--relay-port`, `--force`). Builds the announce multiaddrs
+  (`/ip4/...` for an IPv4, `/dns4/...` for a DNS name), writes `infrastructure/.env`
+  (the only generated config; `compose.yaml` is static and env-driven), and creates
+  the `data/` + `run/` bind-mount roots. Permissions are set explicitly (not left to
+  the shell umask): `.env` is `0600`; `run/` is `0755` so the host CLI can read the
+  runtime JSON after the container chowns its contents to its own uid; `data/` is
+  `0700` since it holds the identity private key + datastore that only the
+  in-container service user needs. Ports are validated to `1..65535` and must differ.
+- `firewall` — prints the inbound TCP rules to open and, if it detects
+  `ufw`/`firewalld`/`iptables`, the matching commands. It makes **no** changes.
+- `up` / `down` / `restart` — thin wrappers over `docker compose`. `up` reminds the
+  operator to `systemctl enable docker` for reboot survival; `down` never passes
+  `-v` and the data lives in bind mounts, so identity + datastore are preserved.
+- `status` — per-service state, health, restart policy, and restart count (via
+  `docker inspect`).
+- `logs [service]` — delegates to `docker compose logs`.
+- `addresses` — reads the runtime JSON from `run/<role>/` and prints the full
+  `/p2p/<peerId>` multiaddrs to paste into Kiyeovo's Setup pages. It trusts the JSON
+  only for a running + healthy container; if the service is unhealthy/stopped but a
+  file remains (e.g. after a crash that skipped graceful cleanup), the address is
+  shown labelled as stale "last known", not as current. Accepts
+  `--show-turn-credential` for forward compatibility (no TURN until a later phase).
 
 ---
 

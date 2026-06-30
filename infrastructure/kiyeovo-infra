@@ -1,0 +1,395 @@
+#!/usr/bin/env bash
+#
+# kiyeovo-infra — thin operations front-end for the Kiyeovo Fast-mode
+# bootstrap + relay stack. It collects configuration and delegates the whole
+# service lifecycle to Docker Compose; it is NOT a second supervisor.
+#
+# Commands:
+#   init        configure the deployment (writes .env, creates data/run dirs)
+#   firewall    print the firewall rules you need to open (makes no changes)
+#   up          start the stack (docker compose up -d)
+#   down        stop the stack (preserves identity + datastore)
+#   restart     restart services
+#   status      service state, health, and restart policy
+#   logs        follow/show service logs
+#   addresses   print the bootstrap/relay multiaddrs to paste into Kiyeovo
+#
+# This MVP handles Fast mode only; Anonymous mode and coturn/TURN arrive in
+# later phases.
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+COMPOSE_FILE="$SCRIPT_DIR/compose.yaml"
+ENV_FILE="$SCRIPT_DIR/.env"
+PROJECT_DIR="$SCRIPT_DIR"
+
+DEFAULT_BOOTSTRAP_PORT=9000
+DEFAULT_RELAY_PORT=4002
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+
+err()  { printf 'kiyeovo-infra: %s\n' "$*" >&2; }
+die()  { err "$*"; exit 1; }
+info() { printf '%s\n' "$*"; }
+
+compose() {
+  docker compose --project-directory "$PROJECT_DIR" -f "$COMPOSE_FILE" "$@"
+}
+
+require_docker() {
+  command -v docker >/dev/null 2>&1 || die "docker not found in PATH"
+  docker compose version >/dev/null 2>&1 || die "the 'docker compose' plugin is not available"
+}
+
+require_init() {
+  [ -f "$ENV_FILE" ] || die "no configuration found — run '$(basename "$0") init' first"
+}
+
+validate_port() {
+  local name="$1" port="$2"
+  case "$port" in
+    *[!0-9]*|'') die "init: invalid $name port '$port' (must be a number)" ;;
+  esac
+  { [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; } \
+    || die "init: $name port '$port' out of range (1-65535)"
+}
+
+is_ipv4() {
+  case "$1" in
+    *[!0-9.]*) return 1 ;;
+  esac
+  local IFS=. ; set -- $1
+  [ "$#" -eq 4 ] || return 1
+  for octet in "$@"; do
+    [ -n "$octet" ] || return 1
+    [ "$octet" -le 255 ] 2>/dev/null || return 1
+  done
+  return 0
+}
+
+# Build a libp2p announce multiaddr from a host (IPv4 or DNS name) and a port.
+build_multiaddr() {
+  local host="$1" port="$2"
+  if is_ipv4 "$host"; then
+    printf '/ip4/%s/tcp/%s' "$host" "$port"
+  else
+    printf '/dns4/%s/tcp/%s' "$host" "$port"
+  fi
+}
+
+# Read a single KEY=value from .env (last wins); prints nothing if absent.
+# The trailing `|| true` keeps a no-match grep from tripping `set -o pipefail`
+# (these keys are optional and fall back to defaults in port_of).
+env_get() {
+  [ -f "$ENV_FILE" ] || return 0
+  grep -E "^$1=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- || true
+}
+
+port_of() {
+  local key="$1" fallback="$2" value
+  value="$(env_get "$key")"
+  printf '%s' "${value:-$fallback}"
+}
+
+# Container id for a compose service (including stopped/exited), or empty if the
+# container does not exist (e.g. after `down`). `-a` so a crashed/exited service
+# is still seen by `status` and `addresses` rather than looking "not created".
+service_cid() { compose ps -aq "$1" 2>/dev/null; }
+
+# Extract the clientAddrs array entries from a runtime-metadata JSON file.
+extract_client_addrs() {
+  local file="$1"
+  [ -f "$file" ] || return 1
+  awk '
+    /"clientAddrs"[[:space:]]*:[[:space:]]*\[/ { capture=1; next }
+    capture && /\]/ { capture=0 }
+    capture {
+      gsub(/[",]/, "")
+      gsub(/^[[:space:]]+/, "")
+      gsub(/[[:space:]]+$/, "")
+      if (length($0)) print
+    }
+  ' "$file"
+}
+
+# ---------------------------------------------------------------------------
+# init
+# ---------------------------------------------------------------------------
+
+usage_init() {
+  cat <<'EOF'
+Usage: kiyeovo-infra init [options]
+
+Configure a Fast-mode deployment. Interactive by default.
+
+Options:
+  --public-address <ip|dns>   public IPv4 or DNS name clients will dial
+  --bootstrap-port <port>     bootstrap TCP port (default 9000)
+  --relay-port <port>         relay TCP port (default 4002)
+  --non-interactive           do not prompt; requires --public-address
+  --force                     overwrite an existing .env without confirming
+  -h, --help                  show this help
+EOF
+}
+
+cmd_init() {
+  local public_address="" bootstrap_port="" relay_port=""
+  local interactive=1 force=0
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --public-address) public_address="${2:-}"; shift 2 ;;
+      --bootstrap-port) bootstrap_port="${2:-}"; shift 2 ;;
+      --relay-port)     relay_port="${2:-}"; shift 2 ;;
+      --non-interactive) interactive=0; shift ;;
+      --force) force=1; shift ;;
+      -h|--help) usage_init; return 0 ;;
+      *) die "init: unknown option '$1' (see 'init --help')" ;;
+    esac
+  done
+
+  if [ "$interactive" -eq 1 ]; then
+    if [ -z "$public_address" ]; then
+      printf 'Public IPv4 or DNS name clients will use to reach this server: '
+      read -r public_address
+    fi
+    if [ -z "$bootstrap_port" ]; then
+      printf 'Bootstrap TCP port [%s]: ' "$DEFAULT_BOOTSTRAP_PORT"
+      read -r bootstrap_port
+    fi
+    if [ -z "$relay_port" ]; then
+      printf 'Relay TCP port [%s]: ' "$DEFAULT_RELAY_PORT"
+      read -r relay_port
+    fi
+  fi
+
+  bootstrap_port="${bootstrap_port:-$DEFAULT_BOOTSTRAP_PORT}"
+  relay_port="${relay_port:-$DEFAULT_RELAY_PORT}"
+
+  [ -n "$public_address" ] || die "init: a public address is required (use --public-address)"
+  validate_port bootstrap "$bootstrap_port"
+  validate_port relay "$relay_port"
+  [ "$bootstrap_port" != "$relay_port" ] || die "init: bootstrap and relay ports must differ"
+
+  if [ -f "$ENV_FILE" ] && [ "$force" -eq 0 ]; then
+    if [ "$interactive" -eq 1 ]; then
+      printf '%s already exists. Overwrite? [y/N]: ' "$ENV_FILE"
+      read -r reply
+      case "$reply" in y|Y|yes|YES) ;; *) die "init: aborted (existing config left unchanged)" ;; esac
+    else
+      die "init: $ENV_FILE exists (use --force to overwrite)"
+    fi
+  fi
+
+  local bootstrap_announce relay_announce
+  bootstrap_announce="$(build_multiaddr "$public_address" "$bootstrap_port")"
+  relay_announce="$(build_multiaddr "$public_address" "$relay_port")"
+
+  cat >"$ENV_FILE" <<EOF
+# Generated by kiyeovo-infra init. Public address: $public_address
+BOOTSTRAP_ANNOUNCE_ADDRS=$bootstrap_announce
+RELAY_ANNOUNCE_ADDRS=$relay_announce
+BOOTSTRAP_PORT=$bootstrap_port
+RELAY_PORT=$relay_port
+EOF
+  chmod 600 "$ENV_FILE"
+
+  # Bind-mount roots. Set perms explicitly so a restrictive shell umask (or an
+  # old dir created as 0700) can't change host readability:
+  #   run/  must stay host-readable (0755) — the container chowns its contents to
+  #         its own uid, and the host CLI still reads the runtime JSON there.
+  #   data/ is restricted (0700) — it holds the identity private key + datastore,
+  #         which only the in-container service user needs. The host operator
+  #         interacts via the CLI/container, not by reading these files.
+  mkdir -p "$PROJECT_DIR/data/bootstrap" "$PROJECT_DIR/data/relay" \
+           "$PROJECT_DIR/run/bootstrap" "$PROJECT_DIR/run/relay"
+  chmod 755 "$PROJECT_DIR/run" "$PROJECT_DIR/run/bootstrap" "$PROJECT_DIR/run/relay"
+  chmod 700 "$PROJECT_DIR/data" "$PROJECT_DIR/data/bootstrap" "$PROJECT_DIR/data/relay"
+
+  info "Wrote $ENV_FILE"
+  info "  bootstrap announce: $bootstrap_announce"
+  info "  relay announce:     $relay_announce"
+  info ""
+  info "Next:"
+  info "  1. $(basename "$0") firewall   # open the required ports"
+  info "  2. $(basename "$0") up          # start the stack"
+  info "  3. $(basename "$0") addresses   # copy into Kiyeovo's Setup pages"
+}
+
+# ---------------------------------------------------------------------------
+# firewall
+# ---------------------------------------------------------------------------
+
+cmd_firewall() {
+  require_init
+  local bport rport
+  bport="$(port_of BOOTSTRAP_PORT "$DEFAULT_BOOTSTRAP_PORT")"
+  rport="$(port_of RELAY_PORT "$DEFAULT_RELAY_PORT")"
+
+  info "Required inbound rules (this command makes NO changes):"
+  info "  - allow TCP $bport   (bootstrap)"
+  info "  - allow TCP $rport   (relay)"
+  info ""
+
+  if command -v ufw >/dev/null 2>&1; then
+    info "Detected ufw. Suggested:"
+    info "  sudo ufw allow $bport/tcp"
+    info "  sudo ufw allow $rport/tcp"
+  elif command -v firewall-cmd >/dev/null 2>&1; then
+    info "Detected firewalld. Suggested:"
+    info "  sudo firewall-cmd --permanent --add-port=$bport/tcp"
+    info "  sudo firewall-cmd --permanent --add-port=$rport/tcp"
+    info "  sudo firewall-cmd --reload"
+  elif command -v iptables >/dev/null 2>&1; then
+    info "Detected iptables. Suggested:"
+    info "  sudo iptables -A INPUT -p tcp --dport $bport -j ACCEPT"
+    info "  sudo iptables -A INPUT -p tcp --dport $rport -j ACCEPT"
+    info "  (persist with your distro's iptables-save mechanism)"
+  else
+    info "No supported firewall tool detected (ufw/firewalld/iptables)."
+    info "Open TCP $bport and TCP $rport however your host manages it."
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# lifecycle (delegated to Compose)
+# ---------------------------------------------------------------------------
+
+cmd_up() {
+  require_init
+  compose up -d "$@"
+  info ""
+  info "Stack started. For auto-restart across reboots, ensure Docker starts on boot:"
+  info "  sudo systemctl enable docker"
+  info "Run '$(basename "$0") status' to check health, then '$(basename "$0") addresses'."
+}
+
+cmd_down() {
+  require_init
+  # Never pass -v / --volumes: identity + datastore live in bind mounts and must
+  # survive `down`. Extra args are forwarded but the data directories are bind
+  # mounts, so they are not removed by Compose regardless.
+  compose down "$@"
+  info "Stopped. Identity and datastore under $PROJECT_DIR/data are preserved."
+}
+
+cmd_restart() {
+  require_init
+  compose restart "$@"
+}
+
+cmd_status() {
+  require_init
+  local svc cid
+  for svc in bootstrap relay; do
+    cid="$(service_cid "$svc")"
+    if [ -z "$cid" ]; then
+      printf '%-10s not created (run up)\n' "$svc:"
+      continue
+    fi
+    local state health policy restarts
+    state="$(docker inspect -f '{{.State.Status}}' "$cid" 2>/dev/null)"
+    health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}n/a{{end}}' "$cid" 2>/dev/null)"
+    policy="$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$cid" 2>/dev/null)"
+    restarts="$(docker inspect -f '{{.RestartCount}}' "$cid" 2>/dev/null)"
+    printf '%-10s state=%s health=%s restart=%s restarts=%s\n' \
+      "$svc:" "$state" "$health" "$policy" "$restarts"
+  done
+}
+
+cmd_logs() {
+  require_init
+  compose logs "$@"
+}
+
+# ---------------------------------------------------------------------------
+# addresses
+# ---------------------------------------------------------------------------
+
+cmd_addresses() {
+  require_init
+  # --show-turn-credential is accepted for forward compatibility; TURN/coturn is
+  # configured in a later phase, so there is no credential to show yet.
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --show-turn-credential) shift ;;
+      *) die "addresses: unknown option '$1'" ;;
+    esac
+  done
+
+  local svc file addrs cid health printed=0
+  for svc in bootstrap relay; do
+    file="$PROJECT_DIR/run/$svc/$svc.runtime.json"
+
+    # Only trust the runtime JSON for a currently running + healthy container.
+    cid="$(service_cid "$svc")"
+    health="not running"
+    if [ -n "$cid" ]; then
+      health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$cid" 2>/dev/null || echo unknown)"
+    fi
+
+    printf '%s:\n' "$svc"
+    if ! addrs="$(extract_client_addrs "$file")" || [ -z "$addrs" ]; then
+      printf '  (not available — service not running or still starting)\n'
+    elif [ "$health" = "healthy" ]; then
+      printf '  %s\n' $addrs
+      printed=1
+    else
+      # File exists but the service is not healthy: the address may be stale
+      # (e.g. after a crash that skipped graceful cleanup). Say so explicitly.
+      printf '  (stale — service is %s; last known address:)\n' "$health"
+      printf '    %s\n' $addrs
+    fi
+  done
+
+  if [ "$printed" -eq 1 ]; then
+    info ""
+    info "Paste the addresses above into Kiyeovo's Bootstrap and Relay Setup pages."
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# dispatch
+# ---------------------------------------------------------------------------
+
+usage() {
+  cat <<'EOF'
+kiyeovo-infra — manage the Kiyeovo Fast-mode bootstrap + relay stack
+
+Usage: kiyeovo-infra <command> [options]
+
+Commands:
+  init        configure the deployment (writes .env, creates data/run dirs)
+  firewall    print the firewall rules you need to open (makes no changes)
+  up          start the stack
+  down        stop the stack (preserves identity + datastore)
+  restart     restart services
+  status      service state, health, and restart policy
+  logs        follow/show service logs (optionally for one service)
+  addresses   print the bootstrap/relay multiaddrs to paste into Kiyeovo
+
+Run 'kiyeovo-infra init --help' for init options.
+EOF
+}
+
+main() {
+  [ "$#" -ge 1 ] || { usage; exit 1; }
+  local command="$1"; shift
+  case "$command" in
+    init)               require_docker; cmd_init "$@" ;;
+    firewall)           cmd_firewall "$@" ;;
+    up)                 require_docker; cmd_up "$@" ;;
+    down)               require_docker; cmd_down "$@" ;;
+    restart)            require_docker; cmd_restart "$@" ;;
+    status)             require_docker; cmd_status "$@" ;;
+    logs)               require_docker; cmd_logs "$@" ;;
+    addresses)          require_docker; cmd_addresses "$@" ;;
+    -h|--help|help)     usage ;;
+    *)                  err "unknown command '$command'"; usage; exit 1 ;;
+  esac
+}
+
+main "$@"
