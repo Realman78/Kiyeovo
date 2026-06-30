@@ -1,0 +1,14 @@
+# Tor configuration for the Kiyeovo anonymous bootstrap onion service.
+#
+# Only an inbound hidden service is needed: the bootstrap node is a rendezvous
+# point that peers connect TO; it does not dial out, so the SOCKS proxy is off.
+
+DataDirectory /var/lib/tor
+SocksPort 0
+
+# Publish a v3 onion whose virtual port 9000 forwards to the bootstrap
+# container's listener (0.0.0.0:9001) over the private Compose network.
+HiddenServiceDir /var/lib/tor/kiyeovo-bootstrap
+HiddenServicePort 9000 bootstrap:9001
+
+Log notice stdout

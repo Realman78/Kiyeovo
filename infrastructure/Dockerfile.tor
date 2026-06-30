@@ -1,0 +1,29 @@
+# syntax=docker/dockerfile:1
+
+# Kiyeovo Tor image — provides the anonymous bootstrap's v3 onion service.
+# Single-stage: a digest-pinned Debian base plus tor from the Debian repos
+# (deliberately not the experimental upstream onion images). gosu lets the
+# entrypoint drop from root to the tor user after fixing the persistent data
+# dir's ownership.
+#
+# Tor version policy (deliberate): the Debian base is digest-pinned, but the
+# `tor` package is NOT pinned to an exact version — we take Debian's bookworm +
+# bookworm-security updates so Tor stays security-patched, accepting slightly
+# less build-for-build reproducibility. To pin exactly instead, replace `tor`
+# below with `tor=<version>` and revisit when Debian supersedes that version.
+# `tor --version` is printed at build time to record what was installed.
+
+ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df
+
+FROM --platform=linux/amd64 ${DEBIAN_IMAGE} AS runtime
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tor gosu ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && tor --version
+
+COPY infrastructure/tor/torrc /etc/tor/torrc
+COPY infrastructure/tor/docker-tor-entrypoint.sh /usr/local/bin/docker-tor-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-tor-entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/docker-tor-entrypoint.sh"]

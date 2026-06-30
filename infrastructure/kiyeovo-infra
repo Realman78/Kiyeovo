@@ -14,15 +14,18 @@
 #   logs        follow/show service logs
 #   addresses   print the bootstrap/relay multiaddrs to paste into Kiyeovo
 #
-# This MVP handles Fast mode only; Anonymous mode and coturn/TURN arrive in
-# later phases.
+# Handles Fast mode (bootstrap + relay) and Anonymous mode (Tor onion
+# bootstrap). coturn/TURN arrives in a later phase.
 
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-COMPOSE_FILE="$SCRIPT_DIR/compose.yaml"
+COMPOSE_FAST_FILE="$SCRIPT_DIR/compose.yaml"
+COMPOSE_ANON_FILE="$SCRIPT_DIR/compose.anonymous.yaml"
 ENV_FILE="$SCRIPT_DIR/.env"
 PROJECT_DIR="$SCRIPT_DIR"
+# Must match `name:` in both compose files.
+PROJECT_NAME="kiyeovo-infra"
 
 DEFAULT_BOOTSTRAP_PORT=9000
 DEFAULT_RELAY_PORT=4002
@@ -35,8 +38,38 @@ err()  { printf 'kiyeovo-infra: %s\n' "$*" >&2; }
 die()  { err "$*"; exit 1; }
 info() { printf '%s\n' "$*"; }
 
+# Configured mode (fast|anonymous), read from .env; defaults to fast.
+current_mode() {
+  local mode
+  mode="$(env_get KIYEOVO_MODE)"
+  printf '%s' "${mode:-fast}"
+}
+
+compose_file() {
+  case "$(current_mode)" in
+    anonymous) printf '%s' "$COMPOSE_ANON_FILE" ;;
+    *)         printf '%s' "$COMPOSE_FAST_FILE" ;;
+  esac
+}
+
 compose() {
-  docker compose --project-directory "$PROJECT_DIR" -f "$COMPOSE_FILE" "$@"
+  docker compose --project-directory "$PROJECT_DIR" -f "$(compose_file)" "$@"
+}
+
+# Services that exist in the current mode.
+services_for_mode() {
+  case "$(current_mode)" in
+    anonymous) printf '%s' "tor bootstrap" ;;
+    *)         printf '%s' "bootstrap relay" ;;
+  esac
+}
+
+# Services that publish a runtime-metadata file (i.e. have addresses).
+address_services_for_mode() {
+  case "$(current_mode)" in
+    anonymous) printf '%s' "bootstrap" ;;
+    *)         printf '%s' "bootstrap relay" ;;
+  esac
 }
 
 require_docker() {
@@ -123,34 +156,109 @@ usage_init() {
   cat <<'EOF'
 Usage: kiyeovo-infra init [options]
 
-Configure a Fast-mode deployment. Interactive by default.
+Configure a deployment. Interactive by default.
 
-Options:
-  --public-address <ip|dns>   public IPv4 or DNS name clients will dial
-  --bootstrap-port <port>     bootstrap TCP port (default 9000)
-  --relay-port <port>         relay TCP port (default 4002)
-  --non-interactive           do not prompt; requires --public-address
+Common options:
+  --mode <fast|anonymous>     deployment mode (default: prompt, else fast)
+  --non-interactive           do not prompt
   --force                     overwrite an existing .env without confirming
   -h, --help                  show this help
+
+Fast mode options:
+  --public-address <ip|dns>   public IPv4 or DNS name clients will dial (required)
+  --bootstrap-port <port>     bootstrap TCP port (default 9000)
+  --relay-port <port>         relay TCP port (default 4002)
+
+Anonymous mode needs no address or ports — the .onion is generated for you.
 EOF
 }
 
+# Create + permission the bind-mount roots for the given data subdirs. run/ stays
+# host-readable (0755) so the CLI can read the runtime JSON; data/ is restricted
+# (0700) since it holds identity keys + datastore only the container needs. A
+# `bootstrap` or `relay` subdir also gets a matching run/ dir for its runtime JSON.
+init_make_dirs() {
+  local sub
+  mkdir -p "$PROJECT_DIR/data" "$PROJECT_DIR/run"
+  # chmods are best-effort: on re-init a dir may already be owned by a container
+  # uid (from a prior `up`), which the host user can't chmod — but its perms were
+  # already set correctly when it was first created, so failing here is benign.
+  chmod 700 "$PROJECT_DIR/data" 2>/dev/null || true
+  chmod 755 "$PROJECT_DIR/run" 2>/dev/null || true
+  for sub in "$@"; do
+    mkdir -p "$PROJECT_DIR/data/$sub"
+    chmod 700 "$PROJECT_DIR/data/$sub" 2>/dev/null || true
+    case "$sub" in
+      bootstrap|relay)
+        mkdir -p "$PROJECT_DIR/run/$sub"
+        chmod 755 "$PROJECT_DIR/run/$sub" 2>/dev/null || true
+        ;;
+    esac
+  done
+}
+
 cmd_init() {
-  local public_address="" bootstrap_port="" relay_port=""
+  local mode="" public_address="" bootstrap_port="" relay_port=""
   local interactive=1 force=0
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --public-address) public_address="${2:-}"; shift 2 ;;
-      --bootstrap-port) bootstrap_port="${2:-}"; shift 2 ;;
-      --relay-port)     relay_port="${2:-}"; shift 2 ;;
+      --mode)            mode="${2:-}"; shift 2 ;;
+      --public-address)  public_address="${2:-}"; shift 2 ;;
+      --bootstrap-port)  bootstrap_port="${2:-}"; shift 2 ;;
+      --relay-port)      relay_port="${2:-}"; shift 2 ;;
       --non-interactive) interactive=0; shift ;;
-      --force) force=1; shift ;;
-      -h|--help) usage_init; return 0 ;;
+      --force)           force=1; shift ;;
+      -h|--help)         usage_init; return 0 ;;
       *) die "init: unknown option '$1' (see 'init --help')" ;;
     esac
   done
 
+  if [ -z "$mode" ] && [ "$interactive" -eq 1 ]; then
+    printf 'Deployment mode [fast/anonymous] (default fast): '
+    read -r mode
+  fi
+  mode="${mode:-fast}"
+  case "$mode" in
+    fast|anonymous) ;;
+    *) die "init: invalid mode '$mode' (expected 'fast' or 'anonymous')" ;;
+  esac
+
+  # Overwrite guard (shared across modes).
+  if [ -f "$ENV_FILE" ] && [ "$force" -eq 0 ]; then
+    if [ "$interactive" -eq 1 ]; then
+      printf '%s already exists. Overwrite? [y/N]: ' "$ENV_FILE"
+      read -r reply
+      case "$reply" in y|Y|yes|YES) ;; *) die "init: aborted (existing config left unchanged)" ;; esac
+    else
+      die "init: $ENV_FILE exists (use --force to overwrite)"
+    fi
+  fi
+
+  if [ "$mode" = "anonymous" ]; then
+    cat >"$ENV_FILE" <<'EOF'
+# Generated by kiyeovo-infra init. Mode: anonymous
+KIYEOVO_MODE=anonymous
+EOF
+    chmod 600 "$ENV_FILE"
+    init_make_dirs tor bootstrap
+    # Shared, CLI-managed location for the public onion hostname. 0777 so both
+    # the Tor (debian-tor) and bootstrap (kiyeovo) containers can use it; it
+    # holds only the public .onion address, never a secret. `up` clears the
+    # hostname here before starting so a stale onion is never read.
+    mkdir -p "$PROJECT_DIR/run/onion"
+    chmod 777 "$PROJECT_DIR/run/onion" 2>/dev/null || true
+
+    info "Wrote $ENV_FILE (anonymous mode)"
+    info "The .onion address is generated on first 'up'; no public IP/ports needed."
+    info ""
+    info "Next:"
+    info "  1. $(basename "$0") up          # start Tor + bootstrap"
+    info "  2. $(basename "$0") addresses   # copy the onion address into Kiyeovo"
+    return 0
+  fi
+
+  # ----- fast mode -----
   if [ "$interactive" -eq 1 ]; then
     if [ -z "$public_address" ]; then
       printf 'Public IPv4 or DNS name clients will use to reach this server: '
@@ -174,40 +282,20 @@ cmd_init() {
   validate_port relay "$relay_port"
   [ "$bootstrap_port" != "$relay_port" ] || die "init: bootstrap and relay ports must differ"
 
-  if [ -f "$ENV_FILE" ] && [ "$force" -eq 0 ]; then
-    if [ "$interactive" -eq 1 ]; then
-      printf '%s already exists. Overwrite? [y/N]: ' "$ENV_FILE"
-      read -r reply
-      case "$reply" in y|Y|yes|YES) ;; *) die "init: aborted (existing config left unchanged)" ;; esac
-    else
-      die "init: $ENV_FILE exists (use --force to overwrite)"
-    fi
-  fi
-
   local bootstrap_announce relay_announce
   bootstrap_announce="$(build_multiaddr "$public_address" "$bootstrap_port")"
   relay_announce="$(build_multiaddr "$public_address" "$relay_port")"
 
   cat >"$ENV_FILE" <<EOF
-# Generated by kiyeovo-infra init. Public address: $public_address
+# Generated by kiyeovo-infra init. Mode: fast. Public address: $public_address
+KIYEOVO_MODE=fast
 BOOTSTRAP_ANNOUNCE_ADDRS=$bootstrap_announce
 RELAY_ANNOUNCE_ADDRS=$relay_announce
 BOOTSTRAP_PORT=$bootstrap_port
 RELAY_PORT=$relay_port
 EOF
   chmod 600 "$ENV_FILE"
-
-  # Bind-mount roots. Set perms explicitly so a restrictive shell umask (or an
-  # old dir created as 0700) can't change host readability:
-  #   run/  must stay host-readable (0755) — the container chowns its contents to
-  #         its own uid, and the host CLI still reads the runtime JSON there.
-  #   data/ is restricted (0700) — it holds the identity private key + datastore,
-  #         which only the in-container service user needs. The host operator
-  #         interacts via the CLI/container, not by reading these files.
-  mkdir -p "$PROJECT_DIR/data/bootstrap" "$PROJECT_DIR/data/relay" \
-           "$PROJECT_DIR/run/bootstrap" "$PROJECT_DIR/run/relay"
-  chmod 755 "$PROJECT_DIR/run" "$PROJECT_DIR/run/bootstrap" "$PROJECT_DIR/run/relay"
-  chmod 700 "$PROJECT_DIR/data" "$PROJECT_DIR/data/bootstrap" "$PROJECT_DIR/data/relay"
+  init_make_dirs bootstrap relay
 
   info "Wrote $ENV_FILE"
   info "  bootstrap announce: $bootstrap_announce"
@@ -225,6 +313,14 @@ EOF
 
 cmd_firewall() {
   require_init
+
+  if [ "$(current_mode)" = "anonymous" ]; then
+    info "Anonymous mode needs NO inbound firewall rules."
+    info "Clients reach the bootstrap only through its Tor onion service, and the"
+    info "bootstrap port is not published on the host."
+    return 0
+  fi
+
   local bport rport
   bport="$(port_of BOOTSTRAP_PORT "$DEFAULT_BOOTSTRAP_PORT")"
   rport="$(port_of RELAY_PORT "$DEFAULT_RELAY_PORT")"
@@ -260,7 +356,14 @@ cmd_firewall() {
 
 cmd_up() {
   require_init
-  compose up -d "$@"
+  # In anonymous mode, clear the previously published onion hostname so the
+  # bootstrap can't read a stale one before Tor republishes from current keys.
+  if [ "$(current_mode)" = "anonymous" ]; then
+    rm -f "$PROJECT_DIR/run/onion/hostname" 2>/dev/null || true
+  fi
+  # --remove-orphans drops containers from a prior mode (e.g. a Fast relay left
+  # over after switching to anonymous) that would otherwise keep running.
+  compose up -d --remove-orphans "$@"
   info ""
   info "Stack started. For auto-restart across reboots, ensure Docker starts on boot:"
   info "  sudo systemctl enable docker"
@@ -270,9 +373,8 @@ cmd_up() {
 cmd_down() {
   require_init
   # Never pass -v / --volumes: identity + datastore live in bind mounts and must
-  # survive `down`. Extra args are forwarded but the data directories are bind
-  # mounts, so they are not removed by Compose regardless.
-  compose down "$@"
+  # survive `down`. --remove-orphans clears any container left from a prior mode.
+  compose down --remove-orphans "$@"
   info "Stopped. Identity and datastore under $PROJECT_DIR/data are preserved."
 }
 
@@ -284,7 +386,7 @@ cmd_restart() {
 cmd_status() {
   require_init
   local svc cid
-  for svc in bootstrap relay; do
+  for svc in $(services_for_mode); do
     cid="$(service_cid "$svc")"
     if [ -z "$cid" ]; then
       printf '%-10s not created (run up)\n' "$svc:"
@@ -297,6 +399,19 @@ cmd_status() {
     restarts="$(docker inspect -f '{{.RestartCount}}' "$cid" 2>/dev/null)"
     printf '%-10s state=%s health=%s restart=%s restarts=%s\n' \
       "$svc:" "$state" "$health" "$policy" "$restarts"
+  done
+
+  # Warn about containers from a different mode still present in this project
+  # (e.g. a Fast relay left over after switching to anonymous). `up`/`down`
+  # reconcile these via --remove-orphans.
+  local expected found
+  expected=" $(services_for_mode) "
+  for found in $(docker ps -a --filter "label=com.docker.compose.project=$PROJECT_NAME" \
+                   --format '{{.Label "com.docker.compose.service"}}' 2>/dev/null | sort -u); do
+    case "$expected" in
+      *" $found "*) ;;
+      *) err "warning: unexpected '$found' container present (not part of $(current_mode) mode); run 'up' or 'down' to reconcile" ;;
+    esac
   done
 }
 
@@ -320,8 +435,18 @@ cmd_addresses() {
     esac
   done
 
+  # In anonymous mode the onion is only reachable while Tor is running, even if
+  # the bootstrap itself is healthy — so gate the bootstrap address on Tor too.
+  local onion_blocked="" tor_cid tor_state
+  if [ "$(current_mode)" = "anonymous" ]; then
+    tor_cid="$(service_cid tor)"
+    tor_state="not running"
+    [ -n "$tor_cid" ] && tor_state="$(docker inspect -f '{{.State.Status}}' "$tor_cid" 2>/dev/null || echo unknown)"
+    [ "$tor_state" = "running" ] || onion_blocked="Tor is $tor_state, onion unreachable"
+  fi
+
   local svc file addrs cid health printed=0
-  for svc in bootstrap relay; do
+  for svc in $(address_services_for_mode); do
     file="$PROJECT_DIR/run/$svc/$svc.runtime.json"
 
     # Only trust the runtime JSON for a currently running + healthy container.
@@ -334,9 +459,12 @@ cmd_addresses() {
     printf '%s:\n' "$svc"
     if ! addrs="$(extract_client_addrs "$file")" || [ -z "$addrs" ]; then
       printf '  (not available — service not running or still starting)\n'
-    elif [ "$health" = "healthy" ]; then
+    elif [ "$health" = "healthy" ] && [ -z "$onion_blocked" ]; then
       printf '  %s\n' $addrs
       printed=1
+    elif [ "$health" = "healthy" ] && [ -n "$onion_blocked" ]; then
+      printf '  (stale — %s; last known address:)\n' "$onion_blocked"
+      printf '    %s\n' $addrs
     else
       # File exists but the service is not healthy: the address may be stale
       # (e.g. after a crash that skipped graceful cleanup). Say so explicitly.
@@ -347,7 +475,7 @@ cmd_addresses() {
 
   if [ "$printed" -eq 1 ]; then
     info ""
-    info "Paste the addresses above into Kiyeovo's Bootstrap and Relay Setup pages."
+    info "Paste the addresses above into Kiyeovo's Setup pages."
   fi
 }
 
@@ -357,7 +485,7 @@ cmd_addresses() {
 
 usage() {
   cat <<'EOF'
-kiyeovo-infra — manage the Kiyeovo Fast-mode bootstrap + relay stack
+kiyeovo-infra — manage the Kiyeovo bootstrap + relay stack (Fast / Anonymous)
 
 Usage: kiyeovo-infra <command> [options]
 

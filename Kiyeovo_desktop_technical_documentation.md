@@ -759,9 +759,11 @@ Peer IDs survive `restart`, recreation, and image changes.
 
 `infrastructure/kiyeovo-infra` is a Bash operations front-end over the Compose
 stack. It collects configuration and delegates the whole service lifecycle to
-Docker Compose — it is not a second supervisor and holds no state of its own. This
-MVP handles **Fast mode only**; Anonymous mode and coturn/TURN arrive in later
-phases.
+Docker Compose — it is not a second supervisor and holds no state of its own. It
+is mode-aware (Fast and Anonymous, picked from `KIYEOVO_MODE` in `.env`, see 11.9);
+coturn/TURN arrives in a later phase. `up`/`down` pass `--remove-orphans` so a
+container from a previous mode (e.g. a Fast relay after switching to anonymous)
+can't linger, and `status` warns if an unexpected project container is present.
 
 Commands:
 - `init` — interactive wizard (or `--non-interactive` with `--public-address`,
@@ -787,6 +789,52 @@ Commands:
   file remains (e.g. after a crash that skipped graceful cleanup), the address is
   shown labelled as stale "last known", not as current. Accepts
   `--show-turn-credential` for forward compatibility (no TURN until a later phase).
+
+#### 11.9 Anonymous mode (Tor onion bootstrap)
+
+Anonymous mode is structurally different from Fast mode: a Tor hidden-service
+container fronts a single bootstrap node. There is **no relay**, and nothing is
+published on the host — clients reach the bootstrap only via its `.onion`. It is a
+separate Compose file (`compose.anonymous.yaml`); the CLI selects it from
+`KIYEOVO_MODE=anonymous` in `.env`.
+
+Tor image (`infrastructure/Dockerfile.tor`):
+- Digest-pinned `debian:bookworm-slim` + `tor` from the Debian repos + `gosu`.
+  Version policy (deliberate): the base is digest-pinned but `tor` is **not**
+  hard-pinned — we take bookworm + bookworm-security updates so Tor stays patched,
+  at the cost of exact reproducibility. `tor --version` is printed at build time.
+- `torrc` runs an inbound hidden service only (`SocksPort 0`): the bootstrap is a
+  rendezvous point peers connect to, it does not dial out.
+  `HiddenServicePort 9000 bootstrap:9001` forwards the onion's virtual port 9000
+  to the bootstrap container's listener over the private network.
+- The entrypoint runs as root only to `chown`/`chmod 0700` the persistent
+  `HiddenServiceDir`, then drops to `debian-tor`. It traps `SIGTERM`/`SIGINT` and
+  forwards them to the backgrounded Tor process for a clean stop.
+
+Onion orchestration:
+- Onion keys persist in the bind-mounted `./data/tor` → the `.onion` survives
+  recreation.
+- The `.onion` hostname is public (it's the dial address). It is shared with the
+  bootstrap via a **CLI-managed bind mount** (`./run/onion`, `0777` — public data
+  only). `up` clears the published hostname before starting, so if `./data/tor` is
+  rotated, the bootstrap can never read a stale onion before Tor republishes from
+  the current keys. The secret keys never leave the `0700` `HiddenServiceDir`.
+- The bootstrap entrypoint waits for that hostname, strips `.onion`, validates 56
+  base32 chars, and derives `BOOTSTRAP_ANNOUNCE_ADDRS=/onion3/<host>:9000` before
+  starting. The bootstrap listens on `0.0.0.0:9001` (overriding the `127.0.0.1`
+  default — Tor is a separate container).
+
+Startup ordering: **tor `depends_on` bootstrap** (not the reverse). Tor needs the
+`bootstrap` name to resolve when it parses `HiddenServicePort` at startup; the
+bootstrap entrypoint only polls for the hostname file, so it does not need Tor's
+process first. This breaks the chicken-and-egg without relying on a crash-restart.
+
+The CLI is mode-aware: `init --mode anonymous` skips the public-IP/port questions
+(the onion is generated), `firewall` reports that no inbound rules are needed,
+`status` shows `tor` + `bootstrap` (no relay), and `addresses` prints the onion
+multiaddr **only while both the bootstrap is healthy and Tor is running** —
+otherwise it labels the onion as stale/last-known (an onion is unreachable without
+Tor even if the bootstrap is up).
 
 ---
 
