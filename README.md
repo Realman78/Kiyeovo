@@ -1,44 +1,51 @@
 # Kiyeovo
 
-> Beta notice: this is the beta version of Kiyeovo. Expect rough edges, missing polish, and behavior changes before the first full release.
+> Beta notice: this is the beta version of Kiyeovo. Expect rough edges, missing polish, and behavior changes before the first full release on 7th of July 2026
 > Tested on: Linux (Debian, Ubuntu, Lubuntu, EndeavourOS) and macOS.
 
-Kiyeovo is a decentralized peer-to-peer messenger.
+Kiyeovo is a decentralized peer-to-peer communication app. It supports many features you would find in modern messaging applications, yet still stays fully decentralized & respects your privacy. No e-mail or any KYC data needed.
 
-- realtime direct messages are end-to-end encrypted
-- messages can fall back to offline delivery when the other side is not online
-- `fast` mode is for normal day-to-day use: lower latency, relays, and 1:1 audio/video calling
-- `anonymous` mode is for Tor-routed messaging. Better anonymity, but slower and less convenient
-- group chats, encrypted file transfer, and trusted profile import/export
+- realtime end-to-end encrypted messages
+- messages securely peristed when the other side is not online
+- group chats
+- `fast` mode is for normal day-to-day use: lower latency, relays, audio/video calling
+- `anonymous` mode is for Tor-routed messaging. Better anonymity, but slower and no call support
+- encrypted file transfer
+- trusted profile import/export
+- identity backup
 - no central account or message server; you can use the default bootstrap/relay setup or self-host (see the [guide](#bootstrap-and-relay-setup))
 
 For technical readers, contributors, and coding agents, start with [Kiyeovo_desktop_technical_documentation.md](./Kiyeovo_desktop_technical_documentation.md). That is the source-of-truth architecture overview.
 
-
-<img width="1274" height="739" alt="image" src="https://github.com/user-attachments/assets/787f23da-9317-4e70-a44b-cdf504163e8f" />
+<img width="1532" height="832" alt="image" src="https://github.com/user-attachments/assets/e25008f2-3c78-4886-992f-0fb50a765944" />
 
 
 ## Beta status
 
-The purpose of this beta release is to gain feedback on the core app functionality and feel.
+The purpose of this beta release is to gain feedback on the core app functionality and feel. Keep in mind, this is a single-developer effort so I physically cannot test on every platform. If you find any issues, please report them - they will be solved ASAP.
 
-The full version will come with:
+At the time of updating this README document (30th of June), all of the expected "bigger" features have already been added since the beta release.
+Some of the most notable added features:
 
-- big UX improvements
-- group audio/video calls (fast mode)
-- screen sharing in calls *(Added 12th of May)*
-- performance improvements
-- security hardening *(Electron hardening added 11th of May)*
-- easier self-hosted infrastructure setup
-- local API interface for agents and external tools
-- emojis 🪐 *(Added 12th of April)*
-- Platform-specific installers
+- Screen sharing in calls
+- Group calls
+- Group file sharing
+- Offline file sharing
+- Electron security hardening
+- Huge UX improvements such as: home screen redesign, first-time user onboard, typical messaging features
+- etc.
 
-## Quick start
+What's left:
+
+- Self hosting infrastcture CLI tool - makes self hosting setup much easier *(coming 1st of July)*
+- Testing & polishing *(30th of June - 6th of July)*
+- Platform specific installers which will be available on kiyeovo.marindedic.com - final step *(coming 7th of July - relase)*
+
+## Quick start if you don't want to wait for the full release
 
 > The default public bootstrap/relay nodes are temporarily offline. To run the beta, see [Bootstrap and relay setup](#bootstrap-and-relay-setup) for self-hosting your own infrastructure.
 
-> There is also a tutorial [here](https://marindedic.com/blog/p2p-messenger/), but you can just follow the steps below
+> There is also an **outdated** tutorial [here](https://marindedic.com/p2p-messenger/) (will be updated on 1st of July), but you can just follow the steps below
 
 Requirements for running:
 
@@ -101,7 +108,7 @@ The output should start with something like `-rwsr-xr-x 1 root root`. You may ne
 
 If your machine is not low-end, consider increasing `IDENTITY_SCRYPT_N` and `PROFILE_SCRYPT_N` in [src/core/constants.ts](./src/core/constants.ts) for stronger protection against local brute-force password attacks, but at the cost of slower unlock/import.
 
-## Bootstrap and relay setup
+## Bootstrap and relay setup (will be updated on 1st of July when the CLI tool becomes ready)
 
 ### Fast mode
 
