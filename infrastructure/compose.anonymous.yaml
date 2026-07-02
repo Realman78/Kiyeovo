@@ -5,8 +5,8 @@
 # is published on the host — clients reach the bootstrap only via its .onion.
 #
 # The Tor container generates the onion and publishes its (public) hostname into
-# the shared `onion-hostname` volume; the bootstrap entrypoint waits for it and
-# derives its /onion3/<host>:9000 announce. The onion keys persist in the
+# the CLI-managed ./run/onion bind mount; the bootstrap entrypoint waits for it
+# and derives its /onion3/<host>:9000 announce. The onion keys persist in the
 # bind-mounted ./data/tor so the .onion address survives recreation.
 
 name: kiyeovo-infra
@@ -15,7 +15,9 @@ services:
   tor:
     image: ghcr.io/realman78/kiyeovo-tor:0.1.0
     build:
-      context: ..
+      # Absolute repo root injected by kiyeovo-infra (falls back to `..` for a raw
+      # `docker compose` run from infrastructure/).
+      context: ${KIYEOVO_BUILD_CONTEXT:-..}
       dockerfile: infrastructure/Dockerfile.tor
     platform: linux/amd64
     restart: unless-stopped
@@ -39,7 +41,9 @@ services:
   bootstrap:
     image: ghcr.io/realman78/kiyeovo-server:0.1.0
     build:
-      context: ..
+      # Absolute repo root injected by kiyeovo-infra (falls back to `..` for a raw
+      # `docker compose` run from infrastructure/).
+      context: ${KIYEOVO_BUILD_CONTEXT:-..}
       dockerfile: infrastructure/Dockerfile.server
     platform: linux/amd64
     command: ["bootstrap"]

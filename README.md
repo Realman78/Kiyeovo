@@ -118,15 +118,22 @@ Prerequisites: Docker Engine + the Compose plugin.
 ```bash
 cd infrastructure          # or unpack the released kiyeovo-infra-<version>.tar.gz
 
-./kiyeovo-infra init       # choose fast or anonymous; for fast you can add coturn
-./kiyeovo-infra firewall   # prints the ports to open (makes no changes)
-./kiyeovo-infra up         # start the stack
-./kiyeovo-infra status     # check health
-./kiyeovo-infra addresses  # copy the printed multiaddrs into Kiyeovo's Setup pages
+./kiyeovo-infra fast init       # Fast: bootstrap + relay; can also configure TURN
+./kiyeovo-infra fast firewall   # prints the ports to open (makes no changes)
+./kiyeovo-infra fast up         # start Fast mode
+./kiyeovo-infra fast status     # check health
+./kiyeovo-infra fast addresses  # copy the printed multiaddrs into Kiyeovo
 ```
 
 - **Fast mode** runs bootstrap + relay (and optional TURN); **anonymous mode**
   runs a Tor onion bootstrap (no relay, nothing published on the host).
+- To run anonymous mode too, use the same commands with `anonymous`, for example
+  `./kiyeovo-infra anonymous init`, `./kiyeovo-infra anonymous up`, and
+  `./kiyeovo-infra anonymous addresses`. Both modes can coexist on one host; the
+  CLI stores their state separately under `infrastructure/instances/fast/` and
+  `infrastructure/instances/anon/`.
+- If only one mode exists, the mode token may be omitted. Once both exist, name
+  the mode explicitly so the CLI never guesses which stack you meant.
 - For reboot survival: `sudo systemctl enable docker` (the containers use
   `restart: unless-stopped`).
 - Operators who do not want Docker can use the advanced manual path below; the

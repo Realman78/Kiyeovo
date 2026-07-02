@@ -37,7 +37,10 @@ relay-peer-id.bin
 # Server runtime metadata (public, regenerated each start)
 *.runtime.json
 
-# Local infra deployment data (identities, datastores, runtime output, secrets)
+# Local infra deployment data (identities, datastores, runtime output, secrets).
+# Per-mode instances live under infrastructure/instances/<slug>/ and hold .env,
+# peer-identity keys, datastores, Tor onion keys, and the TURN credential.
+infrastructure/instances
 infrastructure/.env
 infrastructure/data
 infrastructure/run

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# kiyeovo-infra — thin operations front-end for the Kiyeovo Fast-mode
-# bootstrap + relay stack. It collects configuration and delegates the whole
-# service lifecycle to Docker Compose; it is NOT a second supervisor.
+# kiyeovo-infra — thin operations front-end for Kiyeovo self-hosted
+# infrastructure. It collects configuration and delegates the whole service
+# lifecycle to Docker Compose; it is NOT a second supervisor.
 #
 # Commands:
-#   init        configure the deployment (writes .env, creates data/run dirs)
+#   init        configure one mode instance (writes .env, creates data/run dirs)
 #   firewall    print the firewall rules you need to open (makes no changes)
 #   up          start the stack (docker compose up -d)
 #   down        stop the stack (preserves identity + datastore)
@@ -22,10 +22,20 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 COMPOSE_FAST_FILE="$SCRIPT_DIR/compose.yaml"
 COMPOSE_ANON_FILE="$SCRIPT_DIR/compose.anonymous.yaml"
-ENV_FILE="$SCRIPT_DIR/.env"
-PROJECT_DIR="$SCRIPT_DIR"
-# Must match `name:` in both compose files.
-PROJECT_NAME="kiyeovo-infra"
+
+# Each mode is an independent instance under instances/<slug>/ (slug: fast|anon),
+# with its own .env, data/, run/, and secrets/. The Compose project name is
+# per-instance too, so the Fast and Anonymous stacks never reconcile against each
+# other (no cross-mode --remove-orphans / status drift).
+INSTANCES_ROOT="$SCRIPT_DIR/instances"
+PROJECT_NAME_PREFIX="kiyeovo-infra"
+
+# Absolute build context (repo root) so a re-rooted `--project-directory
+# instances/<slug>` can't misplace the Dockerfiles. The compose files read it via
+# `context: ${KIYEOVO_BUILD_CONTEXT:-..}`; the `..` default keeps a raw
+# `docker compose` run from infrastructure/ working.
+KIYEOVO_BUILD_CONTEXT="$(cd "$SCRIPT_DIR/.." && pwd)"
+export KIYEOVO_BUILD_CONTEXT
 
 DEFAULT_BOOTSTRAP_PORT=9000
 DEFAULT_RELAY_PORT=4002
@@ -33,12 +43,18 @@ DEFAULT_TURN_PORT=3478
 DEFAULT_TURN_MIN_PORT=49160
 DEFAULT_TURN_MAX_PORT=49200
 
-# Optional TURN credential lives only here (gitignored) — never in the image,
-# compose args, or .env. The conf is 0644 (coturn runs as an unprivileged user
-# and the file is bind-mounted into the container, so it must be world-readable)
-# inside the 0700 SECRETS_DIR, which keeps other local host users out.
-SECRETS_DIR="$SCRIPT_DIR/secrets"
-TURN_CONF="$SECRETS_DIR/turnserver.conf"
+# Per-instance paths, populated by set_instance_paths once the active mode is
+# resolved (positional token or the sole existing instance).
+ACTIVE_MODE=""
+PROJECT_DIR=""
+PROJECT_NAME=""
+ENV_FILE=""
+# Optional TURN credential lives only in TURN_CONF (gitignored) — never in the
+# image, compose args, or .env. The conf is 0644 (coturn runs as an unprivileged
+# user and the file is bind-mounted into the container, so it must be
+# world-readable) inside the 0700 SECRETS_DIR, which keeps other host users out.
+SECRETS_DIR=""
+TURN_CONF=""
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -48,11 +64,84 @@ err()  { printf 'kiyeovo-infra: %s\n' "$*" >&2; }
 die()  { err "$*"; exit 1; }
 info() { printf '%s\n' "$*"; }
 
-# Configured mode (fast|anonymous), read from .env; defaults to fast.
-current_mode() {
+# The active mode is selected by the dispatcher (positional token, or the sole
+# existing instance) and is authoritative — .env is validated against it, never
+# consulted to decide it.
+current_mode() { printf '%s' "$ACTIVE_MODE"; }
+
+# Canonical mode (fast|anonymous) -> filesystem/project slug (fast|anon).
+mode_slug() {
+  case "$1" in
+    anonymous) printf 'anon' ;;
+    *)         printf 'fast' ;;
+  esac
+}
+
+# Canonicalize a user-supplied mode token; non-zero exit if it is not one.
+canonical_mode() {
+  case "$1" in
+    fast)           printf 'fast' ;;
+    anonymous|anon) printf 'anonymous' ;;
+    *)              return 1 ;;
+  esac
+}
+
+# Point every per-instance path at the given mode's instance directory.
+set_instance_paths() {
+  local mode="$1" slug
+  slug="$(mode_slug "$mode")"
+  ACTIVE_MODE="$mode"
+  PROJECT_DIR="$INSTANCES_ROOT/$slug"
+  PROJECT_NAME="$PROJECT_NAME_PREFIX-$slug"
+  ENV_FILE="$PROJECT_DIR/.env"
+  SECRETS_DIR="$PROJECT_DIR/secrets"
+  TURN_CONF="$SECRETS_DIR/turnserver.conf"
+}
+
+# Canonical modes that already have an instance on disk (one per line). Always
+# succeeds: the trailing `return 0` keeps a final missing-instance test from
+# failing the function (and tripping `set -e` at the call site).
+discovered_modes() {
   local mode
-  mode="$(env_get KIYEOVO_MODE)"
-  printf '%s' "${mode:-fast}"
+  for mode in fast anonymous; do
+    [ -f "$INSTANCES_ROOT/$(mode_slug "$mode")/.env" ] && printf '%s\n' "$mode"
+  done
+  return 0
+}
+
+# Resolve which instance a command targets and set its paths. An explicit token
+# wins; otherwise default to the sole instance, else error (ambiguous or absent).
+resolve_active_mode() {
+  local explicit="$1" is_init="$2" command="$3"
+  if [ -n "$explicit" ]; then
+    set_instance_paths "$explicit"
+    return 0
+  fi
+  local modes; modes="$(discovered_modes)"
+  # shellcheck disable=SC2086
+  set -- $modes
+  if [ "$#" -eq 1 ]; then
+    set_instance_paths "$1"
+    return 0
+  fi
+  if [ "$#" -ge 2 ]; then
+    die "multiple modes configured ($*) — name one, e.g. '$(basename "$0") fast $command'"
+  fi
+  if [ "$is_init" -eq 1 ]; then
+    die "init: name a mode, e.g. '$(basename "$0") fast init' or '$(basename "$0") anonymous init'"
+  fi
+  die "no configuration found — run '$(basename "$0") <fast|anonymous> init' first"
+}
+
+# The dispatcher's selection is authoritative; a stored KIYEOVO_MODE that
+# disagrees (hand-edited, or a wrong-slug file) must abort rather than silently
+# run the other mode's logic.
+validate_env_mode() {
+  [ -f "$ENV_FILE" ] || return 0
+  local stored; stored="$(env_get KIYEOVO_MODE)"
+  stored="${stored:-fast}"
+  [ "$stored" = "$ACTIVE_MODE" ] || \
+    die "mode mismatch: selected '$ACTIVE_MODE' but $ENV_FILE has KIYEOVO_MODE=$stored (fix the file or select the matching mode)"
 }
 
 compose_file() {
@@ -69,9 +158,11 @@ turn_enabled() {
 
 compose() {
   if turn_enabled; then
-    docker compose --project-directory "$PROJECT_DIR" -f "$(compose_file)" --profile turn "$@"
+    docker compose -p "$PROJECT_NAME" --project-directory "$PROJECT_DIR" \
+      --env-file "$ENV_FILE" -f "$(compose_file)" --profile turn "$@"
   else
-    docker compose --project-directory "$PROJECT_DIR" -f "$(compose_file)" "$@"
+    docker compose -p "$PROJECT_NAME" --project-directory "$PROJECT_DIR" \
+      --env-file "$ENV_FILE" -f "$(compose_file)" "$@"
   fi
 }
 
@@ -100,7 +191,7 @@ require_docker() {
 }
 
 require_init() {
-  [ -f "$ENV_FILE" ] || die "no configuration found — run '$(basename "$0") init' first"
+  [ -f "$ENV_FILE" ] || die "no configuration for $ACTIVE_MODE mode — run '$(basename "$0") $ACTIVE_MODE init' first"
 }
 
 validate_port() {
@@ -152,7 +243,7 @@ port_of() {
 # Container id for a compose service (including stopped/exited), or empty if the
 # container does not exist (e.g. after `down`). `-a` so a crashed/exited service
 # is still seen by `status` and `addresses` rather than looking "not created".
-service_cid() { compose ps -aq "$1" 2>/dev/null; }
+service_cid() { compose ps -aq "$1" 2>/dev/null || true; }
 
 # Extract the clientAddrs array entries from a runtime-metadata JSON file.
 extract_client_addrs() {
@@ -176,14 +267,15 @@ extract_client_addrs() {
 
 usage_init() {
   cat <<'EOF'
-Usage: kiyeovo-infra init [options]
+Usage: kiyeovo-infra <fast|anonymous> init [options]
 
-Configure a deployment. Interactive by default.
+Configure a deployment for the given mode. Interactive by default. The mode is a
+positional token before 'init'; if exactly one instance already exists you may
+omit it to re-initialise that one.
 
 Common options:
-  --mode <fast|anonymous>     deployment mode (default: prompt, else fast)
   --non-interactive           do not prompt
-  --force                     overwrite an existing .env without confirming
+  --force                     overwrite an existing instance's .env without confirming
   -h, --help                  show this help
 
 Fast mode options:
@@ -268,13 +360,13 @@ turn_credential() {
 }
 
 cmd_init() {
-  local mode="" public_address="" bootstrap_port="" relay_port=""
+  local mode="$ACTIVE_MODE" public_address="" bootstrap_port="" relay_port=""
   local interactive=1 force=0
   local with_turn=0 no_turn=0 turn_user="" turn_password="" turn_external_ip=""
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --mode)             mode="${2:-}"; shift 2 ;;
+      --mode|--mode=*)    die "init: --mode is removed; use the positional form '$(basename "$0") <fast|anonymous> init'" ;;
       --public-address)   public_address="${2:-}"; shift 2 ;;
       --bootstrap-port)   bootstrap_port="${2:-}"; shift 2 ;;
       --relay-port)       relay_port="${2:-}"; shift 2 ;;
@@ -290,17 +382,9 @@ cmd_init() {
     esac
   done
 
-  if [ -z "$mode" ] && [ "$interactive" -eq 1 ]; then
-    printf 'Deployment mode [fast/anonymous] (default fast): '
-    read -r mode
-  fi
-  mode="${mode:-fast}"
-  case "$mode" in
-    fast|anonymous) ;;
-    *) die "init: invalid mode '$mode' (expected 'fast' or 'anonymous')" ;;
-  esac
+  # Mode comes from the positional token (resolved before dispatch); $mode is set.
 
-  # Overwrite guard (shared across modes).
+  # Overwrite guard (per instance).
   if [ -f "$ENV_FILE" ] && [ "$force" -eq 0 ]; then
     if [ "$interactive" -eq 1 ]; then
       printf '%s already exists. Overwrite? [y/N]: ' "$ENV_FILE"
@@ -310,6 +394,9 @@ cmd_init() {
       die "init: $ENV_FILE exists (use --force to overwrite)"
     fi
   fi
+
+  # The .env writes below target $PROJECT_DIR/.env, so the instance dir must exist.
+  mkdir -p "$PROJECT_DIR"
 
   if [ "$mode" = "anonymous" ]; then
     cat >"$ENV_FILE" <<'EOF'
@@ -329,8 +416,8 @@ EOF
     info "The .onion address is generated on first 'up'; no public IP/ports needed."
     info ""
     info "Next:"
-    info "  1. $(basename "$0") up          # start Tor + bootstrap"
-    info "  2. $(basename "$0") addresses   # copy the onion address into Kiyeovo"
+    info "  1. $(basename "$0") $mode up          # start Tor + bootstrap"
+    info "  2. $(basename "$0") $mode addresses   # copy the onion address into Kiyeovo"
     return 0
   fi
 
@@ -431,9 +518,9 @@ EOF
 
   info ""
   info "Next:"
-  info "  1. $(basename "$0") firewall   # open the required ports"
-  info "  2. $(basename "$0") up          # start the stack"
-  info "  3. $(basename "$0") addresses   # copy into Kiyeovo's Setup pages"
+  info "  1. $(basename "$0") $mode firewall   # open the required ports"
+  info "  2. $(basename "$0") $mode up          # start the stack"
+  info "  3. $(basename "$0") $mode addresses   # copy into Kiyeovo's Setup pages"
 }
 
 # ---------------------------------------------------------------------------
@@ -442,6 +529,8 @@ EOF
 
 cmd_firewall() {
   require_init
+  info "Mode: $(current_mode)"
+  info ""
 
   if [ "$(current_mode)" = "anonymous" ]; then
     info "Anonymous mode needs NO inbound firewall rules."
@@ -526,23 +615,23 @@ cmd_up() {
   if [ "$(current_mode)" = "anonymous" ]; then
     rm -f "$PROJECT_DIR/run/onion/hostname" 2>/dev/null || true
   fi
-  # --remove-orphans drops containers from a prior mode (e.g. a Fast relay left
-  # over after switching to anonymous) that would otherwise keep running.
+  # --remove-orphans only reconciles the selected mode because the Compose
+  # project name is per-instance (kiyeovo-infra-fast / kiyeovo-infra-anon).
   compose up -d --remove-orphans "$@"
   info ""
   info "Stack started. For auto-restart across reboots, ensure Docker starts on boot:"
   info "  sudo systemctl enable docker"
-  info "Run '$(basename "$0") status' to check health, then '$(basename "$0") addresses'."
+  info "Run '$(basename "$0") $(current_mode) status' to check health, then '$(basename "$0") $(current_mode) addresses'."
 }
 
 cmd_down() {
   require_init
   # Never pass -v / --volumes: identity + datastore live in bind mounts and must
-  # survive `down`. --remove-orphans clears any container left from a prior mode.
+  # survive `down`. --remove-orphans is scoped to the selected Compose project.
   # Always activate the `turn` profile so a coturn container is torn down too,
   # even if TURN was disabled on a re-init (compose ignores unknown profiles).
-  docker compose --project-directory "$PROJECT_DIR" -f "$(compose_file)" \
-    --profile turn down --remove-orphans "$@"
+  docker compose -p "$PROJECT_NAME" --project-directory "$PROJECT_DIR" \
+    --env-file "$ENV_FILE" -f "$(compose_file)" --profile turn down --remove-orphans "$@"
   info "Stopped. Identity and datastore under $PROJECT_DIR/data are preserved."
 }
 
@@ -553,6 +642,8 @@ cmd_restart() {
 
 cmd_status() {
   require_init
+  info "Mode: $(current_mode) (project: $PROJECT_NAME)"
+  info ""
   local svc cid
   for svc in $(services_for_mode); do
     cid="$(service_cid "$svc")"
@@ -569,9 +660,8 @@ cmd_status() {
       "$svc:" "$state" "$health" "$policy" "$restarts"
   done
 
-  # Warn about containers from a different mode still present in this project
-  # (e.g. a Fast relay left over after switching to anonymous). `up`/`down`
-  # reconcile these via --remove-orphans.
+  # Warn about unexpected services inside this selected mode's Compose project.
+  # Other modes use different project names and are intentionally ignored.
   local expected found
   expected=" $(services_for_mode) "
   for found in $(docker ps -a --filter "label=com.docker.compose.project=$PROJECT_NAME" \
@@ -594,8 +684,8 @@ cmd_logs() {
 
 cmd_addresses() {
   require_init
-  # --show-turn-credential is accepted for forward compatibility; TURN/coturn is
-  # configured in a later phase, so there is no credential to show yet.
+  # --show-turn-credential reveals the TURN password in the printed ICE entry;
+  # without it the credential is redacted (see the turn block below).
   local show_turn_cred=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -603,6 +693,9 @@ cmd_addresses() {
       *) die "addresses: unknown option '$1'" ;;
     esac
   done
+
+  info "Mode: $(current_mode) (project: $PROJECT_NAME)"
+  info ""
 
   # In anonymous mode the onion is only reachable while Tor is running, even if
   # the bootstrap itself is healthy — so gate the bootstrap address on Tor too.
@@ -682,10 +775,13 @@ usage() {
   cat <<'EOF'
 kiyeovo-infra — manage the Kiyeovo bootstrap + relay stack (Fast / Anonymous)
 
-Usage: kiyeovo-infra <command> [options]
+Usage: kiyeovo-infra [mode] <command> [options]
+
+[mode] is 'fast' or 'anonymous' (alias 'anon'). Omit it only when exactly one
+mode is configured; include it for first-time init and whenever both modes exist.
 
 Commands:
-  init        configure the deployment (writes .env, creates data/run dirs)
+  init        configure one mode instance (writes .env, creates data/run dirs)
   firewall    print the firewall rules you need to open (makes no changes)
   up          start the stack
   down        stop the stack (preserves identity + datastore)
@@ -695,24 +791,49 @@ Commands:
   addresses   print the bootstrap/relay multiaddrs to paste into Kiyeovo
               (--show-turn-credential also reveals the TURN password)
 
-Run 'kiyeovo-infra init --help' for init options.
+Run 'kiyeovo-infra <mode> init --help' for init options.
 EOF
 }
 
 main() {
   [ "$#" -ge 1 ] || { usage; exit 1; }
+
+  # Optional positional mode token before the command (e.g. `kiyeovo-infra fast up`).
+  local explicit_mode=""
+  if explicit_mode="$(canonical_mode "$1")"; then
+    shift
+  else
+    explicit_mode=""
+  fi
+
+  [ "$#" -ge 1 ] || { usage; exit 1; }
   local command="$1"; shift
+
+  if [ "$command" = "-h" ] || [ "$command" = "--help" ] || [ "$command" = "help" ]; then
+    usage; return 0
+  fi
+
+  local is_init=0
+  [ "$command" = "init" ] && is_init=1
+
+  # `init --help` must work without a configured instance to resolve against.
+  if [ "$is_init" -eq 1 ]; then
+    case " $* " in *" -h "*|*" --help "*) usage_init; return 0 ;; esac
+  fi
+
+  resolve_active_mode "$explicit_mode" "$is_init" "$command"
+  [ "$is_init" -eq 1 ] || validate_env_mode
+
   case "$command" in
-    init)               require_docker; cmd_init "$@" ;;
-    firewall)           cmd_firewall "$@" ;;
-    up)                 require_docker; cmd_up "$@" ;;
-    down)               require_docker; cmd_down "$@" ;;
-    restart)            require_docker; cmd_restart "$@" ;;
-    status)             require_docker; cmd_status "$@" ;;
-    logs)               require_docker; cmd_logs "$@" ;;
-    addresses)          require_docker; cmd_addresses "$@" ;;
-    -h|--help|help)     usage ;;
-    *)                  err "unknown command '$command'"; usage; exit 1 ;;
+    init)        require_docker; cmd_init "$@" ;;
+    firewall)    cmd_firewall "$@" ;;
+    up)          require_docker; cmd_up "$@" ;;
+    down)        require_docker; cmd_down "$@" ;;
+    restart)     require_docker; cmd_restart "$@" ;;
+    status)      require_docker; cmd_status "$@" ;;
+    logs)        require_docker; cmd_logs "$@" ;;
+    addresses)   require_docker; cmd_addresses "$@" ;;
+    *)           err "unknown command '$command'"; usage; exit 1 ;;
   esac
 }
 

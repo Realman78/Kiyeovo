@@ -31,7 +31,9 @@ kiyeovo-uploads
 .vscode
 .idea
 
-# Local infra test data + secrets (never send to the build daemon)
+# Local infra test data + secrets (never send to the build daemon). Per-mode
+# instances under infrastructure/instances/<slug>/ hold identities + credentials.
+infrastructure/instances
 infrastructure/.env
 infrastructure/data
 infrastructure/run

@@ -700,12 +700,12 @@ Server build target:
   (which applies the required `@libp2p/kad-dht` patch the servers depend on) is a
   runtime dependency so a production `npm ci --omit=dev` install still applies it.
 
-#### 11.7 Containerised deployment (Docker Compose, Fast mode)
+#### 11.7 Containerised deployment (Docker Compose)
 
 `infrastructure/` holds the Docker artefacts for self-hosting Fast bootstrap +
-relay. Docker Compose owns the service lifecycle (start/stop/restart/auto-restart);
-the `kiyeovo-infra` CLI (11.8) is a thin front-end over this, never a second
-supervisor.
+relay and Anonymous onion bootstrap stacks. Docker Compose owns the service
+lifecycle (start/stop/restart/auto-restart); the `kiyeovo-infra` CLI (11.8) is a
+thin front-end over this, never a second supervisor.
 
 Image (`infrastructure/Dockerfile.server`):
 - One `amd64` image, role (`bootstrap`|`relay`) selected by the entrypoint
@@ -733,19 +733,28 @@ Ownership boundary (`infrastructure/docker-entrypoint.sh`):
   stays root (so the entrypoint can chown), so the Compose healthcheck explicitly
   re-drops via `gosu kiyeovo:kiyeovo`.
 
-Compose (`infrastructure/compose.yaml`):
+Fast Compose (`infrastructure/compose.yaml`):
 - Two services from the one image, differing only by `command` (role) and env. Both
   set `KIYEOVO_DEPLOY_MODE=1`, so the fail-closed identity, fail-fast announce, and
   required runtime-metadata behaviours of 11.6 are active.
-- **Bind mounts** (not named volumes) under the deployment dir: `./data/<role>` →
-  `/data` (identity file + datastore) and `./run/<role>` → `/run/kiyeovo` (the
-  runtime JSON the CLI reads). Bind mounts keep state on the host across recreation
-  and image changes, and let the host-side CLI read the runtime metadata directly.
+- **Bind mounts** (not named volumes) under the selected instance dir:
+  `./data/<role>` → `/data` (identity file + datastore) and `./run/<role>` →
+  `/run/kiyeovo` (the runtime JSON the CLI reads). With `kiyeovo-infra`, those
+  relative paths resolve under `infrastructure/instances/fast/` for Fast mode and
+  `infrastructure/instances/anon/` for Anonymous mode. Bind mounts keep state on
+  the host across recreation and image changes, and let the host-side CLI read the
+  runtime metadata directly.
 - `restart: unless-stopped` (crash/boot auto-restart with `systemctl enable
   docker`), `json-file` log rotation (`max-size`/`max-file`), published ports
   `9000` (bootstrap) and `4002` (relay), and **no** Docker socket mounted.
 - Announce addresses are required (deploy mode); they come from
-  `infrastructure/.env` (`BOOTSTRAP_ANNOUNCE_ADDRS`, `RELAY_ANNOUNCE_ADDRS`).
+  `infrastructure/instances/fast/.env` (`BOOTSTRAP_ANNOUNCE_ADDRS`,
+  `RELAY_ANNOUNCE_ADDRS`) when managed by `kiyeovo-infra`.
+- The repo Compose files keep `build:` blocks for local/dev builds, but their
+  `build.context` is `${KIYEOVO_BUILD_CONTEXT:-..}`. The CLI exports an absolute
+  repo-root `KIYEOVO_BUILD_CONTEXT` because it re-roots Compose's
+  `--project-directory` to the per-mode instance dir. Release bundles strip
+  `build:` blocks and run published images only.
 
 Healthcheck (`infrastructure/healthcheck.mjs`):
 - "Healthy" = process running + the runtime JSON present and well-formed
@@ -755,72 +764,90 @@ Healthcheck (`infrastructure/healthcheck.mjs`):
   an unhealthy container).
 
 `down` preserves state: stopping/removing the containers leaves the bind-mounted
-`./data` and `./run` directories (identity, datastore, last runtime JSON) intact;
-Peer IDs survive `restart`, recreation, and image changes.
+instance `data/` and `run/` directories (identity, datastore, last runtime JSON)
+intact; Peer IDs survive `restart`, recreation, and image changes.
 
 #### 11.8 `kiyeovo-infra` CLI
 
 `infrastructure/kiyeovo-infra` is a Bash operations front-end over the Compose
 stack. It collects configuration and delegates the whole service lifecycle to
-Docker Compose — it is not a second supervisor and holds no state of its own. It
-is mode-aware (Fast and Anonymous, picked from `KIYEOVO_MODE` in `.env`, see 11.9)
-and can additionally run an optional coturn TURN server in Fast mode (see below).
-`up`/`down` pass `--remove-orphans` so a container from a previous mode (e.g. a
-Fast relay after switching to anonymous) can't linger, and `status` warns if an
-unexpected project container is present.
+Docker Compose — it is not a second supervisor. Fast and Anonymous mode are
+separate instances that can coexist on one host:
+
+```text
+infrastructure/instances/fast/   # Fast bootstrap + relay (+ optional TURN)
+infrastructure/instances/anon/   # Anonymous Tor onion bootstrap
+```
+
+The user-facing mode token is `fast` or `anonymous` (`anon` is accepted as an
+alias); the filesystem/project slug is `fast` or `anon`. The dispatcher-selected
+mode is authoritative. The instance `.env` is validated against that selection
+(`KIYEOVO_MODE=fast|anonymous`) but is not allowed to redirect a command to the
+other mode. Compose is invoked with a per-mode project name
+(`kiyeovo-infra-fast` / `kiyeovo-infra-anon`), per-mode `--project-directory`, and
+per-mode `--env-file`, so `--remove-orphans`, `down`, status drift checks, runtime
+JSON reads, peer IDs, onion keys, and TURN credentials are all scoped to one mode.
+If exactly one instance exists, the mode token may be omitted; once both exist,
+commands require the mode token so the CLI never guesses.
 
 Commands:
-- `init` — interactive wizard (or `--non-interactive` with `--public-address`,
-  `--bootstrap-port`, `--relay-port`, `--force`). Builds the announce multiaddrs
-  (`/ip4/...` for an IPv4, `/dns4/...` for a DNS name), writes `infrastructure/.env`
-  (the only generated config; `compose.yaml` is static and env-driven), and creates
-  the `data/` + `run/` bind-mount roots. Permissions are set explicitly (not left to
-  the shell umask): `.env` is `0600`; `run/` is `0755` so the host CLI can read the
-  runtime JSON after the container chowns its contents to its own uid; `data/` is
-  `0700` since it holds the identity private key + datastore that only the
-  in-container service user needs. Ports are validated to `1..65535` and must differ.
+- `<mode> init` — interactive wizard (or `--non-interactive` with
+  `--public-address`, `--bootstrap-port`, `--relay-port`, `--force`). Builds the
+  Fast announce multiaddrs (`/ip4/...` for an IPv4, `/dns4/...` for a DNS name),
+  writes `instances/<slug>/.env`, and creates that instance's `data/` + `run/`
+  bind-mount roots. Permissions are set explicitly (not left to the shell umask):
+  `.env` is `0600`; `run/` is `0755` so the host CLI can read runtime JSON after
+  the container chowns its contents to its own uid; `data/` is `0700` since it
+  holds the identity private key + datastore that only the in-container service
+  user needs. Ports are validated to `1..65535` and must differ. The old
+  `init --mode` flag is intentionally removed; the mode is positional.
 - `firewall` — prints the inbound rules to open and, if it detects
   `ufw`/`firewalld`/`iptables`, the matching commands. It makes **no** changes.
   Lists the bootstrap/relay TCP ports, plus (when TURN is enabled) `3478/tcp+udp`
-  and the UDP relay media range (`49160-49200/udp`).
+  and the UDP relay media range (`49160-49200/udp`). Anonymous mode reports that
+  no inbound rules are needed.
 - `up` / `down` / `restart` — thin wrappers over `docker compose`. `up` reminds the
-  operator to `systemctl enable docker` for reboot survival; `down` never passes
-  `-v` and the data lives in bind mounts, so identity + datastore are preserved.
+  operator to `systemctl enable docker` for reboot survival. `up`/`down` use
+  `--remove-orphans`, but the per-mode Compose project name means they only
+  reconcile the selected mode. `down` never passes `-v` and the data lives in bind
+  mounts, so identity + datastore are preserved.
 - `status` — per-service state, health, restart policy, and restart count (via
-  `docker inspect`).
+  `docker inspect`), labelled with the active mode/project.
 - `logs [service]` — delegates to `docker compose logs`.
-- `addresses` — reads the runtime JSON from `run/<role>/` and prints the full
-  `/p2p/<peerId>` multiaddrs to paste into Kiyeovo's Setup pages. It trusts the JSON
-  only for a running + healthy container; if the service is unhealthy/stopped but a
-  file remains (e.g. after a crash that skipped graceful cleanup), the address is
-  shown labelled as stale "last known", not as current. When TURN is enabled it also
-  prints the ICE `turn:` URL + username (credential redacted unless
-  `--show-turn-credential`), shown only while coturn is running.
+- `addresses` — reads runtime JSON from `instances/<slug>/run/<role>/` and prints
+  the full `/p2p/<peerId>` multiaddrs to paste into Kiyeovo's Setup pages. It
+  trusts the JSON only for a running + healthy container; if the service is
+  unhealthy/stopped but a file remains (e.g. after a crash that skipped graceful
+  cleanup), the address is shown labelled as stale "last known", not as current.
+  When TURN is enabled it also prints the ICE `turn:` URL + username (credential
+  redacted unless `--show-turn-credential`), shown only while coturn is running.
 
 #### 11.8.1 Optional TURN (coturn) for Fast-mode calls
 
-`init` (Fast mode) can additionally configure an optional coturn TURN server for
-calls. It is a Compose `turn` profile service that the CLI activates only when
-`KIYEOVO_TURN=1` in `.env`; it uses host networking because coturn's UDP relay
-media port range makes per-port Docker mapping impractical. coturn needs a numeric
-`external-ip` (it cannot derive one from a DNS name), so `init` defaults it to an
-IPv4 public address or otherwise requires `--turn-external-ip`. The credential is
-prompted for (`lt-cred-mech`, `realm=kiyeovo`) and written only to
-`infrastructure/secrets/turnserver.conf`, never to `.env`, env vars, the image, or
-Compose args. That file is `0644` inside the `0700` `infrastructure/secrets/`
-directory: coturn runs as an unprivileged user (`nobody`) and the file is
-bind-mounted straight into the container, so it must be world-readable, while the
-`0700` directory keeps other local host users from reading it. `down` always
-activates the `turn` profile so a coturn container is torn down even if TURN was
-later disabled.
+`fast init` can additionally configure an optional coturn TURN server for calls.
+It is a Compose `turn` profile service that the CLI activates only when
+`KIYEOVO_TURN=1` in the Fast instance `.env`; it uses host networking because
+coturn's UDP relay media port range makes per-port Docker mapping impractical.
+coturn needs a numeric `external-ip` (it cannot derive one from a DNS name), so
+`init` defaults it to an IPv4 public address or otherwise requires
+`--turn-external-ip`. The credential is prompted for (`lt-cred-mech`,
+`realm=kiyeovo`) and written only to
+`infrastructure/instances/fast/secrets/turnserver.conf`, never to `.env`, env
+vars, the image, or Compose args. That file is `0644` inside the `0700`
+`instances/fast/secrets/` directory: coturn runs as an unprivileged user
+(`nobody`) and the file is bind-mounted straight into the container, so it must be
+world-readable, while the `0700` directory keeps other local host users from
+reading it. `down` always activates the `turn` profile for the selected project so
+a coturn container is torn down even if TURN was later disabled.
 
 #### 11.9 Anonymous mode (Tor onion bootstrap)
 
 Anonymous mode is structurally different from Fast mode: a Tor hidden-service
 container fronts a single bootstrap node. There is **no relay**, and nothing is
 published on the host — clients reach the bootstrap only via its `.onion`. It is a
-separate Compose file (`compose.anonymous.yaml`); the CLI selects it from
-`KIYEOVO_MODE=anonymous` in `.env`.
+separate Compose file (`compose.anonymous.yaml`); the CLI selects it from the
+positional mode token (`anonymous`/`anon`) and validates
+`instances/anon/.env` contains `KIYEOVO_MODE=anonymous`.
 
 Tor image (`infrastructure/Dockerfile.tor`):
 - Digest-pinned `debian:bookworm-slim` + `tor` from the Debian repos + `gosu`.
@@ -853,12 +880,13 @@ Startup ordering: **tor `depends_on` bootstrap** (not the reverse). Tor needs th
 bootstrap entrypoint only polls for the hostname file, so it does not need Tor's
 process first. This breaks the chicken-and-egg without relying on a crash-restart.
 
-The CLI is mode-aware: `init --mode anonymous` skips the public-IP/port questions
-(the onion is generated), `firewall` reports that no inbound rules are needed,
+The CLI is mode-aware: `anonymous init` skips the public-IP/port questions (the
+onion is generated), `firewall` reports that no inbound rules are needed,
 `status` shows `tor` + `bootstrap` (no relay), and `addresses` prints the onion
 multiaddr **only while both the bootstrap is healthy and Tor is running** —
 otherwise it labels the onion as stale/last-known (an onion is unreachable without
-Tor even if the bootstrap is up).
+Tor even if the bootstrap is up). Anonymous and Fast stacks can run concurrently
+because their Compose project names and host state subtrees are distinct.
 
 ---
 
