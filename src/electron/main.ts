@@ -815,6 +815,7 @@ async function initializeApp() {
     const trustedIpcMain = createTrustedIpcMainHandle(ipcMain, () => mainWindow);
     const isDevelopment = isDev();
     const appEntryUrl = isDevelopment ? DEV_SERVER_URL : getPackagedAppEntryUrl();
+    const startupNetworkMode = readPersistedNetworkMode();
 
     // Setup minimal menu (keeps keyboard shortcuts working)
     setupMinimalMenu();
@@ -830,6 +831,7 @@ async function initializeApp() {
       appEntryUrl,
       isDevelopment,
       getMainWindow: () => mainWindow,
+      networkMode: startupNetworkMode,
       selectDisplayMediaSource: displayMediaPicker.selectDisplayMediaSource,
     });
 

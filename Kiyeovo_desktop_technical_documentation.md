@@ -620,6 +620,7 @@ Current behavior:
 - calls are fast-mode only and use WebRTC media in the renderer
 - the default ICE list in `src/core/network/default-infrastructure.ts` is currently empty
 - users can add runtime ICE overrides from Setup in fast mode
+- in anonymous mode, Electron applies `disable_non_proxied_udp` as a WebRTC IP-handling backstop so accidental peer connections fail closed instead of gathering real-IP candidates
 - supported entry types are `stun`, `turn`, and `turns`
 - TURN entries require username + credential
 - multiple ICE servers are supported and passed to `RTCPeerConnection` in configured order; the browser's ICE agent may gather and check candidates in parallel, so this is not a strict first-server-then-next retry order
