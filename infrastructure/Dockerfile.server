@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-# Kiyeovo server image (bootstrap + relay), amd64 only.
+# Kiyeovo infra-node image (bootstrap + relay), amd64 only.
 # One image; the role (bootstrap|relay) is selected by the entrypoint argument.
 #
 # Multi-stage:

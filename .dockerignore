@@ -1,4 +1,4 @@
-# Keep the server image build context small and free of host secrets/state.
+# Keep the infra-node image build context small and free of host secrets/state.
 # The Dockerfile only needs infrastructure/server.package.json + its lockfile,
 # patches/, tsconfig.server.json, src/, and the infrastructure/ entrypoint +
 # tor assets.

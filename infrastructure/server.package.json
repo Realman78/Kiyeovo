@@ -1,8 +1,8 @@
 {
-  "name": "kiyeovo-server",
+  "name": "kiyeovo-infra-node",
   "version": "0.1.0",
   "private": true,
-  "description": "Server-only dependency manifest for the Kiyeovo bootstrap/relay image. Generated from the root package — keep in sync (see infrastructure/scripts/check-server-deps.mjs).",
+  "description": "Infra-node dependency manifest for the Kiyeovo bootstrap/relay image. Generated from the root package — keep in sync (see infrastructure/scripts/check-server-deps.mjs).",
   "type": "module",
   "scripts": {
     "build:server": "tsc -p tsconfig.server.json"

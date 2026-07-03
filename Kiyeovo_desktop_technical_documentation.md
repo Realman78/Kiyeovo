@@ -711,7 +711,7 @@ Image (`infrastructure/Dockerfile.server`):
 - One `amd64` image, role (`bootstrap`|`relay`) selected by the entrypoint
   argument. Base is `node:22-bookworm-slim` pinned by digest (glibc, so
   `classic-level`'s bundled `linux-x64` prebuild loads without a toolchain).
-- **Server-only dependency boundary.** The image installs from a dedicated
+- **Infra-node dependency boundary.** The image installs from a dedicated
   manifest (`infrastructure/server.package.json` + `server.package-lock.json`),
   **not** the root package — so it carries only the bootstrap/relay runtime graph
   (16 deps + transitives), never the desktop/UI deps (React, Redux, Radix,

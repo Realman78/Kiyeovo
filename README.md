@@ -103,42 +103,89 @@ If your machine is not low-end, consider increasing `IDENTITY_SCRYPT_N` and `PRO
 
 ## Bootstrap and relay setup
 
-The recommended way to self-host is the **`kiyeovo-infra` CLI** in
-`infrastructure/`. It runs the bootstrap, relay, optional Tor onion (anonymous
-mode), and optional coturn TURN server as pinned Docker containers, owns their
-lifecycle (start/stop/restart/auto-restart) through Docker Compose, and prints the
-exact addresses to paste into Kiyeovo's Setup pages. You do not need to clone the
-repo or install Node — a released bundle ships the CLI + compose files + systemd
-templates and pulls the published images.
+The recommended way to self-host is the **released `kiyeovo-infra` bundle**. It
+runs the bootstrap, relay, optional Tor onion (anonymous mode), and optional
+coturn TURN server as pinned Docker containers, owns their lifecycle
+(start/stop/restart/auto-restart) through Docker Compose, and prints the exact
+addresses to paste into Kiyeovo's Setup pages.
 
-### Recommended: `kiyeovo-infra` (Docker)
+Most users should not clone this repository or build Kiyeovo from source just to
+self-host. The desktop app will be distributed separately (for Linux, as an
+AppImage), and the infrastructure bundle pulls versioned public images from
+GHCR.
+
+### Recommended: release bundle (Docker)
 
 Prerequisites: Docker Engine + the Compose plugin.
 
+Download the `kiyeovo-infra-<version>.tar.gz` asset from the Kiyeovo GitHub
+release, then:
+
 ```bash
-cd infrastructure          # or unpack the released kiyeovo-infra-<version>.tar.gz
+tar -xzf kiyeovo-infra-0.1.0.tar.gz
+cd kiyeovo-infra-0.1.0
 
 ./kiyeovo-infra fast init       # Fast: bootstrap + relay; can also configure TURN
 ./kiyeovo-infra fast firewall   # prints the ports to open (makes no changes)
-./kiyeovo-infra fast up         # start Fast mode
+./kiyeovo-infra fast up         # pulls public GHCR images and starts Fast mode
 ./kiyeovo-infra fast status     # check health
 ./kiyeovo-infra fast addresses  # copy the printed multiaddrs into Kiyeovo
 ```
 
-- **Fast mode** runs bootstrap + relay (and optional TURN); **anonymous mode**
-  runs a Tor onion bootstrap (no relay, nothing published on the host).
-- To run anonymous mode too, use the same commands with `anonymous`, for example
-  `./kiyeovo-infra anonymous init`, `./kiyeovo-infra anonymous up`, and
-  `./kiyeovo-infra anonymous addresses`. Both modes can coexist on one host; the
-  CLI stores their state separately under `infrastructure/instances/fast/` and
-  `infrastructure/instances/anon/`.
-- If only one mode exists, the mode token may be omitted. Once both exist, name
-  the mode explicitly so the CLI never guesses which stack you meant.
-- For reboot survival: `sudo systemctl enable docker` (the containers use
-  `restart: unless-stopped`).
-- Operators who do not want Docker can use the advanced manual path below; the
-  same servers can also run under systemd via the templates in
-  `infrastructure/config/`.
+The bundle contains the CLI and Compose files. It does **not** contain the app
+source tree, Node.js dependencies, or Docker build context. `fast up` pulls the
+published image:
+
+```text
+ghcr.io/realman78/kiyeovo-infra-node:<version>
+```
+
+To run anonymous mode too:
+
+```bash
+./kiyeovo-infra anonymous init
+./kiyeovo-infra anonymous up
+./kiyeovo-infra anonymous status
+./kiyeovo-infra anonymous addresses
+```
+
+Anonymous mode pulls the same infra-node image plus:
+
+```text
+ghcr.io/realman78/kiyeovo-tor:<version>
+```
+
+Fast and Anonymous mode can coexist on one host. The CLI keeps their state and
+Compose projects separate:
+
+```text
+instances/fast/   -> project kiyeovo-infra-fast
+instances/anon/   -> project kiyeovo-infra-anon
+```
+
+If only one mode exists, the mode token may be omitted. Once both exist, name the
+mode explicitly so the CLI never guesses which stack you meant. For reboot
+survival: `sudo systemctl enable docker` (the containers use
+`restart: unless-stopped`).
+
+Operators who do not want Docker can use the advanced manual path below; the same
+servers can also run under systemd via the templates in `infrastructure/config/`.
+
+### Developer/source checkout testing
+
+Use this path only if you are testing unpublished source changes or building the
+infra images yourself:
+
+```bash
+git clone https://github.com/Realman78/Kiyeovo.git
+cd Kiyeovo/infrastructure
+
+./kiyeovo-infra fast init
+./kiyeovo-infra fast up --build
+```
+
+`--build` is for source checkouts. Release-bundle users should normally run
+`./kiyeovo-infra <mode> up` without `--build`.
 
 ### Advanced: manual setup (no Docker)
 

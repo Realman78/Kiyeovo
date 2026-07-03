@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the Kiyeovo infrastructure release: the amd64 server + Tor images and the
+# Build the Kiyeovo infrastructure release: the amd64 infra-node + Tor images and the
 # operator bundle (CLI + compose files + .env example + systemd templates +
 # checksums). It does NOT push images or create the GitHub release — those need
 # credentials, so it prints the exact commands to run instead.
@@ -12,8 +12,8 @@
 #   --no-build     alias for --bundle-only
 #
 # Env overrides:
-#   SERVER_IMAGE   default ghcr.io/realman78/kiyeovo-server
-#   TOR_IMAGE      default ghcr.io/realman78/kiyeovo-tor
+#   INFRA_NODE_IMAGE  default ghcr.io/realman78/kiyeovo-infra-node
+#   TOR_IMAGE         default ghcr.io/realman78/kiyeovo-tor
 set -euo pipefail
 
 VERSION="0.1.0"
@@ -33,7 +33,7 @@ case "$VERSION" in
     ;;
 esac
 
-SERVER_IMAGE="${SERVER_IMAGE:-ghcr.io/realman78/kiyeovo-server}"
+INFRA_NODE_IMAGE="${INFRA_NODE_IMAGE:-ghcr.io/realman78/kiyeovo-infra-node}"
 TOR_IMAGE="${TOR_IMAGE:-ghcr.io/realman78/kiyeovo-tor}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -51,9 +51,9 @@ node "$SCRIPT_DIR/check-server-deps.mjs"
 
 # ---- 2. Build the amd64 images (pinned by version, never :latest). ----
 if [ "$BUILD_IMAGES" -eq 1 ]; then
-  log "Building $SERVER_IMAGE:$VERSION (linux/amd64)"
+  log "Building $INFRA_NODE_IMAGE:$VERSION (linux/amd64)"
   docker build --platform linux/amd64 -f "$INFRA_DIR/Dockerfile.server" \
-    -t "$SERVER_IMAGE:$VERSION" "$REPO_ROOT"
+    -t "$INFRA_NODE_IMAGE:$VERSION" "$REPO_ROOT"
   log "Building $TOR_IMAGE:$VERSION (linux/amd64)"
   docker build --platform linux/amd64 -f "$INFRA_DIR/Dockerfile.tor" \
     -t "$TOR_IMAGE:$VERSION" "$REPO_ROOT"
@@ -62,14 +62,15 @@ else
 fi
 
 # Emit a runtime-only compose file for the bundle: pin images to the requested
-# $VERSION (and any SERVER_IMAGE/TOR_IMAGE override), bump KIYEOVO_SERVER_VERSION
-# to match, and strip the `build:` blocks so the bundle never assumes a source
-# tree (operators pull the published images; they don't build).
+# $VERSION (and any INFRA_NODE_IMAGE/TOR_IMAGE override), bump
+# KIYEOVO_SERVER_VERSION to match, and strip the `build:` blocks so the bundle
+# never assumes a source tree (operators pull the published images; they don't
+# build).
 bundle_compose() {
   local src="$1" dst="$2"
   sed -E \
     -e '/^[[:space:]]+build:[[:space:]]*$/,/^[[:space:]]+dockerfile:[[:space:]]/d' \
-    -e "s#(image:[[:space:]]+)[^[:space:]]*kiyeovo-server:[^[:space:]]*#\\1$SERVER_IMAGE:$VERSION#" \
+    -e "s#(image:[[:space:]]+)[^[:space:]]*kiyeovo-infra-node:[^[:space:]]*#\\1$INFRA_NODE_IMAGE:$VERSION#" \
     -e "s#(image:[[:space:]]+)[^[:space:]]*kiyeovo-tor:[^[:space:]]*#\\1$TOR_IMAGE:$VERSION#" \
     -e "s#(KIYEOVO_SERVER_VERSION:[[:space:]]+)\"[^\"]*\"#\\1\"$VERSION\"#" \
     "$src" > "$dst"
@@ -89,7 +90,7 @@ chmod +x "$BUNDLE_DIR/kiyeovo-infra"
 
 # Record exactly which images this bundle expects.
 cat >"$BUNDLE_DIR/IMAGES.txt" <<EOF
-$SERVER_IMAGE:$VERSION
+$INFRA_NODE_IMAGE:$VERSION
 $TOR_IMAGE:$VERSION
 EOF
 
@@ -110,7 +111,7 @@ echo "  tarball:    $TARBALL"
 echo ""
 echo "Next (require your credentials — not run automatically):"
 echo "  # 1. log in to GHCR, then push the pinned images:"
-echo "  docker push $SERVER_IMAGE:$VERSION"
+echo "  docker push $INFRA_NODE_IMAGE:$VERSION"
 echo "  docker push $TOR_IMAGE:$VERSION"
 echo "  # 2. publish the bundle as a GitHub release asset:"
 echo "  gh release create v$VERSION \"$TARBALL\" \"$TARBALL.sha256\" \\"

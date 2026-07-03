@@ -39,7 +39,7 @@ services:
         max-file: "3"
 
   bootstrap:
-    image: ghcr.io/realman78/kiyeovo-server:0.1.0
+    image: ghcr.io/realman78/kiyeovo-infra-node:0.1.0
     build:
       # Absolute repo root injected by kiyeovo-infra (falls back to `..` for a raw
       # `docker compose` run from infrastructure/).
