@@ -1,0 +1,860 @@
+#!/usr/bin/env bash
+#
+# kiyeovo-infra — thin operations front-end for Kiyeovo self-hosted
+# infrastructure. It collects configuration and delegates the whole service
+# lifecycle to Docker Compose; it is NOT a second supervisor.
+#
+# Commands:
+#   init        configure one mode instance (writes .env, creates data/run dirs)
+#   firewall    print the firewall rules you need to open (makes no changes)
+#   up          start the stack (docker compose up -d)
+#   down        stop the stack (preserves identity + datastore)
+#   restart     restart services
+#   status      service state, health, and restart policy
+#   logs        follow/show service logs
+#   addresses   print the bootstrap/relay multiaddrs to paste into Kiyeovo
+#
+# Handles Fast mode (bootstrap + relay, plus an optional coturn TURN server for
+# calls) and Anonymous mode (Tor onion bootstrap).
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+COMPOSE_FAST_FILE="$SCRIPT_DIR/compose.yaml"
+COMPOSE_ANON_FILE="$SCRIPT_DIR/compose.anonymous.yaml"
+
+# Each mode is an independent instance under instances/<slug>/ (slug: fast|anon),
+# with its own .env, data/, run/, and secrets/. The Compose project name is
+# per-instance too, so the Fast and Anonymous stacks never reconcile against each
+# other (no cross-mode --remove-orphans / status drift).
+INSTANCES_ROOT="$SCRIPT_DIR/instances"
+PROJECT_NAME_PREFIX="kiyeovo-infra"
+
+# Absolute build context (repo root) so a re-rooted `--project-directory
+# instances/<slug>` can't misplace the Dockerfiles. The compose files read it via
+# `context: ${KIYEOVO_BUILD_CONTEXT:-..}`; the `..` default keeps a raw
+# `docker compose` run from infrastructure/ working.
+KIYEOVO_BUILD_CONTEXT="$(cd "$SCRIPT_DIR/.." && pwd)"
+export KIYEOVO_BUILD_CONTEXT
+
+DEFAULT_BOOTSTRAP_PORT=9000
+DEFAULT_RELAY_PORT=4002
+DEFAULT_TURN_PORT=3478
+DEFAULT_TURN_MIN_PORT=49160
+DEFAULT_TURN_MAX_PORT=49200
+
+# Per-instance paths, populated by set_instance_paths once the active mode is
+# resolved (positional token or the sole existing instance).
+ACTIVE_MODE=""
+PROJECT_DIR=""
+PROJECT_NAME=""
+ENV_FILE=""
+# Optional TURN credential lives only in TURN_CONF (gitignored) — never in the
+# image, compose args, or .env. The conf is 0644 (coturn runs as an unprivileged
+# user and the file is bind-mounted into the container, so it must be
+# world-readable) inside the 0700 SECRETS_DIR, which keeps other host users out.
+SECRETS_DIR=""
+TURN_CONF=""
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+
+err()  { printf 'kiyeovo-infra: %s\n' "$*" >&2; }
+die()  { err "$*"; exit 1; }
+info() { printf '%s\n' "$*"; }
+
+# The active mode is selected by the dispatcher (positional token, or the sole
+# existing instance) and is authoritative — .env is validated against it, never
+# consulted to decide it.
+current_mode() { printf '%s' "$ACTIVE_MODE"; }
+
+# Canonical mode (fast|anonymous) -> filesystem/project slug (fast|anon).
+mode_slug() {
+  case "$1" in
+    anonymous) printf 'anon' ;;
+    *)         printf 'fast' ;;
+  esac
+}
+
+# Canonicalize a user-supplied mode token; non-zero exit if it is not one.
+canonical_mode() {
+  case "$1" in
+    fast)           printf 'fast' ;;
+    anonymous|anon) printf 'anonymous' ;;
+    *)              return 1 ;;
+  esac
+}
+
+# Point every per-instance path at the given mode's instance directory.
+set_instance_paths() {
+  local mode="$1" slug
+  slug="$(mode_slug "$mode")"
+  ACTIVE_MODE="$mode"
+  PROJECT_DIR="$INSTANCES_ROOT/$slug"
+  PROJECT_NAME="$PROJECT_NAME_PREFIX-$slug"
+  ENV_FILE="$PROJECT_DIR/.env"
+  SECRETS_DIR="$PROJECT_DIR/secrets"
+  TURN_CONF="$SECRETS_DIR/turnserver.conf"
+}
+
+# Canonical modes that already have an instance on disk (one per line). Always
+# succeeds: the trailing `return 0` keeps a final missing-instance test from
+# failing the function (and tripping `set -e` at the call site).
+discovered_modes() {
+  local mode
+  for mode in fast anonymous; do
+    [ -f "$INSTANCES_ROOT/$(mode_slug "$mode")/.env" ] && printf '%s\n' "$mode"
+  done
+  return 0
+}
+
+# Resolve which instance a command targets and set its paths. An explicit token
+# wins; otherwise default to the sole instance, else error (ambiguous or absent).
+resolve_active_mode() {
+  local explicit="$1" is_init="$2" command="$3"
+  if [ -n "$explicit" ]; then
+    set_instance_paths "$explicit"
+    return 0
+  fi
+  local modes; modes="$(discovered_modes)"
+  # shellcheck disable=SC2086
+  set -- $modes
+  if [ "$#" -eq 1 ]; then
+    set_instance_paths "$1"
+    return 0
+  fi
+  if [ "$#" -ge 2 ]; then
+    die "multiple modes configured ($*) — name one, e.g. '$(basename "$0") fast $command'"
+  fi
+  if [ "$is_init" -eq 1 ]; then
+    die "init: name a mode, e.g. '$(basename "$0") fast init' or '$(basename "$0") anonymous init'"
+  fi
+  die "no configuration found — run '$(basename "$0") <fast|anonymous> init' first"
+}
+
+# The dispatcher's selection is authoritative; a stored KIYEOVO_MODE that
+# disagrees (hand-edited, or a wrong-slug file) must abort rather than silently
+# run the other mode's logic.
+validate_env_mode() {
+  [ -f "$ENV_FILE" ] || return 0
+  local stored; stored="$(env_get KIYEOVO_MODE)"
+  stored="${stored:-fast}"
+  [ "$stored" = "$ACTIVE_MODE" ] || \
+    die "mode mismatch: selected '$ACTIVE_MODE' but $ENV_FILE has KIYEOVO_MODE=$stored (fix the file or select the matching mode)"
+}
+
+compose_file() {
+  case "$(current_mode)" in
+    anonymous) printf '%s' "$COMPOSE_ANON_FILE" ;;
+    *)         printf '%s' "$COMPOSE_FAST_FILE" ;;
+  esac
+}
+
+# Is the optional coturn TURN server configured? (Fast mode only.)
+turn_enabled() {
+  [ "$(current_mode)" != "anonymous" ] && [ "$(env_get KIYEOVO_TURN)" = "1" ]
+}
+
+compose() {
+  if turn_enabled; then
+    docker compose -p "$PROJECT_NAME" --project-directory "$PROJECT_DIR" \
+      --env-file "$ENV_FILE" -f "$(compose_file)" --profile turn "$@"
+  else
+    docker compose -p "$PROJECT_NAME" --project-directory "$PROJECT_DIR" \
+      --env-file "$ENV_FILE" -f "$(compose_file)" "$@"
+  fi
+}
+
+# Services that exist in the current mode.
+services_for_mode() {
+  case "$(current_mode)" in
+    anonymous) printf '%s' "tor bootstrap" ;;
+    *)
+      if turn_enabled; then printf '%s' "bootstrap relay coturn"
+      else printf '%s' "bootstrap relay"; fi
+      ;;
+  esac
+}
+
+# Services that publish a runtime-metadata file (i.e. have addresses).
+address_services_for_mode() {
+  case "$(current_mode)" in
+    anonymous) printf '%s' "bootstrap" ;;
+    *)         printf '%s' "bootstrap relay" ;;
+  esac
+}
+
+require_docker() {
+  command -v docker >/dev/null 2>&1 || die "docker not found in PATH"
+  docker compose version >/dev/null 2>&1 || die "the 'docker compose' plugin is not available"
+}
+
+require_init() {
+  [ -f "$ENV_FILE" ] || die "no configuration for $ACTIVE_MODE mode — run '$(basename "$0") $ACTIVE_MODE init' first"
+}
+
+validate_port() {
+  local name="$1" port="$2"
+  case "$port" in
+    *[!0-9]*|'') die "init: invalid $name port '$port' (must be a number)" ;;
+  esac
+  { [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; } \
+    || die "init: $name port '$port' out of range (1-65535)"
+}
+
+is_ipv4() {
+  case "$1" in
+    *[!0-9.]*) return 1 ;;
+  esac
+  local IFS=. ; set -- $1
+  [ "$#" -eq 4 ] || return 1
+  for octet in "$@"; do
+    [ -n "$octet" ] || return 1
+    [ "$octet" -le 255 ] 2>/dev/null || return 1
+  done
+  return 0
+}
+
+# Build a libp2p announce multiaddr from a host (IPv4 or DNS name) and a port.
+build_multiaddr() {
+  local host="$1" port="$2"
+  if is_ipv4 "$host"; then
+    printf '/ip4/%s/tcp/%s' "$host" "$port"
+  else
+    printf '/dns4/%s/tcp/%s' "$host" "$port"
+  fi
+}
+
+# Read a single KEY=value from .env (last wins); prints nothing if absent.
+# The trailing `|| true` keeps a no-match grep from tripping `set -o pipefail`
+# (these keys are optional and fall back to defaults in port_of).
+env_get() {
+  [ -f "$ENV_FILE" ] || return 0
+  grep -E "^$1=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- || true
+}
+
+port_of() {
+  local key="$1" fallback="$2" value
+  value="$(env_get "$key")"
+  printf '%s' "${value:-$fallback}"
+}
+
+# Container id for a compose service (including stopped/exited), or empty if the
+# container does not exist (e.g. after `down`). `-a` so a crashed/exited service
+# is still seen by `status` and `addresses` rather than looking "not created".
+service_cid() { compose ps -aq "$1" 2>/dev/null || true; }
+
+# Extract the clientAddrs array entries from a runtime-metadata JSON file.
+extract_client_addrs() {
+  local file="$1"
+  [ -f "$file" ] || return 1
+  awk '
+    /"clientAddrs"[[:space:]]*:[[:space:]]*\[/ { capture=1; next }
+    capture && /\]/ { capture=0 }
+    capture {
+      gsub(/[",]/, "")
+      gsub(/^[[:space:]]+/, "")
+      gsub(/[[:space:]]+$/, "")
+      if (length($0)) print
+    }
+  ' "$file"
+}
+
+# ---------------------------------------------------------------------------
+# init
+# ---------------------------------------------------------------------------
+
+usage_init() {
+  cat <<'EOF'
+Usage: kiyeovo-infra <fast|anonymous> init [options]
+
+Configure a deployment for the given mode. Interactive by default. The mode is a
+positional token before 'init'; if exactly one instance already exists you may
+omit it to re-initialise that one.
+
+Common options:
+  --non-interactive           do not prompt
+  --force                     overwrite an existing instance's .env without confirming
+  -h, --help                  show this help
+
+Fast mode options:
+  --public-address <ip|dns>   public IPv4 or DNS name clients will dial (required)
+  --bootstrap-port <port>     bootstrap TCP port (default 9000)
+  --relay-port <port>         relay TCP port (default 4002)
+
+Fast mode TURN (optional, for calls):
+  --with-turn                 enable a coturn TURN server
+  --no-turn                   skip TURN (default in --non-interactive)
+  --turn-user <name>          TURN username
+  --turn-password <pass>      TURN password
+  --turn-external-ip <ipv4>   public IPv4 coturn advertises (required if the
+                              public address is a DNS name; defaults to it if IPv4)
+
+Anonymous mode needs no address or ports — the .onion is generated for you.
+EOF
+}
+
+# Create + permission the bind-mount roots for the given data subdirs. run/ stays
+# host-readable (0755) so the CLI can read the runtime JSON; data/ is restricted
+# (0700) since it holds identity keys + datastore only the container needs. A
+# `bootstrap` or `relay` subdir also gets a matching run/ dir for its runtime JSON.
+init_make_dirs() {
+  local sub
+  mkdir -p "$PROJECT_DIR/data" "$PROJECT_DIR/run"
+  # chmods are best-effort: on re-init a dir may already be owned by a container
+  # uid (from a prior `up`), which the host user can't chmod — but its perms were
+  # already set correctly when it was first created, so failing here is benign.
+  chmod 700 "$PROJECT_DIR/data" 2>/dev/null || true
+  chmod 755 "$PROJECT_DIR/run" 2>/dev/null || true
+  for sub in "$@"; do
+    mkdir -p "$PROJECT_DIR/data/$sub"
+    chmod 700 "$PROJECT_DIR/data/$sub" 2>/dev/null || true
+    case "$sub" in
+      bootstrap|relay)
+        mkdir -p "$PROJECT_DIR/run/$sub"
+        chmod 755 "$PROJECT_DIR/run/$sub" 2>/dev/null || true
+        ;;
+    esac
+  done
+}
+
+# Render the coturn secret config. Only this file holds the TURN credential.
+write_turn_conf() {
+  local user="$1" password="$2" extip="$3" minp="$4" maxp="$5" lport="$6"
+  mkdir -p "$SECRETS_DIR"
+  chmod 700 "$SECRETS_DIR" 2>/dev/null || true
+  cat >"$TURN_CONF" <<EOF
+# Generated by kiyeovo-infra init. Contains the TURN credential — keep private.
+# Mounted read-only into the coturn container; never baked into the image.
+listening-port=$lport
+fingerprint
+lt-cred-mech
+realm=kiyeovo
+user=$user:$password
+external-ip=$extip
+min-port=$minp
+max-port=$maxp
+no-cli
+log-file=stdout
+EOF
+  # The coturn image runs as an unprivileged user (uid 65534/nobody), and the
+  # file is bind-mounted straight to /etc/coturn/turnserver.conf, so it must be
+  # world-readable for coturn to load it. The credential is still protected
+  # host-side by the 0700 SECRETS_DIR (other local users can't traverse into it).
+  chmod 644 "$TURN_CONF"
+}
+
+# Print the configured TURN username (field before the ':' in user=USER:PASS).
+turn_username() {
+  [ -f "$TURN_CONF" ] || return 1
+  local line; line="$(grep -E '^user=' "$TURN_CONF" 2>/dev/null | tail -n1 | cut -d= -f2-)"
+  printf '%s' "${line%%:*}"
+}
+
+# Print the configured TURN credential (field after the first ':').
+turn_credential() {
+  [ -f "$TURN_CONF" ] || return 1
+  local line; line="$(grep -E '^user=' "$TURN_CONF" 2>/dev/null | tail -n1 | cut -d= -f2-)"
+  printf '%s' "${line#*:}"
+}
+
+cmd_init() {
+  local mode="$ACTIVE_MODE" public_address="" bootstrap_port="" relay_port=""
+  local interactive=1 force=0
+  local with_turn=0 no_turn=0 turn_user="" turn_password="" turn_external_ip=""
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --mode|--mode=*)    die "init: --mode is removed; use the positional form '$(basename "$0") <fast|anonymous> init'" ;;
+      --public-address)   public_address="${2:-}"; shift 2 ;;
+      --bootstrap-port)   bootstrap_port="${2:-}"; shift 2 ;;
+      --relay-port)       relay_port="${2:-}"; shift 2 ;;
+      --with-turn)        with_turn=1; shift ;;
+      --no-turn)          no_turn=1; shift ;;
+      --turn-user)        turn_user="${2:-}"; shift 2 ;;
+      --turn-password)    turn_password="${2:-}"; shift 2 ;;
+      --turn-external-ip) turn_external_ip="${2:-}"; shift 2 ;;
+      --non-interactive)  interactive=0; shift ;;
+      --force)            force=1; shift ;;
+      -h|--help)          usage_init; return 0 ;;
+      *) die "init: unknown option '$1' (see 'init --help')" ;;
+    esac
+  done
+
+  # Mode comes from the positional token (resolved before dispatch); $mode is set.
+  [ "$with_turn" -eq 0 ] || [ "$no_turn" -eq 0 ] || die "init: --with-turn and --no-turn cannot be used together"
+
+  # Overwrite guard (per instance).
+  if [ -f "$ENV_FILE" ] && [ "$force" -eq 0 ]; then
+    if [ "$interactive" -eq 1 ]; then
+      printf '%s already exists. Overwrite? [y/N]: ' "$ENV_FILE"
+      read -r reply
+      case "$reply" in y|Y|yes|YES) ;; *) die "init: aborted (existing config left unchanged)" ;; esac
+    else
+      die "init: $ENV_FILE exists (use --force to overwrite)"
+    fi
+  fi
+
+  # The .env writes below target $PROJECT_DIR/.env, so the instance dir must exist.
+  mkdir -p "$PROJECT_DIR"
+
+  if [ "$mode" = "anonymous" ]; then
+    cat >"$ENV_FILE" <<'EOF'
+# Generated by kiyeovo-infra init. Mode: anonymous
+KIYEOVO_MODE=anonymous
+EOF
+    chmod 600 "$ENV_FILE"
+    init_make_dirs tor bootstrap
+    # Shared, CLI-managed location for the public onion hostname. 1777 so both
+    # the Tor (debian-tor) and bootstrap (kiyeovo) containers can use it; it
+    # holds only the public .onion address, never a secret. The sticky bit keeps
+    # unrelated local users from replacing/removing each other's files. `up`
+    # clears the hostname here before starting so a stale onion is never read.
+    mkdir -p "$PROJECT_DIR/run/onion"
+    chmod 1777 "$PROJECT_DIR/run/onion" 2>/dev/null || true
+
+    info "Wrote $ENV_FILE (anonymous mode)"
+    info "The .onion address is generated on first 'up'; no public IP/ports needed."
+    info ""
+    info "Next:"
+    info "  1. $(basename "$0") $mode up          # start Tor + bootstrap"
+    info "  2. $(basename "$0") $mode addresses   # copy the onion address into Kiyeovo"
+    return 0
+  fi
+
+  # ----- fast mode -----
+  if [ "$interactive" -eq 1 ]; then
+    if [ -z "$public_address" ]; then
+      printf 'Public IPv4 or DNS name clients will use to reach this server: '
+      read -r public_address
+    fi
+    if [ -z "$bootstrap_port" ]; then
+      printf 'Bootstrap TCP port [%s]: ' "$DEFAULT_BOOTSTRAP_PORT"
+      read -r bootstrap_port
+    fi
+    if [ -z "$relay_port" ]; then
+      printf 'Relay TCP port [%s]: ' "$DEFAULT_RELAY_PORT"
+      read -r relay_port
+    fi
+  fi
+
+  bootstrap_port="${bootstrap_port:-$DEFAULT_BOOTSTRAP_PORT}"
+  relay_port="${relay_port:-$DEFAULT_RELAY_PORT}"
+
+  [ -n "$public_address" ] || die "init: a public address is required (use --public-address)"
+  validate_port bootstrap "$bootstrap_port"
+  validate_port relay "$relay_port"
+  [ "$bootstrap_port" != "$relay_port" ] || die "init: bootstrap and relay ports must differ"
+
+  local bootstrap_announce relay_announce
+  bootstrap_announce="$(build_multiaddr "$public_address" "$bootstrap_port")"
+  relay_announce="$(build_multiaddr "$public_address" "$relay_port")"
+
+  # ----- optional TURN (coturn) for calls -----
+  # Validate/prompt everything before writing .env or secrets, so a failed TURN
+  # configuration cannot leave behind a partial Fast instance.
+  local want_turn=0 extip="" tuser="" tpass=""
+  if [ "$with_turn" -eq 1 ]; then want_turn=1
+  elif [ "$no_turn" -eq 1 ]; then want_turn=0
+  elif [ "$interactive" -eq 1 ]; then
+    printf 'Configure a TURN server (coturn) for calls? [y/N]: '
+    read -r reply
+    case "$reply" in y|Y|yes|YES) want_turn=1 ;; esac
+  fi
+
+  if [ "$want_turn" -eq 1 ]; then
+    # coturn needs a numeric external IP; it can't derive one from a DNS name.
+    extip="$turn_external_ip"
+    if [ -z "$extip" ] && is_ipv4 "$public_address"; then extip="$public_address"; fi
+    if [ -z "$extip" ] && [ "$interactive" -eq 1 ]; then
+      printf 'TURN external (public) IPv4 address: '
+      read -r extip
+    fi
+    [ -n "$extip" ] || die "init: TURN needs a numeric external IP (--turn-external-ip); the public address is a DNS name"
+    is_ipv4 "$extip" || die "init: TURN external IP '$extip' is not a valid IPv4 address"
+
+    tuser="$turn_user"
+    tpass="$turn_password"
+    if [ -z "$tuser" ] && [ "$interactive" -eq 1 ]; then
+      printf 'TURN username: '; read -r tuser
+    fi
+    if [ -z "$tpass" ] && [ "$interactive" -eq 1 ]; then
+      printf 'TURN password: '; read -rs tpass; printf '\n'
+    fi
+    [ -n "$tuser" ] || die "init: TURN username required (--turn-user)"
+    [ -n "$tpass" ] || die "init: TURN password required (--turn-password)"
+    # ':' separates user from password in coturn's user= line; spaces break parsing.
+    case "$tuser:$tpass" in
+      *' '*) die "init: TURN username/password cannot contain spaces" ;;
+    esac
+    case "$tuser" in *:*) die "init: TURN username cannot contain ':'" ;; esac
+  fi
+
+  init_make_dirs bootstrap relay
+
+  local env_tmp="$ENV_FILE.tmp.$$"
+  rm -f "$env_tmp" 2>/dev/null || true
+  cat >"$env_tmp" <<EOF
+# Generated by kiyeovo-infra init. Mode: fast. Public address: $public_address
+KIYEOVO_MODE=fast
+BOOTSTRAP_ANNOUNCE_ADDRS=$bootstrap_announce
+RELAY_ANNOUNCE_ADDRS=$relay_announce
+BOOTSTRAP_PORT=$bootstrap_port
+RELAY_PORT=$relay_port
+EOF
+
+  if [ "$want_turn" -eq 1 ]; then
+    write_turn_conf "$tuser" "$tpass" "$extip" \
+      "$DEFAULT_TURN_MIN_PORT" "$DEFAULT_TURN_MAX_PORT" "$DEFAULT_TURN_PORT"
+    cat >>"$env_tmp" <<EOF
+KIYEOVO_TURN=1
+TURN_HOST=$public_address
+TURN_PORT=$DEFAULT_TURN_PORT
+TURN_MIN_PORT=$DEFAULT_TURN_MIN_PORT
+TURN_MAX_PORT=$DEFAULT_TURN_MAX_PORT
+EOF
+  else
+    # Disabling TURN on re-init: drop any stale secret so it can't be reused.
+    rm -f "$TURN_CONF" 2>/dev/null || true
+  fi
+
+  chmod 600 "$env_tmp"
+  mv -f "$env_tmp" "$ENV_FILE"
+
+  info "Wrote $ENV_FILE"
+  info "  bootstrap announce: $bootstrap_announce"
+  info "  relay announce:     $relay_announce"
+  if [ "$want_turn" -eq 1 ]; then
+    info "  TURN: enabled — turn:$public_address:$DEFAULT_TURN_PORT (external-ip $extip)"
+    info "  TURN credential stored in $TURN_CONF (0644 inside 0700 $SECRETS_DIR)"
+  fi
+
+  info ""
+  info "Next:"
+  info "  1. $(basename "$0") $mode firewall   # open the required ports"
+  info "  2. $(basename "$0") $mode up          # start the stack"
+  info "  3. $(basename "$0") $mode addresses   # copy into Kiyeovo's Setup pages"
+}
+
+# ---------------------------------------------------------------------------
+# firewall
+# ---------------------------------------------------------------------------
+
+cmd_firewall() {
+  require_init
+  info "Mode: $(current_mode)"
+  info ""
+
+  if [ "$(current_mode)" = "anonymous" ]; then
+    info "Anonymous mode needs NO inbound firewall rules."
+    info "Clients reach the bootstrap only through its Tor onion service, and the"
+    info "bootstrap port is not published on the host."
+    return 0
+  fi
+
+  local bport rport
+  bport="$(port_of BOOTSTRAP_PORT "$DEFAULT_BOOTSTRAP_PORT")"
+  rport="$(port_of RELAY_PORT "$DEFAULT_RELAY_PORT")"
+
+  local tport tmin tmax
+  if turn_enabled; then
+    tport="$(port_of TURN_PORT "$DEFAULT_TURN_PORT")"
+    tmin="$(port_of TURN_MIN_PORT "$DEFAULT_TURN_MIN_PORT")"
+    tmax="$(port_of TURN_MAX_PORT "$DEFAULT_TURN_MAX_PORT")"
+  fi
+
+  info "Required inbound rules (this command makes NO changes):"
+  info "  - allow TCP $bport   (bootstrap)"
+  info "  - allow TCP $rport   (relay)"
+  if turn_enabled; then
+    info "  - allow TCP+UDP $tport (TURN)"
+    info "  - allow UDP $tmin-$tmax (TURN relay media)"
+  fi
+  info ""
+
+  if command -v ufw >/dev/null 2>&1; then
+    info "Detected ufw. Suggested:"
+    info "  sudo ufw allow $bport/tcp"
+    info "  sudo ufw allow $rport/tcp"
+    if turn_enabled; then
+      info "  sudo ufw allow $tport/tcp"
+      info "  sudo ufw allow $tport/udp"
+      info "  sudo ufw allow $tmin:$tmax/udp"
+    fi
+  elif command -v firewall-cmd >/dev/null 2>&1; then
+    info "Detected firewalld. Suggested:"
+    info "  sudo firewall-cmd --permanent --add-port=$bport/tcp"
+    info "  sudo firewall-cmd --permanent --add-port=$rport/tcp"
+    if turn_enabled; then
+      info "  sudo firewall-cmd --permanent --add-port=$tport/tcp"
+      info "  sudo firewall-cmd --permanent --add-port=$tport/udp"
+      info "  sudo firewall-cmd --permanent --add-port=$tmin-$tmax/udp"
+    fi
+    info "  sudo firewall-cmd --reload"
+  elif command -v iptables >/dev/null 2>&1; then
+    info "Detected iptables. Suggested:"
+    info "  sudo iptables -A INPUT -p tcp --dport $bport -j ACCEPT"
+    info "  sudo iptables -A INPUT -p tcp --dport $rport -j ACCEPT"
+    if turn_enabled; then
+      info "  sudo iptables -A INPUT -p tcp --dport $tport -j ACCEPT"
+      info "  sudo iptables -A INPUT -p udp --dport $tport -j ACCEPT"
+      info "  sudo iptables -A INPUT -p udp --dport $tmin:$tmax -j ACCEPT"
+    fi
+    info "  (persist with your distro's iptables-save mechanism)"
+  else
+    info "No supported firewall tool detected (ufw/firewalld/iptables)."
+    info "Open TCP $bport and TCP $rport however your host manages it."
+    if turn_enabled; then
+      info "Also open TCP+UDP $tport and UDP $tmin-$tmax for TURN."
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# lifecycle (delegated to Compose)
+# ---------------------------------------------------------------------------
+
+cmd_up() {
+  require_init
+  # Fail fast if TURN is enabled but its secret config is missing/unreadable:
+  # otherwise Compose would create the bind source as a stray directory and
+  # coturn would start on the wrong (or no) config.
+  if turn_enabled; then
+    [ -f "$TURN_CONF" ] || die "up: KIYEOVO_TURN=1 but $TURN_CONF is missing — re-run 'init --with-turn'"
+    [ -r "$TURN_CONF" ] || die "up: $TURN_CONF is not readable"
+  fi
+  # In anonymous mode, clear the previously published onion hostname so the
+  # bootstrap can't read a stale one before Tor republishes from current keys.
+  if [ "$(current_mode)" = "anonymous" ]; then
+    rm -f "$PROJECT_DIR/run/onion/hostname" 2>/dev/null || true
+  fi
+  # --remove-orphans only reconciles the selected mode because the Compose
+  # project name is per-instance (kiyeovo-infra-fast / kiyeovo-infra-anon).
+  compose up -d --remove-orphans "$@"
+  info ""
+  info "Stack started. For auto-restart across reboots, ensure Docker starts on boot:"
+  info "  sudo systemctl enable docker"
+  info "Run '$(basename "$0") $(current_mode) status' to check health, then '$(basename "$0") $(current_mode) addresses'."
+}
+
+cmd_down() {
+  require_init
+  # Never pass -v / --volumes: identity + datastore live in bind mounts and must
+  # survive `down`. --remove-orphans is scoped to the selected Compose project.
+  # Always activate the `turn` profile so a coturn container is torn down too,
+  # even if TURN was disabled on a re-init (compose ignores unknown profiles).
+  docker compose -p "$PROJECT_NAME" --project-directory "$PROJECT_DIR" \
+    --env-file "$ENV_FILE" -f "$(compose_file)" --profile turn down --remove-orphans "$@"
+  info "Stopped. Identity and datastore under $PROJECT_DIR/data are preserved."
+}
+
+cmd_restart() {
+  require_init
+  compose restart "$@"
+}
+
+cmd_status() {
+  require_init
+  info "Mode: $(current_mode) (project: $PROJECT_NAME)"
+  info ""
+  local svc cid
+  for svc in $(services_for_mode); do
+    cid="$(service_cid "$svc")"
+    if [ -z "$cid" ]; then
+      printf '%-10s not created (run up)\n' "$svc:"
+      continue
+    fi
+    local state health policy restarts
+    state="$(docker inspect -f '{{.State.Status}}' "$cid" 2>/dev/null)"
+    health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}n/a{{end}}' "$cid" 2>/dev/null)"
+    policy="$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$cid" 2>/dev/null)"
+    restarts="$(docker inspect -f '{{.RestartCount}}' "$cid" 2>/dev/null)"
+    printf '%-10s state=%s health=%s restart=%s restarts=%s\n' \
+      "$svc:" "$state" "$health" "$policy" "$restarts"
+  done
+
+  # Warn about unexpected services inside this selected mode's Compose project.
+  # Other modes use different project names and are intentionally ignored.
+  local expected found
+  expected=" $(services_for_mode) "
+  for found in $(docker ps -a --filter "label=com.docker.compose.project=$PROJECT_NAME" \
+                   --format '{{.Label "com.docker.compose.service"}}' 2>/dev/null | sort -u); do
+    case "$expected" in
+      *" $found "*) ;;
+      *) err "warning: unexpected '$found' container present (not part of $(current_mode) mode); run 'up' or 'down' to reconcile" ;;
+    esac
+  done
+}
+
+cmd_logs() {
+  require_init
+  compose logs "$@"
+}
+
+# ---------------------------------------------------------------------------
+# addresses
+# ---------------------------------------------------------------------------
+
+cmd_addresses() {
+  require_init
+  # --show-turn-credential reveals the TURN password in the printed ICE entry;
+  # without it the credential is redacted (see the turn block below).
+  local show_turn_cred=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --show-turn-credential) show_turn_cred=1; shift ;;
+      *) die "addresses: unknown option '$1'" ;;
+    esac
+  done
+
+  info "Mode: $(current_mode) (project: $PROJECT_NAME)"
+  info ""
+
+  # In anonymous mode the onion is only reachable while Tor is running, even if
+  # the bootstrap itself is healthy — so gate the bootstrap address on Tor too.
+  local onion_blocked="" tor_cid tor_state
+  if [ "$(current_mode)" = "anonymous" ]; then
+    tor_cid="$(service_cid tor)"
+    tor_state="not running"
+    [ -n "$tor_cid" ] && tor_state="$(docker inspect -f '{{.State.Status}}' "$tor_cid" 2>/dev/null || echo unknown)"
+    [ "$tor_state" = "running" ] || onion_blocked="Tor is $tor_state, onion unreachable"
+  fi
+
+  local svc file addrs cid health printed=0
+  for svc in $(address_services_for_mode); do
+    file="$PROJECT_DIR/run/$svc/$svc.runtime.json"
+
+    # Only trust the runtime JSON for a currently running + healthy container.
+    cid="$(service_cid "$svc")"
+    health="not running"
+    if [ -n "$cid" ]; then
+      health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$cid" 2>/dev/null || echo unknown)"
+    fi
+
+    printf '%s:\n' "$svc"
+    if ! addrs="$(extract_client_addrs "$file")" || [ -z "$addrs" ]; then
+      printf '  (not available — service not running or still starting)\n'
+    elif [ "$health" = "healthy" ] && [ -z "$onion_blocked" ]; then
+      printf '  %s\n' $addrs
+      printed=1
+    elif [ "$health" = "healthy" ] && [ -n "$onion_blocked" ]; then
+      printf '  (stale — %s; last known address:)\n' "$onion_blocked"
+      printf '    %s\n' $addrs
+    else
+      # File exists but the service is not healthy: the address may be stale
+      # (e.g. after a crash that skipped graceful cleanup). Say so explicitly.
+      printf '  (stale — service is %s; last known address:)\n' "$health"
+      printf '    %s\n' $addrs
+    fi
+  done
+
+  # TURN is a separate ICE entry (URL + username + credential), not a /p2p/
+  # multiaddr. Show it gated on coturn actually running; credential redacted
+  # unless --show-turn-credential.
+  if turn_enabled; then
+    local thost tport tuser turn_cid turn_state
+    thost="$(env_get TURN_HOST)"
+    tport="$(port_of TURN_PORT "$DEFAULT_TURN_PORT")"
+    tuser="$(turn_username || true)"
+    turn_cid="$(service_cid coturn)"
+    turn_state="not running"
+    [ -n "$turn_cid" ] && turn_state="$(docker inspect -f '{{.State.Status}}' "$turn_cid" 2>/dev/null || echo unknown)"
+
+    printf 'turn (ICE server for calls):\n'
+    if [ "$turn_state" != "running" ]; then
+      printf '  (coturn is %s — start it with "up" before using these)\n' "$turn_state"
+    fi
+    printf '  url:        turn:%s:%s\n' "$thost" "$tport"
+    printf '  username:   %s\n' "$tuser"
+    if [ "$show_turn_cred" -eq 1 ]; then
+      printf '  credential: %s\n' "$(turn_credential || true)"
+    else
+      printf '  credential: (hidden — re-run with --show-turn-credential)\n'
+    fi
+    [ "$turn_state" = "running" ] && printed=1
+  fi
+
+  if [ "$printed" -eq 1 ]; then
+    info ""
+    info "Paste the addresses above into Kiyeovo's Setup pages."
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# dispatch
+# ---------------------------------------------------------------------------
+
+usage() {
+  cat <<'EOF'
+kiyeovo-infra — manage the Kiyeovo bootstrap + relay stack (Fast / Anonymous)
+
+Usage: kiyeovo-infra [mode] <command> [options]
+
+[mode] is 'fast' or 'anonymous' (alias 'anon'). Omit it only when exactly one
+mode is configured; include it for first-time init and whenever both modes exist.
+
+Commands:
+  init        configure one mode instance (writes .env, creates data/run dirs)
+  firewall    print the firewall rules you need to open (makes no changes)
+  up          start the stack
+  down        stop the stack (preserves identity + datastore)
+  restart     restart services
+  status      service state, health, and restart policy
+  logs        follow/show service logs (optionally for one service)
+  addresses   print the bootstrap/relay multiaddrs to paste into Kiyeovo
+              (--show-turn-credential also reveals the TURN password)
+
+Run 'kiyeovo-infra <mode> init --help' for init options.
+EOF
+}
+
+main() {
+  [ "$#" -ge 1 ] || { usage; exit 1; }
+
+  # Optional positional mode token before the command (e.g. `kiyeovo-infra fast up`).
+  local explicit_mode=""
+  if explicit_mode="$(canonical_mode "$1")"; then
+    shift
+  else
+    explicit_mode=""
+  fi
+
+  [ "$#" -ge 1 ] || { usage; exit 1; }
+  local command="$1"; shift
+
+  if [ "$command" = "-h" ] || [ "$command" = "--help" ] || [ "$command" = "help" ]; then
+    usage; return 0
+  fi
+
+  local is_init=0
+  [ "$command" = "init" ] && is_init=1
+
+  # `init --help` must work without a configured instance to resolve against.
+  if [ "$is_init" -eq 1 ]; then
+    case " $* " in *" -h "*|*" --help "*) usage_init; return 0 ;; esac
+  fi
+
+  # Validate the command before resolving a mode so `kiyeovo-infra bogus` reports
+  # the real problem even on a fresh host with no configured instances yet.
+  case "$command" in
+    init|firewall|up|down|restart|status|logs|addresses) ;;
+    *) err "unknown command '$command'"; usage; exit 1 ;;
+  esac
+
+  resolve_active_mode "$explicit_mode" "$is_init" "$command"
+  [ "$is_init" -eq 1 ] || validate_env_mode
+
+  case "$command" in
+    init)        require_docker; cmd_init "$@" ;;
+    firewall)    cmd_firewall "$@" ;;
+    up)          require_docker; cmd_up "$@" ;;
+    down)        require_docker; cmd_down "$@" ;;
+    restart)     require_docker; cmd_restart "$@" ;;
+    status)      require_docker; cmd_status "$@" ;;
+    logs)        require_docker; cmd_logs "$@" ;;
+    addresses)   require_docker; cmd_addresses "$@" ;;
+  esac
+}
+
+main "$@"

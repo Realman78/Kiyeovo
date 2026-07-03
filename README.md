@@ -111,7 +111,100 @@ If your machine is not low-end, consider increasing `IDENTITY_SCRYPT_N` and `PRO
 
 ## Bootstrap and relay setup (will be updated on 1st of July when the CLI tool becomes ready)
 
-### Fast mode
+The recommended way to self-host is the **released `kiyeovo-infra` bundle**. It
+runs the bootstrap, relay, optional Tor onion (anonymous mode), and optional
+coturn TURN server as pinned Docker containers, owns their lifecycle
+(start/stop/restart/auto-restart) through Docker Compose, and prints the exact
+addresses to paste into Kiyeovo's Setup pages.
+
+Most users should not clone this repository or build Kiyeovo from source just to
+self-host. The desktop app will be distributed separately (for Linux, as an
+AppImage), and the infrastructure bundle pulls versioned public images from
+GHCR.
+
+### Recommended: release bundle (Docker)
+
+Prerequisites: Docker Engine + the Compose plugin.
+
+Download and unpack the `kiyeovo-infra-<version>.tar.gz` asset from the Kiyeovo
+GitHub release:
+
+```bash
+VERSION=0.1.0
+wget "https://github.com/Realman78/Kiyeovo/releases/download/v${VERSION}/kiyeovo-infra-${VERSION}.tar.gz"
+wget "https://github.com/Realman78/Kiyeovo/releases/download/v${VERSION}/kiyeovo-infra-${VERSION}.tar.gz.sha256"
+sha256sum -c "kiyeovo-infra-${VERSION}.tar.gz.sha256"
+
+tar -xzf "kiyeovo-infra-${VERSION}.tar.gz"
+cd "kiyeovo-infra-${VERSION}"
+
+./kiyeovo-infra fast init       # Fast: bootstrap + relay; can also configure TURN
+./kiyeovo-infra fast firewall   # prints the ports to open (makes no changes)
+./kiyeovo-infra fast up         # pulls public GHCR images and starts Fast mode
+./kiyeovo-infra fast status     # check health
+./kiyeovo-infra fast addresses  # copy the printed multiaddrs into Kiyeovo
+```
+
+The bundle contains the CLI and Compose files. It does **not** contain the app
+source tree, Node.js dependencies, or Docker build context. `fast up` pulls the
+published image:
+
+```text
+ghcr.io/realman78/kiyeovo-infra-node:<version>
+```
+
+To run anonymous mode too:
+
+```bash
+./kiyeovo-infra anonymous init
+./kiyeovo-infra anonymous up
+./kiyeovo-infra anonymous status
+./kiyeovo-infra anonymous addresses
+```
+
+Anonymous mode pulls the same infra-node image plus:
+
+```text
+ghcr.io/realman78/kiyeovo-tor:<version>
+```
+
+Fast and Anonymous mode can coexist on one host. The CLI keeps their state and
+Compose projects separate:
+
+```text
+instances/fast/   -> project kiyeovo-infra-fast
+instances/anon/   -> project kiyeovo-infra-anon
+```
+
+If only one mode exists, the mode token may be omitted. Once both exist, name the
+mode explicitly so the CLI never guesses which stack you meant. For reboot
+survival: `sudo systemctl enable docker` (the containers use
+`restart: unless-stopped`).
+
+Operators who do not want Docker can use the advanced manual path below; the same
+servers can also run under systemd via the templates in `infrastructure/config/`.
+
+### Developer/source checkout testing
+
+Use this path only if you are testing unpublished source changes or building the
+infra images yourself:
+
+```bash
+git clone https://github.com/Realman78/Kiyeovo.git
+cd Kiyeovo/infrastructure
+
+./kiyeovo-infra fast init
+./kiyeovo-infra fast up --build
+```
+
+`--build` is for source checkouts. Release-bundle users should normally run
+`./kiyeovo-infra <mode> up` without `--build`.
+
+### Advanced: manual setup (no Docker)
+
+The steps below run the servers by hand and are the alternative to the CLI above.
+
+#### Fast mode
 
 1. Install dependencies
 
@@ -143,7 +236,7 @@ npm run relay
 4002  # relay
 ```
 
-5. You should be all set now. You can add the addresses to the list of known bootstrap and/or relay addresses in Kiyeovo by clicking on the network status text in the sidebar header - a dialog shall open up:
+5. You should be all set now. To register the servers in Kiyeovo, open the **Setup** tab in the left sidebar rail, then add each multiaddress with **Add server** — the bootstrap address under **Bootstrap servers** and the relay address under **Relay servers**:
 
 ```text
 /ip4/YOUR_PUBLIC_IP/tcp/9000/p2p/<BOOTSTRAP_PEER_ID>
@@ -151,7 +244,7 @@ npm run relay
 ```
 
 
-### Anonymous mode
+#### Anonymous mode
 
 1. Run the setup script
 
@@ -191,7 +284,7 @@ npm run bootstrap
 
 If you host both fast and anonymous bootstrap nodes on the same machine, keep fast mode on `0.0.0.0:9000` and anonymous mode on local `127.0.0.1:9001`.
 
-5. The setup is done. Now you can add the address to the list of known bootstrap addresses in Kiyeovo by clicking on the network status text in the sidebar header - a dialog shall open up:
+5. The setup is done. To register the server in Kiyeovo, open the **Setup** tab in the left sidebar rail, go to **Bootstrap servers**, and add the address with **Add server**:
 
 ```text
 /onion3/YOUR_ONION_HOST:9000/p2p/<BOOTSTRAP_PEER_ID>
@@ -199,7 +292,7 @@ If you host both fast and anonymous bootstrap nodes on the same machine, keep fa
 
 The relay is not needed in anonymous mode.
 
-### (Optional) STUN/TURN for calls in Fast mode
+#### (Optional) STUN/TURN for calls in Fast mode
 
 Calls are currently fast-mode direct 1:1 calls.
 
@@ -228,7 +321,7 @@ no-cli
 
 3. Run `systemctl enable --now coturn`
 
-4. The servers should be running now. You can add the server addresses inside Kiyeovo by clicking on the network status text in the sidebar header - a dialog shall open up:
+4. The servers should be running now. To register them in Kiyeovo, open the **Setup** tab in the left sidebar rail and go to **STUN/TURN servers**, then add each entry with **Add server**.
 
 You can add multiple ICE servers. Kiyeovo supports `stun`, `turn`, and `turns` entries.
 

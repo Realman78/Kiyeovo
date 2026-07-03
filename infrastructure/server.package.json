@@ -1,0 +1,37 @@
+{
+  "name": "kiyeovo-infra-node",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Infra-node dependency manifest for the Kiyeovo bootstrap/relay image. Generated from the root package — keep in sync (see infrastructure/scripts/check-server-deps.mjs).",
+  "type": "module",
+  "scripts": {
+    "build:server": "tsc -p tsconfig.server.json"
+  },
+  "dependencies": {
+    "@chainsafe/libp2p-gossipsub": "14.1.2",
+    "@chainsafe/libp2p-noise": "16.1.5",
+    "@chainsafe/libp2p-yamux": "7.0.4",
+    "@libp2p/circuit-relay-v2": "3.2.24",
+    "@libp2p/crypto": "5.1.13",
+    "@libp2p/identify": "3.0.39",
+    "@libp2p/kad-dht": "15.1.11",
+    "@libp2p/peer-id": "5.1.9",
+    "@libp2p/ping": "2.0.37",
+    "@libp2p/tcp": "10.1.19",
+    "@multiformats/multiaddr": "12.5.1",
+    "@noble/curves": "1.9.7",
+    "@noble/hashes": "1.8.0",
+    "datastore-level": "12.0.2",
+    "dotenv": "17.3.1",
+    "libp2p": "2.10.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.13",
+    "patch-package": "^8.0.1",
+    "typescript": "~5.9.3"
+  },
+  "comment:overrides": "Mirrors the root package's @libp2p/interface pin so the whole tree dedupes to one interface version (packages like @libp2p/crypto declare ^3 but the app is built and tested against 2.11.0). Keep in sync with root.",
+  "overrides": {
+    "@libp2p/interface": "2.11.0"
+  }
+}

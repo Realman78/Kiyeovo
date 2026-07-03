@@ -26,10 +26,25 @@ dist-ssr
 
 dist-ui
 dist-electron
+dist-server
+dist-release
 
 .env
-bootstrap-peer-id.bin
+bootstrap-peer-id*.bin
 bootstrap-datastore
+relay-peer-id.bin
+
+# Server runtime metadata (public, regenerated each start)
+*.runtime.json
+
+# Local infra deployment data (identities, datastores, runtime output, secrets).
+# Per-mode instances live under infrastructure/instances/<slug>/ and hold .env,
+# peer-identity keys, datastores, Tor onion keys, and the TURN credential.
+infrastructure/instances
+infrastructure/.env
+infrastructure/data
+infrastructure/run
+infrastructure/secrets
 
 .claude
 .codex

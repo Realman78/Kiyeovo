@@ -29,6 +29,15 @@ import {
   getNetworkModeRuntime,
   isNetworkMode,
 } from './constants.js';
+import { isDeploymentMode } from './server/deploy-mode.js';
+import {
+  buildClientAddrs,
+  getRuntimeMetadataPath,
+  getServerVersion,
+  removeRuntimeMetadataFile,
+  writeRuntimeMetadata,
+  type ServiceRuntimeMetadata,
+} from './server/runtime-metadata.js';
 import { filterOnionAddressesMapper } from './utils/miscellaneous.js';
 import { offlineMessageSelector, offlineMessageValidateUpdate, offlineMessageValidator } from './direct/offline-message-validator.js';
 import { groupOfflineMessageValidator, groupInfoLatestValidator, groupInfoVersionedValidator, groupOfflineMessageSelector, groupInfoLatestSelector, groupInfoVersionedSelector, groupOfflineValidateUpdate, groupInfoLatestValidateUpdate, groupInfoVersionedValidateUpdate } from './group/dht/group-dht-validator.js';
@@ -45,6 +54,7 @@ type BootstrapRuntime = {
   node: ChatNode;
   datastore: LevelDatastore;
   datastorePath: string;
+  runtimeFile: string | undefined;
 };
 
 type BootstrapRuntimeConfig = {
@@ -114,9 +124,37 @@ function readBootstrapAnnounceAddrs(isAnonymousMode: boolean): string[] {
     .map((address) => address.trim())
     .filter(Boolean) ?? [];
 
-  return rawAddrs
+  const validAddrs = rawAddrs
     .map((address) => validateBootstrapAnnounceAddress(address, isAnonymousMode))
     .filter((address): address is string => address !== null);
+
+  // Deploy mode fails fast: every provided announce address must be valid for
+  // the current mode, and at least one is required (a public node with no
+  // reachable announce address is a misconfiguration).
+  if (isDeploymentMode()) {
+    const droppedCount = rawAddrs.length - validAddrs.length;
+    if (droppedCount > 0) {
+      throw new Error(
+        `[CONFIG][BOOTSTRAP] deploy mode: ${droppedCount} invalid announce address(es) in ` +
+          `BOOTSTRAP_ANNOUNCE_ADDRS for ${isAnonymousMode ? 'anonymous' : 'fast'} mode; aborting.`
+      );
+    }
+    if (validAddrs.length === 0) {
+      throw new Error(
+        '[CONFIG][BOOTSTRAP] deploy mode: at least one valid announce address is required ' +
+          '(set BOOTSTRAP_ANNOUNCE_ADDRS); aborting.'
+      );
+    }
+  }
+
+  return validAddrs;
+}
+
+function readBootstrapDatastorePath(networkMode: 'fast' | 'anonymous'): string {
+  const raw = process.env.BOOTSTRAP_DATASTORE_PATH?.trim();
+  if (raw) return resolve(raw);
+
+  return resolve(join('./bootstrap-datastore', networkMode));
 }
 
 function readBootstrapListenAddr(networkMode: 'fast' | 'anonymous'): string {
@@ -157,7 +195,7 @@ function readBootstrapRuntimeConfig(): BootstrapRuntimeConfig {
     isAnonymousMode,
     listenAddr: readBootstrapListenAddr(networkMode),
     announceAddrs,
-    datastorePath: resolve(join('./bootstrap-datastore', networkMode)),
+    datastorePath: readBootstrapDatastorePath(networkMode),
     peerIdFile: readBootstrapPeerIdFile(networkMode),
   };
 
@@ -267,13 +305,19 @@ function registerBootstrapLifecycleLogging(bootstrap: ChatNode, datastorePath: s
   console.log('Bootstrap node ready for connections...');
 }
 
-function registerBootstrapShutdownHandlers({ node, datastore }: BootstrapRuntime): void {
+function registerBootstrapShutdownHandlers({ node, datastore, runtimeFile }: BootstrapRuntime): void {
   let shuttingDown = false;
   const shutdown = async (signal: 'SIGINT' | 'SIGTERM'): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
 
     console.log(`\nShutting down bootstrap node (${signal})...`);
+
+    // Remove runtime metadata first so the CLI immediately stops treating this
+    // node as healthy while it winds down.
+    if (runtimeFile) {
+      await removeRuntimeMetadataFile(runtimeFile);
+    }
 
     try {
       await node.stop();
@@ -305,7 +349,19 @@ function registerBootstrapShutdownHandlers({ node, datastore }: BootstrapRuntime
 
 async function createBootstrapNode(): Promise<BootstrapRuntime> {
   const runtimeConfig = readBootstrapRuntimeConfig();
-  const { privateKey } = await PeerIdManager.loadOrCreate(runtimeConfig.peerIdFile);
+  const runtimeFile = getRuntimeMetadataPath();
+
+  // Clear any stale runtime metadata before we become healthy so the CLI never
+  // reads addresses from a previous run while this process is still starting.
+  // In deploy mode this is part of the control-plane contract, so a failure to
+  // clear stale metadata aborts startup.
+  if (runtimeFile) {
+    await removeRuntimeMetadataFile(runtimeFile, { required: isDeploymentMode() });
+  }
+
+  const { privateKey } = await PeerIdManager.loadOrCreate(runtimeConfig.peerIdFile, {
+    failClosed: isDeploymentMode(),
+  });
 
   await mkdir(runtimeConfig.datastorePath, { recursive: true });
   const datastore = new LevelDatastore(runtimeConfig.datastorePath);
@@ -343,10 +399,27 @@ async function createBootstrapNode(): Promise<BootstrapRuntime> {
     });
 
     await bootstrap.start();
+
+    if (runtimeFile) {
+      const peerId = bootstrap.peerId.toString();
+      const metadata: ServiceRuntimeMetadata = {
+        schemaVersion: 1,
+        role: 'bootstrap',
+        networkMode: runtimeConfig.networkMode,
+        peerId,
+        announceAddrs: runtimeConfig.announceAddrs,
+        clientAddrs: buildClientAddrs(runtimeConfig.announceAddrs, peerId),
+        version: getServerVersion(),
+        startedAt: new Date().toISOString(),
+      };
+      await writeRuntimeMetadata(runtimeFile, metadata, { required: isDeploymentMode() });
+    }
+
     return {
       node: bootstrap as ChatNode,
       datastore,
       datastorePath: runtimeConfig.datastorePath,
+      runtimeFile,
     };
   } catch (error: unknown) {
     try {

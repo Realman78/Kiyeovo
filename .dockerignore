@@ -1,0 +1,40 @@
+# Keep the infra-node image build context small and free of host secrets/state.
+# The Dockerfile only needs infrastructure/server.package.json + its lockfile,
+# patches/, tsconfig.server.json, src/, and the infrastructure/ entrypoint +
+# tor assets.
+
+.git
+node_modules
+dist
+dist-ui
+dist-electron
+dist-server
+dist-release
+
+# Secrets, identities, local datastores, runtime output
+.env
+*.bin
+bootstrap-datastore
+*.runtime.json
+chat.db*
+
+# Logs and local app data
+*.log
+logs
+logs*
+kiyeovo-downloads
+kiyeovo-uploads
+
+# Tooling / editor
+.claude
+.codex
+.vscode
+.idea
+
+# Local infra test data + secrets (never send to the build daemon). Per-mode
+# instances under infrastructure/instances/<slug>/ hold identities + credentials.
+infrastructure/instances
+infrastructure/.env
+infrastructure/data
+infrastructure/run
+infrastructure/secrets

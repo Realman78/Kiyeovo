@@ -1,0 +1,74 @@
+# Kiyeovo bootstrap — systemd unit TEMPLATE (advanced, no-Docker path).
+#
+# This is the manual alternative to the recommended Docker Compose flow. The
+# kiyeovo-infra CLI does NOT install Node, write units, or supervise native
+# processes — with this path you own the unit and the runtime yourself.
+#
+# Setup:
+#   1. Install Node.js and build the server so dist-server/ exists:
+#        npm ci && npm run build:server
+#      Copy (or keep) the project at __WORKDIR__ so that
+#      __WORKDIR__/dist-server/core/bootstrap.js exists. Use a node binary OUTSIDE
+#      /home (e.g. /usr/bin/node) for __NODE_BIN__ — an nvm/home-directory node is
+#      unreachable while ProtectHome=true is enabled below.
+#   2. Create a dedicated, unprivileged service user (recommended; do NOT run as
+#      root). --user-group also creates the matching group the unit's Group= line
+#      expects. Pick a WorkingDirectory OUTSIDE /home (e.g. /opt/kiyeovo or
+#      /var/lib/kiyeovo) so the hardening below works as written:
+#        sudo useradd --system --user-group --home-dir __WORKDIR__ --shell /usr/sbin/nologin __SERVICE_USER__
+#        sudo install -d -o __SERVICE_USER__ -g __SERVICE_USER__ -m 0700 __WORKDIR__/data
+#        sudo install -d -o __SERVICE_USER__ -g __SERVICE_USER__ -m 0755 __WORKDIR__/run
+#   3. Replace every __PLACEHOLDER__ below, then:
+#        sudo cp kiyeovo-bootstrap.service.template /etc/systemd/system/kiyeovo-bootstrap.service
+#        sudo systemctl daemon-reload
+#        sudo systemctl enable --now kiyeovo-bootstrap
+#
+# Placeholders:
+#   __SERVICE_USER__              system user/group to run as (e.g. kiyeovo)
+#   __WORKDIR__                   absolute path containing dist-server/, data/, run/
+#   __NODE_BIN__                  absolute path to the node binary, outside /home
+#                                 (e.g. /usr/bin/node; not an nvm/home install)
+#   __SERVER_VERSION__            value reported as KIYEOVO_SERVER_VERSION (e.g. 0.1.0)
+#   __BOOTSTRAP_ANNOUNCE_ADDRS__  public dial address clients use, e.g.
+#                                 /ip4/<public-ip>/tcp/9000 or /dns4/<host>/tcp/9000
+#   __BOOTSTRAP_PORT__            local TCP port to listen on (matches the announce port)
+
+[Unit]
+Description=Kiyeovo bootstrap node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+Group=__SERVICE_USER__
+WorkingDirectory=__WORKDIR__
+
+# Deployment mode: fail-closed identity, required runtime metadata, strict
+# announce validation (the server refuses to start on a bad/empty announce).
+Environment=KIYEOVO_DEPLOY_MODE=1
+Environment=KIYEOVO_SERVER_VERSION=__SERVER_VERSION__
+Environment=BOOTSTRAP_NETWORK_MODE=fast
+# Public address clients dial. IPv4: /ip4/<ip>/tcp/<port>; DNS: /dns4/<host>/tcp/<port>.
+Environment=BOOTSTRAP_ANNOUNCE_ADDRS=__BOOTSTRAP_ANNOUNCE_ADDRS__
+# Bind all interfaces on the announced port.
+Environment=BOOTSTRAP_LISTEN_ADDRESS=/ip4/0.0.0.0/tcp/__BOOTSTRAP_PORT__
+Environment=BOOTSTRAP_PEER_ID_FILE=__WORKDIR__/data/bootstrap-peer-id.bin
+Environment=BOOTSTRAP_DATASTORE_PATH=__WORKDIR__/data/datastore
+Environment=KIYEOVO_RUNTIME_FILE=__WORKDIR__/run/bootstrap.runtime.json
+
+ExecStart=__NODE_BIN__ __WORKDIR__/dist-server/core/bootstrap.js
+
+# Auto-restart on crash; pair with `systemctl enable` for boot survival.
+Restart=always
+RestartSec=5
+
+# Hardening (assumes WorkingDirectory is NOT under /home — see setup note 2).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=__WORKDIR__/data __WORKDIR__/run
+
+[Install]
+WantedBy=multi-user.target

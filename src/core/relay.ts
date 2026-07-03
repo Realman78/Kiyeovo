@@ -11,6 +11,14 @@ import dotenv from 'dotenv';
 import type { PeerId } from '@libp2p/interface';
 
 import { PeerIdManager } from './network/peer-id-manager.js';
+import { isDeploymentMode } from './server/deploy-mode.js';
+import {
+  buildClientAddrs,
+  getRuntimeMetadataPath,
+  getServerVersion,
+  removeRuntimeMetadataFile,
+  writeRuntimeMetadata,
+} from './server/runtime-metadata.js';
 import { errStr } from './utils/general-error.js';
 
 dotenv.config();
@@ -39,6 +47,25 @@ function parseAnnounceAddrs(): string[] {
       console.warn(`[RELAY] Invalid announce address ignored: ${addr}`);
     }
   }
+
+  // Deploy mode fails fast: every provided announce address must parse, and at
+  // least one is required so clients have a reachable address to dial.
+  if (isDeploymentMode()) {
+    const droppedCount = raw.length - out.length;
+    if (droppedCount > 0) {
+      throw new Error(
+        `[CONFIG][RELAY] deploy mode: ${droppedCount} invalid announce address(es) in ` +
+          'RELAY_ANNOUNCE_ADDRS; aborting.'
+      );
+    }
+    if (out.length === 0) {
+      throw new Error(
+        '[CONFIG][RELAY] deploy mode: at least one valid announce address is required ' +
+          '(set RELAY_ANNOUNCE_ADDRS); aborting.'
+      );
+    }
+  }
+
   return out;
 }
 
@@ -52,7 +79,19 @@ async function createRelayNode() {
   const defaultDurationLimit = parseOptionalPositiveInt(process.env.RELAY_DEFAULT_DURATION_LIMIT_MS || String(5 * 60 * 1000));
   const defaultDataLimit = parseOptionalPositiveInt(process.env.RELAY_DEFAULT_DATA_LIMIT_BYTES);
 
-  const { privateKey } = await PeerIdManager.loadOrCreate(peerIdFile);
+  const runtimeFile = getRuntimeMetadataPath();
+
+  // Clear any stale runtime metadata before we become healthy so the CLI never
+  // reads addresses from a previous run while this process is still starting.
+  // In deploy mode this is part of the control-plane contract, so a failure to
+  // clear stale metadata aborts startup.
+  if (runtimeFile) {
+    await removeRuntimeMetadataFile(runtimeFile, { required: isDeploymentMode() });
+  }
+
+  const { privateKey } = await PeerIdManager.loadOrCreate(peerIdFile, {
+    failClosed: isDeploymentMode(),
+  });
 
   console.log('[CONFIG][RELAY] mode=fast');
   console.log(`[CONFIG][RELAY] listen=${listenAddress}`);
@@ -96,12 +135,62 @@ async function createRelayNode() {
   });
 
   await relay.start();
-  return relay;
+
+  if (runtimeFile) {
+    const peerId = relay.peerId.toString();
+    await writeRuntimeMetadata(runtimeFile, {
+      schemaVersion: 1,
+      role: 'relay',
+      networkMode: 'fast',
+      peerId,
+      announceAddrs,
+      clientAddrs: buildClientAddrs(announceAddrs, peerId),
+      version: getServerVersion(),
+      startedAt: new Date().toISOString(),
+    }, { required: isDeploymentMode() });
+  }
+
+  return { relay, runtimeFile };
+}
+
+function registerRelayShutdownHandlers(
+  relay: { stop: () => void | Promise<void> },
+  runtimeFile: string | undefined
+): void {
+  let shuttingDown = false;
+  const shutdown = async (signal: 'SIGINT' | 'SIGTERM'): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+
+    console.log(`\nShutting down relay node (${signal})...`);
+
+    // Remove runtime metadata first so the CLI immediately stops treating this
+    // node as healthy while it winds down.
+    if (runtimeFile) {
+      await removeRuntimeMetadataFile(runtimeFile);
+    }
+
+    try {
+      await relay.stop();
+    } catch (stopError: unknown) {
+      console.error(`[CONFIG][RELAY] failed to stop libp2p cleanly: ${errStr(stopError)}`);
+    }
+
+    process.exit(0);
+  };
+
+  process.on('SIGINT', () => {
+    void shutdown('SIGINT');
+  });
+
+  process.on('SIGTERM', () => {
+    void shutdown('SIGTERM');
+  });
 }
 
 async function main(): Promise<void> {
   try {
-    const relay = await createRelayNode();
+    const { relay, runtimeFile } = await createRelayNode();
     console.log(`Relay Peer ID: ${relay.peerId.toString()}`);
 
     relay.getMultiaddrs().forEach(addr => {
@@ -118,21 +207,7 @@ async function main(): Promise<void> {
 
     console.log('Relay node ready for reservations...');
 
-    process.on('SIGINT', () => {
-      void (async () => {
-        console.log('\nShutting down relay node...');
-        await relay.stop();
-        process.exit(0);
-      })();
-    });
-
-    process.on('SIGTERM', () => {
-      void (async () => {
-        console.log('\nShutting down relay node...');
-        await relay.stop();
-        process.exit(0);
-      })();
-    });
+    registerRelayShutdownHandlers(relay, runtimeFile);
   } catch (err: unknown) {
     console.error('Failed to start relay node:', errStr(err, 'Unknown error'));
     process.exit(1);
