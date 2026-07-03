@@ -249,6 +249,7 @@ Group system uses two planes:
 - membership changes (join/leave/kick) rotate group key (`key_version`)
 - previous topic may stay during grace window to reduce transition gaps
 - sender sequence boundaries and per-member progress are tracked for epoch-safe offline replay
+- if a closed epoch (`used_until !== null`) lacks authoritative sender boundaries, offline catch-up caps each sender at the pre-scan local high-water mark; live epochs remain uncapped and late-gap repair at or below that mark is still allowed
 
 #### 6.3 Encrypted group-info metadata
 
