@@ -23,6 +23,44 @@ async function withoutConsoleNoise<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
+type TrustedImportResult = Awaited<ReturnType<typeof ProfileManager.importTrustedUser>>;
+
+async function importTrustedUserWithBlockedDatabaseWork(
+  filename: string,
+  password: string,
+  myPeerId: string,
+  database: ChatDatabase,
+  customName?: string
+): Promise<TrustedImportResult> {
+  const originalGetUserByPeerId = database.getUserByPeerId.bind(database);
+  const originalCreateUser = database.createUser.bind(database);
+  const originalCreateChat = database.createChat.bind(database);
+
+  database.getUserByPeerId = (() => {
+    throw new Error('getUserByPeerId should not be called for self-import');
+  }) as ChatDatabase['getUserByPeerId'];
+  database.createUser = (async () => {
+    throw new Error('createUser should not be called for self-import');
+  }) as ChatDatabase['createUser'];
+  database.createChat = (async () => {
+    throw new Error('createChat should not be called for self-import');
+  }) as ChatDatabase['createChat'];
+
+  try {
+    return await withoutConsoleNoise(() => ProfileManager.importTrustedUser(
+      filename,
+      password,
+      myPeerId,
+      database,
+      customName,
+    ));
+  } finally {
+    database.getUserByPeerId = originalGetUserByPeerId;
+    database.createUser = originalCreateUser;
+    database.createChat = originalCreateChat;
+  }
+}
+
 test('trusted profile export/import round-trips public contact data and rejects wrong passwords', async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'kiyeovo-profile-test-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -122,4 +160,88 @@ test('trusted profile import creates an out-of-band direct chat and rejects dupl
   ));
   assert.equal(duplicate.success, false);
   assert.match(duplicate.error ?? '', /already exists/);
+});
+
+test('trusted profile import rejects self-import even when local user row already exists', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'kiyeovo-self-import-existing-user-test-'));
+  const database = new ChatDatabase(join(dir, 'chat.sqlite'));
+  t.after(async () => {
+    database.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const identity = await EncryptedUserIdentity.createEncrypted();
+  const filePath = join(dir, 'self.kiyeovo');
+  const password = 'Profile-password-123!';
+  const sharedSecret = 'self-default-inbox-key';
+
+  await database.createUser({
+    peer_id: identity.id,
+    username: 'Local User',
+    signing_public_key: Buffer.from(identity.signingPublicKey).toString('base64'),
+    offline_public_key: Buffer.from(identity.offlinePublicKey, 'utf8').toString('base64'),
+    signature: 'local-signature',
+  });
+
+  const exportResult = await withoutConsoleNoise(() => ProfileManager.exportProfileDesktop(
+    identity,
+    'Local User',
+    identity.id,
+    filePath,
+    password,
+    sharedSecret,
+  ));
+  assert.equal(exportResult.success, true);
+
+  const imported = await importTrustedUserWithBlockedDatabaseWork(
+    filePath,
+    password,
+    identity.id,
+    database,
+  );
+
+  assert.deepEqual(imported, {
+    success: false,
+    error: 'Cannot import your own profile',
+  });
+  assert.equal(database.getUserByPeerId(identity.id)?.username, 'Local User');
+  assert.deepEqual(database.getAllChats(), []);
+});
+
+test('trusted profile import rejects self-import without creating orphaned rows', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'kiyeovo-self-import-no-user-test-'));
+  const database = new ChatDatabase(join(dir, 'chat.sqlite'));
+  t.after(async () => {
+    database.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const identity = await EncryptedUserIdentity.createEncrypted();
+  const filePath = join(dir, 'self.kiyeovo');
+  const password = 'Profile-password-123!';
+  const sharedSecret = 'self-default-inbox-key';
+
+  const exportResult = await withoutConsoleNoise(() => ProfileManager.exportProfileDesktop(
+    identity,
+    'Local User',
+    identity.id,
+    filePath,
+    password,
+    sharedSecret,
+  ));
+  assert.equal(exportResult.success, true);
+
+  const imported = await importTrustedUserWithBlockedDatabaseWork(
+    filePath,
+    password,
+    identity.id,
+    database,
+  );
+
+  assert.deepEqual(imported, {
+    success: false,
+    error: 'Cannot import your own profile',
+  });
+  assert.equal(database.getUserByPeerId(identity.id), null);
+  assert.deepEqual(database.getAllChats(), []);
 });

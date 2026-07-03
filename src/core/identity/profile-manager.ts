@@ -143,6 +143,13 @@ export class ProfileManager {
       // Import and decrypt profile
       const profile = await ProfileManager.importProfile(filename, password);
 
+      if (profile.peerId === myPeerId) {
+        return {
+          success: false,
+          error: 'Cannot import your own profile'
+        };
+      }
+
       const existingUser = database.getUserByPeerId(profile.peerId);
       if (existingUser) {
         log(`User ${existingUser.username} (${profile.peerId.slice(0, 12)}...) already exists in your contacts`);
