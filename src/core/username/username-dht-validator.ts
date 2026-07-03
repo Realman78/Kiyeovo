@@ -5,6 +5,7 @@ import { errStr } from '../utils/general-error.js';
 import {
   canonicalUsernameRegistrationPayloadJson,
   isUsernameRegistrationRecord,
+  verifyUsernameRegistrationPeerBinding,
   verifyUsernameRegistrationSignature,
 } from './username-record.js';
 
@@ -54,6 +55,9 @@ function parseRegistration(value: Uint8Array): UserRegistration {
   }
   if (!verifyUsernameRegistrationSignature(parsed)) {
     throw new Error('Invalid username registration signature');
+  }
+  if (!verifyUsernameRegistrationPeerBinding(parsed)) {
+    throw new Error('Invalid username registration peer binding');
   }
 
   return parsed;

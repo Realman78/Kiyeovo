@@ -435,7 +435,9 @@ Primary categories:
 
 1. Username registry
    - by-name and by-peer mapping
-   - signed payload with validator/select/update logic
+   - records contain `{ peerID, username, signingPublicKey, offlinePublicKey, timestamp, kind, signature, peerBinding }`
+   - `signature` is the application Ed25519 signature over the canonical payload, and `peerBinding` is a second Ed25519 signature over the same canonical payload using the libp2p private key for `peerID`; both signature fields are excluded from the canonical payload
+   - validators, selectors, update validation, and local lookup paths reject records with missing or invalid signatures, missing or invalid peer binding, DHT key-slot mismatches, stale timestamps, or future timestamps
 
 2. Direct offline stores
    - per-recipient bucket model

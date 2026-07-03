@@ -511,6 +511,9 @@ export class KeyExchange {
     }
     if (!recipientOfflinePublicKeyBase64) {
       const registration = await this.usernameRegistry.lookupByPeerId(peerIdStr);
+      if (registration.peerID !== peerIdStr) {
+        throw new Error(`Username record peer ID mismatch for ${targetUsername}`);
+      }
       recipientOfflinePublicKeyBase64 = registration.offlinePublicKey;
     }
     if (!recipientOfflinePublicKeyBase64) {

@@ -172,6 +172,7 @@ export interface UserRegistration {
   signingPublicKey: string  // Ed25519 for signature verification
   offlinePublicKey: string // RSA for offline message encryption
   signature: string
+  peerBinding: string // Ed25519 signature from the libp2p peer identity key
 }
 
 // Message handling types

@@ -8,6 +8,8 @@ import { QueryEvent } from '@libp2p/kad-dht';
 import {
   isUsernameRegistrationRecord,
   signUsernameRegistrationPayload,
+  signUsernameRegistrationPeerBinding,
+  verifyUsernameRegistrationPeerBinding,
   verifyUsernameRegistrationSignature,
 } from './username-record.js';
 import { log } from '../../shared/logger.js';
@@ -111,7 +113,7 @@ export class UsernameRegistry {
       return true;
     }
 
-    const registrationContext = this.createRegistrationContext(username);
+    const registrationContext = await this.createRegistrationContext(username);
 
     await this.ensureUsernameAvailableForRegistration(
       registrationContext.usernameKey,
@@ -194,7 +196,7 @@ export class UsernameRegistry {
       this.buildUsernameByPeerIdKey(peerId),
       peerId,
       'Peer ID not found in DHT',
-      undefined,
+      (reg) => reg.peerID === peerId,
     );
   }
 
@@ -339,9 +341,9 @@ export class UsernameRegistry {
     return true;
   }
 
-  private createRegistrationContext(username: string): UsernameRegistrationContext {
+  private async createRegistrationContext(username: string): Promise<UsernameRegistrationContext> {
     const myPeerId = this.node.peerId.toString();
-    const registration = this.#createRegistrationObject(username, 'active');
+    const registration = await this.#createRegistrationObject(username, 'active');
     const registrationJson = JSON.stringify(registration);
 
     return {
@@ -370,7 +372,11 @@ export class UsernameRegistry {
         let existingRegistration: UserRegistration | null = null;
         try {
           const parsed = JSON.parse(rawData) as unknown;
-          if (!isUsernameRegistrationRecord(parsed) || !verifyUsernameRegistrationSignature(parsed)) {
+          if (
+            !isUsernameRegistrationRecord(parsed)
+            || !verifyUsernameRegistrationSignature(parsed)
+            || !verifyUsernameRegistrationPeerBinding(parsed)
+          ) {
             continue;
           }
           existingRegistration = parsed;
@@ -524,13 +530,13 @@ export class UsernameRegistry {
     }
   }
 
-  #createRegistrationObject(username: string, kind: 'active' | 'released'): UserRegistration {
+  async #createRegistrationObject(username: string, kind: 'active' | 'released'): Promise<UserRegistration> {
     if (!this.userIdentity) {
       throw new Error('User identity not initialized');
     }
     const identity = this.userIdentity;
 
-    const registrationData: Omit<UserRegistration, 'signature'> = {
+    const registrationData: Omit<UserRegistration, 'signature' | 'peerBinding'> = {
       peerID: this.node.peerId.toString(),
       username,
       kind,
@@ -542,14 +548,18 @@ export class UsernameRegistry {
     const signature = signUsernameRegistrationPayload(registrationData, (payload) =>
       identity.sign(payload),
     );
+    const peerBinding = await signUsernameRegistrationPeerBinding(registrationData, (payloadBytes) =>
+      identity.libp2pPrivateKey.sign(payloadBytes),
+    );
 
     return {
       ...registrationData,
       signature,
-    } as UserRegistration;
+      peerBinding,
+    };
   }
 
-  #createReleasedRegistrationObject(username: string): UserRegistration {
+  async #createReleasedRegistrationObject(username: string): Promise<UserRegistration> {
     return this.#createRegistrationObject(username, 'released');
   }
 
@@ -571,6 +581,7 @@ export class UsernameRegistry {
     const registration = JSON.parse(rawData) as unknown;
     if (!this.isValidUserRegistration(registration)) return null;
     if (!verifyUsernameRegistrationSignature(registration)) return null;
+    if (!verifyUsernameRegistrationPeerBinding(registration)) return null;
 
     // Check if registration is too old (replay attack prevention)
     const age = currentTime - registration.timestamp;
@@ -746,8 +757,8 @@ export class UsernameRegistry {
     return publish.acceptedCount > 0;
   }
 
-  private createReleasedRegistrationValueBytes(username: string): Uint8Array {
-    const releaseRecord = this.#createReleasedRegistrationObject(username);
+  private async createReleasedRegistrationValueBytes(username: string): Promise<Uint8Array> {
+    const releaseRecord = await this.#createReleasedRegistrationObject(username);
     return UsernameRegistry.TEXT_ENCODER.encode(JSON.stringify(releaseRecord));
   }
 
@@ -760,7 +771,7 @@ export class UsernameRegistry {
     username: string,
   ): Promise<{ usernameUnregistered: boolean; peerIdUnregistered: boolean }> {
     const myPeerId = this.node.peerId.toString();
-    const valueBytes = this.createReleasedRegistrationValueBytes(username);
+    const valueBytes = await this.createReleasedRegistrationValueBytes(username);
     const [usernameRelease, peerRelease] = await Promise.allSettled([
       this.publishReleasedRegistrationForKey(this.buildUsernameByNameKey(username), valueBytes),
       this.publishReleasedRegistrationForKey(this.buildUsernameByPeerIdKey(myPeerId), valueBytes),
@@ -775,7 +786,7 @@ export class UsernameRegistry {
   private async releaseUsernameByName(username: string): Promise<boolean> {
     return this.publishReleasedRegistrationForKey(
       this.buildUsernameByNameKey(username),
-      this.createReleasedRegistrationValueBytes(username),
+      await this.createReleasedRegistrationValueBytes(username),
     );
   }
 
