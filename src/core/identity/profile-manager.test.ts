@@ -162,6 +162,60 @@ test('trusted profile import creates an out-of-band direct chat and rejects dupl
   assert.match(duplicate.error ?? '', /already exists/);
 });
 
+test('trusted profile import trims custom names and rejects whitespace-only custom names', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'kiyeovo-trusted-import-name-test-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const database = new ChatDatabase(':memory:');
+  t.after(() => database.close());
+
+  await database.createUser({
+    peer_id: 'local-peer',
+    username: 'Local User',
+    signing_public_key: 'local-signing-public-key',
+    offline_public_key: 'local-offline-public-key',
+    signature: 'local-signature',
+  });
+
+  const identity = await EncryptedUserIdentity.createEncrypted();
+  const filePath = join(dir, 'trusted.kiyeovo');
+  const password = 'Profile-password-123!';
+  const sharedSecret = 'trusted-default-inbox-key';
+
+  const exportResult = await withoutConsoleNoise(() => ProfileManager.exportProfileDesktop(
+    identity,
+    'Trusted Alice',
+    identity.id,
+    filePath,
+    password,
+    sharedSecret,
+  ));
+  assert.equal(exportResult.success, true);
+
+  const whitespaceOnly = await withoutConsoleNoise(() => ProfileManager.importTrustedUser(
+    filePath,
+    password,
+    'local-peer',
+    database,
+    '   ',
+  ));
+
+  assert.equal(whitespaceOnly.success, false);
+  assert.match(whitespaceOnly.error ?? '', /Username must be between 2 and 64 characters/);
+  assert.equal(database.getUserByPeerId(identity.id), null);
+
+  const imported = await withoutConsoleNoise(() => ProfileManager.importTrustedUser(
+    filePath,
+    password,
+    'local-peer',
+    database,
+    '  Al  ',
+  ));
+
+  assert.equal(imported.success, true);
+  assert.equal(imported.username, 'Al');
+  assert.equal(database.getUserByPeerId(identity.id)?.username, 'Al');
+});
+
 test('trusted profile import rolls back contact user when chat creation fails and retry succeeds', async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'kiyeovo-trusted-import-atomic-test-'));
   const database = new ChatDatabase(join(dir, 'chat.sqlite'));

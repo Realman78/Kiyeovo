@@ -159,7 +159,7 @@ export class ProfileManager {
         };
       }
 
-      const localUsername = customName || profile.username;
+      const localUsername = (customName ?? profile.username).trim();
 
       if (localUsername.length < 2 || localUsername.length > 64) {
         log('Username must be between 2 and 64 characters');

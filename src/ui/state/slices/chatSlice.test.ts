@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import chatReducer, {
   addMessage,
+  removeChat,
   removeMessagesByIds,
   resolveMessageSendOutcome,
   setActiveChat,
@@ -98,6 +99,78 @@ test('addMessage updates unread and inbound activity only for inactive inbound m
   assert.equal(chat?.lastInboundActivityTimestamp, 100);
 });
 
+test('addMessage ignores duplicate and older payloads when refreshing chat preview', () => {
+  let state = chatReducer(undefined, setChats([
+    makeChat({ id: 1, lastMessage: 'newer', lastMessageTimestamp: 300 }),
+  ]));
+  state = chatReducer(state, setMessages([
+    makeMessage({ id: 'newer', content: 'newer', timestamp: 300 }),
+  ]));
+
+  state = withoutConsoleLog(() => chatReducer(state, addMessage(makeMessage({
+    id: 'newer',
+    content: 'stale duplicate',
+    timestamp: 100,
+  }))));
+
+  let chat = state.chats.find((candidate) => candidate.id === 1);
+  assert.equal(chat?.lastMessage, 'newer');
+  assert.equal(chat?.lastMessageTimestamp, 300);
+  assert.deepEqual(state.messages.map((message) => message.id), ['newer']);
+
+  state = chatReducer(state, addMessage(makeMessage({
+    id: 'older',
+    content: 'older',
+    timestamp: 200,
+  })));
+
+  chat = state.chats.find((candidate) => candidate.id === 1);
+  assert.equal(chat?.lastMessage, 'newer');
+  assert.equal(chat?.lastMessageTimestamp, 300);
+  assert.deepEqual(state.messages.map((message) => message.id), ['older', 'newer']);
+
+  state = chatReducer(state, addMessage(makeMessage({
+    id: 'latest',
+    content: 'latest',
+    timestamp: 400,
+  })));
+
+  chat = state.chats.find((candidate) => candidate.id === 1);
+  assert.equal(chat?.lastMessage, 'latest');
+  assert.equal(chat?.lastMessageTimestamp, 400);
+});
+
+test('removeChat clears reply targets for the removed chat', () => {
+  let state = chatReducer(undefined, setChats([
+    makeChat({ id: 1 }),
+  ]));
+  state = chatReducer(state, setReplyTarget({
+    chatId: 1,
+    target: { cid: 'cid-1', sender: 'Alice', excerpt: 'hello' },
+  }));
+
+  state = chatReducer(state, removeChat(1));
+
+  assert.equal(state.replyTargetByChatId[1], undefined);
+});
+
+test('removeChat of a non-active chat removes that chat from loaded messages', () => {
+  let state = chatReducer(undefined, setChats([
+    makeChat({ id: 1 }),
+    makeChat({ id: 2, name: 'Bob', lastMessageTimestamp: 50 }),
+  ]));
+  state = chatReducer(state, setMessages([
+    makeMessage({ id: 'chat-1-message', chatId: 1 }),
+    makeMessage({ id: 'chat-2-message', chatId: 2, content: 'from Bob' }),
+  ]));
+  state = chatReducer(state, setActiveChat(1));
+
+  state = chatReducer(state, removeChat(2));
+
+  assert.equal(state.activeChat?.id, 1);
+  assert.deepEqual(state.messages.map((message) => message.id), ['chat-1-message']);
+});
+
 test('removeMessagesByIds clears deleted reply targets and keeps the newest settled Redux preview', () => {
   let state = chatReducer(undefined, setChats([
     makeChat({ id: 1, lastMessage: 'newer', lastMessageTimestamp: 300 }),
@@ -127,6 +200,27 @@ test('removeMessagesByIds clears deleted reply targets and keeps the newest sett
   assert.equal(state.replyTargetByChatId[1], undefined);
   assert.equal(state.chats[0].lastMessage, 'newer');
   assert.equal(state.chats[0].lastMessageTimestamp, 300);
+});
+
+test('removeMessagesByIds resets preview timestamp when deleting down to empty', () => {
+  let state = chatReducer(undefined, setChats([
+    makeChat({ id: 1, lastMessage: 'only message', lastMessageTimestamp: 300 }),
+    makeChat({ id: 2, name: 'Bob', lastMessage: 'bob message', lastMessageTimestamp: 100 }),
+  ]));
+  state = chatReducer(state, setMessages([
+    makeMessage({ id: 'only-message', content: 'only message', timestamp: 300 }),
+  ]));
+
+  state = chatReducer(state, removeMessagesByIds({
+    chatId: 1,
+    messageIds: ['only-message'],
+    latestRemaining: null,
+  }));
+
+  const emptiedChat = state.chats.find((candidate) => candidate.id === 1);
+  assert.equal(emptiedChat?.lastMessage, 'SYSTEM: No messages yet');
+  assert.equal(emptiedChat?.lastMessageTimestamp, 0);
+  assert.deepEqual(state.chats.map((chat) => chat.id), [2, 1]);
 });
 
 test('file transfer reducers ignore progress after terminal state and finalize completed paths', () => {
