@@ -350,6 +350,11 @@ export const FILE_PULL_CONFIRM_TIMEOUT = 30 * SECOND; // Last chunk sent, awaiti
 export const SILENT_REJECTION_THRESHOLD_GLOBAL = 20; // After N global rejections, stop responding (bandwidth optimization)
 export const SILENT_REJECTION_THRESHOLD_PER_PEER = 5; // After N rejections to same peer, stop responding (bandwidth optimization)
 export const CHATS_TO_CHECK_FOR_OFFLINE_MESSAGES = 10; // Max chats scanned per offline-message check pass
+export const INBOUND_STREAM_READ_TIMEOUT_MS = 30 * SECOND; // Default deadline for one inbound JSON stream read
+export const MAX_CHAT_ENVELOPE_BYTES = 64 * 1024; // Direct chat envelope cap
+export const MAX_CALL_SIGNAL_ENVELOPE_BYTES = 256 * 1024; // WebRTC SDP/ICE signaling envelope cap
+export const MAX_KEY_EXCHANGE_ENVELOPE_BYTES = 128 * 1024; // Signed key-exchange envelope cap
+export const MAX_BUCKET_NUDGE_ENVELOPE_BYTES = 16 * 1024; // Offline/refetch nudge envelope cap
 export const MAX_MESSAGE_CONTENT_LENGTH = 2048; // Max direct/group message characters
 
 /**

@@ -6,6 +6,7 @@ import './lib/served-file-registry.test.js';
 import './lib/lease-pool.test.js';
 import './lib/file-transfer.test.js';
 import './lib/frame-stream.test.js';
+import './transport/stream-handler.test.js';
 import './lib/file-storage.test.js';
 import './lib/file-handler.test.js';
 import './network/reconnect-controller.test.js';

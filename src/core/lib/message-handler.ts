@@ -66,6 +66,10 @@ import {
   ERRORS,
   getNetworkModeRuntime,
   NETWORK_MODES,
+  INBOUND_STREAM_READ_TIMEOUT_MS,
+  MAX_BUCKET_NUDGE_ENVELOPE_BYTES,
+  MAX_CALL_SIGNAL_ENVELOPE_BYTES,
+  MAX_CHAT_ENVELOPE_BYTES,
   RESUME_RELAY_GRACE_MS,
   RESUME_RELAY_READY_WAIT_MS,
   RESUME_RELAY_READY_POLL_MS,
@@ -807,7 +811,10 @@ export class MessageHandler {
       StreamHandler.logIncomingConnection(remoteId, this.chatProtocol);
 
       try {
-        const message = await StreamHandler.readMessageFromStream<EncryptedMessage>(stream);
+        const message = await StreamHandler.readMessageFromStream<EncryptedMessage>(stream, {
+          maxBytes: MAX_CHAT_ENVELOPE_BYTES,
+          timeoutMs: INBOUND_STREAM_READ_TIMEOUT_MS,
+        });
         StreamHandler.logReceivedMessage(message);
 
         if (MessageEncryption.isKeyExchange(message)) {
@@ -864,7 +871,10 @@ export class MessageHandler {
       try {
         if (this.database.isBlocked(remoteId)) return;
 
-        const signal = await StreamHandler.readMessageFromStream<CallSignalMessage>(stream);
+        const signal = await StreamHandler.readMessageFromStream<CallSignalMessage>(stream, {
+          maxBytes: MAX_CALL_SIGNAL_ENVELOPE_BYTES,
+          timeoutMs: INBOUND_STREAM_READ_TIMEOUT_MS,
+        });
         await this.handleIncomingCallSignal(remoteId, signal);
       } catch (error: unknown) {
         generalErrorHandler(error, `Error handling call signal from ${remoteId}`);
@@ -2009,33 +2019,28 @@ export class MessageHandler {
   }
 
   private async readBucketNudgePayload(stream: StreamHandlerContext['stream']): Promise<BucketNudgePayload | null> {
-    const chunks: Uint8Array[] = [];
-    for await (const chunk of stream.source) {
-      chunks.push((chunk as any).subarray());
-    }
-    if (chunks.length === 0) return null;
-
-    const totalLength = chunks.reduce((sum, c) => sum + c.length, 0);
-    const combined = new Uint8Array(totalLength);
-    let offset = 0;
-    for (const chunk of chunks) {
-      combined.set(chunk, offset);
-      offset += chunk.length;
-    }
-
+    let parsed: { kind?: string; groupId?: string };
     try {
-      const parsed = JSON.parse(new TextDecoder().decode(combined)) as { kind?: string; groupId?: string };
-      if (parsed.kind === 'DIRECT_SESSION_RESET') {
-        return { kind: 'DIRECT_SESSION_RESET' };
+      parsed = await StreamHandler.readMessageFromStream<{ kind?: string; groupId?: string }>(stream, {
+        maxBytes: MAX_BUCKET_NUDGE_ENVELOPE_BYTES,
+        timeoutMs: INBOUND_STREAM_READ_TIMEOUT_MS,
+      });
+    } catch (error: unknown) {
+      if (error instanceof SyntaxError) {
+        // Ignore empty or invalid payloads and treat as plain nudges.
+        return null;
       }
-      if (parsed.kind === 'DIRECT_OFFLINE_REFETCH') {
-        return { kind: 'DIRECT_OFFLINE_REFETCH' };
-      }
-      if (parsed.kind === 'GROUP_REKEY_REFETCH' && typeof parsed.groupId === 'string' && parsed.groupId.length > 0) {
-        return { kind: 'GROUP_REKEY_REFETCH', groupId: parsed.groupId };
-      }
-    } catch {
-      // Ignore invalid payloads and treat as plain nudge.
+      throw error;
+    }
+
+    if (parsed.kind === 'DIRECT_SESSION_RESET') {
+      return { kind: 'DIRECT_SESSION_RESET' };
+    }
+    if (parsed.kind === 'DIRECT_OFFLINE_REFETCH') {
+      return { kind: 'DIRECT_OFFLINE_REFETCH' };
+    }
+    if (parsed.kind === 'GROUP_REKEY_REFETCH' && typeof parsed.groupId === 'string' && parsed.groupId.length > 0) {
+      return { kind: 'GROUP_REKEY_REFETCH', groupId: parsed.groupId };
     }
     return null;
   }

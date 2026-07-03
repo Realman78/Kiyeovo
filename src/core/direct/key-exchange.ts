@@ -8,10 +8,12 @@ import type { ChatNode, ConversationSession, AuthenticatedEncryptedMessage, Mess
 import { EncryptedUserIdentity } from '../identity/encrypted-user-identity.js';
 import { SessionManager } from './session-manager.js';
 import {
+  INBOUND_STREAM_READ_TIMEOUT_MS,
   KEY_EXCHANGE_MAX_FUTURE_SKEW_MS,
   KEY_EXCHANGE_RATE_LIMIT_DEFAULT,
   KEY_ROTATION_TIMEOUT,
   MAX_KEY_EXCHANGE_AGE,
+  MAX_KEY_EXCHANGE_ENVELOPE_BYTES,
   NETWORK_MODES,
   PENDING_KEY_EXCHANGE_EXPIRATION,
   RECENT_KEY_EXCHANGE_ATTEMPTS_WINDOW,
@@ -1331,26 +1333,15 @@ export class KeyExchange {
       `peer=${remoteId}`,
     );
 
-    let timeoutId: NodeJS.Timeout | undefined;
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      timeoutId = setTimeout(() => {
-        reject(new Error('Key exchange follow-up timeout'));
-      }, this.getKeyExchangeFollowupTimeoutMs());
+    const message = await StreamHandler.readMessageFromStream<AuthenticatedEncryptedMessage>(stream, {
+      maxBytes: MAX_KEY_EXCHANGE_ENVELOPE_BYTES,
+      timeoutMs: this.getKeyExchangeFollowupTimeoutMs(),
     });
-
-    const message = await Promise.race([
-      StreamHandler.readMessageFromStream<AuthenticatedEncryptedMessage>(stream),
-      timeoutPromise,
-    ]);
 
     log(
       `[KEY-EXCHANGE][FINALIZE][WAIT][MESSAGE] ts=${new Date().toISOString()} ` +
       `peer=${remoteId} durationMs=${Date.now() - startedAt} content=${message.content}`,
     );
-
-    if (timeoutId) {
-      clearTimeout(timeoutId);
-    }
 
     if (message.content === 'key_exchange_cancelled') {
       await this.assertKeyExchangeStreamResult(message, remoteId, 'key_exchange_cancelled', responderEphemeralPublicKey);
@@ -1657,7 +1648,10 @@ export class KeyExchange {
       `sinceInitMs=${keyExchangeStartedAt === undefined ? 'unknown' : String(waitStartedAt - keyExchangeStartedAt)}`,
     );
     try {
-      const message = await StreamHandler.readMessageFromStream<AuthenticatedEncryptedMessage>(stream);
+      const message = await StreamHandler.readMessageFromStream<AuthenticatedEncryptedMessage>(stream, {
+        maxBytes: MAX_KEY_EXCHANGE_ENVELOPE_BYTES,
+        timeoutMs: INBOUND_STREAM_READ_TIMEOUT_MS,
+      });
       log(
         `[KEY-EXCHANGE][INIT_STREAM][MESSAGE] ts=${new Date().toISOString()} peer=${peerId} ` +
         `durationMs=${Date.now() - waitStartedAt} content=${message.content}`,
