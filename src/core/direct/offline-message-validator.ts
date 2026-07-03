@@ -14,6 +14,10 @@ import {
 const gunzipAsync = promisify(gunzip);
 const OFFLINE_BUCKET_PREFIXES = Object.values(NETWORK_MODE_CONFIG).map((config) => config.dhtNamespaces.offline);
 
+function hashBase64Field(value: string): string {
+  return Buffer.from(sha256(Buffer.from(value, 'base64'))).toString('base64');
+}
+
 /**
  * The signed payload structure included in each offline message
  */
@@ -22,6 +26,11 @@ export interface OfflineSignedPayload {
   sender_info_hash: string;   // SHA256 of encrypted sender info (base64)
   timestamp: number;
   bucket_key: string;         // Full bucket key for binding
+  message_type: 'encrypted' | 'hybrid';
+  expires_at: number;
+  aes_key_hash?: string;      // hybrid only: SHA256 of encrypted_aes_key (base64)
+  aes_iv_hash?: string;       // hybrid only: SHA256 of aes_iv (base64)
+  ack_only?: boolean;
 }
 
 /**
@@ -75,6 +84,7 @@ export interface OfflineMessageStoreDHT {
  *    - Verify content_hash matches SHA256(encrypted_content)
  *    - Verify sender_info_hash matches SHA256(encrypted_sender_info)
  *    - Verify bucket_key in signed_payload matches the actual bucket key
+ *    - Verify message_type, expires_at, and hybrid AES metadata hashes match the signed payload
  *
  * @throws Error if validation fails (DHT rejects the write)
  */
@@ -235,6 +245,44 @@ function validateSingleMessage(
   // Timestamp used by receivers must be exactly what was signed.
   if (msg.timestamp !== msg.signed_payload.timestamp) {
     throw new Error(`Message ${msg.id} timestamp mismatch with signed payload`);
+  }
+
+  if (msg.message_type !== 'encrypted' && msg.message_type !== 'hybrid') {
+    throw new Error(`Message ${msg.id} message_type invalid`);
+  }
+  if (msg.signed_payload.message_type !== msg.message_type) {
+    throw new Error(`Message ${msg.id} message_type mismatch with signed payload`);
+  }
+  if (!Number.isFinite(msg.expires_at) || msg.expires_at <= 0) {
+    throw new Error(`Message ${msg.id} expires_at invalid`);
+  }
+  if (!Number.isFinite(msg.signed_payload.expires_at) || msg.signed_payload.expires_at <= 0) {
+    throw new Error(`Message ${msg.id} signed expires_at invalid`);
+  }
+  if (msg.expires_at !== msg.signed_payload.expires_at) {
+    throw new Error(`Message ${msg.id} expires_at mismatch with signed payload`);
+  }
+
+  if (msg.message_type === 'hybrid') {
+    if (
+      typeof msg.encrypted_aes_key !== 'string' || msg.encrypted_aes_key.length === 0 ||
+      typeof msg.aes_iv !== 'string' || msg.aes_iv.length === 0
+    ) {
+      throw new Error(`Message ${msg.id} hybrid AES fields missing`);
+    }
+    if (hashBase64Field(msg.encrypted_aes_key) !== msg.signed_payload.aes_key_hash) {
+      throw new Error(`Message ${msg.id} aes_key_hash mismatch`);
+    }
+    if (hashBase64Field(msg.aes_iv) !== msg.signed_payload.aes_iv_hash) {
+      throw new Error(`Message ${msg.id} aes_iv_hash mismatch`);
+    }
+  } else if (
+    msg.encrypted_aes_key !== undefined ||
+    msg.aes_iv !== undefined ||
+    msg.signed_payload.aes_key_hash !== undefined ||
+    msg.signed_payload.aes_iv_hash !== undefined
+  ) {
+    throw new Error(`Message ${msg.id} encrypted message contains AES fields`);
   }
 
   // 2. Verify content_hash matches SHA256(encrypted_content)

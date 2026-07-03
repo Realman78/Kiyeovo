@@ -442,7 +442,7 @@ Primary categories:
 
 2. Direct offline stores
    - per-recipient bucket model
-   - message/store signatures + validateUpdate
+   - message/store signatures + validateUpdate; per-message signatures bind ciphertext/sender-info hashes, bucket key, timestamp, type, expiry, and hybrid AES metadata hashes
    - local UX capacity view is derived from the local mirror plus actively queued pending writes; failed offline-backup rows remain retryable local state but do not consume capacity
    - effective direct capacity is split into `30` sendable slots, `10` reserved group-control slots, and `1` reserved ACK slot
 

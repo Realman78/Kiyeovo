@@ -19,6 +19,10 @@ import { log } from '../../shared/logger.js';
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
 
+function hashBase64Field(value: string): string {
+    return Buffer.from(sha256(Buffer.from(value, 'base64'))).toString('base64');
+}
+
 /**
  * Manages offline message storage and retrieval using DHT
  */
@@ -409,7 +413,8 @@ export class OfflineMessageManager {
      * 1. Encrypt content and sender info with recipient's RSA public key
      * 2. Sign the hashes of encrypted data (for DHT validation)
      *
-     * The signature is over: {content_hash, sender_info_hash, timestamp, bucket_key}
+     * The signature binds ciphertext/sender-info hashes, timestamp, bucket key,
+     * message type, expiry, and hybrid AES metadata hashes.
      * This allows DHT validators to verify writes without decryption.
      */
     static createOfflineMessage(
@@ -475,11 +480,20 @@ export class OfflineMessageManager {
             const encryptedSenderInfoB64 = encryptedSenderInfo.toString('base64');
 
             const encryptedContentBuf = Buffer.from(encryptedContentB64, 'base64');
+            const expiresAt = timestamp + MESSAGE_TTL;
             const signedPayload: OfflineSignedPayload = {
                 content_hash: Buffer.from(sha256(encryptedContentBuf)).toString('base64'),
                 sender_info_hash: Buffer.from(sha256(encryptedSenderInfo)).toString('base64'),
                 timestamp,
                 bucket_key: bucketKey,
+                message_type: messageType,
+                expires_at: expiresAt,
+                ...(messageType === 'hybrid' && encryptedAesKey !== undefined && aesIv !== undefined
+                    ? {
+                        aes_key_hash: hashBase64Field(encryptedAesKey),
+                        aes_iv_hash: hashBase64Field(aesIv),
+                    }
+                    : {}),
                 ...(ackOnly ? { ack_only: true } : {}),
             };
 
@@ -497,7 +511,7 @@ export class OfflineMessageManager {
                 ...(encryptedAesKey !== undefined && { encrypted_aes_key: encryptedAesKey }),
                 ...(aesIv !== undefined && { aes_iv: aesIv }),
                 timestamp,
-                expires_at: timestamp + MESSAGE_TTL
+                expires_at: expiresAt
             };
         } catch (error: unknown) {
             const errorMessage = errStr(error);
@@ -564,6 +578,53 @@ export class OfflineMessageManager {
             }
             if (message.timestamp > Date.now() + OFFLINE_MESSAGE_MAX_FUTURE_SKEW_MS) {
                 log('Offline message timestamp too far in future');
+                return false;
+            }
+
+            if (message.message_type !== 'encrypted' && message.message_type !== 'hybrid') {
+                log('Offline message message_type invalid');
+                return false;
+            }
+            if (message.signed_payload.message_type !== message.message_type) {
+                log('Offline message message_type mismatch');
+                return false;
+            }
+            if (!Number.isFinite(message.expires_at) || message.expires_at <= 0) {
+                log('Offline message expires_at invalid');
+                return false;
+            }
+            if (!Number.isFinite(message.signed_payload.expires_at) || message.signed_payload.expires_at <= 0) {
+                log('Offline message signed expires_at invalid');
+                return false;
+            }
+            if (message.expires_at !== message.signed_payload.expires_at) {
+                log('Offline message expires_at mismatch');
+                return false;
+            }
+
+            if (message.message_type === 'hybrid') {
+                if (
+                    typeof message.encrypted_aes_key !== 'string' || message.encrypted_aes_key.length === 0 ||
+                    typeof message.aes_iv !== 'string' || message.aes_iv.length === 0
+                ) {
+                    log('Offline hybrid message missing AES fields');
+                    return false;
+                }
+                if (hashBase64Field(message.encrypted_aes_key) !== message.signed_payload.aes_key_hash) {
+                    log('Offline message aes_key_hash mismatch');
+                    return false;
+                }
+                if (hashBase64Field(message.aes_iv) !== message.signed_payload.aes_iv_hash) {
+                    log('Offline message aes_iv_hash mismatch');
+                    return false;
+                }
+            } else if (
+                message.encrypted_aes_key !== undefined ||
+                message.aes_iv !== undefined ||
+                message.signed_payload.aes_key_hash !== undefined ||
+                message.signed_payload.aes_iv_hash !== undefined
+            ) {
+                log('Offline encrypted message contains AES fields');
                 return false;
             }
 

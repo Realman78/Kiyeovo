@@ -237,6 +237,10 @@ export interface OfflineSignedPayload {
   sender_info_hash: string   // SHA256 of encrypted sender info (base64)
   timestamp: number
   bucket_key: string         // Full bucket key for binding
+  message_type: 'encrypted' | 'hybrid'
+  expires_at: number
+  aes_key_hash?: string      // hybrid only: SHA256 of encrypted_aes_key (base64)
+  aes_iv_hash?: string       // hybrid only: SHA256 of aes_iv (base64)
   ack_only?: boolean         // Standalone ACK marker (authenticated by the signature)
 }
 
