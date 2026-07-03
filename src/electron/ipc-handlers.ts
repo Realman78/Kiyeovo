@@ -1,4 +1,4 @@
-import type { BrowserWindow } from 'electron';
+import type { BrowserWindow, SaveDialogOptions } from 'electron';
 import { app, clipboard, dialog, nativeImage, Notification, shell } from 'electron';
 import {
   IPC_CHANNELS,
@@ -17,7 +17,7 @@ import {
   type IceServerType,
   type IceServersResponse,
 } from '../core/index.js';
-import { CHATS_TO_CHECK_FOR_OFFLINE_MESSAGES, DEFAULT_NETWORK_MODE, DOWNLOADS_DIR, FAST_MISSING_ICE_WARNING_ACKNOWLEDGED_SETTING_KEY, FAST_RELAY_MULTIADDRS_SETTING_KEY, FILE_OFFER_RATE_LIMIT, KEY_EXCHANGE_RATE_LIMIT_DEFAULT, MAX_FILE_SIZE, MAX_PENDING_FILES_PER_PEER, MAX_PENDING_FILES_TOTAL, NETWORK_MODE_ONBOARDED_SETTING_KEY, OFFLINE_MESSAGE_LIMIT, SILENT_REJECTION_THRESHOLD_GLOBAL, SILENT_REJECTION_THRESHOLD_PER_PEER, NETWORK_MODES, UPLOADS_DIR, WEBRTC_ICE_SERVERS_SETTING_KEY, getInitialSetupStatusSettingKey, getTorConfig, isNetworkMode } from '../core/constants.js';
+import { CHATS_TO_CHECK_FOR_OFFLINE_MESSAGES, DEFAULT_NETWORK_MODE, DOWNLOADS_DIR, FAST_MISSING_ICE_WARNING_ACKNOWLEDGED_SETTING_KEY, FAST_RELAY_MULTIADDRS_SETTING_KEY, FILE_OFFER_RATE_LIMIT, KEY_EXCHANGE_RATE_LIMIT_DEFAULT, MAX_FILE_SIZE, MAX_PENDING_FILES_PER_PEER, MAX_PENDING_FILES_TOTAL, NETWORK_MODE_ONBOARDED_SETTING_KEY, OFFLINE_MESSAGE_LIMIT, SILENT_REJECTION_THRESHOLD_GLOBAL, SILENT_REJECTION_THRESHOLD_PER_PEER, NETWORK_MODES, WEBRTC_ICE_SERVERS_SETTING_KEY, getInitialSetupStatusSettingKey, getTorConfig, isNetworkMode } from '../core/constants.js';
 import { validateMessageLength, validateUsername } from '../core/utils/validators.js';
 import { peerIdFromString } from '@libp2p/peer-id';
 import { multiaddr } from '@multiformats/multiaddr';
@@ -33,7 +33,7 @@ import {
 } from '../core/network/node-relays.js';
 import { DEFAULT_WEBRTC_ICE_SERVERS } from '../core/network/default-infrastructure.js';
 import { ensureAppDataDir } from '../core/utils/miscellaneous.js';
-import { basename, dirname, isAbsolute, join, resolve as resolvePath } from 'path';
+import { basename, join } from 'path';
 import { copyFile, lstat, mkdir, readdir, realpath, rm, stat } from 'fs/promises';
 import { log } from '../shared/logger.js';
 import { isImageFile } from '../shared/file-types.js';
@@ -45,6 +45,12 @@ import { scheduleAppRelaunch } from './relaunch.js';
 import { createTrustedIpcMainHandle, type IpcMainHandleRegistrar } from './trusted-ipc.js';
 import { mintMediaToken } from './app-protocol.js';
 import { prepareTextUpload } from './text-upload.js';
+import {
+  resolveCompletedImageMedia,
+  resolveOpenFileLocationPath,
+  resolveUploadsDirectory,
+  validateUploadImageFileName,
+} from './ipc-handler-helpers.js';
 import { writeFileWithCopySuffix } from '../core/lib/file-storage.js';
 import type { InitialSetupStatus, SaveTextUploadResponse } from '../shared/kiyeovo-api.js';
 
@@ -69,14 +75,6 @@ function withSettingsDatabase<T>(getP2PCore: () => P2PCore | null, run: (db: Cha
   }
 }
 
-function resolveUploadsDirectory(db: ChatDatabase): string {
-  const configuredDownloadsDir = db.getSetting('downloads_directory') || DOWNLOADS_DIR;
-  const downloadsDir = isAbsolute(configuredDownloadsDir)
-    ? configuredDownloadsDir
-    : resolvePath(process.cwd(), configuredDownloadsDir);
-  return join(dirname(downloadsDir), UPLOADS_DIR);
-}
-
 function getConfiguredMaxFileSize(db: ChatDatabase): number {
   const configured = Number.parseInt(db.getSetting('max_file_size') || '', 10);
   return Number.isFinite(configured) && configured > 0 ? configured : MAX_FILE_SIZE;
@@ -98,32 +96,6 @@ async function getFlatDirectorySize(directoryPath: string): Promise<number> {
       .map(async (entry) => (await stat(join(directoryPath, entry.name))).size),
   );
   return sizes.reduce((total, size) => total + size, 0);
-}
-
-async function resolveCompletedImageMedia(
-  p2pCore: P2PCore,
-  messageId: string,
-): Promise<{ canonicalPath: string; fileName: string }> {
-  const media = p2pCore.database.getCompletedFileMediaById(messageId);
-  if (!media || !isImageFile(media.fileName)) {
-    throw new Error('Completed image message not found');
-  }
-
-  const storedPathStats = await lstat(media.filePath);
-  if (storedPathStats.isSymbolicLink()) {
-    throw new Error('Symbolic-link media paths are not allowed');
-  }
-
-  const canonicalPath = await realpath(media.filePath);
-  const fileStats = await stat(canonicalPath);
-  if (!fileStats.isFile()) {
-    throw new Error('Media path is not a file');
-  }
-
-  return {
-    canonicalPath,
-    fileName: media.fileName,
-  };
 }
 
 function normalizeAddressList(addresses: string[]): string[] {
@@ -515,10 +487,8 @@ function setupMessagingHandlers(
       log(`[IPC] Sending message to ${identifier}: ${message}`);
 
       // Check if identifier is a valid peer ID or username
-      let isPeerId = false;
       try {
         peerIdFromString(identifier);
-        isPeerId = true;
         log(`[IPC] Identifier is a peer ID`);
       } catch {
         // Not a peer ID, check if it's a valid username
@@ -1432,7 +1402,7 @@ function setupFileDialogHandlers(ipcMain: IpcMainHandleRegistrar): void {
     filters?: Array<{ name: string; extensions: string[] }>;
   }) => {
     try {
-      const dialogOptions: any = {
+      const dialogOptions: SaveDialogOptions = {
         title: options.title || 'Save File',
         filters: options.filters || []
       };
@@ -1489,7 +1459,7 @@ function setupMediaHandlers(
         return { success: false, token: null, error: 'P2P core not initialized' };
       }
 
-      const { canonicalPath } = await resolveCompletedImageMedia(p2pCore, messageId);
+      const { canonicalPath } = await resolveCompletedImageMedia(p2pCore.database, messageId);
 
       return {
         success: true,
@@ -1517,7 +1487,7 @@ function setupMediaHandlers(
         return { success: false, error: 'P2P core not initialized' };
       }
 
-      const { canonicalPath } = await resolveCompletedImageMedia(p2pCore, messageId);
+      const { canonicalPath } = await resolveCompletedImageMedia(p2pCore.database, messageId);
       const image = nativeImage.createFromPath(canonicalPath);
       if (image.isEmpty()) {
         return { success: false, error: 'Image could not be decoded for clipboard' };
@@ -1578,20 +1548,17 @@ function setupUploadHandlers(
         };
       }
 
-      const sanitizedFileName = basename(fileName.trim());
-      if (
-        !sanitizedFileName
-        || sanitizedFileName.length > 255
-        || !isImageFile(sanitizedFileName)
-      ) {
+      const validatedFileName = validateUploadImageFileName(fileName);
+      if (!validatedFileName.success) {
         return {
           success: false,
           filePath: null,
           mediaToken: null,
           uploadsDirSizeBytes: 0,
-          error: 'Unsupported upload filename',
+          error: validatedFileName.error,
         };
       }
+      const sanitizedFileName = validatedFileName.fileName;
 
       const maxFileSize = getConfiguredMaxFileSize(p2pCore.database);
       if (bytes.byteLength > maxFileSize) {
@@ -2485,7 +2452,7 @@ function setupChatSettingsHandlers(
     },
   );
 
-  ipcMain.handle(IPC_CHANNELS.GET_NOTIFICATIONS_ENABLED, async (_event) => {
+  ipcMain.handle(IPC_CHANNELS.GET_NOTIFICATIONS_ENABLED, async () => {
     try {
       const p2pCore = getP2PCore();
       if (!p2pCore) {
@@ -2529,7 +2496,7 @@ function setupChatSettingsHandlers(
   });
 
   // Downloads directory settings
-  ipcMain.handle(IPC_CHANNELS.GET_DOWNLOADS_DIR, async (_event) => {
+  ipcMain.handle(IPC_CHANNELS.GET_DOWNLOADS_DIR, async () => {
     try {
       const p2pCore = getP2PCore();
       if (!p2pCore) {
@@ -3355,19 +3322,19 @@ function setupAppHandlers(ipcMain: IpcMainHandleRegistrar, getP2PCore: () => P2P
       try {
         await fs.unlink(dbPath);
         log('[IPC] Removed existing chat.db');
-      } catch (e) {
+      } catch {
         // File doesn't exist, that's ok
       }
       try {
         await fs.unlink(`${dbPath}-wal`);
         log('[IPC] Removed existing chat.db-wal');
-      } catch (e) {
+      } catch {
         // File doesn't exist, that's ok
       }
       try {
         await fs.unlink(`${dbPath}-shm`);
         log('[IPC] Removed existing chat.db-shm');
-      } catch (e) {
+      } catch {
         // File doesn't exist, that's ok
       }
 
@@ -3599,9 +3566,18 @@ function setupFileTransferHandlers(
   // Open file location
   ipcMain.handle(IPC_CHANNELS.OPEN_FILE_LOCATION, async (_event, filePath: string) => {
     try {
-      const normalizedPath = isAbsolute(filePath) ? filePath : resolvePath(process.cwd(), filePath);
-      log(`[IPC] Opening file location: ${normalizedPath}`);
-      shell.showItemInFolder(normalizedPath);
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { success: false, error: 'P2P core not initialized' };
+      }
+
+      const fileLocationPath = await resolveOpenFileLocationPath({
+        database: p2pCore.database,
+        filePath,
+        uploadsDir: resolveUploadsDirectory(p2pCore.database),
+      });
+      log(`[IPC] Opening file location: ${fileLocationPath}`);
+      shell.showItemInFolder(fileLocationPath);
 
       return { success: true, error: null };
     } catch (error) {

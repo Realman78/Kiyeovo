@@ -327,7 +327,7 @@ Current direct/group behavior:
 - outgoing image sends keep the sender's trusted selection/upload capability in renderer state, so the sender sees the image immediately with connecting/approval/progress/failure status beneath it; receivers still see the file-offer card until the transfer completes
 - clicking an inline image opens a viewport-sized preview dialog using the same capability-backed media URL; Escape, the close control, and backdrop clicks close it
 - inline images keep a compact searchable filename/size caption; completed files retain show-in-folder as a secondary action in both the message caption and preview dialog, while sender-only pending previews do not expose filesystem actions
-- completed local image messages expose **Copy image** from the message row menu/right-click menu and the fullscreen preview dialog. The renderer passes only the message id; the main process revalidates that the row is a completed image message in the active network mode, rejects symlink paths, canonicalizes the stored path, decodes it with Electron's native image loader, and writes the decoded bitmap to the OS clipboard. Non-image files, pending offers, failed/rejected/cancelled transfers, and sender-only pending previews do not expose image copy
+- completed local image messages expose **Copy image** from the message row menu/right-click menu and the fullscreen preview dialog. The renderer passes only the message id; the main process revalidates that the row is a completed image message in the active network mode, rejects symlink paths, canonicalizes the stored path, decodes it with Electron's native image loader, and writes the decoded bitmap to the OS clipboard. Non-image files, pending offers, failed/rejected/cancelled transfers, and sender-only pending previews do not expose image copy. Show-in-folder IPC rejects arbitrary renderer paths and only reveals regular files that either match a completed file row in the active database or live under Kiyeovo's app-owned uploads directory
 - unavailable inline media falls back to the file card
 - images selected through the paperclip flow show a capability-backed preview in the confirmation dialog, while non-image selections keep the existing dialog layout
 - direct file confirmation/conversion dialogs and group file confirmation dialogs show the captured reply context when opened from a reply draft, and the resulting file offer carries that reply cid
@@ -1022,7 +1022,7 @@ Current resilience layers:
 - bootstrap/relay retry mechanisms
 - pending-ACK republish cycles (including retirement/reactivation behavior)
 - per-bucket mutation locks for offline store writes
-- durable offline-send / group-backup queues with crash-safe (transactional) state and manual retry
+- durable offline-send / group-backup queues with crash-safe (transactional) state, manual retry, and queued-row settlement guards so late delivered/failed results cannot overwrite a first terminal offline-send outcome
 - group offline check orchestration with single-flight style guards
 - startup cleanup of interrupted file transfers (and reconciliation of interrupted offline sends → `failed`)
 - main-process logging for renderer process termination (`render-process-gone`) so renderer crashes are visible in operational logs
