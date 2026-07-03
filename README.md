@@ -118,12 +118,17 @@ GHCR.
 
 Prerequisites: Docker Engine + the Compose plugin.
 
-Download the `kiyeovo-infra-<version>.tar.gz` asset from the Kiyeovo GitHub
-release, then:
+Download and unpack the `kiyeovo-infra-<version>.tar.gz` asset from the Kiyeovo
+GitHub release:
 
 ```bash
-tar -xzf kiyeovo-infra-0.1.0.tar.gz
-cd kiyeovo-infra-0.1.0
+VERSION=0.1.0
+wget "https://github.com/Realman78/Kiyeovo/releases/download/v${VERSION}/kiyeovo-infra-${VERSION}.tar.gz"
+wget "https://github.com/Realman78/Kiyeovo/releases/download/v${VERSION}/kiyeovo-infra-${VERSION}.tar.gz.sha256"
+sha256sum -c "kiyeovo-infra-${VERSION}.tar.gz.sha256"
+
+tar -xzf "kiyeovo-infra-${VERSION}.tar.gz"
+cd "kiyeovo-infra-${VERSION}"
 
 ./kiyeovo-infra fast init       # Fast: bootstrap + relay; can also configure TURN
 ./kiyeovo-infra fast firewall   # prints the ports to open (makes no changes)
