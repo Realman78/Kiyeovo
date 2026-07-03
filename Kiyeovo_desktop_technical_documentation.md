@@ -735,6 +735,7 @@ Call UI state:
      - leave `OnlyLoadAppFromAsar` for a later follow-up
    - preload is bundled as a standalone artifact so it remains compatible with sandboxed Electron preload constraints
    - the renderer bridge is an explicit whitelist exposed through `contextBridge`; raw `ipcRenderer` is not exposed to the UI
+   - native open/save dialog paths are treated as main-issued session capabilities: file metadata and database backup/restore IPC accept only non-canceled dialog results granted by main, and metadata rejects symlinks/non-regular files
    - unpackaged Linux development may still require machine-level `chrome-sandbox` helper setup on some VM/distro combinations
    - IPC sender validation in the main process:
      - only the main app window's main frame can invoke privileged IPC handlers

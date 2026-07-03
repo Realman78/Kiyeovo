@@ -51,6 +51,11 @@ import {
   resolveUploadsDirectory,
   validateUploadImageFileName,
 } from './ipc-handler-helpers.js';
+import {
+  grantDialogPath,
+  resolveDialogGrantedFileMetadata,
+  resolveGrantedDialogPath,
+} from './dialog-path-grants.js';
 import { writeFileWithCopySuffix } from '../core/lib/file-storage.js';
 import type { InitialSetupStatus, SaveTextUploadResponse } from '../shared/kiyeovo-api.js';
 
@@ -1363,6 +1368,10 @@ function setupFileDialogHandlers(ipcMain: IpcMainHandleRegistrar): void {
       });
 
       const filePath = result.filePaths[0] || null;
+      if (!result.canceled && filePath) {
+        grantDialogPath(filePath);
+      }
+
       let mediaToken: string | null = null;
       if (!result.canceled && filePath && isImageFile(filePath)) {
         try {
@@ -1412,9 +1421,13 @@ function setupFileDialogHandlers(ipcMain: IpcMainHandleRegistrar): void {
       }
 
       const result = await dialog.showSaveDialog(dialogOptions);
+      const filePath = result.filePath || null;
+      if (!result.canceled && filePath) {
+        grantDialogPath(filePath);
+      }
 
       return {
-        filePath: result.filePath || null,
+        filePath,
         canceled: result.canceled
       };
     } catch (error) {
@@ -1425,11 +1438,11 @@ function setupFileDialogHandlers(ipcMain: IpcMainHandleRegistrar): void {
 
   ipcMain.handle(IPC_CHANNELS.GET_FILE_METADATA, async (_event, filePath: string) => {
     try {
-      const stats = await stat(filePath);
+      const metadata = await resolveDialogGrantedFileMetadata({ filePath });
       return {
         success: true,
-        name: basename(filePath),
-        size: stats.size,
+        name: metadata.name,
+        size: metadata.size,
         error: null
       };
     } catch (error) {
@@ -3268,13 +3281,14 @@ function setupAppHandlers(ipcMain: IpcMainHandleRegistrar, getP2PCore: () => P2P
 
   ipcMain.handle(IPC_CHANNELS.BACKUP_DATABASE, async (_event, backupPath: string) => {
     try {
+      const grantedBackupPath = resolveGrantedDialogPath(backupPath);
       const p2pCore = getP2PCore();
       if (!p2pCore) {
         return { success: false, error: 'P2P core not initialized' };
       }
 
-      log(`[IPC] Backing up database to: ${backupPath}`);
-      await p2pCore.database.backup(backupPath);
+      log(`[IPC] Backing up database to: ${grantedBackupPath}`);
+      await p2pCore.database.backup(grantedBackupPath);
       log('[IPC] Database backup completed');
 
       return { success: true, error: null };
@@ -3286,18 +3300,19 @@ function setupAppHandlers(ipcMain: IpcMainHandleRegistrar, getP2PCore: () => P2P
 
   ipcMain.handle(IPC_CHANNELS.RESTORE_DATABASE, async (_event, backupPath: string) => {
     try {
+      const grantedBackupPath = resolveGrantedDialogPath(backupPath);
       const p2pCore = getP2PCore();
       if (!p2pCore) {
         return { success: false, error: 'P2P core not initialized' };
       }
 
-      log(`[IPC] Restoring database from: ${backupPath}`);
+      log(`[IPC] Restoring database from: ${grantedBackupPath}`);
 
       // Close current database connection
       p2pCore.database.close();
 
       // Restore the database
-      await p2pCore.database.restore(backupPath);
+      await p2pCore.database.restore(grantedBackupPath);
 
       log('[IPC] Database restored. Restarting app...');
 
@@ -3312,10 +3327,11 @@ function setupAppHandlers(ipcMain: IpcMainHandleRegistrar, getP2PCore: () => P2P
 
   ipcMain.handle(IPC_CHANNELS.RESTORE_DATABASE_FROM_FILE, async (_event, backupPath: string) => {
     try {
+      const grantedBackupPath = resolveGrantedDialogPath(backupPath);
       const dataDir = ensureAppDataDir();
       const dbPath = join(dataDir, 'chat.db');
 
-      log(`[IPC] Restoring database (no core) from: ${backupPath} -> ${dbPath}`);
+      log(`[IPC] Restoring database (no core) from: ${grantedBackupPath} -> ${dbPath}`);
 
       // Clean up any existing database and WAL files first
       const fs = await import('fs/promises');
@@ -3339,7 +3355,7 @@ function setupAppHandlers(ipcMain: IpcMainHandleRegistrar, getP2PCore: () => P2P
       }
 
       // Copy the backup file
-      await copyFile(backupPath, dbPath);
+      await copyFile(grantedBackupPath, dbPath);
       log('[IPC] Database file copied successfully');
 
       // Verify the file exists
