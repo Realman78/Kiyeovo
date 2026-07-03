@@ -26,6 +26,13 @@ for arg in "$@"; do
   esac
 done
 
+case "$VERSION" in
+  ''|.*|-*|_*|*[!A-Za-z0-9._-]*)
+    echo "build-release: invalid VERSION '$VERSION' (use letters, numbers, dot, underscore, or dash; start with a letter/number)" >&2
+    exit 2
+    ;;
+esac
+
 SERVER_IMAGE="${SERVER_IMAGE:-ghcr.io/realman78/kiyeovo-server}"
 TOR_IMAGE="${TOR_IMAGE:-ghcr.io/realman78/kiyeovo-tor}"
 

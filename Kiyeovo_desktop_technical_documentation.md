@@ -764,8 +764,9 @@ Healthcheck (`infrastructure/healthcheck.mjs`):
   an unhealthy container).
 
 `down` preserves state: stopping/removing the containers leaves the bind-mounted
-instance `data/` and `run/` directories (identity, datastore, last runtime JSON)
-intact; Peer IDs survive `restart`, recreation, and image changes.
+instance `data/` and `run/` directories intact; identity and datastore persist
+while runtime JSON is normally removed by the service during graceful shutdown.
+Peer IDs survive `restart`, recreation, and image changes.
 
 #### 11.8 `kiyeovo-infra` CLI
 
@@ -866,10 +867,12 @@ Onion orchestration:
 - Onion keys persist in the bind-mounted `./data/tor` → the `.onion` survives
   recreation.
 - The `.onion` hostname is public (it's the dial address). It is shared with the
-  bootstrap via a **CLI-managed bind mount** (`./run/onion`, `0777` — public data
-  only). `up` clears the published hostname before starting, so if `./data/tor` is
-  rotated, the bootstrap can never read a stale onion before Tor republishes from
-  the current keys. The secret keys never leave the `0700` `HiddenServiceDir`.
+  bootstrap via a **CLI-managed bind mount** (`./run/onion`, `1777` sticky —
+  public data only). `up` clears the published hostname before starting, and the
+  Tor entrypoint publishes it with a temp-file + rename, so if `./data/tor` is
+  rotated, the bootstrap can never read a stale or partial onion before Tor
+  republishes from the current keys. The secret keys never leave the `0700`
+  `HiddenServiceDir`.
 - The bootstrap entrypoint waits for that hostname, strips `.onion`, validates 56
   base32 chars, and derives `BOOTSTRAP_ANNOUNCE_ADDRS=/onion3/<host>:9000` before
   starting. The bootstrap listens on `0.0.0.0:9001` (overriding the `127.0.0.1`

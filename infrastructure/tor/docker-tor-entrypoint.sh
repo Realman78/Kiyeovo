@@ -20,10 +20,13 @@ if [ "$(id -u)" = "0" ]; then
   chown -R debian-tor:debian-tor /var/lib/tor
   chmod 700 "$HS_DIR"
   # Ensure debian-tor can publish the (public) hostname even if the shared dir
-  # was created root-owned by Docker. World-writable is fine: it holds only the
-  # public .onion address, and keeping it non-tor-owned lets the host CLI clear
-  # the hostname between deployments.
-  chmod 0777 "$SHARED_DIR"
+  # was created root-owned by Docker. It holds only the public .onion address,
+  # never secrets. Use a sticky world-writable directory (like /tmp) so unrelated
+  # local users cannot replace/remove each other's files.
+  chmod 1777 "$SHARED_DIR"
+  # Clear stale hostname state while still root; with the sticky bit set,
+  # debian-tor may not be able to remove a host-owned file.
+  rm -f "$SHARED_HOSTNAME" "$SHARED_HOSTNAME".tmp.* 2>/dev/null || true
   exec gosu debian-tor:debian-tor "$0" "$@"
 fi
 
@@ -31,10 +34,6 @@ fi
 # container stops promptly and cleanly.
 tor_pid=''
 trap 'if [ -n "$tor_pid" ]; then kill -TERM "$tor_pid" 2>/dev/null || true; fi' TERM INT
-
-# Defensively clear any stale published hostname before generating a fresh one,
-# so a republished onion always reflects the current keys in HS_DIR.
-rm -f "$SHARED_HOSTNAME" 2>/dev/null || true
 
 tor -f /etc/tor/torrc &
 tor_pid=$!
@@ -50,8 +49,10 @@ while [ ! -s "$HS_DIR/hostname" ]; do
   sleep 1
 done
 
-cp "$HS_DIR/hostname" "$SHARED_HOSTNAME"
-chmod 644 "$SHARED_HOSTNAME"
+tmp_hostname="$SHARED_HOSTNAME.tmp.$$"
+cp "$HS_DIR/hostname" "$tmp_hostname"
+chmod 644 "$tmp_hostname"
+mv -f "$tmp_hostname" "$SHARED_HOSTNAME"
 echo "tor-entrypoint: published onion $(cat "$SHARED_HOSTNAME")"
 
 wait "$tor_pid"

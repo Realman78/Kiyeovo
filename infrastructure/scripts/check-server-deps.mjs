@@ -9,7 +9,7 @@
 // imports and compares them against the manifest's dependencies.
 //
 // Usage:
-//   npm run build:server            # produce dist-server/ (or this script will)
+//   npm run build:server            # produce dist-server/ (this script also rebuilds)
 //   node infrastructure/scripts/check-server-deps.mjs
 //
 // Exit non-zero if any imported package is missing from the manifest.
@@ -35,14 +35,13 @@ function fail(msg) {
   process.exit(1);
 }
 
-// 1. Ensure the compiled output exists (build it if not).
-if (!existsSync(distDir)) {
-  console.log('dist-server/ not found — running build:server...');
-  try {
-    execFileSync('npm', ['run', 'build:server'], { cwd: repoRoot, stdio: 'inherit' });
-  } catch {
-    fail('build:server failed; cannot scan compiled output');
-  }
+// 1. Rebuild the compiled output before scanning it. Scanning an existing
+// dist-server/ directory is unsafe because it may be stale after source changes.
+console.log('Running build:server before scanning imports...');
+try {
+  execFileSync('npm', ['run', 'build:server'], { cwd: repoRoot, stdio: 'inherit' });
+} catch {
+  fail('build:server failed; cannot scan compiled output');
 }
 
 // 2. Collect every .js file under dist-server/.
