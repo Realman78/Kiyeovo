@@ -162,6 +162,83 @@ test('trusted profile import creates an out-of-band direct chat and rejects dupl
   assert.match(duplicate.error ?? '', /already exists/);
 });
 
+test('trusted profile import rolls back contact user when chat creation fails and retry succeeds', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'kiyeovo-trusted-import-atomic-test-'));
+  const database = new ChatDatabase(join(dir, 'chat.sqlite'));
+  t.after(async () => {
+    database.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  await database.createUser({
+    peer_id: 'local-peer',
+    username: 'Local User',
+    signing_public_key: 'local-signing-public-key',
+    offline_public_key: 'local-offline-public-key',
+    signature: 'local-signature',
+  });
+
+  const identity = await EncryptedUserIdentity.createEncrypted();
+  const filePath = join(dir, 'trusted.kiyeovo');
+  const password = 'Profile-password-123!';
+  const sharedSecret = 'trusted-default-inbox-key';
+
+  const exportResult = await withoutConsoleNoise(() => ProfileManager.exportProfileDesktop(
+    identity,
+    'Trusted Alice',
+    identity.id,
+    filePath,
+    password,
+    sharedSecret,
+  ));
+  assert.equal(exportResult.success, true);
+
+  type CreateTrustedDirectContact = ChatDatabase['createTrustedDirectContact'];
+  const originalCreateTrustedDirectContact: CreateTrustedDirectContact = database.createTrustedDirectContact.bind(database);
+  let createAttempts = 0;
+  database.createTrustedDirectContact = ((
+    user: Parameters<CreateTrustedDirectContact>[0],
+    chat: Parameters<CreateTrustedDirectContact>[1],
+  ) => {
+    createAttempts += 1;
+    const chatWithInjectedFailure = createAttempts === 1
+      ? { ...chat, participants: [chat.created_by, chat.created_by] }
+      : chat;
+    return originalCreateTrustedDirectContact(user, chatWithInjectedFailure);
+  }) as CreateTrustedDirectContact;
+
+  const failed = await withoutConsoleNoise(() => ProfileManager.importTrustedUser(
+    filePath,
+    password,
+    'local-peer',
+    database,
+    'Alice Local',
+  ));
+
+  assert.equal(failed.success, false);
+  assert.equal(database.getUserByPeerId(identity.id), null);
+  assert.deepEqual(database.getAllChats(), []);
+
+  const retried = await withoutConsoleNoise(() => ProfileManager.importTrustedUser(
+    filePath,
+    password,
+    'local-peer',
+    database,
+    'Alice Local',
+  ));
+
+  assert.equal(retried.success, true);
+  assert.equal(retried.username, 'Alice Local');
+  assert.equal(retried.peerId, identity.id);
+  assert.equal(typeof retried.chatId, 'number');
+  assert.equal(createAttempts, 2);
+  assert.equal(database.getUserByPeerId(identity.id)?.username, 'Alice Local');
+
+  const chat = database.getChatByPeerId(identity.id);
+  assert.equal(chat?.trusted_out_of_band, true);
+  assert.equal(chat?.offline_bucket_secret, sharedSecret);
+});
+
 test('trusted profile import rejects self-import even when local user row already exists', async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'kiyeovo-self-import-existing-user-test-'));
   const database = new ChatDatabase(join(dir, 'chat.sqlite'));

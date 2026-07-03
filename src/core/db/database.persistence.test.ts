@@ -67,6 +67,44 @@ async function createGroupChat(database: ChatDatabase, groupId: string): Promise
   });
 }
 
+test('createChat rolls back failed participant inserts and leaves connection reusable', async (t) => {
+  const database = new ChatDatabase(':memory:');
+  t.after(() => database.close());
+
+  await createUser(database, 'local_peer', 'local');
+
+  const chatInput: Omit<Chat, 'id' | 'updated_at' | 'network_mode'> & { participants: string[] } = {
+    type: 'direct',
+    name: 'local',
+    created_by: 'local_peer',
+    offline_bucket_secret: 'failed_bucket_secret',
+    notifications_bucket_key: 'failed_notifications_key',
+    status: 'active',
+    offline_last_read_timestamp: 0,
+    offline_last_ack_sent: 0,
+    trusted_out_of_band: false,
+    muted: false,
+    key_version: 0,
+    created_at: new Date(1_000),
+    participants: ['local_peer', 'local_peer'],
+  };
+
+  await assert.rejects(
+    database.createChat(chatInput),
+    /UNIQUE constraint failed: chat_participants.chat_id, chat_participants.peer_id/,
+  );
+  assert.deepEqual(database.getAllChats(), []);
+
+  const chatId = await database.createChat({
+    ...chatInput,
+    participants: ['local_peer'],
+  });
+
+  assert.equal(typeof chatId, 'number');
+  assert.equal(database.getAllChats().length, 1);
+  assert.deepEqual(database.getChatParticipants(chatId).map((participant) => participant.peer_id), ['local_peer']);
+});
+
 function makeTextMessage(input: {
   id: string;
   chatId: number;

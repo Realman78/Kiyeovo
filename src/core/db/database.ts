@@ -1096,33 +1096,38 @@ export class ChatDatabase {
     }
 
     // User operations
+    private insertUser(
+        user: Omit<User, 'created_at' | 'updated_at' | 'network_mode'>,
+        mode: NetworkMode
+    ): string {
+        const stmt = this.db.prepare(`
+            INSERT INTO users (network_mode, peer_id, signing_public_key, offline_public_key, signature, username)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(network_mode, peer_id) DO UPDATE SET
+                signing_public_key = excluded.signing_public_key,
+                offline_public_key = excluded.offline_public_key,
+                signature = excluded.signature,
+                username = excluded.username,
+                updated_at = CURRENT_TIMESTAMP
+        `);
+
+        try {
+            stmt.run(mode, user.peer_id, user.signing_public_key, user.offline_public_key, user.signature, user.username);
+            return user.peer_id;
+        } catch (error: any) {
+            console.error('Error creating user:', error);
+            if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+                return user.peer_id;
+            }
+            throw error;
+        }
+    }
+
     async createUser(
         user: Omit<User, 'created_at' | 'updated_at' | 'network_mode'> & { network_mode?: NetworkMode }
     ): Promise<string> {
         const mode = this.getActiveNetworkMode(user.network_mode);
-        return this.retryOperation(() => {
-            const stmt = this.db.prepare(`
-                INSERT INTO users (network_mode, peer_id, signing_public_key, offline_public_key, signature, username)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(network_mode, peer_id) DO UPDATE SET
-                    signing_public_key = excluded.signing_public_key,
-                    offline_public_key = excluded.offline_public_key,
-                    signature = excluded.signature,
-                    username = excluded.username,
-                    updated_at = CURRENT_TIMESTAMP
-            `);
-
-            try {
-                stmt.run(mode, user.peer_id, user.signing_public_key, user.offline_public_key, user.signature, user.username);
-                return user.peer_id;
-            } catch (error: any) {
-                console.error('Error creating user:', error);
-                if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
-                    return user.peer_id;
-                }
-                throw error;
-            }
-        });
+        return this.retryOperation(() => this.insertUser(user, mode));
     }
 
     updateUserKeys(
@@ -1470,50 +1475,80 @@ export class ChatDatabase {
     }
 
     // Chat operations
+    private assertUserExists(peerId: string, mode: NetworkMode): void {
+        const user = this.db
+            .prepare('SELECT peer_id FROM users WHERE peer_id = ? AND network_mode = ?')
+            .get(peerId, mode);
+        if (!user) {
+            throw new Error(`User with peer_id '${peerId}' not found in database`);
+        }
+    }
+
+    private insertChatWithParticipants(
+        chat: Omit<Chat, 'id' | 'updated_at' | 'network_mode'> & { participants: string[] },
+        mode: NetworkMode
+    ): number {
+        const stmt = this.db.prepare(`
+            INSERT INTO chats (network_mode, created_by, type, name, offline_bucket_secret, notifications_bucket_key, status, group_id, group_key, permanent_key, trusted_out_of_band, group_creator_peer_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+
+        const createdAt = chat.created_at instanceof Date ? chat.created_at.toISOString() : chat.created_at;
+        const result = stmt.run(
+            mode,
+            chat.created_by,
+            chat.type,
+            chat.type === 'group' ? chat.name : chat.created_by,
+            chat.offline_bucket_secret,
+            chat.notifications_bucket_key,
+            chat.status ?? (chat.type === 'group' ? 'pending' : 'active'),
+            chat.type === 'group' && chat?.group_id ? chat.group_id : null,
+            chat.type === 'group' && chat?.group_key ? chat.group_key : null,
+            chat.type === 'group' && chat?.permanent_key ? chat.permanent_key : null,
+            chat.trusted_out_of_band ? 1 : 0,
+            chat.group_creator_peer_id ?? null,
+            createdAt,
+            createdAt
+        );
+        const chatId = result.lastInsertRowid as number;
+
+        const participantStmt = this.db.prepare('INSERT INTO chat_participants (chat_id, peer_id, role) VALUES (?, ?, ?)');
+        for (const participant of chat.participants) {
+            participantStmt.run(chatId, participant, chat.created_by === participant ? 'admin' : 'member');
+        }
+
+        return chatId;
+    }
+
     async createChat(chat: Omit<Chat, 'id' | 'updated_at' | 'network_mode'> & { participants: string[] }): Promise<number> {
         return this.retryOperation(() => {
             log(`Creating chat: created_by=${chat.created_by}, participants=${chat.participants}`);
             const mode = this.getActiveNetworkMode();
-            const createdByUser = this.db
-                .prepare('SELECT peer_id FROM users WHERE peer_id = ? AND network_mode = ?')
-                .get(chat.created_by, mode);
-            if (!createdByUser) {
-                throw new Error(`User with peer_id '${chat.created_by}' not found in database`);
-            }
+            this.assertUserExists(chat.created_by, mode);
 
-            this.db.exec('BEGIN TRANSACTION');
-            const stmt = this.db.prepare(`
-                INSERT INTO chats (network_mode, created_by, type, name, offline_bucket_secret, notifications_bucket_key, status, group_id, group_key, permanent_key, trusted_out_of_band, group_creator_peer_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `);
-
-            const createdAt = chat.created_at instanceof Date ? chat.created_at.toISOString() : chat.created_at;
-            const result = stmt.run(
-                mode,
-                chat.created_by,
-                chat.type,
-                chat.type === 'group' ? chat.name : chat.created_by,
-                chat.offline_bucket_secret,
-                chat.notifications_bucket_key,
-                chat.status ?? (chat.type === 'group' ? 'pending' : 'active'),
-                chat.type === 'group' && chat?.group_id ? chat.group_id : null,
-                chat.type === 'group' && chat?.group_key ? chat.group_key : null,
-                chat.type === 'group' && chat?.permanent_key ? chat.permanent_key : null,
-                chat.trusted_out_of_band ? 1 : 0,
-                chat.group_creator_peer_id ?? null,
-                createdAt,
-                createdAt
-            );
-            const chatId = result.lastInsertRowid as number;
-
-            for (const participant of chat.participants) {
-                const stmt = this.db.prepare('INSERT INTO chat_participants (chat_id, peer_id, role) VALUES (?, ?, ?)');
-                stmt.run(chatId, participant, chat.created_by === participant ? 'admin' : 'member');
-            }
-
-            this.db.exec('COMMIT');
+            const transaction = this.db.transaction(() => this.insertChatWithParticipants(chat, mode));
+            const chatId = transaction();
 
             log(`Created chat with ID: ${chatId}`);
+            return chatId;
+        });
+    }
+
+    async createTrustedDirectContact(
+        user: Omit<User, 'created_at' | 'updated_at' | 'network_mode'> & { network_mode?: NetworkMode },
+        chat: Omit<Chat, 'id' | 'updated_at' | 'network_mode'> & { participants: string[] }
+    ): Promise<number> {
+        const mode = this.getActiveNetworkMode(user.network_mode);
+        return this.retryOperation(() => {
+            log(`Creating trusted direct contact: created_by=${chat.created_by}, contact=${user.peer_id}, participants=${chat.participants}`);
+            const transaction = this.db.transaction(() => {
+                this.assertUserExists(chat.created_by, mode);
+                this.insertUser(user, mode);
+                return this.insertChatWithParticipants(chat, mode);
+            });
+            const chatId = transaction();
+
+            log(`Created trusted direct contact chat with ID: ${chatId}`);
             return chatId;
         });
     }
