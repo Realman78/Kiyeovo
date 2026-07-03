@@ -137,6 +137,7 @@ Security model:
 - optional OS keychain storage (`keytar`)
 - recovery phrase (BIP39)
 - login attempts + cooldown enforcement
+- contact signing keys are pinned trust-on-first-use state in `users`; if a known contact's signature fails against the pinned signing key, a differing DHT/incoming signing key is recorded in `key_change_events` and the message/key-exchange path remains unverified without replacing the pinned key. First-contact and missing-key population still pins after successful signature verification. Renderer warning/confirmation gating for recorded key changes is a follow-up.
 
 Current KDF defaults live in `src/core/constants.ts`:
 - `IDENTITY_SCRYPT_N = 2 ** 18`
@@ -475,6 +476,7 @@ Core tables include:
 - `pending_offline_sends` (durable 1:1 offline-send queue)
 - `group_offline_sent_messages`
 - `pending_group_offline_backups` (durable group offline-backup retry)
+- `key_change_events` (mode-scoped audit rows for observed contact signing-key changes that were not auto-adopted)
 - `group_key_history`
 - `group_offline_cursors`
 - `group_pending_acks`

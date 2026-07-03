@@ -234,6 +234,17 @@ export interface FailedKeyExchange {
     created_at: Date
 }
 
+export interface KeyChangeEvent {
+    id: number
+    network_mode: NetworkMode
+    peer_id: string
+    username: string
+    old_signing_key: string
+    new_signing_key: string
+    source: string
+    created_at: Date
+}
+
 export interface OfflineSentMessages {
     bucket_key: string
     messages: OfflineMessage[]
@@ -557,6 +568,20 @@ export class ChatDatabase {
             )
         `);
 
+        // Audit trail for observed contact signing-key changes.
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS key_change_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                network_mode TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}' CHECK(network_mode IN ('${NETWORK_MODES.FAST}','${NETWORK_MODES.ANONYMOUS}')),
+                peer_id TEXT NOT NULL,
+                username TEXT NOT NULL,
+                old_signing_key TEXT NOT NULL,
+                new_signing_key TEXT NOT NULL,
+                source TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
         // Settings table (for local preferences like contact_mode)
         this.db.exec(`
             CREATE TABLE IF NOT EXISTS settings (
@@ -830,6 +855,7 @@ export class ChatDatabase {
       -- Indexes for cleanup queries
       CREATE INDEX IF NOT EXISTS idx_failed_key_exchanges_timestamp ON failed_key_exchanges(timestamp);
       CREATE INDEX IF NOT EXISTS idx_failed_key_exchanges_mode_timestamp ON failed_key_exchanges(network_mode, timestamp);
+      CREATE INDEX IF NOT EXISTS idx_key_change_events_mode_peer_created ON key_change_events(network_mode, peer_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_contact_attempts_mode_created_at ON contact_attempts(network_mode, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_blocked_peers_mode_blocked_at ON blocked_peers(network_mode, blocked_at DESC);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_login_attempts_unique_mode_peer ON login_attempts(network_mode, peer_id);
@@ -964,6 +990,7 @@ export class ChatDatabase {
         this.ensureColumnExists('contact_attempts', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
         this.ensureColumnExists('blocked_peers', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
         this.ensureColumnExists('failed_key_exchanges', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
+        this.ensureColumnExists('key_change_events', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
         this.ensureColumnExists('login_attempts', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
         this.ensureColumnExists('messages', 'local_send_state', 'TEXT');
         this.ensureColumnExists('messages', 'failed_reason', 'TEXT');
@@ -1458,6 +1485,45 @@ export class ChatDatabase {
         if (result.changes > 0) {
             log(`[CLEANUP] Removed ${result.changes} old failed key exchange records`);
         }
+    }
+
+    // Signing-key change audit operations
+    recordKeyChangeEvent(
+        event: Omit<KeyChangeEvent, 'id' | 'created_at' | 'network_mode'> & { network_mode?: NetworkMode }
+    ): void {
+        const mode = this.getActiveNetworkMode(event.network_mode);
+        const stmt = this.db.prepare(`
+            INSERT INTO key_change_events (
+                network_mode,
+                peer_id,
+                username,
+                old_signing_key,
+                new_signing_key,
+                source
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+        `);
+        stmt.run(mode, event.peer_id, event.username, event.old_signing_key, event.new_signing_key, event.source);
+    }
+
+    getKeyChangeEvents(peerId: string, mode?: NetworkMode): KeyChangeEvent[] {
+        const activeMode = this.getActiveNetworkMode(mode);
+        const stmt = this.db.prepare(`
+            SELECT * FROM key_change_events
+            WHERE peer_id = ? AND network_mode = ?
+            ORDER BY created_at DESC, id DESC
+        `);
+        const rows = stmt.all(peerId, activeMode) as any[];
+        return rows.map(row => ({
+            id: row.id,
+            network_mode: row.network_mode,
+            peer_id: row.peer_id,
+            username: row.username,
+            old_signing_key: row.old_signing_key,
+            new_signing_key: row.new_signing_key,
+            source: row.source,
+            created_at: new Date(row.created_at)
+        }));
     }
 
     cleanupExpiredNotifications(olderThanDays: number = 30): void {

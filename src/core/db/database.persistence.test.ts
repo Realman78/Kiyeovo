@@ -631,3 +631,30 @@ test('group sender and member sequences are monotonic and epoch scoped', () => {
     database.close();
   }
 });
+
+test('recordKeyChangeEvent and getKeyChangeEvents round-trip audit rows', () => {
+  const database = new ChatDatabase(':memory:');
+  try {
+    database.recordKeyChangeEvent({
+      peer_id: 'peer_key_change',
+      username: 'alice',
+      old_signing_key: 'old_signing_key',
+      new_signing_key: 'new_signing_key',
+      source: 'unit_test',
+    });
+
+    const events = database.getKeyChangeEvents('peer_key_change');
+
+    assert.equal(events.length, 1);
+    assert.equal(events[0]?.network_mode, 'fast');
+    assert.equal(events[0]?.peer_id, 'peer_key_change');
+    assert.equal(events[0]?.username, 'alice');
+    assert.equal(events[0]?.old_signing_key, 'old_signing_key');
+    assert.equal(events[0]?.new_signing_key, 'new_signing_key');
+    assert.equal(events[0]?.source, 'unit_test');
+    assert.ok(events[0]?.created_at instanceof Date);
+    assert.deepEqual(database.getKeyChangeEvents('other_peer'), []);
+  } finally {
+    database.close();
+  }
+});

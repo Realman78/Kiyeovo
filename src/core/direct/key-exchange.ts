@@ -108,6 +108,26 @@ export class KeyExchange {
     return payload;
   }
 
+  private recordSigningKeyChangeEvent(
+    peerId: string,
+    username: string,
+    oldSigningKey: string | null | undefined,
+    newSigningKey: string | null | undefined,
+    source: string
+  ): void {
+    if (!oldSigningKey || !newSigningKey || oldSigningKey === newSigningKey) {
+      return;
+    }
+
+    this.database.recordKeyChangeEvent({
+      peer_id: peerId,
+      username,
+      old_signing_key: oldSigningKey,
+      new_signing_key: newSigningKey,
+      source
+    });
+  }
+
   constructor(
     node: ChatNode,
     usernameRegistry: UsernameRegistry,
@@ -233,13 +253,15 @@ export class KeyExchange {
     peerId: string
   ): Promise<{ valid: boolean; signingPublicKey: string | null }> {
     const dbUser = this.database.getUserByPeerId(peerId);
-    if (dbUser?.signing_public_key) {
+    const pinnedSigningPublicKey = dbUser?.signing_public_key ?? null;
+
+    if (pinnedSigningPublicKey) {
       const valid = EncryptedUserIdentity.verifyKeyExchangeSignature(
-        signature, message, dbUser.signing_public_key
+        signature, message, pinnedSigningPublicKey
       );
 
       if (valid) {
-        return { valid: true, signingPublicKey: dbUser.signing_public_key };
+        return { valid: true, signingPublicKey: pinnedSigningPublicKey };
       }
     }
 
@@ -247,34 +269,47 @@ export class KeyExchange {
     try {
       const userRegistration = await this.usernameRegistry.lookup(username);
       if (userRegistration.peerID !== peerId) {
-        return { valid: false, signingPublicKey: null };
+        return { valid: false, signingPublicKey: pinnedSigningPublicKey };
+      }
+
+      if (pinnedSigningPublicKey && userRegistration.signingPublicKey !== pinnedSigningPublicKey) {
+        this.recordSigningKeyChangeEvent(
+          peerId,
+          username,
+          pinnedSigningPublicKey,
+          userRegistration.signingPublicKey,
+          'signature_dht_fallback'
+        );
+        return { valid: false, signingPublicKey: pinnedSigningPublicKey };
       }
 
       const valid = EncryptedUserIdentity.verifyKeyExchangeSignature(
         signature, message, userRegistration.signingPublicKey
       );
 
-      if (dbUser) {
-        this.database.updateUserKeys({
-          peer_id: peerId,
-          signing_public_key: userRegistration.signingPublicKey,
-          offline_public_key: userRegistration.offlinePublicKey,
-          signature: userRegistration.signature
-        });
-      } else {
-        await this.database.createUser({
-          peer_id: peerId,
-          username: username,
-          signing_public_key: userRegistration.signingPublicKey,
-          offline_public_key: userRegistration.offlinePublicKey,
-          signature: userRegistration.signature
-        });
+      if (valid) {
+        if (dbUser) {
+          this.database.updateUserKeys({
+            peer_id: peerId,
+            signing_public_key: userRegistration.signingPublicKey,
+            offline_public_key: userRegistration.offlinePublicKey,
+            signature: userRegistration.signature
+          });
+        } else {
+          await this.database.createUser({
+            peer_id: peerId,
+            username: username,
+            signing_public_key: userRegistration.signingPublicKey,
+            offline_public_key: userRegistration.offlinePublicKey,
+            signature: userRegistration.signature
+          });
+        }
       }
 
       return { valid, signingPublicKey: userRegistration.signingPublicKey };
     } catch (error: unknown) {
       generalErrorHandler(error);
-      return { valid: false, signingPublicKey: null };
+      return { valid: false, signingPublicKey: pinnedSigningPublicKey };
     }
   }
 
@@ -1030,8 +1065,47 @@ export class KeyExchange {
       signature = sender.signature;
     }
 
+    const existingUser = this.database.getUserByPeerId(remoteId);
+    const pinnedSigningPublicKey = existingUser?.signing_public_key ?? '';
+    const pinnedKeys = {
+      signingPublicKey: pinnedSigningPublicKey,
+      offlinePublicKey: existingUser?.offline_public_key ?? '',
+      signature: existingUser?.signature ?? ''
+    };
+
     let signatureValid = false;
-    if (signingPublicKey) {
+    if (pinnedSigningPublicKey) {
+      signatureValid = EncryptedUserIdentity.verifyKeyExchangeSignature(
+        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+        message.signature!,
+        messageToVerify,
+        pinnedSigningPublicKey
+      );
+
+      if (signatureValid) {
+        const verifiedPinnedKeys = {
+          signingPublicKey: pinnedSigningPublicKey,
+          offlinePublicKey: signingPublicKey === pinnedSigningPublicKey
+            ? existingUser?.offline_public_key || offlinePublicKey
+            : existingUser?.offline_public_key ?? '',
+          signature: signingPublicKey === pinnedSigningPublicKey
+            ? existingUser?.signature || signature
+            : existingUser?.signature ?? ''
+        };
+        return { valid: true, keys: verifiedPinnedKeys };
+      }
+
+      if (signingPublicKey && signingPublicKey !== pinnedSigningPublicKey) {
+        this.recordSigningKeyChangeEvent(
+          remoteId,
+          message.senderUsername,
+          pinnedSigningPublicKey,
+          signingPublicKey,
+          'key_exchange_init_incoming'
+        );
+        return { valid: false, keys: pinnedKeys };
+      }
+    } else if (signingPublicKey) {
       signatureValid = EncryptedUserIdentity.verifyKeyExchangeSignature(
         // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
         message.signature!,
@@ -1045,6 +1119,17 @@ export class KeyExchange {
       try {
         const refreshed = await this.usernameRegistry.lookupByPeerId(remoteId);
         if (refreshed.peerID === remoteId) {
+          if (pinnedSigningPublicKey && refreshed.signingPublicKey !== pinnedSigningPublicKey) {
+            this.recordSigningKeyChangeEvent(
+              remoteId,
+              message.senderUsername,
+              pinnedSigningPublicKey,
+              refreshed.signingPublicKey,
+              'key_exchange_init_dht_refresh'
+            );
+            return { valid: false, keys: pinnedKeys };
+          }
+
           signingPublicKey = refreshed.signingPublicKey;
           offlinePublicKey = refreshed.offlinePublicKey;
           signature = refreshed.signature;
@@ -1084,9 +1169,15 @@ export class KeyExchange {
         offline_public_key: offlinePublicKey,
         signature: signature
       });
-    } else if (!existingUser.signing_public_key ||
-      existingUser.signing_public_key !== signingPublicKey ||
-      existingUser.offline_public_key !== offlinePublicKey) {
+    } else if (existingUser.signing_public_key && existingUser.signing_public_key !== signingPublicKey) {
+      this.recordSigningKeyChangeEvent(
+        remoteId,
+        username,
+        existingUser.signing_public_key,
+        signingPublicKey,
+        'key_exchange_init_persist'
+      );
+    } else if (!existingUser.signing_public_key || existingUser.offline_public_key !== offlinePublicKey) {
       // Update placeholder/missing keys after successful verification
       this.database.updateUserKeys({
         peer_id: remoteId,
