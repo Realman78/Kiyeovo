@@ -15,6 +15,7 @@ import {
   FILE_PULL_FIRST_FRAME_TIMEOUT_FAST, FILE_PULL_FIRST_FRAME_TIMEOUT_ANON,
   FILE_PULL_AUTH_TIMEOUT_FAST, FILE_PULL_AUTH_TIMEOUT_ANON, FILE_PULL_CONFIRM_TIMEOUT,
   CHUNK_RECEIVE_TIMEOUT, CHUNK_IDLE_TIMEOUT, NETWORK_MODES, getNetworkModeRuntime,
+  MAX_INBOUND_STREAMS_FILE_TRANSFER,
 } from "../constants.js";
 import { MessageHandler } from "./message-handler.js";
 import { ServedFileRegistry, type ServedFileMeta } from "./served-file-registry.js";
@@ -333,7 +334,10 @@ export class FileHandler {
         this.activeServeStreams.delete(stream);
         this.activeServeTasks.delete(task);
       });
-    }, { runOnLimitedConnection: true });
+    }, {
+      runOnLimitedConnection: true,
+      maxInboundStreams: MAX_INBOUND_STREAMS_FILE_TRANSFER,
+    });
   }
 
   async #serveStream(remoteId: string, stream: Stream, preAuthLease: Lease): Promise<void> {

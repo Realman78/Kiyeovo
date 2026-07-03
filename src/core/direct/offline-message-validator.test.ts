@@ -4,7 +4,12 @@ import test from 'node:test';
 import { gzipSync } from 'node:zlib';
 import { ed25519 } from '@noble/curves/ed25519';
 import { sha256 } from '@noble/hashes/sha2';
-import { MAX_MESSAGES_PER_STORE, MESSAGE_TTL, NETWORK_MODE_CONFIG } from '../constants.js';
+import {
+  DIRECT_OFFLINE_STORE_MAX_COMPRESSED_BYTES,
+  MAX_MESSAGES_PER_STORE,
+  MESSAGE_TTL,
+  NETWORK_MODE_CONFIG,
+} from '../constants.js';
 import { toBase64Url } from '../utils/miscellaneous.js';
 import {
   type OfflineMessageDHT,
@@ -127,7 +132,21 @@ async function withoutConsoleLog(fn: () => Promise<void>): Promise<void> {
 }
 
 test('offline DHT validator accepts a signed store bound to the bucket key', async () => {
-  await offlineMessageValidator(encoder.encode(BUCKET_KEY), encodeStore(makeStore()));
+  const encoded = encodeStore(makeStore());
+  assert.equal(encoded.length <= DIRECT_OFFLINE_STORE_MAX_COMPRESSED_BYTES, true);
+
+  await offlineMessageValidator(encoder.encode(BUCKET_KEY), encoded);
+});
+
+test('offline DHT validator rejects oversized compressed stores before decompression', async () => {
+  const oversizedValue = new Uint8Array(DIRECT_OFFLINE_STORE_MAX_COMPRESSED_BYTES + 1);
+
+  await withoutConsoleLog(async () => {
+    await assert.rejects(
+      () => offlineMessageValidator(encoder.encode(BUCKET_KEY), oversizedValue),
+      /Direct offline store too large/,
+    );
+  });
 });
 
 test('offline DHT validator rejects bucket-binding and message-hash tampering', async () => {
@@ -314,10 +333,20 @@ test('offline DHT selector and validateUpdate prefer newest non-stale stores', a
   const older = encodeStore(makeStore({ version: 1, last_updated: 1_000 }));
   const newerSameVersion = encodeStore(makeStore({ version: 1, last_updated: 2_000 }));
   const higherVersion = encodeStore(makeStore({ version: 2, last_updated: 1_500 }));
+  const oversizedValue = new Uint8Array(DIRECT_OFFLINE_STORE_MAX_COMPRESSED_BYTES + 1);
 
   assert.equal(
     offlineMessageSelector(encoder.encode(BUCKET_KEY), [older, higherVersion, newerSameVersion]),
     1,
+  );
+  assert.equal(
+    offlineMessageSelector(encoder.encode(BUCKET_KEY), [oversizedValue, higherVersion]),
+    1,
+  );
+
+  await assert.rejects(
+    () => offlineMessageValidateUpdate(encoder.encode(BUCKET_KEY), higherVersion, oversizedValue),
+    /Direct offline store too large/,
   );
 
   await assert.rejects(

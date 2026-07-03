@@ -167,10 +167,20 @@ test('group offline selector and validateUpdate prefer newest non-stale stores',
   const older = encodeGroupOfflineStore(makeGroupOfflineStore({ version: 1, lastUpdated: 1_000 }));
   const newerSameVersion = encodeGroupOfflineStore(makeGroupOfflineStore({ version: 1, lastUpdated: 2_000 }));
   const higherVersion = encodeGroupOfflineStore(makeGroupOfflineStore({ version: 2, lastUpdated: 1_500 }));
+  const oversizedValue = new Uint8Array(GROUP_OFFLINE_STORE_MAX_COMPRESSED_BYTES + 1);
 
   assert.equal(
     groupOfflineMessageSelector(encoder.encode(GROUP_OFFLINE_KEY), [older, higherVersion, newerSameVersion]),
     1,
+  );
+  assert.equal(
+    groupOfflineMessageSelector(encoder.encode(GROUP_OFFLINE_KEY), [oversizedValue, higherVersion]),
+    1,
+  );
+
+  await assert.rejects(
+    () => groupOfflineValidateUpdate(encoder.encode(GROUP_OFFLINE_KEY), higherVersion, oversizedValue),
+    /Group offline store too large/,
   );
 
   await assert.rejects(

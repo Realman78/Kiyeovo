@@ -312,6 +312,8 @@ export const DATABASE_CLEANUP_INTERVAL = 30 * MINUTE; // 30 minutes
 export const MAX_MESSAGES_PER_STORE = 41; // Hard cap for one offline DHT store payload (incl. ack reserve)
 export const OFFLINE_CONTROL_MESSAGE_RESERVE = 10; // Slots reserved for offline control traffic
 export const OFFLINE_ACK_RESERVE = 1; // Slot reserved for a standalone (superseding) offline ACK
+// Defensive cap to reject direct offline DHT values before gzip inflation.
+export const DIRECT_OFFLINE_STORE_MAX_COMPRESSED_BYTES = 64 * 1024; // 64KB
 export const MESSAGE_TTL = 7 * DAY; // 7 days
 export const OFFLINE_MESSAGE_MAX_FUTURE_SKEW_MS = 2 * MINUTE; // 2 minutes
 export const OFFLINE_ACK_MAX_FUTURE_SKEW_MS = 10 * MINUTE; // 10 minutes
@@ -355,7 +357,16 @@ export const MAX_CHAT_ENVELOPE_BYTES = 64 * 1024; // Direct chat envelope cap
 export const MAX_CALL_SIGNAL_ENVELOPE_BYTES = 256 * 1024; // WebRTC SDP/ICE signaling envelope cap
 export const MAX_KEY_EXCHANGE_ENVELOPE_BYTES = 128 * 1024; // Signed key-exchange envelope cap
 export const MAX_BUCKET_NUDGE_ENVELOPE_BYTES = 16 * 1024; // Offline/refetch nudge envelope cap
+export const MAX_INBOUND_STREAMS_CHAT = 8; // Per-connection chat protocol streams
+export const MAX_INBOUND_STREAMS_BUCKET_NUDGE = 4; // Per-connection offline/refetch nudge streams
+export const MAX_INBOUND_STREAMS_CALL_SIGNAL = 8; // Per-connection WebRTC signaling streams
+export const MAX_INBOUND_STREAMS_FILE_TRANSFER = 8; // Per-connection file-pull streams
 export const MAX_MESSAGE_CONTENT_LENGTH = 2048; // Max direct/group message characters
+
+export const CHAT_NODE_MAX_CONNECTIONS = 100;
+export const CHAT_NODE_INBOUND_CONNECTION_THRESHOLD_PER_HOST = 5; // New inbound connections per host per second
+export const CHAT_NODE_MAX_INCOMING_PENDING_CONNECTIONS = 10; // Parallel inbound upgrades before admission
+export const CHAT_NODE_INBOUND_UPGRADE_TIMEOUT_MS = 15 * SECOND;
 
 /**
  * Group chat constants

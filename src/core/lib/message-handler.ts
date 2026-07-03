@@ -70,6 +70,9 @@ import {
   MAX_BUCKET_NUDGE_ENVELOPE_BYTES,
   MAX_CALL_SIGNAL_ENVELOPE_BYTES,
   MAX_CHAT_ENVELOPE_BYTES,
+  MAX_INBOUND_STREAMS_BUCKET_NUDGE,
+  MAX_INBOUND_STREAMS_CALL_SIGNAL,
+  MAX_INBOUND_STREAMS_CHAT,
   RESUME_RELAY_GRACE_MS,
   RESUME_RELAY_READY_WAIT_MS,
   RESUME_RELAY_READY_POLL_MS,
@@ -795,6 +798,7 @@ export class MessageHandler {
       }
     }, {
       runOnLimitedConnection: true,
+      maxInboundStreams: MAX_INBOUND_STREAMS_BUCKET_NUDGE,
     });
 
     void this.node.handle(this.chatProtocol, async (context: StreamHandlerContext) => {
@@ -864,6 +868,7 @@ export class MessageHandler {
       }
     }, {
       runOnLimitedConnection: true,
+      maxInboundStreams: MAX_INBOUND_STREAMS_CHAT,
     });
 
     void this.node.handle(this.callSignalProtocol, async (context: StreamHandlerContext) => {
@@ -887,6 +892,7 @@ export class MessageHandler {
       }
     }, {
       runOnLimitedConnection: true,
+      maxInboundStreams: MAX_INBOUND_STREAMS_CALL_SIGNAL,
     });
   }
 

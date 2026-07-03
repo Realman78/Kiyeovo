@@ -214,7 +214,7 @@ Cross-peer identity:
 
 Wire format — the plaintext that gets encrypted is a strict version-1 **application-message envelope** rather than a bare string: `{ v: 1, cid, kind, payload }`. Supported kinds are `text`, `file_offer`, `file_offer_cancel`, and `file_offer_nack`; a text payload contains `{ text, reply_to? }`. This keeps the cid, message kind, payload, and reply linkage private on the transport **and** in offline DHT-at-rest payloads. Payloads are shape- and bounds-validated before dispatch. Bare text, missing/unknown kinds, unsupported versions, and malformed envelopes are ignored and never rendered as text. Kiyeovo has no pre-1.0 peer compatibility path.
 
-Inbound JSON protocol stream reads (`chat`, `key-exchange`, `call-signal`, and `bucket-nudge`) are byte-capped per protocol and use an absolute read deadline. Oversize or stalled reads abort/reset the underlying libp2p stream before parsing so unauthenticated peers cannot force unbounded buffering.
+Inbound JSON protocol stream reads (`chat`, `key-exchange`, `call-signal`, and `bucket-nudge`) are byte-capped per protocol and use an absolute read deadline. Oversize or stalled reads abort/reset the underlying libp2p stream before parsing so unauthenticated peers cannot force unbounded buffering. App stream handlers set explicit per-connection inbound stream caps, and node startup configures inbound upgrade count/rate/time bounds for the installed libp2p connection manager.
 
 One shared codec/dispatcher is used by direct realtime, direct offline, group GossipSub, and group offline catch-up/late-gap repair. The envelope + cid are built **once per send** and reused across delivery routes, so online/offline overlap dedupes on the same id. The outbound application-message API requires a caller-supplied id and encodes persistence ownership in its request type: text is transport-owned, a file offer is caller-owned (the file subsystem persists its row), and cancel/nack controls own no visible row. Direct application messages reuse the established direct session or existing offline bucket; group application messages retain the normal GossipSub + signed offline-backup behavior. Caller-owned rows must exist before transport begins, while invisible controls never create a `messages` row.
 
@@ -444,13 +444,14 @@ Primary categories:
 2. Direct offline stores
    - per-recipient bucket model
    - message/store signatures + validateUpdate; per-message signatures bind ciphertext/sender-info hashes, bucket key, timestamp, type, expiry, and hybrid AES metadata hashes
+   - validators, selectors, and validateUpdate reject compressed records above `64 KiB` before gunzip/JSON parsing
    - local UX capacity view is derived from the local mirror plus actively queued pending writes; failed offline-backup rows remain retryable local state but do not consume capacity
    - effective direct capacity is split into `30` sendable slots, `10` reserved group-control slots, and `1` reserved ACK slot
 
 3. Group offline stores
    - sender buckets per group and epoch
    - local UX capacity view shows only the current sender epoch (the bucket the next group message would use)
-   - group fullness is tracked by both message count and compressed store size (`64 KiB` app-level cap)
+   - group fullness is tracked by both message count and compressed store size (`64 KiB` app-level cap), and validator/selector/update paths reject oversized compressed records before gunzip/JSON parsing
 
 4. Group info records
    - `latest` pointer record

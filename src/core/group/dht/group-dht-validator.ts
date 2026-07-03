@@ -31,6 +31,14 @@ function hasMatchingPrefix(keyStr: string, prefixes: string[]): boolean {
   return prefixes.some((prefix) => keyStr.startsWith(`${prefix}/`));
 }
 
+function assertGroupOfflineCompressedSize(value: Uint8Array): void {
+  if (value.length > GROUP_OFFLINE_STORE_MAX_COMPRESSED_BYTES) {
+    throw new Error(
+      `Group offline store too large (${value.length}B > ${GROUP_OFFLINE_STORE_MAX_COMPRESSED_BYTES}B)`,
+    );
+  }
+}
+
 function toCanonicalUnsignedMessage(message: GroupContentMessage): Omit<GroupContentMessage, 'signature'> {
   return {
     type: message.type ?? 'GROUP_MESSAGE',
@@ -50,11 +58,8 @@ export async function groupOfflineMessageValidator(
   key: Uint8Array,
   value: Uint8Array
 ): Promise<void> {
-  if (value.length > GROUP_OFFLINE_STORE_MAX_COMPRESSED_BYTES) {
-    throw new Error(
-      `Group offline store too large (${value.length}B > ${GROUP_OFFLINE_STORE_MAX_COMPRESSED_BYTES}B)`,
-    );
-  }
+  assertGroupOfflineCompressedSize(value);
+
   const keyStr = new TextDecoder().decode(key);
 
   if (!hasMatchingPrefix(keyStr, GROUP_OFFLINE_BUCKET_PREFIXES)) {
@@ -233,6 +238,7 @@ export async function groupOfflineValidateUpdate(
 }
 
 function decompressGroupOfflineStore(value: Uint8Array): GroupOfflineStore {
+  assertGroupOfflineCompressedSize(value);
   const buf = gunzipSync(Buffer.from(value));
   return JSON.parse(buf.toString('utf8'));
 }

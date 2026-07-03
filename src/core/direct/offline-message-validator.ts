@@ -5,6 +5,7 @@ import { promisify } from 'util';
 import { fromBase64Url } from '../utils/miscellaneous.js';
 import { generalErrorHandler } from '../utils/general-error.js';
 import {
+  DIRECT_OFFLINE_STORE_MAX_COMPRESSED_BYTES,
   MAX_MESSAGES_PER_STORE,
   MESSAGE_TTL,
   NETWORK_MODE_CONFIG,
@@ -16,6 +17,14 @@ const OFFLINE_BUCKET_PREFIXES = Object.values(NETWORK_MODE_CONFIG).map((config) 
 
 function hashBase64Field(value: string): string {
   return Buffer.from(sha256(Buffer.from(value, 'base64'))).toString('base64');
+}
+
+function assertDirectOfflineCompressedSize(value: Uint8Array): void {
+  if (value.length > DIRECT_OFFLINE_STORE_MAX_COMPRESSED_BYTES) {
+    throw new Error(
+      `Direct offline store too large (${value.length}B > ${DIRECT_OFFLINE_STORE_MAX_COMPRESSED_BYTES}B)`,
+    );
+  }
 }
 
 /**
@@ -102,12 +111,14 @@ export async function offlineMessageValidator(
       throw new Error(`Invalid sender public key length: ${senderPubKey.length}, expected 32`);
     }
 
+    assertDirectOfflineCompressedSize(value);
+
     // 3. Decompress and parse value (OfflineMessageStore)
     let store: OfflineMessageStoreDHT;
     try {
       const decompressedBuffer = await gunzipAsync(Buffer.from(value));
       store = JSON.parse(decompressedBuffer.toString('utf8'));
-    } catch (error) {
+    } catch {
       throw new Error('Failed to decompress or parse DHT value');
     }
 
@@ -358,6 +369,7 @@ export async function offlineMessageValidateUpdate(
  * Decompress and parse a gzipped OfflineMessageStoreDHT record
  */
 function decompressStore(value: Uint8Array): OfflineMessageStoreDHT {
+  assertDirectOfflineCompressedSize(value);
   const decompressedBuffer = gunzipSync(Buffer.from(value));
   return JSON.parse(decompressedBuffer.toString('utf8'));
 }
