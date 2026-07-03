@@ -34,7 +34,7 @@ import {
 import { DEFAULT_WEBRTC_ICE_SERVERS } from '../core/network/default-infrastructure.js';
 import { ensureAppDataDir } from '../core/utils/miscellaneous.js';
 import { basename, join } from 'path';
-import { copyFile, lstat, mkdir, readdir, realpath, rm, stat } from 'fs/promises';
+import { lstat, mkdir, readdir, realpath, rm, stat } from 'fs/promises';
 import { log } from '../shared/logger.js';
 import { isImageFile } from '../shared/file-types.js';
 import { errStr } from '../core/utils/general-error.js';
@@ -3279,7 +3279,7 @@ function setupAppHandlers(ipcMain: IpcMainHandleRegistrar, getP2PCore: () => P2P
     }
   });
 
-  ipcMain.handle(IPC_CHANNELS.BACKUP_DATABASE, async (_event, backupPath: string) => {
+  ipcMain.handle(IPC_CHANNELS.BACKUP_DATABASE, async (_event, backupPath: string, password: string) => {
     try {
       const grantedBackupPath = resolveGrantedDialogPath(backupPath);
       const p2pCore = getP2PCore();
@@ -3288,7 +3288,7 @@ function setupAppHandlers(ipcMain: IpcMainHandleRegistrar, getP2PCore: () => P2P
       }
 
       log(`[IPC] Backing up database to: ${grantedBackupPath}`);
-      await p2pCore.database.backup(grantedBackupPath);
+      await p2pCore.database.backupEncrypted(grantedBackupPath, password);
       log('[IPC] Database backup completed');
 
       return { success: true, error: null };
@@ -3298,7 +3298,7 @@ function setupAppHandlers(ipcMain: IpcMainHandleRegistrar, getP2PCore: () => P2P
     }
   });
 
-  ipcMain.handle(IPC_CHANNELS.RESTORE_DATABASE, async (_event, backupPath: string) => {
+  ipcMain.handle(IPC_CHANNELS.RESTORE_DATABASE, async (_event, backupPath: string, password: string) => {
     try {
       const grantedBackupPath = resolveGrantedDialogPath(backupPath);
       const p2pCore = getP2PCore();
@@ -3307,12 +3307,7 @@ function setupAppHandlers(ipcMain: IpcMainHandleRegistrar, getP2PCore: () => P2P
       }
 
       log(`[IPC] Restoring database from: ${grantedBackupPath}`);
-
-      // Close current database connection
-      p2pCore.database.close();
-
-      // Restore the database
-      await p2pCore.database.restore(grantedBackupPath);
+      await p2pCore.database.restoreEncrypted(grantedBackupPath, password);
 
       log('[IPC] Database restored. Restarting app...');
 
@@ -3325,42 +3320,14 @@ function setupAppHandlers(ipcMain: IpcMainHandleRegistrar, getP2PCore: () => P2P
     }
   });
 
-  ipcMain.handle(IPC_CHANNELS.RESTORE_DATABASE_FROM_FILE, async (_event, backupPath: string) => {
+  ipcMain.handle(IPC_CHANNELS.RESTORE_DATABASE_FROM_FILE, async (_event, backupPath: string, password: string) => {
     try {
       const grantedBackupPath = resolveGrantedDialogPath(backupPath);
       const dataDir = ensureAppDataDir();
       const dbPath = join(dataDir, 'chat.db');
 
       log(`[IPC] Restoring database (no core) from: ${grantedBackupPath} -> ${dbPath}`);
-
-      // Clean up any existing database and WAL files first
-      const fs = await import('fs/promises');
-      try {
-        await fs.unlink(dbPath);
-        log('[IPC] Removed existing chat.db');
-      } catch {
-        // File doesn't exist, that's ok
-      }
-      try {
-        await fs.unlink(`${dbPath}-wal`);
-        log('[IPC] Removed existing chat.db-wal');
-      } catch {
-        // File doesn't exist, that's ok
-      }
-      try {
-        await fs.unlink(`${dbPath}-shm`);
-        log('[IPC] Removed existing chat.db-shm');
-      } catch {
-        // File doesn't exist, that's ok
-      }
-
-      // Copy the backup file
-      await copyFile(grantedBackupPath, dbPath);
-      log('[IPC] Database file copied successfully');
-
-      // Verify the file exists
-      await stat(dbPath);
-      log('[IPC] Database file verified');
+      await ChatDatabase.restoreEncryptedAtPath(dbPath, grantedBackupPath, password);
 
       log('[IPC] Database restored. Restarting app...');
       requestAppRestart();

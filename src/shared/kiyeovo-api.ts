@@ -463,9 +463,9 @@ export interface KiyeovoAPI {
   restartApp: () => Promise<{ success: boolean; error: string | null }>;
   quitApp: () => Promise<{ success: boolean; error: string | null }>;
   deleteAccountAndData: () => Promise<{ success: boolean; error: string | null }>;
-  backupDatabase: (backupPath: string) => Promise<{ success: boolean; error: string | null }>;
-  restoreDatabase: (backupPath: string) => Promise<{ success: boolean; error: string | null }>;
-  restoreDatabaseFromFile: (backupPath: string) => Promise<{ success: boolean; error: string | null }>;
+  backupDatabase: (backupPath: string, password: string) => Promise<{ success: boolean; error: string | null }>;
+  restoreDatabase: (backupPath: string, password: string) => Promise<{ success: boolean; error: string | null }>;
+  restoreDatabaseFromFile: (backupPath: string, password: string) => Promise<{ success: boolean; error: string | null }>;
 
   showNotification: (options: {
     title: string;

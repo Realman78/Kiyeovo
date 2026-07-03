@@ -22,6 +22,7 @@ import { NetworkModeSwitchDialog } from '../../NetworkModeSwitchDialog';
 import { TOR_CONFIG } from '../../../constants';
 import { Button } from '../../ui/Button';
 import { useToast } from '../../ui/use-toast';
+import { BackupPasswordDialog } from '../../backup/BackupPasswordDialog';
 import { ConfigurationDialog } from '../footer/ConfigurationDialog';
 import { DeleteAccountDialog } from '../footer/DeleteAccountDialog';
 import { KiyeovoDialog } from '../header/KiyeovoDialog';
@@ -83,6 +84,9 @@ export const SettingsPage: FC = () => {
   const [torRestartRequired, setTorRestartRequired] = useState(false);
   const [configurationOpen, setConfigurationOpen] = useState(false);
   const [backingUpDatabase, setBackingUpDatabase] = useState(false);
+  const [backupPasswordDialogOpen, setBackupPasswordDialogOpen] = useState(false);
+  const [pendingBackupPath, setPendingBackupPath] = useState<string | null>(null);
+  const [backupPasswordError, setBackupPasswordError] = useState<string | null>(null);
   const [deleteAccountOpen, setDeleteAccountOpen] = useState(false);
   const [deletingAccount, setDeletingAccount] = useState(false);
   const [quitAppOpen, setQuitAppOpen] = useState(false);
@@ -368,30 +372,66 @@ export const SettingsPage: FC = () => {
   };
 
   const handleBackupDatabase = async () => {
-    if (backingUpDatabase) return;
+    if (backingUpDatabase || backupPasswordDialogOpen) return;
 
     setBackingUpDatabase(true);
     try {
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
       const result = await window.kiyeovoAPI.showSaveDialog({
         title: 'Save Database Backup',
-        defaultPath: `kiyeovo-backup-${timestamp}.db`,
+        defaultPath: `kiyeovo-backup-${timestamp}.kiyeovo-db-backup`,
         filters: [
-          { name: 'Database Files', extensions: ['db'] },
+          { name: 'Database Backup', extensions: ['kiyeovo-db-backup'] },
           { name: 'All Files', extensions: ['*'] },
         ],
       });
       if (result.canceled || !result.filePath) return;
 
-      const backupResult = await window.kiyeovoAPI.backupDatabase(result.filePath);
+      setPendingBackupPath(result.filePath);
+      setBackupPasswordError(null);
+      setBackupPasswordDialogOpen(true);
+    } catch (error) {
+      console.error('Failed to choose database backup path:', error);
+      toast.error(errStr(error, 'Failed to choose database backup path'));
+    } finally {
+      setBackingUpDatabase(false);
+    }
+  };
+
+  const handleBackupPasswordOpenChange = (open: boolean) => {
+    if (open) {
+      setBackupPasswordDialogOpen(true);
+      return;
+    }
+    if (backingUpDatabase) return;
+
+    setBackupPasswordDialogOpen(false);
+    setPendingBackupPath(null);
+    setBackupPasswordError(null);
+  };
+
+  const handleConfirmBackupPassword = async (backupPassword: string) => {
+    if (!pendingBackupPath || backingUpDatabase) return;
+
+    setBackingUpDatabase(true);
+    setBackupPasswordError(null);
+    try {
+      const backupResult = await window.kiyeovoAPI.backupDatabase(pendingBackupPath, backupPassword);
       if (!backupResult.success) {
-        toast.error(backupResult.error || 'Failed to back up database');
+        const message = backupResult.error || 'Failed to back up database';
+        setBackupPasswordError(message);
+        toast.error(message);
         return;
       }
+
       toast.success('Database backup saved');
+      setBackupPasswordDialogOpen(false);
+      setPendingBackupPath(null);
     } catch (error) {
       console.error('Failed to back up database:', error);
-      toast.error(errStr(error, 'Failed to back up database'));
+      const message = errStr(error, 'Failed to back up database');
+      setBackupPasswordError(message);
+      toast.error(message);
     } finally {
       setBackingUpDatabase(false);
     }
@@ -591,7 +631,7 @@ export const SettingsPage: FC = () => {
                   variant="outline"
                   size="sm"
                   onClick={() => { void handleBackupDatabase(); }}
-                  disabled={backingUpDatabase}
+                  disabled={backingUpDatabase || backupPasswordDialogOpen}
                 >
                   {backingUpDatabase ? 'Backing up...' : 'Backup'}
                 </Button>
@@ -636,6 +676,18 @@ export const SettingsPage: FC = () => {
       </div>
 
       <KiyeovoDialog open={aboutOpen} onOpenChange={setAboutOpen} />
+      <BackupPasswordDialog
+        open={backupPasswordDialogOpen}
+        onOpenChange={handleBackupPasswordOpenChange}
+        title="Encrypt Database Backup"
+        description="Use a backup password separate from your login password."
+        confirmLabel="Save Backup"
+        submittingLabel="Saving..."
+        requireConfirmation
+        submitting={backingUpDatabase}
+        error={backupPasswordError}
+        onSubmit={handleConfirmBackupPassword}
+      />
       <TimeFormatDialog open={timeFormatOpen} onOpenChange={setTimeFormatOpen} />
       <ConfigurationDialog
         open={configurationOpen}

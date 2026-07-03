@@ -160,9 +160,9 @@ const kiyeovoAPI: KiyeovoAPI = {
   restartApp: () => invoke(IPC_CHANNELS.RESTART_APP),
   quitApp: () => invoke(IPC_CHANNELS.QUIT_APP),
   deleteAccountAndData: () => invoke(IPC_CHANNELS.DELETE_ACCOUNT_AND_DATA),
-  backupDatabase: (backupPath) => invoke(IPC_CHANNELS.BACKUP_DATABASE, backupPath),
-  restoreDatabase: (backupPath) => invoke(IPC_CHANNELS.RESTORE_DATABASE, backupPath),
-  restoreDatabaseFromFile: (backupPath) => invoke(IPC_CHANNELS.RESTORE_DATABASE_FROM_FILE, backupPath),
+  backupDatabase: (backupPath, password) => invoke(IPC_CHANNELS.BACKUP_DATABASE, backupPath, password),
+  restoreDatabase: (backupPath, password) => invoke(IPC_CHANNELS.RESTORE_DATABASE, backupPath, password),
+  restoreDatabaseFromFile: (backupPath, password) => invoke(IPC_CHANNELS.RESTORE_DATABASE_FROM_FILE, backupPath, password),
 
   showNotification: (options) => invoke(IPC_CHANNELS.SHOW_NOTIFICATION, options),
   isWindowFocused: () => invoke(IPC_CHANNELS.IS_WINDOW_FOCUSED),
