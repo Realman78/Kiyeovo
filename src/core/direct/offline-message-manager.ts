@@ -6,6 +6,7 @@ import { ed25519 } from '@noble/curves/ed25519';
 import { sha256 } from '@noble/hashes/sha2';
 import { errStr, generalErrorHandler } from '../utils/general-error.js';
 import {
+    DIRECT_OFFLINE_STORE_MAX_DECOMPRESSED_BYTES,
     MAX_MESSAGES_PER_STORE,
     MESSAGE_TTL,
     OFFLINE_ACK_RESERVE,
@@ -18,9 +19,21 @@ import { log } from '../../shared/logger.js';
 
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
+const DIRECT_OFFLINE_GUNZIP_OPTS = { maxOutputLength: DIRECT_OFFLINE_STORE_MAX_DECOMPRESSED_BYTES };
 
 function hashBase64Field(value: string): string {
     return Buffer.from(sha256(Buffer.from(value, 'base64'))).toString('base64');
+}
+
+/**
+ * A direct offline bucket key contains the pairwise bucket secret in its middle
+ * segment; logging it verbatim leaks that secret into shareable log files. Render
+ * a stable, non-reversible tag (namespace + short hash) for diagnostics instead.
+ */
+export function redactBucketKey(bucketKey: string): string {
+    const namespace = bucketKey.split('/')[1] ?? 'offline';
+    const tag = Buffer.from(sha256(Buffer.from(bucketKey, 'utf8'))).toString('hex').slice(0, 12);
+    return `${namespace}/#${tag}`;
 }
 
 /**
@@ -185,7 +198,7 @@ export class OfflineMessageManager {
         appendBucketKey: boolean = true
     ): Promise<OfflineMessageStore> {
         const fetchPromises = bucketKeys.map(async (bucketKey) => {
-            log('fetching messages for bucket', bucketKey);
+            log('fetching messages for bucket', redactBucketKey(bucketKey));
             const key = new TextEncoder().encode(bucketKey);
             const bucketMessages: OfflineMessage[] = [];
             let valueEventCount = 0;
@@ -201,7 +214,7 @@ export class OfflineMessageManager {
                         valueEventCount++;
 
                         const compressedBuffer = Buffer.from(event.value);
-                        const decompressedBuffer = await gunzipAsync(compressedBuffer);
+                        const decompressedBuffer = await gunzipAsync(compressedBuffer, DIRECT_OFFLINE_GUNZIP_OPTS);
                         const store = JSON.parse(decompressedBuffer.toString('utf8')) as unknown;
 
                         if (!store || typeof store !== 'object' || !('messages' in store) || !Array.isArray(store.messages) || store.messages.length === 0) continue;
@@ -229,7 +242,7 @@ export class OfflineMessageManager {
                             .join(',');
 
                         log(
-                            `[OFFLINE][READ] bucket=${bucketKey.slice(0, 48)}... value#${valueEventCount} ` +
+                            `[OFFLINE][READ] bucket=${redactBucketKey(bucketKey)} value#${valueEventCount} ` +
                             `storeVersion=${storeVersion} storeLastUpdated=${storeLastUpdated} ` +
                             `raw=${store.messages.length} valid=${validMessages.length} ` +
                             `sampleIds=[${validIds}]`
@@ -244,13 +257,13 @@ export class OfflineMessageManager {
                 }
 
                 if (!foundValue) {
-                    log(`No value found in DHT for bucket key: ${bucketKey}`);
+                    log(`No value found in DHT for bucket key: ${redactBucketKey(bucketKey)}`);
                 } else {
                     const uniqueIds = new Set(bucketMessages.map(m => m.id)).size;
                     const duplicateCount = bucketMessages.length - uniqueIds;
                     const repeatedStoreWrites = parsedStoreCount - storeSignatures.size;
                     log(
-                        `[OFFLINE][READ] bucket=${bucketKey.slice(0, 48)}... summary ` +
+                        `[OFFLINE][READ] bucket=${redactBucketKey(bucketKey)} summary ` +
                         `valueEvents=${valueEventCount} parsedStores=${parsedStoreCount} uniqueStores=${storeSignatures.size} ` +
                         `repeatedStorePayloads=${Math.max(0, repeatedStoreWrites)} accumulatedMessages=${bucketMessages.length} duplicatesById=${Math.max(0, duplicateCount)}`
                     );

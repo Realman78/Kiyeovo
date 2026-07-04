@@ -18,6 +18,7 @@ import {
   GROUP_STATE_RESYNC_REQUEST_COOLDOWN_MS,
   getNetworkModeRuntime,
   GROUP_PENDING_ACK_RETIRE_AGE_MS,
+  GROUP_OFFLINE_STORE_MAX_DECOMPRESSED_BYTES,
 } from '../../constants.js';
 import {
   GroupMessageType,
@@ -1749,7 +1750,7 @@ export class GroupCreator {
       if (event.name !== 'VALUE' || event.value.length === 0) continue;
       let parsed: GroupOfflineStore;
       try {
-        const decompressed = gunzipSync(Buffer.from(event.value));
+        const decompressed = gunzipSync(Buffer.from(event.value), { maxOutputLength: GROUP_OFFLINE_STORE_MAX_DECOMPRESSED_BYTES });
         parsed = JSON.parse(decompressed.toString('utf8')) as GroupOfflineStore;
       } catch {
         continue;

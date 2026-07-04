@@ -14,6 +14,7 @@ import {
   GROUP_OFFLINE_LOCAL_CACHE_TTL_MS,
   GROUP_OFFLINE_MESSAGE_TTL_MS,
   GROUP_OFFLINE_STORE_MAX_COMPRESSED_BYTES,
+  GROUP_OFFLINE_STORE_MAX_DECOMPRESSED_BYTES,
   GROUP_ROTATION_GRACE_WINDOW_MS,
   getNetworkModeRuntime,
   GROUP_MISSING_USED_UNTIL_SCAN_EPOCH_CAP,
@@ -1123,7 +1124,7 @@ export class GroupOfflineManager {
         if (event.name !== 'VALUE' || event.value.length === 0) continue;
         valueEvents++;
         try {
-          const decompressed = await gunzipAsync(Buffer.from(event.value));
+          const decompressed = await gunzipAsync(Buffer.from(event.value), { maxOutputLength: GROUP_OFFLINE_STORE_MAX_DECOMPRESSED_BYTES });
           const store = JSON.parse(decompressed.toString('utf8')) as GroupOfflineStore;
           if (
             !best

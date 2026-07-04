@@ -320,6 +320,10 @@ export const OFFLINE_CONTROL_MESSAGE_RESERVE = 10; // Slots reserved for offline
 export const OFFLINE_ACK_RESERVE = 1; // Slot reserved for a standalone (superseding) offline ACK
 // Defensive cap to reject direct offline DHT values before gzip inflation.
 export const DIRECT_OFFLINE_STORE_MAX_COMPRESSED_BYTES = 64 * 1024; // 64KB
+// Cap on the *decompressed* size so a compression bomb (~1030:1 DEFLATE ratio on
+// a 64KB value ≈ 66MB) cannot exhaust memory during gunzip. Real stores are mostly
+// incompressible base64 ciphertext, so 2MiB is >30x headroom over any legit store.
+export const DIRECT_OFFLINE_STORE_MAX_DECOMPRESSED_BYTES = 2 * 1024 * 1024; // 2MiB
 export const MESSAGE_TTL = 7 * DAY; // 7 days
 export const OFFLINE_MESSAGE_MAX_FUTURE_SKEW_MS = 2 * MINUTE; // 2 minutes
 export const OFFLINE_ACK_MAX_FUTURE_SKEW_MS = 10 * MINUTE; // 10 minutes
@@ -406,6 +410,9 @@ export const GROUP_INFO_REPUBLISH_RETRY_STEADY_DELAY = 10 * MINUTE; // 10 minute
 export const GROUP_INFO_REPUBLISH_MAX_ATTEMPTS = 20; // Retry cap before falling back to steady republish cadence
 // Defensive cap to keep group offline DHT values bounded even when message limit is increased.
 export const GROUP_OFFLINE_STORE_MAX_COMPRESSED_BYTES = 64 * 1024; // 64KB
+// Decompressed-size ceiling for group offline stores (see the direct-offline
+// counterpart above); rejects gzip bombs before they can exhaust memory.
+export const GROUP_OFFLINE_STORE_MAX_DECOMPRESSED_BYTES = 2 * 1024 * 1024; // 2MiB
 export const GROUP_OFFLINE_LOCAL_CACHE_TTL_MS = 15 * MINUTE; // 15 minutes
 export const GROUP_OFFLINE_LOCAL_CACHE_MAX_ENTRIES = 256; // Max cached group offline snapshots
 export const GROUP_OFFLINE_CLEANUP_INTERVAL_MS = 30 * MINUTE; // 30 minutes

@@ -6,6 +6,7 @@ import { fromBase64Url } from '../utils/miscellaneous.js';
 import { generalErrorHandler } from '../utils/general-error.js';
 import {
   DIRECT_OFFLINE_STORE_MAX_COMPRESSED_BYTES,
+  DIRECT_OFFLINE_STORE_MAX_DECOMPRESSED_BYTES,
   MAX_MESSAGES_PER_STORE,
   MESSAGE_TTL,
   NETWORK_MODE_CONFIG,
@@ -13,6 +14,7 @@ import {
 } from '../constants.js';
 
 const gunzipAsync = promisify(gunzip);
+const DIRECT_OFFLINE_GUNZIP_OPTS = { maxOutputLength: DIRECT_OFFLINE_STORE_MAX_DECOMPRESSED_BYTES };
 const OFFLINE_BUCKET_PREFIXES = Object.values(NETWORK_MODE_CONFIG).map((config) => config.dhtNamespaces.offline);
 
 function hashBase64Field(value: string): string {
@@ -116,7 +118,7 @@ export async function offlineMessageValidator(
     // 3. Decompress and parse value (OfflineMessageStore)
     let store: OfflineMessageStoreDHT;
     try {
-      const decompressedBuffer = await gunzipAsync(Buffer.from(value));
+      const decompressedBuffer = await gunzipAsync(Buffer.from(value), DIRECT_OFFLINE_GUNZIP_OPTS);
       store = JSON.parse(decompressedBuffer.toString('utf8'));
     } catch {
       throw new Error('Failed to decompress or parse DHT value');
@@ -370,7 +372,7 @@ export async function offlineMessageValidateUpdate(
  */
 function decompressStore(value: Uint8Array): OfflineMessageStoreDHT {
   assertDirectOfflineCompressedSize(value);
-  const decompressedBuffer = gunzipSync(Buffer.from(value));
+  const decompressedBuffer = gunzipSync(Buffer.from(value), DIRECT_OFFLINE_GUNZIP_OPTS);
   return JSON.parse(decompressedBuffer.toString('utf8'));
 }
 

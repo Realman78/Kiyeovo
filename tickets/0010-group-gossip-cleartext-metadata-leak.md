@@ -5,11 +5,11 @@
 - **Source:** Security scan — group messaging (malicious-peer threat model)
 - **Status:** Open
 
-> Scope note: this ticket covers **two** cleartext group-metadata surfaces that must be
-> fixed together — realtime gossip frames (§ Realtime gossip) and group-offline DHT
-> bucket keys (§ Group-offline DHT). Encrypting only the gossip frame leaves the DHT
-> backup metadata exposed. Both are the group analogue of
-> [[0008-offline-bucket-sender-identity-metadata-leak]].
+> Scope note: this ticket covers **three** cleartext group-metadata surfaces that must be
+> fixed together — realtime gossip frames (§ Realtime gossip), group-offline DHT
+> bucket keys (§ Group-offline DHT), and group-info DHT keys (§ Group-info DHT).
+> Encrypting only the gossip frame leaves the DHT backup metadata exposed. All are the
+> group analogue of [[0008-offline-bucket-sender-identity-metadata-leak]].
 
 ## Threat model
 
@@ -68,6 +68,35 @@ validator-vs-metadata tension as [[0008-offline-bucket-sender-identity-metadata-
 Fixing only the gossip frame leaves this exposed, which is why both surfaces are in one
 ticket.
 
+## Group-info DHT (latest + versioned metadata records)
+
+The group-info records that distribute roster/version state have the **record body
+metadata encrypted** (`encryptedMetadata` + nonce, verified in the versioned validator),
+but their **DHT keys are cleartext** and carry stable, de-anonymizing identifiers:
+
+```
+/<mode-group-info-latest-prefix>/<groupId>/<creatorPubKeyBase64url>
+/<mode-group-info-version-prefix>/<groupId>/<creatorPubKeyBase64url>/<keyVersion>
+```
+
+built at `group-creator.ts:1136`, `:1587`, `:1600`. So a storage node learns:
+
+- the stable `groupId` (same UUID leaked by the gossip/offline surfaces — links all three
+  across epochs),
+- the **creator's stable signing key** in cleartext — the *same* key in the creator's
+  public username record, so the group's creator is directly de-anonymizable,
+- via the versioned keys' `<keyVersion>` suffix and the `latest` record's cleartext
+  `latestVersion` / `lastUpdated` fields, the group's **rotation cadence and activity
+  timing**.
+
+Unlike the epoch-scoped offline/gossip surfaces, the `latest` key **never rotates**, so it
+is a *permanent* `groupId`↔creator binding — arguably the worst of the three. Same
+validator-vs-metadata tension: the validator recovers `creatorPubKey` from the key path to
+verify the creator signature without holding the group key
+(`group-dht-validator.ts` group-info-latest `:255-303`, versioned `:375-446`), which is
+exactly why the identifiers are in the clear. Fixing only the gossip frame and offline
+buckets leaves this exposed, which is why all three surfaces are in one ticket.
+
 ## Location
 
 - Realtime: `src/core/group/runtime/group-messaging.ts:335-353` (frame assembly +
@@ -76,6 +105,10 @@ ticket.
 - Group-offline: `src/core/group/runtime/group-offline-manager.ts:143-146` (bucket key);
   `src/core/group/dht/group-dht-validator.ts:18,64,79,99,137,156,170` (validator binds to
   the cleartext key segments).
+- Group-info: `src/core/group/control/group-creator.ts:1136,1587,1600` (latest + versioned
+  key construction); `src/core/group/dht/group-dht-validator.ts:255-303` (latest validator),
+  `:375-446` (versioned validator) recover `groupId`/`creatorPubKey` from the cleartext key
+  path. Note the record *body* metadata is already encrypted — only the key is exposed.
 
 ## Expected behavior
 
@@ -112,7 +145,13 @@ identity-revealing field appears in either the gossip frame or the DHT key.
    pseudonymous suffix and record-carried (or recipient-pinned) verifying key instead of
    `groupId`/`keyVersion`/`senderPubKey` in cleartext, subject to the same
    validator-vs-metadata tradeoff.
-4. Decide the privacy target per mode (fast vs anonymous) before implementing — this is
+4. **Group-info DHT:** replace the cleartext `groupId`/`creatorPubKey` key segments with an
+   opaque per-group (and, for the versioned record, per-epoch) selector that members
+   re-derive from keys they hold, and move creator-signature verification off the
+   cleartext key path — e.g. a group-scoped key that only members can compute, since
+   (unlike offline buckets) group-info is only consumed by members who already hold the
+   group key. The permanent, never-rotating `latest` key is the priority here.
+5. Decide the privacy target per mode (fast vs anonymous) before implementing — this is
    the Group B priority-1 decision.
 
 ## Test coverage
@@ -122,6 +161,8 @@ Not currently covered. Once redesigned:
   `senderPeerId`; a member can still select the right key and decrypt.
 - A group-offline DHT key does not contain a stable `groupId` or the sender's global
   signing key.
+- A group-info DHT key (latest + versioned) does not contain a stable `groupId` or the
+  creator's global signing key; a member can still resolve and verify the record.
 - Frames/records from two epochs of the same group are not linkable by a common
   cleartext field.
 - Inbound verification (context resolution, membership, per-message signature, seq

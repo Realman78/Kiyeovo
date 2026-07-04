@@ -5,6 +5,7 @@ import {
   GROUP_MESSAGE_MAX_FUTURE_SKEW_MS,
   GROUP_MAX_MESSAGES_PER_SENDER,
   GROUP_OFFLINE_STORE_MAX_COMPRESSED_BYTES,
+  GROUP_OFFLINE_STORE_MAX_DECOMPRESSED_BYTES,
   NETWORK_MODE_CONFIG,
 } from '../../constants.js';
 import type {
@@ -239,7 +240,7 @@ export async function groupOfflineValidateUpdate(
 
 function decompressGroupOfflineStore(value: Uint8Array): GroupOfflineStore {
   assertGroupOfflineCompressedSize(value);
-  const buf = gunzipSync(Buffer.from(value));
+  const buf = gunzipSync(Buffer.from(value), { maxOutputLength: GROUP_OFFLINE_STORE_MAX_DECOMPRESSED_BYTES });
   return JSON.parse(buf.toString('utf8'));
 }
 

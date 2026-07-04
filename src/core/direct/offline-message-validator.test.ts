@@ -6,6 +6,7 @@ import { ed25519 } from '@noble/curves/ed25519';
 import { sha256 } from '@noble/hashes/sha2';
 import {
   DIRECT_OFFLINE_STORE_MAX_COMPRESSED_BYTES,
+  DIRECT_OFFLINE_STORE_MAX_DECOMPRESSED_BYTES,
   MAX_MESSAGES_PER_STORE,
   MESSAGE_TTL,
   NETWORK_MODE_CONFIG,
@@ -145,6 +146,20 @@ test('offline DHT validator rejects oversized compressed stores before decompres
     await assert.rejects(
       () => offlineMessageValidator(encoder.encode(BUCKET_KEY), oversizedValue),
       /Direct offline store too large/,
+    );
+  });
+});
+
+test('offline DHT validator rejects a compression bomb that passes the compressed-size cap', async () => {
+  // Highly compressible payload: tiny gzipped, but inflates far past the decompressed
+  // ceiling. Passes the compressed-byte cap, so the maxOutputLength guard must catch it.
+  const bomb = gzipSync(Buffer.alloc(DIRECT_OFFLINE_STORE_MAX_DECOMPRESSED_BYTES + 1, 0x41));
+  assert.equal(bomb.length <= DIRECT_OFFLINE_STORE_MAX_COMPRESSED_BYTES, true);
+
+  await withoutConsoleLog(async () => {
+    await assert.rejects(
+      () => offlineMessageValidator(encoder.encode(BUCKET_KEY), bomb),
+      /Failed to decompress or parse DHT value/,
     );
   });
 });
