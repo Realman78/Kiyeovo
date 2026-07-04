@@ -36,6 +36,7 @@ export interface GroupInvite {
   groupId: string;
   groupName: string;
   inviterPeerId: string;
+  inviteePeerId: string; // the specific peer this invite is for; bound into the signature
   inviteId: string;
   createdAt: number;
   expiresAt: number;

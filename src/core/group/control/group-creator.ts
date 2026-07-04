@@ -338,6 +338,7 @@ export class GroupCreator {
             groupId,
             groupName,
             inviterPeerId: myPeerId,
+            inviteePeerId: peerId,
             inviteId,
             createdAt: now,
             expiresAt,
@@ -408,6 +409,15 @@ export class GroupCreator {
       // No pending invite = already processed (dedup) or never sent
       log(
         `[GROUP][TRACE][RESP][DROP] group=${response.groupId} from=${response.responderPeerId.slice(-8)} reason=no_pending_invite`,
+      );
+      return;
+    }
+
+    // Defense-in-depth: the pending invite is already keyed by target peer, but also
+    // reject if the signed invitee binding doesn't match the responder.
+    if (storedInvite.inviteePeerId !== response.responderPeerId) {
+      log(
+        `[GROUP][TRACE][RESP][DROP] group=${response.groupId} from=${response.responderPeerId.slice(-8)} reason=invitee_binding_mismatch invitee=${storedInvite.inviteePeerId.slice(-8)}`,
       );
       return;
     }
