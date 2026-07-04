@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { ed25519 } from '@noble/curves/ed25519';
 import { ChatDatabase } from '../db/database.js';
+import { NETWORK_MODES } from '../constants.js';
 import { KeyExchange } from './key-exchange.js';
 import type { AuthenticatedEncryptedMessage, MessageToVerify, UserRegistration } from '../types.js';
 
@@ -35,6 +36,7 @@ function makeRegistration(input: {
 }): UserRegistration {
   return {
     peerID: input.peerId ?? PEER_ID,
+    networkMode: NETWORK_MODES.FAST,
     username: input.username ?? USERNAME,
     timestamp: 1_000,
     signingPublicKey: input.signingPublicKey,

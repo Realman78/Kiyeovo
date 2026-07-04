@@ -1,6 +1,15 @@
 import { ChatDatabase, User } from '../db/database.js';
-import type { ChatNode, UserRegistration } from '../types.js';
-import { ERRORS, NETWORK_MODES, REREGISTRATION_INTERVAL, USERNAME_MAX_FUTURE_SKEW_MS, getNetworkModeRuntime } from '../constants.js';
+import type { ChatNode, NetworkMode, UserRegistration } from '../types.js';
+import {
+  ERRORS,
+  NETWORK_MODES,
+  REREGISTRATION_INTERVAL,
+  USERNAME_MAX_FUTURE_SKEW_MS,
+  USERNAME_MAX_LENGTH,
+  USERNAME_MIN_LENGTH,
+  USERNAME_REGEX,
+  getNetworkModeRuntime,
+} from '../constants.js';
 import { EncryptedUserIdentity } from '../identity/encrypted-user-identity.js';
 import { errStr, generalErrorHandler } from '../utils/general-error.js';
 import { hashUsingSha256 } from '../utils/crypto.js';
@@ -37,7 +46,6 @@ type StoredUsernameState = {
 };
 
 export class UsernameRegistry {
-  private static readonly USERNAME_REGEX = /^[A-Za-z0-9_]+$/;
   private static readonly TEXT_ENCODER = new TextEncoder();
   private static readonly TEXT_DECODER = new TextDecoder();
   private static readonly MAX_REGISTRATION_AGE = REREGISTRATION_INTERVAL * 2;
@@ -56,6 +64,7 @@ export class UsernameRegistry {
   private userIdentity: EncryptedUserIdentity | null = null;
   public reregistrationInterval: NodeJS.Timeout | null = null;
   private database: ChatDatabase;
+  private readonly networkMode: NetworkMode;
   private readonly usernameDhtPrefix: string;
   private readonly autoRegisterSettingKey: string;
   private readonly isFastMode: boolean;
@@ -64,10 +73,11 @@ export class UsernameRegistry {
   constructor(node: ChatNode, database: ChatDatabase) {
     this.node = node;
     this.database = database;
-    const mode = database.getSessionNetworkMode();
-    this.usernameDhtPrefix = getNetworkModeRuntime(mode).config.dhtNamespaces.username;
-    this.autoRegisterSettingKey = `auto_register_${mode}`;
-    this.isFastMode = mode === NETWORK_MODES.FAST;
+    const runtime = getNetworkModeRuntime(database.getSessionNetworkMode());
+    this.networkMode = runtime.mode;
+    this.usernameDhtPrefix = runtime.config.dhtNamespaces.username;
+    this.autoRegisterSettingKey = `auto_register_${this.networkMode}`;
+    this.isFastMode = this.networkMode === NETWORK_MODES.FAST;
   }
 
   async initialize(userIdentity: EncryptedUserIdentity, onRestoreUsername: (username: string) => void): Promise<void> {
@@ -321,15 +331,15 @@ export class UsernameRegistry {
       throw new Error('User identity not initialized');
     }
 
-    if (username.length < 3) {
-      throw new Error('Username must be at least 3 characters');
+    if (username.length < USERNAME_MIN_LENGTH) {
+      throw new Error(`Username must be at least ${USERNAME_MIN_LENGTH} characters`);
     }
 
-    if (username.length > 32) {
-      throw new Error('Username must be less than 32 characters');
+    if (username.length > USERNAME_MAX_LENGTH) {
+      throw new Error(`Username must be at most ${USERNAME_MAX_LENGTH} characters`);
     }
 
-    if (!UsernameRegistry.USERNAME_REGEX.test(username)) {
+    if (!USERNAME_REGEX.test(username)) {
       throw new Error('Username can only contain alphanumerics and underscores');
     }
 
@@ -374,6 +384,7 @@ export class UsernameRegistry {
           const parsed = JSON.parse(rawData) as unknown;
           if (
             !isUsernameRegistrationRecord(parsed)
+            || parsed.networkMode !== this.networkMode
             || !verifyUsernameRegistrationSignature(parsed)
             || !verifyUsernameRegistrationPeerBinding(parsed)
           ) {
@@ -538,6 +549,7 @@ export class UsernameRegistry {
 
     const registrationData: Omit<UserRegistration, 'signature' | 'peerBinding'> = {
       peerID: this.node.peerId.toString(),
+      networkMode: this.networkMode,
       username,
       kind,
       signingPublicKey: Buffer.from(identity.signingPublicKey).toString('base64'),
@@ -580,6 +592,7 @@ export class UsernameRegistry {
 
     const registration = JSON.parse(rawData) as unknown;
     if (!this.isValidUserRegistration(registration)) return null;
+    if (registration.networkMode !== this.networkMode) return null;
     if (!verifyUsernameRegistrationSignature(registration)) return null;
     if (!verifyUsernameRegistrationPeerBinding(registration)) return null;
 

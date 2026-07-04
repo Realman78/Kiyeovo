@@ -166,6 +166,7 @@ export interface ErrorConstants {
 
 export interface UserRegistration {
   peerID: string
+  networkMode: NetworkMode
   timestamp: number
   username: string
   kind?: 'active' | 'released'

@@ -157,6 +157,12 @@ export const BOOTSTRAP_PORT = 9000; // Default TCP port for the dedicated bootst
  * DHT settings
  */
 export const USERNAME_RECORD_PREFIX = 'kiyeovo-user-';
+export const USERNAME_MIN_LENGTH = 3;
+export const USERNAME_MAX_LENGTH = 32;
+export const USERNAME_REGEX = /^[A-Za-z0-9_]+$/;
+// Username records are small signed JSON blobs; 8 KiB leaves generous headroom
+// while rejecting oversized values before JSON parsing.
+export const USERNAME_RECORD_MAX_BYTES = 8 * 1024;
 export const K_BUCKET_SIZE = 20; // Kademlia bucket size for routing table maintenance
 export const PREFIX_LENGTH = 6; // Kademlia routing-table prefix length
 export const MDNS_SERVICE_TAG = 'kiyeovo.local';
