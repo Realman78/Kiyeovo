@@ -179,6 +179,8 @@ Inbound first-contact behavior depends on contact mode:
 
 Contact attempts are persisted so the UI can show pending/recent inbound requests and the core can enforce timeout/cancellation/rate-limit behavior consistently across restarts.
 
+Inbound new-contact prompts resolve lookupByPeerId before prompting and display the DHT-verified username, not the self-asserted wire username. If the peer cannot be resolved in the username DHT, no spoofable prompt is shown; if the claimed and resolved usernames differ, the prompt and saved contact use the resolved username.
+
 #### 5.2 Key exchange
 
 - message types: `key_exchange_init` / `response` / `rejected` / key rotation variants

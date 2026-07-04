@@ -2,9 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { ed25519 } from '@noble/curves/ed25519';
 import { ChatDatabase } from '../db/database.js';
+import type { User } from '../db/database.js';
 import { NETWORK_MODES } from '../constants.js';
 import { KeyExchange } from './key-exchange.js';
-import type { AuthenticatedEncryptedMessage, MessageToVerify, UserRegistration } from '../types.js';
+import type { AuthenticatedEncryptedMessage, ChatNode, ContactRequestEvent, MessageToVerify, UserRegistration } from '../types.js';
+import type { UsernameRegistry } from '../username/username-registry.js';
+import type { SessionManager } from './session-manager.js';
 
 const encoder = new TextEncoder();
 const PEER_ID = 'peer_alice';
@@ -56,6 +59,17 @@ function makeVerifyMessage(content: MessageToVerify['content'] = 'key_exchange_r
   };
 }
 
+function makeContactRequestMessage(senderUsername = USERNAME): AuthenticatedEncryptedMessage {
+  return {
+    type: 'key_exchange',
+    content: 'key_exchange_init',
+    ephemeralPublicKey: 'ephemeral_public_key',
+    senderUsername,
+    timestamp: Date.now(),
+    signature: 'signature',
+  };
+}
+
 async function createPinnedUser(
   database: ChatDatabase,
   signingPublicKey: string,
@@ -84,21 +98,140 @@ async function createRosterSeededUser(
   });
 }
 
-function makeKeyExchange(database: ChatDatabase, usernameRegistry: object): any {
+type KeyExchangeTestOptions = {
+  node?: Partial<ChatNode>;
+  onContactRequestReceived?: (data: ContactRequestEvent) => void;
+};
+
+type SignatureFallbackResult = {
+  valid: boolean;
+  signingPublicKey?: string;
+};
+
+type KeyExchangeInitSignatureResult = {
+  valid: boolean;
+  keys: {
+    signingPublicKey: string;
+    offlinePublicKey: string;
+    signature: string;
+  };
+};
+
+type KeyExchangeHarness = {
+  pendingAcceptances: Map<string, unknown>;
+  acceptPendingContact(senderPeerId: string): void;
+  authorizeContactRequest(
+    remoteId: string,
+    message: AuthenticatedEncryptedMessage,
+    initialMessageBody: string,
+    onPendingCreated?: () => Promise<void>,
+  ): Promise<UserRegistration | User | null>;
+  verifySignatureWithFallback(
+    signature: string,
+    message: MessageToVerify,
+    username: string,
+    peerId: string,
+  ): Promise<SignatureFallbackResult>;
+  verifyKeyExchangeInitSignature(
+    message: AuthenticatedEncryptedMessage,
+    sender: UserRegistration | User,
+    remoteId: string,
+  ): Promise<KeyExchangeInitSignatureResult>;
+  ensureUserExistsWithKeys(
+    remoteId: string,
+    username: string,
+    signingPublicKey: string,
+    offlinePublicKey: string,
+    signature: string,
+  ): Promise<void>;
+};
+
+function makeKeyExchange(
+  database: ChatDatabase,
+  usernameRegistry: object,
+  options: KeyExchangeTestOptions = {},
+): KeyExchangeHarness {
   const noop = () => undefined;
   return new KeyExchange(
-    {} as any,
-    usernameRegistry as any,
-    {} as any,
+    (options.node ?? { getConnections: () => [] }) as unknown as ChatNode,
+    usernameRegistry as unknown as UsernameRegistry,
+    {} as unknown as SessionManager,
     database,
     noop,
+    options.onContactRequestReceived ?? noop,
     noop,
     noop,
     noop,
     noop,
-    noop,
-  ) as any;
+  ) as unknown as KeyExchangeHarness;
 }
+
+async function waitForPendingContact(keyExchange: KeyExchangeHarness, peerId: string): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (keyExchange.pendingAcceptances.has(peerId)) {
+      return;
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  throw new Error('Pending contact request was not created');
+}
+
+test('authorizeContactRequest prompts and accepts using DHT-resolved username over claimed name', async (t) => {
+  const database = new ChatDatabase(':memory:');
+  t.after(() => database.close());
+
+  const signing = makeSigningKeyPair();
+  const resolved = makeRegistration({
+    peerId: PEER_ID,
+    username: 'bob',
+    signingPublicKey: signing.publicKey,
+    offlinePublicKey: 'bob_offline_key',
+    signature: 'bob_registration_signature',
+  });
+  let prompt: ContactRequestEvent | undefined;
+  const keyExchange = makeKeyExchange(
+    database,
+    { lookupByPeerId: async () => resolved },
+    { onContactRequestReceived: (data) => { prompt = data; } },
+  );
+
+  const request = keyExchange.authorizeContactRequest(
+    PEER_ID,
+    makeContactRequestMessage('alice'),
+    'hello from claimed alice',
+  );
+  await waitForPendingContact(keyExchange, PEER_ID);
+  keyExchange.acceptPendingContact(PEER_ID);
+  const sender = await request;
+
+  assert.equal(prompt?.username, 'bob');
+  assert.equal(prompt?.peerId, PEER_ID);
+  assert.equal(sender.username, 'bob');
+  assert.equal(sender.peerID, PEER_ID);
+  assert.equal(sender.signingPublicKey, signing.publicKey);
+});
+
+test('authorizeContactRequest does not prompt unresolved peers under a claimed username', async (t) => {
+  const database = new ChatDatabase(':memory:');
+  t.after(() => database.close());
+
+  let prompted = false;
+  const keyExchange = makeKeyExchange(
+    database,
+    { lookupByPeerId: async () => { throw new Error('not found'); } },
+    { onContactRequestReceived: () => { prompted = true; } },
+  );
+
+  const sender = await keyExchange.authorizeContactRequest(
+    PEER_ID,
+    makeContactRequestMessage('alice'),
+    'hello from claimed alice',
+  );
+
+  assert.equal(sender, null);
+  assert.equal(prompted, false);
+  assert.deepEqual(database.getContactAttemptsByPeerId(PEER_ID), []);
+});
 
 test('verifySignatureWithFallback does not mutate pinned keys when DHT retry also fails', async (t) => {
   const database = new ChatDatabase(':memory:');

@@ -852,41 +852,58 @@ export class KeyExchange {
       return null;
     }
 
+    let verifiedSender: UserRegistration;
+    try {
+      verifiedSender = await this.resolveContactRequestSenderFromDht(remoteId, senderUsername);
+    } catch (error: unknown) {
+      log(`Rejecting unresolved contact request from ${senderUsername}: ${errStr(error)}`);
+      return null;
+    }
+
     // Silent mode - just log the attempt
     const contactAttemptId = this.database.logContactAttempt({
       sender_peer_id: remoteId,
-      sender_username: senderUsername,
+      sender_username: verifiedSender.username,
       message: message.content || 'Contact request',
       message_body: initialMessageBody,
       timestamp: Date.now()
     });
 
-    return await this.handleActiveContactRequest(remoteId, message, contactAttemptId, initialMessageBody, onPendingCreated);
+    return await this.handleActiveContactRequest(
+      remoteId,
+      message,
+      verifiedSender,
+      contactAttemptId,
+      initialMessageBody,
+      onPendingCreated,
+    );
   }
 
   // Handle contact request in active mode (with user prompt and timeout)
   private async handleActiveContactRequest(
     remoteId: string,
     message: AuthenticatedEncryptedMessage,
+    verifiedSender: UserRegistration,
     contactAttemptId: number,
     initialMessageBody: string,
     onPendingCreated?: () => Promise<void>,
   ): Promise<UserRegistration | User> {
     const senderUsername = message.senderUsername;
+    const verifiedUsername = verifiedSender.username;
     const receivedAt = Date.now();
 
     if (!message.ephemeralPublicKey || !message.signature) {
       throw new Error('Key exchange missing signature or ephemeral public key - this should never happen');
     }
 
-    this.emitIncomingContactRequest(remoteId, message, initialMessageBody);
+    this.emitIncomingContactRequest(remoteId, message, initialMessageBody, verifiedUsername);
     if (onPendingCreated) {
       try {
         await onPendingCreated();
       } catch (error) {
         console.warn(
           `[KEY-EXCHANGE][ACK][FAIL] ts=${new Date().toISOString()} ` +
-          `peer=${remoteId} username=${senderUsername} error=${errStr(error)}`,
+          `peer=${remoteId} username=${verifiedUsername} error=${errStr(error)}`,
         );
       }
     }
@@ -894,7 +911,7 @@ export class KeyExchange {
     try {
       result = await this.waitForContactRequestDecision(
         remoteId,
-        senderUsername,
+        verifiedUsername,
         initialMessageBody,
         receivedAt,
         this.getKeyExchangeDecisionExpiresAt(message.timestamp),
@@ -902,32 +919,33 @@ export class KeyExchange {
     } catch (error) {
       this.database.deleteContactAttempt(contactAttemptId);
       if (error instanceof Error && error.message === 'KEY_EXCHANGE_CANCELLED_BY_INITIATOR') {
-        log(`Contact request from ${senderUsername} cancelled by initiator`);
+        log(`Contact request from ${verifiedUsername} cancelled by initiator`);
       }
       throw error;
     }
 
     this.database.deleteContactAttempt(contactAttemptId);
     if (result === null) {
-      log(`Contact request from ${senderUsername} expired`);
+      log(`Contact request from ${verifiedUsername} expired`);
       throw new Error('REJECTION_TIMEOUT');
     }
 
     if (!result) {
-      log(`Contact request from ${senderUsername} rejected`);
+      log(`Contact request from ${verifiedUsername} rejected`);
       // Signal that rejection response needs to be sent
       throw new Error('REJECTION_NEEDED');
     }
 
-    return this.resolveAcceptedContactRequestSender(remoteId, senderUsername);
+    return this.resolveAcceptedContactRequestSender(remoteId, senderUsername, verifiedSender);
   }
 
   private emitIncomingContactRequest(
     remoteId: string,
     message: AuthenticatedEncryptedMessage,
     initialMessageBody: string,
+    displayUsername: string,
   ): void {
-    const senderUsername = message.senderUsername;
+    const senderUsername = displayUsername;
     const now = Date.now();
     const expiresAt = this.getKeyExchangeDecisionExpiresAt(message.timestamp);
 
@@ -998,7 +1016,13 @@ export class KeyExchange {
   private async resolveAcceptedContactRequestSender(
     remoteId: string,
     senderUsername: string,
+    preResolvedSender?: UserRegistration,
   ): Promise<UserRegistration | User> {
+    if (preResolvedSender) {
+      log(`Accepted contact request from ${preResolvedSender.username} (verified via DHT before prompt)`);
+      return preResolvedSender;
+    }
+
     const existingAcceptedUser = this.database.getUserByPeerId(remoteId);
     if (
       existingAcceptedUser?.signing_public_key &&
@@ -1011,12 +1035,25 @@ export class KeyExchange {
       return existingAcceptedUser;
     }
 
+    return this.resolveContactRequestSenderFromDht(remoteId, senderUsername);
+  }
+
+  private async resolveContactRequestSenderFromDht(
+    remoteId: string,
+    claimedUsername: string,
+  ): Promise<UserRegistration> {
     try {
       const sender = await this.usernameRegistry.lookupByPeerId(remoteId);
       if (sender.peerID !== remoteId) {
-        throw new Error(`Username/peer mismatch for ${senderUsername}`);
+        throw new Error(`Username/peer mismatch for ${claimedUsername}`);
       }
-      log(`Accepted contact request from ${senderUsername} (verified via DHT)`);
+      if (sender.username !== claimedUsername) {
+        log(
+          `[KEY-EXCHANGE][CONTACT][USERNAME_MISMATCH] peer=${remoteId} ` +
+          `claimed=${claimedUsername} resolved=${sender.username}`,
+        );
+      }
+      log(`Contact request from ${sender.username} verified via DHT`);
       return sender;
     } catch (error: unknown) {
       throw new Error(`Sender not in DHT: ${errStr(error)}`);
@@ -1102,7 +1139,7 @@ export class KeyExchange {
       if (signingPublicKey && signingPublicKey !== pinnedSigningPublicKey) {
         this.recordSigningKeyChangeEvent(
           remoteId,
-          message.senderUsername,
+          sender.username,
           pinnedSigningPublicKey,
           signingPublicKey,
           'key_exchange_init_incoming'
@@ -1126,7 +1163,7 @@ export class KeyExchange {
           if (pinnedSigningPublicKey && refreshed.signingPublicKey !== pinnedSigningPublicKey) {
             this.recordSigningKeyChangeEvent(
               remoteId,
-              message.senderUsername,
+              sender.username,
               pinnedSigningPublicKey,
               refreshed.signingPublicKey,
               'key_exchange_init_dht_refresh'
@@ -2449,7 +2486,7 @@ export class KeyExchange {
   private createRotationPromise(peerIdStr: string): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
       this.rotationPromises.set(peerIdStr,
-        { resolve: () => { resolve(true); }, reject: (_error: Error) => { resolve(false); } }
+        { resolve: () => { resolve(true); }, reject: () => { resolve(false); } }
       );
     });
   }
