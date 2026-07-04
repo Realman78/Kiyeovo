@@ -372,6 +372,10 @@ export const MAX_INBOUND_STREAMS_BUCKET_NUDGE = 4; // Per-connection offline/ref
 export const MAX_INBOUND_STREAMS_CALL_SIGNAL = 8; // Per-connection WebRTC signaling streams
 export const MAX_INBOUND_STREAMS_FILE_TRANSFER = 8; // Per-connection file-pull streams
 export const MAX_MESSAGE_CONTENT_LENGTH = 2048; // Max direct/group message characters
+// Concurrency gate for unauthenticated first-contact work on /chat (inbound read +
+// key-exchange crypto from a peer with no session/chat). Established peers bypass it.
+export const MAX_UNAUTH_KEY_EXCHANGE_GLOBAL = 16; // Concurrent unauth first-contact handlers, all peers
+export const MAX_UNAUTH_KEY_EXCHANGE_PER_PEER = 2; // Concurrent unauth first-contact handlers, one peer
 
 export const CHAT_NODE_MAX_CONNECTIONS = 100;
 export const CHAT_NODE_INBOUND_CONNECTION_THRESHOLD_PER_HOST = 5; // New inbound connections per host per second
@@ -413,6 +417,10 @@ export const GROUP_OFFLINE_STORE_MAX_COMPRESSED_BYTES = 64 * 1024; // 64KB
 // Decompressed-size ceiling for group offline stores (see the direct-offline
 // counterpart above); rejects gzip bombs before they can exhaust memory.
 export const GROUP_OFFLINE_STORE_MAX_DECOMPRESSED_BYTES = 2 * 1024 * 1024; // 2MiB
+// Pre-parse ceiling for the (uncompressed) group-info latest/versioned DHT records.
+// These are small signed roster-metadata blobs; 256KiB is generous headroom while
+// bounding JSON.parse work on this unauthenticated, network-facing validator path.
+export const GROUP_INFO_RECORD_MAX_BYTES = 256 * 1024; // 256KiB
 export const GROUP_OFFLINE_LOCAL_CACHE_TTL_MS = 15 * MINUTE; // 15 minutes
 export const GROUP_OFFLINE_LOCAL_CACHE_MAX_ENTRIES = 256; // Max cached group offline snapshots
 export const GROUP_OFFLINE_CLEANUP_INTERVAL_MS = 30 * MINUTE; // 30 minutes

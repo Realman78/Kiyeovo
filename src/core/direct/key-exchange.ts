@@ -703,7 +703,12 @@ export class KeyExchange {
   /**
    * Handle incoming key exchange messages
    */
-  async handleKeyExchange(remoteId: string, message: AuthenticatedEncryptedMessage, stream: Stream): Promise<void> {
+  async handleKeyExchange(
+    remoteId: string,
+    message: AuthenticatedEncryptedMessage,
+    stream: Stream,
+    onFirstContactPending?: () => void,
+  ): Promise<void> {
     if (!message.ephemeralPublicKey) {
       console.error('Key exchange message missing ephemeral public key');
       return;
@@ -722,7 +727,7 @@ export class KeyExchange {
 
     try {
       if (message.content === 'key_exchange_init') {
-        await this.handleKeyExchangeInit(remoteId, message, stream, userIdentity, myUsername);
+        await this.handleKeyExchangeInit(remoteId, message, stream, userIdentity, myUsername, onFirstContactPending);
       } else if (message.content === 'key_exchange_response') {
         await this.handleInboundAcceptedKeyExchangeResponse(remoteId, message, {
           stream,
@@ -1577,7 +1582,8 @@ export class KeyExchange {
     message: AuthenticatedEncryptedMessage,
     stream: Stream,
     userIdentity: EncryptedUserIdentity,
-    myUsername: string
+    myUsername: string,
+    onFirstContactPending?: () => void,
   ): Promise<void> {
     try {
       const linkHandling = this.getIncomingKeyExchangeLinkHandling(remoteId, message);
@@ -1593,6 +1599,10 @@ export class KeyExchange {
         }
 
         ackSent = true;
+        // We've finished the unauthenticated crypto and are now waiting on the user's
+        // accept/reject decision; free the pre-auth concurrency slot so a pending prompt
+        // doesn't hold it for the (minutes-long) decision window.
+        onFirstContactPending?.();
         await this.sendKeyExchangeAck(stream, remoteId, myUsername, message.ephemeralPublicKey ?? '');
       };
 

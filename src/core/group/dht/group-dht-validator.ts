@@ -2,6 +2,7 @@ import { ed25519 } from '@noble/curves/ed25519';
 import { gunzipSync } from 'zlib';
 import { fromBase64Url } from '../../utils/miscellaneous.js';
 import {
+  GROUP_INFO_RECORD_MAX_BYTES,
   GROUP_MESSAGE_MAX_FUTURE_SKEW_MS,
   GROUP_MAX_MESSAGES_PER_SENDER,
   GROUP_OFFLINE_STORE_MAX_COMPRESSED_BYTES,
@@ -30,6 +31,17 @@ const GROUP_INFO_VERSION_PREFIXES = Object.values(NETWORK_MODE_CONFIG).map(
 
 function hasMatchingPrefix(keyStr: string, prefixes: string[]): boolean {
   return prefixes.some((prefix) => keyStr.startsWith(`${prefix}/`));
+}
+
+// Group-info records are uncompressed JSON; cap the raw value before decode/parse so an
+// unauthenticated PUT/GET cannot force parsing of an oversized blob on the validator path.
+function parseGroupInfoRecord<T>(value: Uint8Array): T {
+  if (value.length > GROUP_INFO_RECORD_MAX_BYTES) {
+    throw new Error(
+      `Group info record too large (${value.length}B > ${GROUP_INFO_RECORD_MAX_BYTES}B)`,
+    );
+  }
+  return JSON.parse(new TextDecoder().decode(value)) as T;
 }
 
 function assertGroupOfflineCompressedSize(value: Uint8Array): void {
@@ -273,7 +285,7 @@ export async function groupInfoLatestValidator(
     throw new Error(`Invalid creator public key length: ${creatorPubKey.length}`);
   }
 
-  const record: GroupInfoLatest = JSON.parse(new TextDecoder().decode(value));
+  const record = parseGroupInfoRecord<GroupInfoLatest>(value);
 
   // Verify groupId in payload matches key path
   if (record.groupId !== pathGroupId) {
@@ -321,7 +333,7 @@ export function groupInfoLatestSelector(
     try {
       const record = records[i];
       if (!record) continue;
-      const info: GroupInfoLatest = JSON.parse(new TextDecoder().decode(record));
+      const info = parseGroupInfoRecord<GroupInfoLatest>(record);
 
       if (
         info.latestVersion > bestVersion ||
@@ -346,8 +358,8 @@ export async function groupInfoLatestValidateUpdate(
   existing: Uint8Array,
   incoming: Uint8Array
 ): Promise<void> {
-  const existingInfo: GroupInfoLatest = JSON.parse(new TextDecoder().decode(existing));
-  const incomingInfo: GroupInfoLatest = JSON.parse(new TextDecoder().decode(incoming));
+  const existingInfo = parseGroupInfoRecord<GroupInfoLatest>(existing);
+  const incomingInfo = parseGroupInfoRecord<GroupInfoLatest>(incoming);
 
   if (incomingInfo.latestVersion < existingInfo.latestVersion) {
     throw new Error('stale record rejected');
@@ -394,7 +406,7 @@ export async function groupInfoVersionedValidator(
     throw new Error(`Invalid creator public key length: ${creatorPubKey.length}`);
   }
 
-  const record: GroupInfoVersioned = JSON.parse(new TextDecoder().decode(value));
+  const record = parseGroupInfoRecord<GroupInfoVersioned>(value);
 
   // Verify groupId matches key path
   if (record.groupId !== pathGroupId) {
@@ -461,7 +473,7 @@ export function groupInfoVersionedSelector(
     try {
       const record = records[i];
       if (!record) continue;
-      JSON.parse(new TextDecoder().decode(record)) as GroupInfoVersioned;
+      parseGroupInfoRecord<GroupInfoVersioned>(record);
       return i;
     } catch {
       continue;

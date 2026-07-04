@@ -42,9 +42,11 @@ anonymous/Tor mode.
   offline DHT bucket key leaks the sender's stable signing pubkey + social-graph
   out-degree; also covers the tampered-AES-field replica corruption/suppression note.
 - **[0010](0010-group-gossip-cleartext-metadata-leak.md)** (Low–Medium) — group
-  cleartext metadata on **two** surfaces: realtime gossip frame *and* group-offline DHT
-  keys (`groupId` / `keyVersion` / `senderPeerId`); stable `groupId` links traffic
-  across key rotations. Must be fixed together.
+  cleartext metadata on **three** surfaces: realtime gossip frame, group-offline DHT
+  keys (`groupId` / `keyVersion` / `senderPeerId`), *and* group-info DHT keys
+  (`groupId` / `creatorPubKey`; the `latest` key never rotates → permanent
+  groupId↔creator binding); stable `groupId` links traffic across key rotations. Must
+  be fixed together.
 
 ## Group C — Resource exhaustion / DoS (unauthenticated network surface)
 

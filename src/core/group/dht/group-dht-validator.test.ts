@@ -3,6 +3,7 @@ import test from 'node:test';
 import { gzipSync } from 'node:zlib';
 import { ed25519 } from '@noble/curves/ed25519';
 import {
+  GROUP_INFO_RECORD_MAX_BYTES,
   GROUP_MAX_MESSAGES_PER_SENDER,
   GROUP_OFFLINE_STORE_MAX_COMPRESSED_BYTES,
   NETWORK_MODE_CONFIG,
@@ -208,6 +209,24 @@ test('group info latest validator enforces key binding and creator signature', a
   await assert.rejects(
     () => groupInfoLatestValidator(encoder.encode(GROUP_INFO_LATEST_KEY), encodeJson(tampered)),
     /Creator signature verification failed/,
+  );
+});
+
+test('group info validators reject oversized records before parsing', async () => {
+  // A syntactically valid-looking but oversized value: padding the JSON past the cap
+  // must be rejected on size before JSON.parse runs.
+  const oversized = encoder.encode(
+    JSON.stringify({ pad: 'x'.repeat(GROUP_INFO_RECORD_MAX_BYTES + 1) }),
+  );
+  assert.equal(oversized.length > GROUP_INFO_RECORD_MAX_BYTES, true);
+
+  await assert.rejects(
+    () => groupInfoLatestValidator(encoder.encode(GROUP_INFO_LATEST_KEY), oversized),
+    /Group info record too large/,
+  );
+  await assert.rejects(
+    () => groupInfoVersionedValidator(encoder.encode(GROUP_INFO_VERSIONED_KEY), oversized),
+    /Group info record too large/,
   );
 });
 

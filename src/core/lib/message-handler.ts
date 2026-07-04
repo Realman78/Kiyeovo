@@ -73,12 +73,15 @@ import {
   MAX_INBOUND_STREAMS_BUCKET_NUDGE,
   MAX_INBOUND_STREAMS_CALL_SIGNAL,
   MAX_INBOUND_STREAMS_CHAT,
+  MAX_UNAUTH_KEY_EXCHANGE_GLOBAL,
+  MAX_UNAUTH_KEY_EXCHANGE_PER_PEER,
   RESUME_RELAY_GRACE_MS,
   RESUME_RELAY_READY_WAIT_MS,
   RESUME_RELAY_READY_POLL_MS,
 } from '../constants.js';
 import { triggerFastRelayRefresh } from '../network/relay-keepalive.js';
 import { SessionManager } from '../direct/session-manager.js';
+import { LeasePool } from './lease-pool.js';
 import { MessageEncryption } from '../direct/message-encryption.js';
 import {
   dispatchEnvelope,
@@ -95,7 +98,7 @@ import { PeerConnectionHandler } from '../direct/peer-connection-handler.js';
 import { StreamHandler } from '../transport/stream-handler.js';
 import { KeyExchange } from '../direct/key-exchange.js';
 import { ChatDatabase, User, type PendingOfflineSend } from '../db/database.js';
-import { OfflineMessageManager } from '../direct/offline-message-manager.js';
+import { OfflineMessageManager, redactBucketKey } from '../direct/offline-message-manager.js';
 import { OfflineSendQueue } from '../direct/offline-send-queue.js';
 import { UsernameRegistry } from '../username/username-registry.js';
 import { FileHandler } from './file-handler.js';
@@ -200,6 +203,12 @@ export class MessageHandler {
   private groupInfoSyncPending = new Set<string>();
   private offlineCheckRunSeq = 0;
   private lastPowerResumeAt = 0;
+  // Bounds concurrent unauthenticated first-contact work (read + key-exchange crypto) on
+  // /chat from peers with no session/chat; established peers bypass it (contact headroom).
+  private unauthKeyExchangeLeases = new LeasePool(
+    MAX_UNAUTH_KEY_EXCHANGE_GLOBAL,
+    MAX_UNAUTH_KEY_EXCHANGE_PER_PEER,
+  );
   // Single-flight for offline checks, keyed by scope
   private offlineCheckInFlight = new Map<string, Promise<OfflineCheckResult>>();
   private offlineCheckPending = new Map<string, Promise<OfflineCheckResult>>();
@@ -814,6 +823,20 @@ export class MessageHandler {
       }
       StreamHandler.logIncomingConnection(remoteId, this.chatProtocol);
 
+      // Bound unauthenticated first-contact work (the inbound read + key-exchange crypto)
+      // from strangers with a global + per-peer concurrency gate. Established peers — an
+      // active session or an existing direct chat — bypass it, so an inbound flood from
+      // fresh peerIds can't starve real contacts of their first-contact/rotation streams.
+      const isEstablishedPeer =
+        Boolean(this.sessionManager.getSession(remoteId)) ||
+        Boolean(this.database.getChatByPeerId(remoteId));
+      const unauthLease = isEstablishedPeer ? null : this.unauthKeyExchangeLeases.tryAcquire(remoteId);
+      if (!isEstablishedPeer && !unauthLease) {
+        console.warn(`[CHAT][THROTTLE] peer=${remoteId.slice(-8)} reason=unauth_capacity_reached`);
+        try { stream.abort(new Error('chat handshake capacity reached')); } catch { /* best-effort */ }
+        return;
+      }
+
       try {
         const message = await StreamHandler.readMessageFromStream<EncryptedMessage>(stream, {
           maxBytes: MAX_CHAT_ENVELOPE_BYTES,
@@ -823,7 +846,12 @@ export class MessageHandler {
 
         if (MessageEncryption.isKeyExchange(message)) {
           const hadUserAtStart = !!this.database.getUserByPeerId(remoteId);
-          await this.keyExchange.handleKeyExchange(remoteId, message as AuthenticatedEncryptedMessage, stream);
+          await this.keyExchange.handleKeyExchange(
+            remoteId,
+            message as AuthenticatedEncryptedMessage,
+            stream,
+            () => unauthLease?.release(),
+          );
           this.reactivateRetiredPendingAcksForPeer(remoteId);
           // Fallback B only for initial handshake from an existing known contact.
           if (message.content === 'key_exchange_init' && hadUserAtStart) {
@@ -865,6 +893,8 @@ export class MessageHandler {
         this.sessionManager.updateSessionUsage(remoteId);
       } catch (error: unknown) {
         generalErrorHandler(error, `Error handling message from ${remoteId}`);
+      } finally {
+        unauthLease?.release();
       }
     }, {
       runOnLimitedConnection: true,
@@ -3421,7 +3451,7 @@ export class MessageHandler {
         const chatIdForLog = hasChatId(info) ? String(info.chat_id) : 'n/a';
         console.warn(
           `[MODE-GUARD][REJECT][offline_lookup] run=${runId} chatId=${chatIdForLog} peer=${info.peer_id} ` +
-          `reason=bucket_prefix_mismatch expectedPrefix=${this.expectedOfflineBucketPrefix} got=${readBucketKey.slice(0, 64)}...`
+          `reason=bucket_prefix_mismatch expectedPrefix=${this.expectedOfflineBucketPrefix} got=${redactBucketKey(readBucketKey)}`
         );
         continue;
       }
