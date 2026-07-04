@@ -137,7 +137,7 @@ Security model:
 - optional OS keychain storage (`keytar`)
 - recovery phrase (BIP39)
 - login attempts + cooldown enforcement
-- contact signing keys are pinned trust-on-first-use state in `users`; if a known contact's signature fails against the pinned signing key, a differing DHT/incoming signing key is recorded in `key_change_events` and the message/key-exchange path remains unverified without replacing the pinned key. First-contact and missing-key population still pins after successful signature verification. Renderer warning/confirmation gating for recorded key changes is a follow-up.
+- contact signing keys are pinned trust-on-first-use state in `users` only when the row carries a non-empty registration `signature` from direct KX/DHT verification; creator-asserted group roster seeds keep `signature` empty and remain unpinned until a direct exchange verifies them. If a verified known contact's signature fails against the pinned signing key, a differing DHT/incoming signing key is recorded in `key_change_events` and the message/key-exchange path remains unverified without replacing the pinned key. First-contact, unverified roster-seed adoption, and missing-key population still pin after successful signature verification. Renderer warning/confirmation gating for recorded key changes is a follow-up.
 
 Current KDF defaults live in `src/core/constants.ts`:
 - `IDENTITY_SCRYPT_N = 2 ** 18`

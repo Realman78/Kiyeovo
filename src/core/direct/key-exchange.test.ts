@@ -68,6 +68,20 @@ async function createPinnedUser(
   });
 }
 
+async function createRosterSeededUser(
+  database: ChatDatabase,
+  signingPublicKey: string,
+  offlinePublicKey = 'roster_offline_key',
+): Promise<void> {
+  await database.createUser({
+    peer_id: PEER_ID,
+    username: USERNAME,
+    signing_public_key: signingPublicKey,
+    offline_public_key: offlinePublicKey,
+    signature: '',
+  });
+}
+
 function makeKeyExchange(database: ChatDatabase, usernameRegistry: object): any {
   const noop = () => undefined;
   return new KeyExchange(
@@ -145,6 +159,34 @@ test('verifySignatureWithFallback records differing DHT key without replacing pi
   assert.equal(events[0]?.source, 'signature_dht_fallback');
 });
 
+test('verifySignatureWithFallback adopts verified DHT key over roster-seeded key without event', async (t) => {
+  const database = new ChatDatabase(':memory:');
+  t.after(() => database.close());
+
+  const roster = makeSigningKeyPair();
+  const dht = makeSigningKeyPair();
+  await createRosterSeededUser(database, roster.publicKey);
+
+  const message = makeVerifyMessage();
+  const signature = signPayload(dht.privateKey, message);
+  const keyExchange = makeKeyExchange(database, {
+    lookup: async () => makeRegistration({
+      signingPublicKey: dht.publicKey,
+      offlinePublicKey: 'dht_offline_key',
+      signature: 'dht_registration_signature',
+    }),
+  });
+
+  const result = await keyExchange.verifySignatureWithFallback(signature, message, USERNAME, PEER_ID);
+
+  assert.deepEqual(result, { valid: true, signingPublicKey: dht.publicKey });
+  const user = database.getUserByPeerId(PEER_ID);
+  assert.equal(user?.signing_public_key, dht.publicKey);
+  assert.equal(user?.offline_public_key, 'dht_offline_key');
+  assert.equal(user?.signature, 'dht_registration_signature');
+  assert.deepEqual(database.getKeyChangeEvents(PEER_ID), []);
+});
+
 test('verifySignatureWithFallback pins first-contact DHT key after successful verification', async (t) => {
   const database = new ChatDatabase(':memory:');
   t.after(() => database.close());
@@ -168,6 +210,46 @@ test('verifySignatureWithFallback pins first-contact DHT key after successful ve
   assert.equal(user?.offline_public_key, 'dht_offline_key');
   assert.equal(user?.signature, 'dht_registration_signature');
   assert.deepEqual(database.getKeyChangeEvents(PEER_ID), []);
+});
+
+test('verifyKeyExchangeInitSignature rejects differing incoming key for direct-KX-verified user and records event', async (t) => {
+  const database = new ChatDatabase(':memory:');
+  t.after(() => database.close());
+
+  const pinned = makeSigningKeyPair();
+  const incoming = makeSigningKeyPair();
+  await createPinnedUser(database, pinned.publicKey);
+
+  const verifyPayload = makeVerifyMessage('key_exchange_init');
+  const message: AuthenticatedEncryptedMessage = {
+    type: 'key_exchange',
+    content: 'key_exchange_init',
+    ephemeralPublicKey: verifyPayload.ephemeralPublicKey,
+    senderUsername: verifyPayload.senderUsername,
+    timestamp: verifyPayload.timestamp,
+    signature: signPayload(incoming.privateKey, verifyPayload),
+  };
+  const sender = makeRegistration({
+    signingPublicKey: incoming.publicKey,
+    offlinePublicKey: 'incoming_offline_key',
+    signature: 'incoming_registration_signature',
+  });
+
+  const keyExchange = makeKeyExchange(database, {});
+  const result = await keyExchange.verifyKeyExchangeInitSignature(message, sender, PEER_ID);
+
+  assert.equal(result.valid, false);
+  assert.equal(result.keys.signingPublicKey, pinned.publicKey);
+  const user = database.getUserByPeerId(PEER_ID);
+  assert.equal(user?.signing_public_key, pinned.publicKey);
+  assert.equal(user?.offline_public_key, 'old_offline_key');
+  assert.equal(user?.signature, 'old_registration_signature');
+
+  const events = database.getKeyChangeEvents(PEER_ID);
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.old_signing_key, pinned.publicKey);
+  assert.equal(events[0]?.new_signing_key, incoming.publicKey);
+  assert.equal(events[0]?.source, 'key_exchange_init_incoming');
 });
 
 test('verifyKeyExchangeInitSignature rejects DHT-refreshed differing pinned key and records event', async (t) => {
@@ -209,6 +291,93 @@ test('verifyKeyExchangeInitSignature rejects DHT-refreshed differing pinned key 
   assert.equal(events[0]?.old_signing_key, pinned.publicKey);
   assert.equal(events[0]?.new_signing_key, dht.publicKey);
   assert.equal(events[0]?.source, 'key_exchange_init_dht_refresh');
+});
+
+test('verifyKeyExchangeInitSignature adopts verified key over roster-seeded wrong key without event', async (t) => {
+  const database = new ChatDatabase(':memory:');
+  t.after(() => database.close());
+
+  const roster = makeSigningKeyPair();
+  const real = makeSigningKeyPair();
+  await createRosterSeededUser(database, roster.publicKey);
+
+  const verifyPayload = makeVerifyMessage('key_exchange_init');
+  const message: AuthenticatedEncryptedMessage = {
+    type: 'key_exchange',
+    content: 'key_exchange_init',
+    ephemeralPublicKey: verifyPayload.ephemeralPublicKey,
+    senderUsername: verifyPayload.senderUsername,
+    timestamp: verifyPayload.timestamp,
+    signature: signPayload(real.privateKey, verifyPayload),
+  };
+  const sender = makeRegistration({
+    signingPublicKey: real.publicKey,
+    offlinePublicKey: 'real_offline_key',
+    signature: 'real_registration_signature',
+  });
+
+  const keyExchange = makeKeyExchange(database, {});
+  const result = await keyExchange.verifyKeyExchangeInitSignature(message, sender, PEER_ID);
+
+  assert.equal(result.valid, true);
+  assert.equal(result.keys.signingPublicKey, real.publicKey);
+
+  await keyExchange.ensureUserExistsWithKeys(
+    PEER_ID,
+    USERNAME,
+    result.keys.signingPublicKey,
+    result.keys.offlinePublicKey,
+    result.keys.signature,
+  );
+
+  const user = database.getUserByPeerId(PEER_ID);
+  assert.equal(user?.signing_public_key, real.publicKey);
+  assert.equal(user?.offline_public_key, 'real_offline_key');
+  assert.equal(user?.signature, 'real_registration_signature');
+  assert.deepEqual(database.getKeyChangeEvents(PEER_ID), []);
+});
+
+test('verifyKeyExchangeInitSignature verifies correct roster-seeded key and promotes signature', async (t) => {
+  const database = new ChatDatabase(':memory:');
+  t.after(() => database.close());
+
+  const real = makeSigningKeyPair();
+  await createRosterSeededUser(database, real.publicKey);
+
+  const verifyPayload = makeVerifyMessage('key_exchange_init');
+  const message: AuthenticatedEncryptedMessage = {
+    type: 'key_exchange',
+    content: 'key_exchange_init',
+    ephemeralPublicKey: verifyPayload.ephemeralPublicKey,
+    senderUsername: verifyPayload.senderUsername,
+    timestamp: verifyPayload.timestamp,
+    signature: signPayload(real.privateKey, verifyPayload),
+  };
+  const sender = makeRegistration({
+    signingPublicKey: real.publicKey,
+    offlinePublicKey: 'real_offline_key',
+    signature: 'real_registration_signature',
+  });
+
+  const keyExchange = makeKeyExchange(database, {});
+  const result = await keyExchange.verifyKeyExchangeInitSignature(message, sender, PEER_ID);
+
+  assert.equal(result.valid, true);
+  assert.equal(result.keys.signingPublicKey, real.publicKey);
+
+  await keyExchange.ensureUserExistsWithKeys(
+    PEER_ID,
+    USERNAME,
+    result.keys.signingPublicKey,
+    result.keys.offlinePublicKey,
+    result.keys.signature,
+  );
+
+  const user = database.getUserByPeerId(PEER_ID);
+  assert.equal(user?.signing_public_key, real.publicKey);
+  assert.equal(user?.offline_public_key, 'real_offline_key');
+  assert.equal(user?.signature, 'real_registration_signature');
+  assert.deepEqual(database.getKeyChangeEvents(PEER_ID), []);
 });
 
 test('verifyKeyExchangeInitSignature keeps same-key missing metadata population', async (t) => {

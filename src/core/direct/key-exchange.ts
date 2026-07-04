@@ -128,6 +128,10 @@ export class KeyExchange {
     });
   }
 
+  private getPinnedSigningPublicKey(user: User | null | undefined): string {
+    return user?.signature ? user.signing_public_key : '';
+  }
+
   constructor(
     node: ChatNode,
     usernameRegistry: UsernameRegistry,
@@ -253,7 +257,7 @@ export class KeyExchange {
     peerId: string
   ): Promise<{ valid: boolean; signingPublicKey: string | null }> {
     const dbUser = this.database.getUserByPeerId(peerId);
-    const pinnedSigningPublicKey = dbUser?.signing_public_key ?? null;
+    const pinnedSigningPublicKey = this.getPinnedSigningPublicKey(dbUser) || null;
 
     if (pinnedSigningPublicKey) {
       const valid = EncryptedUserIdentity.verifyKeyExchangeSignature(
@@ -1066,7 +1070,7 @@ export class KeyExchange {
     }
 
     const existingUser = this.database.getUserByPeerId(remoteId);
-    const pinnedSigningPublicKey = existingUser?.signing_public_key ?? '';
+    const pinnedSigningPublicKey = this.getPinnedSigningPublicKey(existingUser);
     const pinnedKeys = {
       signingPublicKey: pinnedSigningPublicKey,
       offlinePublicKey: existingUser?.offline_public_key ?? '',
@@ -1169,15 +1173,24 @@ export class KeyExchange {
         offline_public_key: offlinePublicKey,
         signature: signature
       });
-    } else if (existingUser.signing_public_key && existingUser.signing_public_key !== signingPublicKey) {
+      return;
+    }
+
+    const pinnedSigningPublicKey = this.getPinnedSigningPublicKey(existingUser);
+    if (pinnedSigningPublicKey && pinnedSigningPublicKey !== signingPublicKey) {
       this.recordSigningKeyChangeEvent(
         remoteId,
         username,
-        existingUser.signing_public_key,
+        pinnedSigningPublicKey,
         signingPublicKey,
         'key_exchange_init_persist'
       );
-    } else if (!existingUser.signing_public_key || existingUser.offline_public_key !== offlinePublicKey) {
+    } else if (
+      !existingUser.signing_public_key ||
+      existingUser.signing_public_key !== signingPublicKey ||
+      existingUser.offline_public_key !== offlinePublicKey ||
+      !existingUser.signature
+    ) {
       // Update placeholder/missing keys after successful verification
       this.database.updateUserKeys({
         peer_id: remoteId,
