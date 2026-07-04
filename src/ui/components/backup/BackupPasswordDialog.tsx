@@ -29,6 +29,21 @@ type BackupPasswordDialogFormProps = Omit<BackupPasswordDialogProps, 'open' | 'o
   onCancel: () => void;
 };
 
+const BACKUP_PASSWORD_MIN_LENGTH = 12;
+
+// Mirrors the authoritative check in ChatDatabase.assertStrongBackupPassword; enforced
+// only when creating a backup (requireConfirmation), never on restore.
+function validateBackupPasswordStrength(password: string): string | null {
+  if (password.length < BACKUP_PASSWORD_MIN_LENGTH) {
+    return `Backup password must be at least ${BACKUP_PASSWORD_MIN_LENGTH} characters`;
+  }
+  const classes = [/[a-z]/, /[A-Z]/, /\d/, /[^a-zA-Z0-9]/].filter((re) => re.test(password)).length;
+  if (classes < 4) {
+    return 'Backup password must include lowercase, uppercase, numbers, and a special character';
+  }
+  return null;
+}
+
 function BackupPasswordDialogForm({
   title,
   description,
@@ -55,6 +70,13 @@ function BackupPasswordDialogForm({
     if (password.trim().length === 0) {
       setLocalError('Enter a backup password');
       return;
+    }
+    if (requireConfirmation) {
+      const strengthError = validateBackupPasswordStrength(password);
+      if (strengthError) {
+        setLocalError(strengthError);
+        return;
+      }
     }
     if (requireConfirmation && password !== confirmPassword) {
       setLocalError('Passwords do not match');

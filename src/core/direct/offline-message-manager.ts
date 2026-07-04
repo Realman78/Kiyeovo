@@ -270,7 +270,7 @@ export class OfflineMessageManager {
                 }
 
             } catch (error: unknown) {
-                generalErrorHandler(error, `Failed to fetch offline messages for bucket: ${bucketKey}`);
+                generalErrorHandler(error, `Failed to fetch offline messages for bucket: ${redactBucketKey(bucketKey)}`);
             }
 
             return bucketMessages;

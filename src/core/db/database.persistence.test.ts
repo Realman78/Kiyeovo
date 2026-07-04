@@ -686,7 +686,7 @@ test('encrypted database backup hides plaintext, rejects invalid passwords and t
   const targetPath = join(dir, 'target.db');
   const backupPath = join(dir, 'backup.kiyeovo-db-backup');
   const tamperedPath = join(dir, 'tampered.kiyeovo-db-backup');
-  const backupPassword = 'correct backup password 0013!';
+  const backupPassword = 'Correct backup password 0013!';
   const secretContent = 'ticket-0013 secret message plaintext marker';
   const originalContent = 'target database original message';
   let source: ChatDatabase | null = null;
@@ -737,6 +737,32 @@ test('encrypted database backup hides plaintext, rejects invalid passwords and t
   await target.restoreEncrypted(backupPath, backupPassword);
   assert.equal(getMessage(target, sourceChatId, 'source_secret_message')?.content, secretContent);
   assert.equal(target.getMessageCount(sourceChatId), 1);
+});
+
+test('encrypted backup creation rejects weak passwords but restore does not gate on strength', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'kiyeovo-db-weak-password-test-'));
+  const dbPath = join(dir, 'chat.db');
+  const backupPath = join(dir, 'backup.kiyeovo-db-backup');
+  let database: ChatDatabase | null = null;
+
+  t.after(async () => {
+    database?.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  database = new ChatDatabase(dbPath);
+  await createDirectChat(database, 'weakpw_peer', 'weakpw');
+
+  // Too short, and missing character classes: both rejected before any file is written.
+  await assert.rejects(database.backupEncrypted(backupPath, 'short1!A'), /at least 12 characters/);
+  await assert.rejects(database.backupEncrypted(backupPath, 'alllowercaseletters'), /lowercase, uppercase/);
+  await assert.rejects(stat(backupPath), /ENOENT/); // rejected before any artifact is written
+
+  // A policy-compliant password creates a backup that round-trips; restore accepts it
+  // without re-checking policy (the GCM tag is the real gate).
+  const strongPassword = 'Strong backup pw 1!';
+  await database.backupEncrypted(backupPath, strongPassword);
+  await database.restoreEncrypted(backupPath, strongPassword);
 });
 
 test('malformed encrypted restore is rejected before pre-login path touches database sidecars', async (t) => {

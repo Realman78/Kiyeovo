@@ -66,6 +66,7 @@ interface DatabaseSwapBackupFile {
 const DATABASE_BACKUP_MAGIC = 'KIYEOVO-DB-BACKUP';
 const DATABASE_BACKUP_VERSION = 1;
 const DATABASE_BACKUP_HEADER_MAX_BYTES = 4096;
+const DATABASE_BACKUP_MIN_PASSWORD_LENGTH = 12;
 const DATABASE_BACKUP_SCRYPT_PARAMS: DatabaseBackupScryptParams = {
     N: PROFILE_SCRYPT_N,
     r: 8,
@@ -4739,7 +4740,7 @@ export class ChatDatabase {
     }
 
     async backupEncrypted(backupPath: string, password: string): Promise<void> {
-        ChatDatabase.assertBackupPassword(password);
+        ChatDatabase.assertStrongBackupPassword(password);
 
         this.db.pragma('wal_checkpoint(TRUNCATE)');
         const plaintext = this.db.serialize();
@@ -4813,6 +4814,20 @@ export class ChatDatabase {
     private static assertBackupPassword(password: string): void {
         if (typeof password !== 'string' || password.trim().length === 0) {
             throw new Error('Backup password is required');
+        }
+    }
+
+    // Enforced only when CREATING a backup (the artifact leaves the machine, so a weak
+    // password undermines its confidentiality). Restore intentionally does not gate on
+    // policy — the GCM tag is the real check — so a strong old backup always restores.
+    private static assertStrongBackupPassword(password: string): void {
+        ChatDatabase.assertBackupPassword(password);
+        if (password.length < DATABASE_BACKUP_MIN_PASSWORD_LENGTH) {
+            throw new Error(`Backup password must be at least ${DATABASE_BACKUP_MIN_PASSWORD_LENGTH} characters`);
+        }
+        const classes = [/[a-z]/, /[A-Z]/, /\d/, /[^a-zA-Z0-9]/].filter((re) => re.test(password)).length;
+        if (classes < 4) {
+            throw new Error('Backup password must include lowercase, uppercase, numbers, and a special character');
         }
     }
 
