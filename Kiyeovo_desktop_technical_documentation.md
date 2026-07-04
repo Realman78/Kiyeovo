@@ -444,6 +444,7 @@ Primary categories:
    - `signature` is the application Ed25519 signature over the canonical payload, and `peerBinding` is a second Ed25519 signature using the libp2p private key for `peerID` over `kiyeovo-username-peer-binding:v1:` plus the same canonical payload; both signature fields are excluded from the canonical payload
    - validators, selectors, update validation, and local lookup paths reject records with missing or invalid signatures, missing or invalid peer binding, DHT key-slot or network-mode mismatches, stale timestamps, future timestamps, or usernames outside the shared 3–32 character alphanumeric/underscore policy
    - username DHT validators reject record values above `8 KiB` before JSON parsing
+   - the patched kad-dht PUT_VALUE handler treats datastore not-found as a first write, but when an existing record is present any `validateUpdate` exception rejects the incoming value and returns the existing record, so update validators fail closed
 
 2. Direct offline stores
    - per-recipient bucket model

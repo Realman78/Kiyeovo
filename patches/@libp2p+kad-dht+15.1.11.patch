@@ -92,10 +92,16 @@ index c75bc4e..2add8e2 100644
      private readonly datastorePrefix;
      constructor(components: PutValueHandlerComponents, init: PutValueHandlerInit);
 diff --git a/node_modules/@libp2p/kad-dht/dist/src/rpc/handlers/put-value.js b/node_modules/@libp2p/kad-dht/dist/src/rpc/handlers/put-value.js
-index 2db17ed..a33e58e 100644
+index 2db17ed..83692bd 100644
 --- a/node_modules/@libp2p/kad-dht/dist/src/rpc/handlers/put-value.js
 +++ b/node_modules/@libp2p/kad-dht/dist/src/rpc/handlers/put-value.js
-@@ -5,14 +5,16 @@ import { bufferToRecordKey } from '../../utils.js';
+@@ -2,17 +2,22 @@ import { InvalidMessageError } from '@libp2p/interface';
+ import { Libp2pRecord } from '@libp2p/record';
+ import { verifyRecord } from '../../record/validators.js';
+ import { bufferToRecordKey } from '../../utils.js';
++function isNotFoundError(err) {
++    return err?.name === 'NotFoundError' || err?.code === 'ERR_NOT_FOUND';
++}
  export class PutValueHandler {
      components;
      validators;
@@ -113,7 +119,7 @@ index 2db17ed..a33e58e 100644
      }
      async handle(peerId, msg) {
          const key = msg.key;
-@@ -27,6 +29,20 @@ export class PutValueHandler {
+@@ -27,6 +32,30 @@ export class PutValueHandler {
              await verifyRecord(this.validators, deserializedRecord);
              deserializedRecord.timeReceived = new Date();
              const recordKey = bufferToRecordKey(this.datastorePrefix, deserializedRecord.key);
@@ -121,13 +127,23 @@ index 2db17ed..a33e58e 100644
 +                let existingRaw;
 +                try {
 +                    existingRaw = await this.components.datastore.get(recordKey);
-+                    const existing = Libp2pRecord.deserialize(existingRaw);
-+                    await this.validateUpdate(deserializedRecord.key, existing.value, deserializedRecord.value);
 +                }
 +                catch (err) {
-+                    if (err.message === 'stale record rejected') {
-+                        this.log('rejected stale record for %b (version too old)', key);
-+                        return existingRaw != null ? { ...msg, record: existingRaw } : msg;
++                    if (isNotFoundError(err)) {
++                        existingRaw = undefined;
++                    }
++                    else {
++                        throw err;
++                    }
++                }
++                if (existingRaw != null) {
++                    try {
++                        const existing = Libp2pRecord.deserialize(existingRaw);
++                        await this.validateUpdate(deserializedRecord.key, existing.value, deserializedRecord.value);
++                    }
++                    catch (err) {
++                        this.log('rejected record update for %b: %e', key, err);
++                        return { ...msg, record: existingRaw };
 +                    }
 +                }
 +            }
@@ -187,10 +203,18 @@ index 6d9aded..73ea75d 100644
        metricsPrefix,
        datastorePrefix,
 diff --git a/node_modules/@libp2p/kad-dht/src/rpc/handlers/put-value.ts b/node_modules/@libp2p/kad-dht/src/rpc/handlers/put-value.ts
-index 156e65d..ad0473b 100644
+index 156e65d..7dacffb 100644
 --- a/node_modules/@libp2p/kad-dht/src/rpc/handlers/put-value.ts
 +++ b/node_modules/@libp2p/kad-dht/src/rpc/handlers/put-value.ts
-@@ -12,6 +12,7 @@ export interface PutValueHandlerInit {
+@@ -8,10 +8,15 @@ import type { DHTMessageHandler } from '../index.js'
+ import type { ComponentLogger, Logger, PeerId } from '@libp2p/interface'
+ import type { Datastore } from 'interface-datastore'
+ 
++function isNotFoundError (err: any): boolean {
++  return err?.name === 'NotFoundError' || err?.code === 'ERR_NOT_FOUND'
++}
++
+ export interface PutValueHandlerInit {
    validators: Validators
    logPrefix: string
    datastorePrefix: string
@@ -198,7 +222,7 @@ index 156e65d..ad0473b 100644
  }
  
  export interface PutValueHandlerComponents {
-@@ -24,17 +25,19 @@ export class PutValueHandler implements DHTMessageHandler {
+@@ -24,17 +29,19 @@ export class PutValueHandler implements DHTMessageHandler {
    private readonly validators: Validators
    private readonly log: Logger
    private readonly datastorePrefix: string
@@ -221,7 +245,7 @@ index 156e65d..ad0473b 100644
      const key = msg.key
      this.log('%p asked us to store value for key %b', peerId, key)
  
-@@ -47,11 +50,27 @@ export class PutValueHandler implements DHTMessageHandler {
+@@ -47,11 +54,33 @@ export class PutValueHandler implements DHTMessageHandler {
  
      try {
        const deserializedRecord = Libp2pRecord.deserialize(msg.record)
@@ -231,20 +255,26 @@ index 156e65d..ad0473b 100644
        deserializedRecord.timeReceived = new Date()
        const recordKey = bufferToRecordKey(this.datastorePrefix, deserializedRecord.key)
 +
-+      // NEW: check existing record before overwriting
 +      if (this.validateUpdate != null) {
 +        let existingRaw: Uint8Array | undefined
 +        try {
 +          existingRaw = await this.components.datastore.get(recordKey)
-+          const existing = Libp2pRecord.deserialize(existingRaw)
-+          // throws if incoming version < existing version
-+          await this.validateUpdate(deserializedRecord.key, existing.value, deserializedRecord.value)
 +        } catch (err: any) {
-+          if (err.message === 'stale record rejected') {
-+            this.log('rejected stale record for %b (version too old)', key)
-+            return existingRaw != null ? { ...msg, record: existingRaw } : msg // reject the PUT by echoing existing record
++          if (isNotFoundError(err)) {
++            existingRaw = undefined
++          } else {
++            throw err
 +          }
-+          // datastore.get threw "not found" — no existing record, continue to store
++        }
++
++        if (existingRaw != null) {
++          try {
++            const existing = Libp2pRecord.deserialize(existingRaw)
++            await this.validateUpdate(deserializedRecord.key, existing.value, deserializedRecord.value)
++          } catch (err: any) {
++            this.log('rejected record update for %b: %e', key, err)
++            return { ...msg, record: existingRaw }
++          }
 +        }
 +      }
 +
