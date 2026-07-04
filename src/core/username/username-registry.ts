@@ -34,6 +34,7 @@ type UsernameRegistrationContext = {
   myPeerId: string;
   usernameKey: Uint8Array;
   peerIdKey: Uint8Array;
+  registration: UserRegistration;
   registrationJson: string;
   valueBytes: Uint8Array;
   previousUsername: string | null;
@@ -361,6 +362,7 @@ export class UsernameRegistry {
       myPeerId,
       usernameKey: this.buildUsernameByNameKey(username),
       peerIdKey: this.buildUsernameByPeerIdKey(myPeerId),
+      registration,
       registrationJson,
       valueBytes: UsernameRegistry.TEXT_ENCODER.encode(registrationJson),
       previousUsername: this.currentUsername,
@@ -531,9 +533,9 @@ export class UsernameRegistry {
       const peerId = await this.database.createUser({
         peer_id: context.myPeerId,
         username: context.username,
-        signing_public_key: this.userIdentity.signingPublicKey.toString(),
-        offline_public_key: Buffer.from(this.userIdentity.offlinePublicKey).toString('base64'),
-        signature: this.userIdentity.sign(context.registrationJson).toString(),
+        signing_public_key: context.registration.signingPublicKey,
+        offline_public_key: context.registration.offlinePublicKey,
+        signature: context.registration.signature,
       });
       log(peerId ? `User registered in database with peerId: ${peerId}` : 'User may already exist in database');
     } catch (error: unknown) {

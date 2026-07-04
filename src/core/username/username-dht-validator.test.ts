@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { generateKeyPair } from '@libp2p/crypto/keys';
-import type { PrivateKey } from '@libp2p/interface';
+import type { PeerId, PrivateKey } from '@libp2p/interface';
 import { peerIdFromPrivateKey, peerIdFromString } from '@libp2p/peer-id';
 import { ed25519 } from '@noble/curves/ed25519';
 import {
@@ -13,7 +13,9 @@ import {
   USERNAME_RECORD_MAX_BYTES,
 } from '../constants.js';
 import { KeyExchange } from '../direct/key-exchange.js';
-import type { NetworkMode, UserRegistration } from '../types.js';
+import { ChatDatabase } from '../db/database.js';
+import { EncryptedUserIdentity } from '../identity/encrypted-user-identity.js';
+import type { ChatNode, NetworkMode, UserRegistration } from '../types.js';
 import { hashUsingSha256 } from '../utils/crypto.js';
 import {
   PEER_BINDING_DOMAIN,
@@ -108,6 +110,59 @@ async function withoutConsoleWarn(fn: () => Promise<void>): Promise<void> {
 async function* dhtValue(value: Uint8Array): AsyncIterable<unknown> {
   yield { name: 'VALUE', value };
 }
+
+function isCanonicalBase64(value: string): boolean {
+  return /^[A-Za-z0-9+/]+={0,2}$/.test(value)
+    && Buffer.from(value, 'base64').toString('base64') === value;
+}
+
+type UsernameRegistrationTestContext = {
+  registration: UserRegistration;
+  registrationJson: string;
+  valueBytes: Uint8Array;
+};
+
+type UsernameRegistryHarness = {
+  userIdentity: EncryptedUserIdentity;
+  createRegistrationContext(username: string): Promise<UsernameRegistrationTestContext>;
+  persistRegisteredUser(context: UsernameRegistrationTestContext): Promise<void>;
+};
+
+type OfflineKeyExchangeHarness = {
+  database: Pick<ChatDatabase, 'getUserByPeerId'>;
+  usernameRegistry: Pick<UsernameRegistry, 'lookupByPeerId'>;
+  resolveRecipientOfflinePublicKeyBase64(peerId: PeerId, username: string): Promise<string>;
+};
+
+test('persistRegisteredUser stores the local row from the published registration record', async (t) => {
+  const database = new ChatDatabase(':memory:');
+  t.after(() => database.close());
+
+  const identity = await EncryptedUserIdentity.createEncrypted();
+  const registry = new UsernameRegistry(
+    { peerId: identity.identity } as unknown as ChatNode,
+    database,
+  ) as unknown as UsernameRegistryHarness;
+  registry.userIdentity = identity;
+
+  const context = await registry.createRegistrationContext('alice');
+  await registry.persistRegisteredUser(context);
+
+  const published = JSON.parse(new TextDecoder().decode(context.valueBytes)) as UserRegistration;
+  const user = database.getUserByPeerId(identity.id);
+  assert.ok(user);
+  assert.equal(user.signing_public_key, context.registration.signingPublicKey);
+  assert.equal(user.signing_public_key, published.signingPublicKey);
+  assert.equal(user.offline_public_key, context.registration.offlinePublicKey);
+  assert.equal(user.offline_public_key, published.offlinePublicKey);
+  assert.equal(user.signature, context.registration.signature);
+  assert.equal(user.signature, published.signature);
+  assert.equal(user.signature.length > 0, true);
+  assert.equal(isCanonicalBase64(user.signing_public_key), true);
+  assert.equal(isCanonicalBase64(user.signature), true);
+  assert.doesNotMatch(user.signing_public_key, /^(?:\d+,)+\d+$/);
+  assert.doesNotMatch(user.signature, /^(?:\d+,)+\d+$/);
+});
 
 test('username DHT validator accepts valid by-name and by-peer registrations', async () => {
   const registration = await makeRegistration();
@@ -530,10 +585,10 @@ test('lookupByPeerId locally rejects records for a different peer ID', async () 
           get: () => dhtValue(encodeRecord(record)),
         },
       },
-    } as any,
+    } as unknown as ChatNode,
     {
       getSessionNetworkMode: () => NETWORK_MODES.FAST,
-    } as any,
+    } as unknown as ChatDatabase,
   );
 
   await assert.rejects(
@@ -550,7 +605,7 @@ test('offline key resolution fails closed on mismatched DHT records', async () =
     peerPrivateKey: otherPeer.privateKey,
     timestamp: Date.now(),
   });
-  const keyExchange = Object.create(KeyExchange.prototype) as any;
+  const keyExchange = Object.create(KeyExchange.prototype) as OfflineKeyExchangeHarness;
   keyExchange.database = { getUserByPeerId: () => null };
   keyExchange.usernameRegistry = { lookupByPeerId: async () => record };
 
