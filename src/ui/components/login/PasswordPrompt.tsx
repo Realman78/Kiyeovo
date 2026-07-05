@@ -93,6 +93,7 @@ export function PasswordPrompt({
   const passwordInputRef = useRef<HTMLInputElement>(null);
 
   const isNewPassword = passwordRequest.isNewPassword ?? false;
+  const isNewIdentity = isNewPassword && Boolean(passwordRequest.recoveryPhrase);
 
   useEffect(() => {
     if (passwordRequest.prefilledPassword && !password) {
@@ -247,10 +248,12 @@ export function PasswordPrompt({
     <div className='flex flex-col gap-4 justify-center items-center'>
       <div className='flex flex-col gap-2 text-center'>
         <h1 className="text-xl font-mono font-semibold tracking-wide text-foreground">
-          {isNewPassword ? "NEW IDENTITY" : "UNLOCK IDENTITY"}
+          {isNewPassword ? (isNewIdentity ? "NEW IDENTITY" : "SET PASSWORD") : "UNLOCK IDENTITY"}
         </h1>
         <p className="text-sm text-muted-foreground">
-          {isNewPassword ? "Create a strong password that will be used to log into your identity" : "Enter password to decrypt identity information"}
+          {isNewPassword
+            ? `${isNewIdentity ? "Create" : "Set"} a strong password that will be used to log into your identity`
+            : "Enter password to decrypt identity information"}
         </p>
       </div>
       <form onSubmit={handleFormSubmit} className="space-y-6 w-96">
@@ -385,7 +388,7 @@ export function PasswordPrompt({
           ) : (
             <>
               <Shield className="w-4 h-4" />
-              {isNewPassword ? 'Create Identity' : 'Decrypt & Access'}
+              {isNewPassword ? (isNewIdentity ? 'Create Identity' : 'Set Password') : 'Decrypt & Access'}
             </>
           )}
         </Button>

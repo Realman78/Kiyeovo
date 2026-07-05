@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { ChatDatabase, type Chat, type Message } from './database.js';
-import type { OfflineMessage } from '../types.js';
+import type { NetworkMode, OfflineMessage } from '../types.js';
 
 type PersistableMessage = Omit<Message, 'created_at'>;
 
@@ -211,6 +211,41 @@ async function withoutConsoleWarn<T>(fn: () => Promise<T>): Promise<T> {
     console.warn = originalWarn;
   }
 }
+
+function withoutConsoleLog(fn: () => void): void {
+  const originalLog = console.log;
+  console.log = () => undefined;
+  try {
+    fn();
+  } finally {
+    console.log = originalLog;
+  }
+}
+
+test('encrypted identity insert errors propagate to callers', () => {
+  const database = new ChatDatabase(':memory:');
+  try {
+    withoutConsoleLog(() => {
+      assert.throws(
+        () => database.createEncryptedUserIdentityForMode(
+          'invalid-mode' as NetworkMode,
+          'primary',
+          {
+            peer_id: 'peer_identity_insert_failure',
+            encrypted_data: Buffer.from('encrypted'),
+            salt: Buffer.alloc(32),
+            nonce: Buffer.alloc(12),
+          },
+        ),
+        /constraint/i,
+      );
+    });
+
+    assert.equal(database.getEncryptedUserIdentityForMode('fast', 'primary'), null);
+  } finally {
+    database.close();
+  }
+});
 
 test('direct inbound tryCreateMessage deduplicates by chat client id without mutating chat state', async (t) => {
   const { database, chatId } = await createDirectDatabase();

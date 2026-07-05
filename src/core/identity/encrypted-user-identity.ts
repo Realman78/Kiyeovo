@@ -1,4 +1,3 @@
-import { read } from 'read';
 import { scrypt } from '@noble/hashes/scrypt.js';
 import { randomBytes } from '@noble/hashes/utils.js';
 import { gcm } from '@noble/ciphers/aes.js';
@@ -158,17 +157,19 @@ export class EncryptedUserIdentity {
         database: ChatDatabase,
         mode: NetworkMode,
         customPasswordPrompt: (prompt: string, isNew: boolean, recoveryPhrase?: string, prefilledPassword?: string, errorMessage?: string, cooldownSeconds?: number, showRecoveryOption?: boolean, keychainAvailable?: boolean) => Promise<PasswordResponse>,
-        sendStatus: (message: string, stage: any) => void
+        sendStatus: (message: string, stage: any) => void,
+        keytarInstance?: any
     ): Promise<EncryptedUserIdentity> {
         let passwordBytes: Uint8Array | null = null;
         try {
             const encryptedUserIdentity = database.getEncryptedUserIdentityForMode(mode, 'primary');
             if (encryptedUserIdentity) {
-                return await EncryptedUserIdentity.loadEncrypted(encryptedUserIdentity, mode, customPasswordPrompt, sendStatus, database);
+                return await EncryptedUserIdentity.loadEncrypted(encryptedUserIdentity, mode, customPasswordPrompt, sendStatus, database, keytarInstance);
             } else {
                 const identity = await EncryptedUserIdentity.createEncrypted();
                 const recoveryPhrase = EncryptedUserIdentity.generateRecoveryPhrase();
                 const keychainIdentityId = EncryptedUserIdentity.getModeScopedKeychainAccount(mode, identity.id);
+                const creationKeytarInstance = keytarInstance === undefined ? await loadKeytar() : keytarInstance;
 
                 const response = await EncryptedUserIdentity.getPasswordFromKeychain(
                     keychainIdentityId,
@@ -178,10 +179,20 @@ export class EncryptedUserIdentity {
                     recoveryPhrase,
                     undefined,
                     undefined,
-                    false
+                    false,
+                    creationKeytarInstance
                 );
                 passwordBytes = new TextEncoder().encode(response.password);
                 await identity.saveEncrypted(database, mode, passwordBytes, sendStatus, recoveryPhrase);
+
+                if (creationKeytarInstance && response.rememberMe && response.password && !response.useRecoveryPhrase) {
+                    try {
+                        await creationKeytarInstance.setPassword('kiyeovo', keychainIdentityId, response.password);
+                    } catch (error) {
+                        console.warn('[IDENTITY] Failed to store password in OS keychain:', errStr(error));
+                    }
+                }
+
                 return identity;
             }
         } catch (error) {
@@ -211,13 +222,14 @@ export class EncryptedUserIdentity {
         mode: NetworkMode,
         customPasswordPrompt: (prompt: string, isNew: boolean, recoveryPhrase?: string, prefilledPassword?: string, errorMessage?: string, cooldownSeconds?: number, showRecoveryOption?: boolean, keychainAvailable?: boolean) => Promise<PasswordResponse>,
         sendStatus: (message: string, stage: any) => void,
-        database: ChatDatabase
+        database: ChatDatabase,
+        keytarInstance?: any
     ): Promise<EncryptedUserIdentity> {
         let passwordBytes: Uint8Array | null = null;
         let decryptedBytes: Uint8Array | null = null;
         let errorMessage: string | undefined = undefined;
         let showRecoveryOption = false;
-        const keytarInstance = await loadKeytar();
+        keytarInstance = keytarInstance === undefined ? await loadKeytar() : keytarInstance;
 
 
         for (let i = 0; i < 100; i++) { // 100 attempts -> avoiding infinite loops
@@ -241,18 +253,16 @@ export class EncryptedUserIdentity {
                 if (response.useRecoveryPhrase) {
                     log('Attempting recovery phrase login...');
                     sendStatus('Verifying recovery phrase...', 'loadEncrypted');
+                    const recoveryPhrase = response.password;
+                    let identity: EncryptedUserIdentity;
 
                     try {
-                        const identity = await EncryptedUserIdentity.loadWithRecoveryPhrase(
+                        identity = await EncryptedUserIdentity.loadWithRecoveryPhrase(
                             mode,
                             encryptedUserIdentity.peer_id,
-                            response.password, // This is the recovery phrase
+                            recoveryPhrase,
                             database
                         );
-
-                        // Success - clear login attempts
-                        database.clearLoginAttempts(encryptedUserIdentity.peer_id, mode);
-                        return identity;
                     } catch (error: unknown) {
                         if (error instanceof Error) {
                             errorMessage = `Recovery phrase failed: ${error.message}`;
@@ -262,6 +272,38 @@ export class EncryptedUserIdentity {
                         }
                         throw error;
                     }
+
+                    let newPasswordBytes: Uint8Array | null = null;
+                    try {
+                        const newPasswordResponse = await customPasswordPrompt(
+                            'Set a new password for your identity',
+                            true,
+                            undefined,
+                            undefined,
+                            undefined,
+                            undefined,
+                            false,
+                            keytarInstance !== null
+                        );
+                        newPasswordBytes = new TextEncoder().encode(newPasswordResponse.password);
+                        await identity.saveEncrypted(database, mode, newPasswordBytes, sendStatus, recoveryPhrase);
+
+                        if (keytarInstance && newPasswordResponse.rememberMe && newPasswordResponse.password && !newPasswordResponse.useRecoveryPhrase) {
+                            try {
+                                await keytarInstance.setPassword('kiyeovo', keychainIdentityId, newPasswordResponse.password);
+                            } catch (error) {
+                                console.warn('[IDENTITY] Failed to store password in OS keychain:', errStr(error));
+                            }
+                        }
+                    } catch (error: unknown) {
+                        throw new Error(`Recovery phrase accepted, but setting a new password failed: ${errStr(error)}`);
+                    } finally {
+                        if (newPasswordBytes) newPasswordBytes.fill(0);
+                    }
+
+                    // Success - clear login attempts
+                    database.clearLoginAttempts(encryptedUserIdentity.peer_id, mode);
+                    return identity;
                 }
 
                 // Normal password attempt
@@ -303,6 +345,9 @@ export class EncryptedUserIdentity {
 
                 if (!(error instanceof Error)) {
                     throw new Error('Failed to decrypt identity');
+                }
+                if (error.message.startsWith('Recovery phrase accepted,')) {
+                    throw error;
                 }
 
                 // Check if it's a wrong password error
@@ -506,12 +551,15 @@ export class EncryptedUserIdentity {
                 encrypted_data: Buffer.from(ciphertext),
             };
 
-            database.createEncryptedUserIdentityForMode(mode, 'primary', encryptedUserIdentity);
-
-            // Save a second copy encrypted with phrase-derived password
+            // Save a second copy encrypted with phrase-derived password, in the
+            // same transaction so a failure cannot leave a primary row with a
+            // missing or stale recovery row
             if (recoveryPhrase) {
                 recoveryPassword = EncryptedUserIdentity.derivePasswordFromPhrase(recoveryPhrase, mode);
-                await this.saveRecoveryCopy(database, mode, recoveryPassword, identityData);
+                const recoveryIdentity = await this.buildRecoveryCopy(recoveryPassword, identityData);
+                database.createEncryptedUserIdentityPairForMode(mode, encryptedUserIdentity, recoveryIdentity);
+            } else {
+                database.createEncryptedUserIdentityForMode(mode, 'primary', encryptedUserIdentity);
             }
         } catch (error: unknown) {
             generalErrorHandler(error);
@@ -524,12 +572,10 @@ export class EncryptedUserIdentity {
         }
     }
 
-    private async saveRecoveryCopy(
-        database: ChatDatabase,
-        mode: NetworkMode,
+    private async buildRecoveryCopy(
         recoveryPassword: Uint8Array,
         identityData: DecryptedUserIdentityData
-    ): Promise<void> {
+    ): Promise<{ peer_id: string; salt: Buffer; nonce: Buffer; encrypted_data: Buffer }> {
         let plaintext: Uint8Array | null = null;
         let ciphertext: Uint8Array | null = null;
 
@@ -545,14 +591,12 @@ export class EncryptedUserIdentity {
                 nonce
             );
 
-            const recoveryIdentity = {
+            return {
                 peer_id: this.id,
                 salt: Buffer.from(salt),
                 nonce: Buffer.from(nonce),
                 encrypted_data: Buffer.from(ciphertext),
             };
-
-            database.createEncryptedUserIdentityForMode(mode, 'recovery', recoveryIdentity);
         } finally {
             if (plaintext) plaintext.fill(0);
             if (ciphertext) ciphertext.fill(0);
@@ -563,8 +607,13 @@ export class EncryptedUserIdentity {
         return generateMnemonic(wordlist, 256);
     }
 
+    private static normalizeRecoveryPhrase(mnemonic: string): string {
+        return mnemonic.trim().toLowerCase().split(/\s+/).join(' ');
+    }
+
     static derivePasswordFromPhrase(mnemonic: string, mode: NetworkMode): Uint8Array {
-        const seed = mnemonicToSeedSync(mnemonic);
+        const normalizedMnemonic = EncryptedUserIdentity.normalizeRecoveryPhrase(mnemonic);
+        const seed = mnemonicToSeedSync(normalizedMnemonic);
         const derived = hkdfSync(
             'sha256',
             seed,
@@ -576,7 +625,8 @@ export class EncryptedUserIdentity {
     }
 
     static validateRecoveryPhrase(mnemonic: string): boolean {
-        return validateMnemonic(mnemonic, wordlist);
+        const normalizedMnemonic = EncryptedUserIdentity.normalizeRecoveryPhrase(mnemonic);
+        return validateMnemonic(normalizedMnemonic, wordlist);
     }
 
     static async loadWithRecoveryPhrase(
@@ -585,11 +635,13 @@ export class EncryptedUserIdentity {
         mnemonic: string,
         database: ChatDatabase
     ): Promise<EncryptedUserIdentity> {
-        if (!EncryptedUserIdentity.validateRecoveryPhrase(mnemonic)) {
+        const normalizedMnemonic = EncryptedUserIdentity.normalizeRecoveryPhrase(mnemonic);
+
+        if (!EncryptedUserIdentity.validateRecoveryPhrase(normalizedMnemonic)) {
             throw new Error('Invalid recovery phrase');
         }
 
-        const password = EncryptedUserIdentity.derivePasswordFromPhrase(mnemonic, mode);
+        const password = EncryptedUserIdentity.derivePasswordFromPhrase(normalizedMnemonic, mode);
         
         try {
             const recoveryData = database.getEncryptedUserIdentityForMode(mode, 'recovery');
@@ -664,9 +716,9 @@ export class EncryptedUserIdentity {
         errorMessage?: string,
         cooldownSeconds?: number,
         showRecoveryOption?: boolean,
-        keytarInstance: any = null
+        keytarInstance?: any
     ): Promise<PasswordResponse> {
-        if (!keytarInstance) {
+        if (keytarInstance === undefined) {
             keytarInstance = await loadKeytar();
         }
         const keychainAvailable = keytarInstance !== null;
@@ -684,14 +736,6 @@ export class EncryptedUserIdentity {
         }
 
         const response = await customPasswordPrompt(prompt, validateStrength, recoveryPhrase, prefilledPassword, errorMessage, cooldownSeconds, showRecoveryOption, keychainAvailable);
-
-        if (keytarInstance && response.rememberMe && response.password && !response.useRecoveryPhrase && validateStrength) {
-            try {
-                await keytarInstance.setPassword('kiyeovo', identityId, response.password);
-            } catch (error) {
-                console.warn('[IDENTITY] Failed to store password in OS keychain:', errStr(error));
-            }
-        }
 
         return response;
     }

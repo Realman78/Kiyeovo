@@ -1124,7 +1124,20 @@ export class ChatDatabase {
             );
         } catch (error) {
             generalErrorHandler(error);
+            throw error;
         }
+    }
+
+    createEncryptedUserIdentityPairForMode(
+        mode: NetworkMode,
+        primary: Omit<EncryptedUserIdentityDb, 'id' | 'created_at' | 'network_mode' | 'identity_kind'>,
+        recovery: Omit<EncryptedUserIdentityDb, 'id' | 'created_at' | 'network_mode' | 'identity_kind'>
+    ): void {
+        const tx = this.db.transaction(() => {
+            this.createEncryptedUserIdentityForMode(mode, 'primary', primary);
+            this.createEncryptedUserIdentityForMode(mode, 'recovery', recovery);
+        });
+        tx();
     }
 
     getEncryptedUserIdentityForMode(

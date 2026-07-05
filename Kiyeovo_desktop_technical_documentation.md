@@ -136,7 +136,10 @@ Security model:
 - scrypt KDF
 - optional OS keychain storage (`keytar`)
 - recovery phrase (BIP39)
+- recovery phrase login normalizes entered phrases by trimming, lowercasing, and collapsing whitespace before BIP39 validation and phrase-derived password derivation
 - login attempts + cooldown enforcement
+- new identity creation stores remembered passwords in the OS keychain only after the encrypted primary/recovery identity rows are saved; identity persistence failures abort startup and surface through the initialization error/retry path
+- successful recovery phrase login requires setting a new strong password, then rewrites the primary password-encrypted row and recovery phrase row in one transaction before optionally storing the new password in the OS keychain
 - contact signing keys are pinned trust-on-first-use state in `users` only when the row carries a non-empty registration `signature` from direct KX/DHT verification; creator-asserted group roster seeds keep `signature` empty and remain unpinned until a direct exchange verifies them. If a verified known contact's signature fails against the pinned signing key, a differing DHT/incoming signing key is recorded in `key_change_events` and the message/key-exchange path remains unverified without replacing the pinned key. First-contact, unverified roster-seed adoption, and missing-key population still pin after successful signature verification. Renderer warning/confirmation gating for recorded key changes is a follow-up.
 
 Current KDF defaults live in `src/core/constants.ts`:
