@@ -2334,9 +2334,12 @@ export class MessageHandler {
       throw new Error('Cannot send file as first message. Send a text message first.');
     }
 
-    const { targetPeerId, resolvedOfflinePublicKey } = await this.resolveUserRegistrationForSession(targetUsernameOrPeerId);
+    const { targetPeerId, resolvedOfflinePublicKey, resolvedSigningPublicKey, resolvedSignature } =
+      await this.resolveUserRegistrationForSession(targetUsernameOrPeerId);
     const exchangedUser = await this.keyExchange.initiateKeyExchange(targetPeerId, targetUsernameOrPeerId, message, {
       recipientOfflinePublicKey: resolvedOfflinePublicKey,
+      recipientSigningPublicKey: resolvedSigningPublicKey,
+      recipientSignature: resolvedSignature,
     });
     if (!exchangedUser) {
       throw new Error('Key exchange failed');
@@ -2351,7 +2354,7 @@ export class MessageHandler {
 
   private async resolveUserRegistrationForSession(
     targetUsernameOrPeerId: string,
-  ): Promise<{ targetPeerId: PeerId; resolvedOfflinePublicKey: string }> {
+  ): Promise<{ targetPeerId: PeerId; resolvedOfflinePublicKey: string; resolvedSigningPublicKey: string; resolvedSignature: string }> {
     try {
       let isPeerId = false;
       try { peerIdFromString(targetUsernameOrPeerId); isPeerId = true; } catch { /* username */ }
@@ -2361,6 +2364,8 @@ export class MessageHandler {
       return {
         targetPeerId: peerIdFromString(userRegistration.peerID),
         resolvedOfflinePublicKey: userRegistration.offlinePublicKey,
+        resolvedSigningPublicKey: userRegistration.signingPublicKey,
+        resolvedSignature: userRegistration.signature,
       };
     } catch (lookupErr: unknown) {
       const lookupErrorText = errStr(lookupErr);

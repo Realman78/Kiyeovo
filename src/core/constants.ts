@@ -314,6 +314,17 @@ export const OFFLINE_MESSAGE_LIMIT = 50; // 50 messages
 export const OFFLINE_MESSAGE_CHECK_INTERVAL = 5 * MINUTE; // 5 minutes
 export const KEY_ROTATION_TIMEOUT = 30 * SECOND; // 30 seconds
 export const PENDING_KEY_EXCHANGE_EXPIRATION = 5 * MINUTE; // 5 minutes
+// Responder-side deadline for the initiator's confirmed/cancelled after the responder sends its
+// key-exchange response. This wait covers a full peer-side round-trip: the initiator reads the
+// response, verifies its signature (which may fall back to a DHT lookup) and replies. It must
+// therefore be on the order of a single inbound-read deadline plus a DHT round-trip, not a few
+// seconds — a too-tight bound drops the accepting side's request while the initiator is still
+// legitimately verifying. Overridable per-install via KEY_EXCHANGE_FOLLOWUP_TIMEOUT_SETTING_KEY.
+export const KEY_EXCHANGE_FOLLOWUP_TIMEOUT_FAST_MS = 30 * SECOND;
+export const KEY_EXCHANGE_FOLLOWUP_TIMEOUT_ANONYMOUS_MS = 45 * SECOND;
+export const KEY_EXCHANGE_FOLLOWUP_TIMEOUT_SETTING_KEY = 'key_exchange_followup_timeout_ms';
+export const KEY_EXCHANGE_FOLLOWUP_TIMEOUT_MIN_MS = 5 * SECOND;
+export const KEY_EXCHANGE_FOLLOWUP_TIMEOUT_MAX_MS = 120 * SECOND;
 export const DATABASE_CLEANUP_INTERVAL = 30 * MINUTE; // 30 minutes
 export const MAX_MESSAGES_PER_STORE = 41; // Hard cap for one offline DHT store payload (incl. ack reserve)
 export const OFFLINE_CONTROL_MESSAGE_RESERVE = 10; // Slots reserved for offline control traffic

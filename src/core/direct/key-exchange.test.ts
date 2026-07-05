@@ -3,7 +3,14 @@ import test from 'node:test';
 import { ed25519 } from '@noble/curves/ed25519';
 import { ChatDatabase } from '../db/database.js';
 import type { User } from '../db/database.js';
-import { NETWORK_MODES } from '../constants.js';
+import {
+  KEY_EXCHANGE_FOLLOWUP_TIMEOUT_ANONYMOUS_MS,
+  KEY_EXCHANGE_FOLLOWUP_TIMEOUT_FAST_MS,
+  KEY_EXCHANGE_FOLLOWUP_TIMEOUT_MAX_MS,
+  KEY_EXCHANGE_FOLLOWUP_TIMEOUT_MIN_MS,
+  KEY_EXCHANGE_FOLLOWUP_TIMEOUT_SETTING_KEY,
+  NETWORK_MODES,
+} from '../constants.js';
 import { KeyExchange } from './key-exchange.js';
 import type { AuthenticatedEncryptedMessage, ChatNode, ContactRequestEvent, MessageToVerify, UserRegistration } from '../types.js';
 import type { UsernameRegistry } from '../username/username-registry.js';
@@ -144,6 +151,14 @@ type KeyExchangeHarness = {
     offlinePublicKey: string,
     signature: string,
   ): Promise<void>;
+  keyExchangeRecipientKeys: Map<string, { signingPublicKey: string; offlinePublicKey: string; signature: string }>;
+  getKeyExchangeFollowupTimeoutMs(): number;
+  verifyKeyExchangeResponseSignature(
+    signature: string,
+    messageToVerify: MessageToVerify,
+    username: string,
+    peerId: string,
+  ): Promise<boolean>;
 };
 
 function makeKeyExchange(
@@ -593,4 +608,117 @@ test('ensureUserExistsWithKeys records event instead of replacing an existing pi
   assert.equal(events[0]?.old_signing_key, pinned.publicKey);
   assert.equal(events[0]?.new_signing_key, incoming.publicKey);
   assert.equal(events[0]?.source, 'key_exchange_init_persist');
+});
+
+test('getKeyExchangeFollowupTimeoutMs returns mode defaults and honors clamped override', async (t) => {
+  const database = new ChatDatabase(':memory:');
+  t.after(() => database.close());
+
+  const keyExchange = makeKeyExchange(database, {});
+
+  // Default (fast mode for a fresh in-memory DB) must be large enough to cover a peer-side
+  // verify + DHT round-trip — the too-tight 5000ms value was the root cause of the drop.
+  assert.equal(keyExchange.getKeyExchangeFollowupTimeoutMs(), KEY_EXCHANGE_FOLLOWUP_TIMEOUT_FAST_MS);
+  assert.ok(KEY_EXCHANGE_FOLLOWUP_TIMEOUT_FAST_MS >= 30_000);
+  // Anonymous mode (fixed at DB construction) must allow at least as much time as fast mode.
+  assert.ok(KEY_EXCHANGE_FOLLOWUP_TIMEOUT_ANONYMOUS_MS >= KEY_EXCHANGE_FOLLOWUP_TIMEOUT_FAST_MS);
+
+  database.setSetting(KEY_EXCHANGE_FOLLOWUP_TIMEOUT_SETTING_KEY, '12000');
+  assert.equal(keyExchange.getKeyExchangeFollowupTimeoutMs(), 12_000);
+
+  database.setSetting(KEY_EXCHANGE_FOLLOWUP_TIMEOUT_SETTING_KEY, '1');
+  assert.equal(keyExchange.getKeyExchangeFollowupTimeoutMs(), KEY_EXCHANGE_FOLLOWUP_TIMEOUT_MIN_MS);
+
+  database.setSetting(KEY_EXCHANGE_FOLLOWUP_TIMEOUT_SETTING_KEY, '9999999');
+  assert.equal(keyExchange.getKeyExchangeFollowupTimeoutMs(), KEY_EXCHANGE_FOLLOWUP_TIMEOUT_MAX_MS);
+
+  database.setSetting(KEY_EXCHANGE_FOLLOWUP_TIMEOUT_SETTING_KEY, 'not-a-number');
+  assert.equal(keyExchange.getKeyExchangeFollowupTimeoutMs(), KEY_EXCHANGE_FOLLOWUP_TIMEOUT_FAST_MS);
+});
+
+test('verifyKeyExchangeResponseSignature verifies against stashed key without any DHT lookup', async (t) => {
+  const database = new ChatDatabase(':memory:');
+  t.after(() => database.close());
+
+  const responder = makeSigningKeyPair();
+  const keyExchange = makeKeyExchange(database, {
+    // Any DHT access here must be treated as a test failure: the whole point of the fix is to
+    // keep the response-signature verification off the (slow) DHT critical path on first contact.
+    lookup: async () => { throw new Error('DHT lookup must not be used on the confirm path'); },
+    lookupByPeerId: async () => { throw new Error('DHT lookup must not be used on the confirm path'); },
+  });
+
+  keyExchange.keyExchangeRecipientKeys.set(PEER_ID, {
+    signingPublicKey: responder.publicKey,
+    offlinePublicKey: 'responder_offline_key',
+    signature: 'responder_registration_signature',
+  });
+
+  const message = makeVerifyMessage('key_exchange_response');
+  const signature = signPayload(responder.privateKey, message);
+
+  const valid = await keyExchange.verifyKeyExchangeResponseSignature(signature, message, USERNAME, PEER_ID);
+  assert.equal(valid, true);
+
+  // The verified keys are persisted so the subsequent chat finalization pins them.
+  const user = database.getUserByPeerId(PEER_ID);
+  assert.equal(user?.signing_public_key, responder.publicKey);
+  assert.equal(user?.offline_public_key, 'responder_offline_key');
+});
+
+test('verifyKeyExchangeResponseSignature falls back to DHT when the stashed key does not match', async (t) => {
+  const database = new ChatDatabase(':memory:');
+  t.after(() => database.close());
+
+  const stashedWrong = makeSigningKeyPair();
+  const actualSigner = makeSigningKeyPair();
+  let dhtLookups = 0;
+  const keyExchange = makeKeyExchange(database, {
+    lookup: async () => {
+      dhtLookups += 1;
+      return makeRegistration({ signingPublicKey: actualSigner.publicKey });
+    },
+  });
+
+  keyExchange.keyExchangeRecipientKeys.set(PEER_ID, {
+    signingPublicKey: stashedWrong.publicKey,
+    offlinePublicKey: 'responder_offline_key',
+    signature: 'responder_registration_signature',
+  });
+
+  const message = makeVerifyMessage('key_exchange_response');
+  const signature = signPayload(actualSigner.privateKey, message);
+
+  const valid = await keyExchange.verifyKeyExchangeResponseSignature(signature, message, USERNAME, PEER_ID);
+  assert.equal(valid, true);
+  assert.equal(dhtLookups, 1);
+});
+
+test('verifyKeyExchangeResponseSignature ignores stash when a pinned key exists', async (t) => {
+  const database = new ChatDatabase(':memory:');
+  t.after(() => database.close());
+
+  const pinned = makeSigningKeyPair();
+  const stashed = makeSigningKeyPair();
+  await createPinnedUser(database, pinned.publicKey);
+
+  const keyExchange = makeKeyExchange(database, {
+    lookup: async () => makeRegistration({ signingPublicKey: pinned.publicKey }),
+  });
+
+  // A stash signed by a different key must NOT bypass the pinned-key path (key-change detection).
+  keyExchange.keyExchangeRecipientKeys.set(PEER_ID, {
+    signingPublicKey: stashed.publicKey,
+    offlinePublicKey: 'responder_offline_key',
+    signature: 'responder_registration_signature',
+  });
+
+  const message = makeVerifyMessage('key_exchange_response');
+  const signatureFromStash = signPayload(stashed.privateKey, message);
+  const validFromStash = await keyExchange.verifyKeyExchangeResponseSignature(signatureFromStash, message, USERNAME, PEER_ID);
+  assert.equal(validFromStash, false);
+
+  const signatureFromPinned = signPayload(pinned.privateKey, message);
+  const validFromPinned = await keyExchange.verifyKeyExchangeResponseSignature(signatureFromPinned, message, USERNAME, PEER_ID);
+  assert.equal(validFromPinned, true);
 });
