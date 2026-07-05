@@ -31,5 +31,10 @@
     "../electron/**/*",
     "../core/**/*",
     "../shared/**/*"
+  ],
+  "exclude": [
+    "../**/*.test.ts",
+    "../**/*.test.tsx",
+    "../core/test-suite.ts"
   ]
 }

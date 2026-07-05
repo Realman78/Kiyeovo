@@ -1,6 +1,15 @@
 import { ChatDatabase, User } from '../db/database.js';
-import type { ChatNode, UserRegistration } from '../types.js';
-import { ERRORS, NETWORK_MODES, REREGISTRATION_INTERVAL, USERNAME_MAX_FUTURE_SKEW_MS, getNetworkModeRuntime } from '../constants.js';
+import type { ChatNode, NetworkMode, UserRegistration } from '../types.js';
+import {
+  ERRORS,
+  NETWORK_MODES,
+  REREGISTRATION_INTERVAL,
+  USERNAME_MAX_FUTURE_SKEW_MS,
+  USERNAME_MAX_LENGTH,
+  USERNAME_MIN_LENGTH,
+  USERNAME_REGEX,
+  getNetworkModeRuntime,
+} from '../constants.js';
 import { EncryptedUserIdentity } from '../identity/encrypted-user-identity.js';
 import { errStr, generalErrorHandler } from '../utils/general-error.js';
 import { hashUsingSha256 } from '../utils/crypto.js';
@@ -8,6 +17,8 @@ import { QueryEvent } from '@libp2p/kad-dht';
 import {
   isUsernameRegistrationRecord,
   signUsernameRegistrationPayload,
+  signUsernameRegistrationPeerBinding,
+  verifyUsernameRegistrationPeerBinding,
   verifyUsernameRegistrationSignature,
 } from './username-record.js';
 import { log } from '../../shared/logger.js';
@@ -23,6 +34,7 @@ type UsernameRegistrationContext = {
   myPeerId: string;
   usernameKey: Uint8Array;
   peerIdKey: Uint8Array;
+  registration: UserRegistration;
   registrationJson: string;
   valueBytes: Uint8Array;
   previousUsername: string | null;
@@ -35,7 +47,6 @@ type StoredUsernameState = {
 };
 
 export class UsernameRegistry {
-  private static readonly USERNAME_REGEX = /^[A-Za-z0-9_]+$/;
   private static readonly TEXT_ENCODER = new TextEncoder();
   private static readonly TEXT_DECODER = new TextDecoder();
   private static readonly MAX_REGISTRATION_AGE = REREGISTRATION_INTERVAL * 2;
@@ -54,6 +65,7 @@ export class UsernameRegistry {
   private userIdentity: EncryptedUserIdentity | null = null;
   public reregistrationInterval: NodeJS.Timeout | null = null;
   private database: ChatDatabase;
+  private readonly networkMode: NetworkMode;
   private readonly usernameDhtPrefix: string;
   private readonly autoRegisterSettingKey: string;
   private readonly isFastMode: boolean;
@@ -62,10 +74,11 @@ export class UsernameRegistry {
   constructor(node: ChatNode, database: ChatDatabase) {
     this.node = node;
     this.database = database;
-    const mode = database.getSessionNetworkMode();
-    this.usernameDhtPrefix = getNetworkModeRuntime(mode).config.dhtNamespaces.username;
-    this.autoRegisterSettingKey = `auto_register_${mode}`;
-    this.isFastMode = mode === NETWORK_MODES.FAST;
+    const runtime = getNetworkModeRuntime(database.getSessionNetworkMode());
+    this.networkMode = runtime.mode;
+    this.usernameDhtPrefix = runtime.config.dhtNamespaces.username;
+    this.autoRegisterSettingKey = `auto_register_${this.networkMode}`;
+    this.isFastMode = this.networkMode === NETWORK_MODES.FAST;
   }
 
   async initialize(userIdentity: EncryptedUserIdentity, onRestoreUsername: (username: string) => void): Promise<void> {
@@ -111,7 +124,7 @@ export class UsernameRegistry {
       return true;
     }
 
-    const registrationContext = this.createRegistrationContext(username);
+    const registrationContext = await this.createRegistrationContext(username);
 
     await this.ensureUsernameAvailableForRegistration(
       registrationContext.usernameKey,
@@ -194,7 +207,7 @@ export class UsernameRegistry {
       this.buildUsernameByPeerIdKey(peerId),
       peerId,
       'Peer ID not found in DHT',
-      undefined,
+      (reg) => reg.peerID === peerId,
     );
   }
 
@@ -319,15 +332,15 @@ export class UsernameRegistry {
       throw new Error('User identity not initialized');
     }
 
-    if (username.length < 3) {
-      throw new Error('Username must be at least 3 characters');
+    if (username.length < USERNAME_MIN_LENGTH) {
+      throw new Error(`Username must be at least ${USERNAME_MIN_LENGTH} characters`);
     }
 
-    if (username.length > 32) {
-      throw new Error('Username must be less than 32 characters');
+    if (username.length > USERNAME_MAX_LENGTH) {
+      throw new Error(`Username must be at most ${USERNAME_MAX_LENGTH} characters`);
     }
 
-    if (!UsernameRegistry.USERNAME_REGEX.test(username)) {
+    if (!USERNAME_REGEX.test(username)) {
       throw new Error('Username can only contain alphanumerics and underscores');
     }
 
@@ -339,9 +352,9 @@ export class UsernameRegistry {
     return true;
   }
 
-  private createRegistrationContext(username: string): UsernameRegistrationContext {
+  private async createRegistrationContext(username: string): Promise<UsernameRegistrationContext> {
     const myPeerId = this.node.peerId.toString();
-    const registration = this.#createRegistrationObject(username, 'active');
+    const registration = await this.#createRegistrationObject(username, 'active');
     const registrationJson = JSON.stringify(registration);
 
     return {
@@ -349,6 +362,7 @@ export class UsernameRegistry {
       myPeerId,
       usernameKey: this.buildUsernameByNameKey(username),
       peerIdKey: this.buildUsernameByPeerIdKey(myPeerId),
+      registration,
       registrationJson,
       valueBytes: UsernameRegistry.TEXT_ENCODER.encode(registrationJson),
       previousUsername: this.currentUsername,
@@ -370,7 +384,12 @@ export class UsernameRegistry {
         let existingRegistration: UserRegistration | null = null;
         try {
           const parsed = JSON.parse(rawData) as unknown;
-          if (!isUsernameRegistrationRecord(parsed) || !verifyUsernameRegistrationSignature(parsed)) {
+          if (
+            !isUsernameRegistrationRecord(parsed)
+            || parsed.networkMode !== this.networkMode
+            || !verifyUsernameRegistrationSignature(parsed)
+            || !verifyUsernameRegistrationPeerBinding(parsed)
+          ) {
             continue;
           }
           existingRegistration = parsed;
@@ -514,9 +533,9 @@ export class UsernameRegistry {
       const peerId = await this.database.createUser({
         peer_id: context.myPeerId,
         username: context.username,
-        signing_public_key: this.userIdentity.signingPublicKey.toString(),
-        offline_public_key: Buffer.from(this.userIdentity.offlinePublicKey).toString('base64'),
-        signature: this.userIdentity.sign(context.registrationJson).toString(),
+        signing_public_key: context.registration.signingPublicKey,
+        offline_public_key: context.registration.offlinePublicKey,
+        signature: context.registration.signature,
       });
       log(peerId ? `User registered in database with peerId: ${peerId}` : 'User may already exist in database');
     } catch (error: unknown) {
@@ -524,14 +543,15 @@ export class UsernameRegistry {
     }
   }
 
-  #createRegistrationObject(username: string, kind: 'active' | 'released'): UserRegistration {
+  async #createRegistrationObject(username: string, kind: 'active' | 'released'): Promise<UserRegistration> {
     if (!this.userIdentity) {
       throw new Error('User identity not initialized');
     }
     const identity = this.userIdentity;
 
-    const registrationData: Omit<UserRegistration, 'signature'> = {
+    const registrationData: Omit<UserRegistration, 'signature' | 'peerBinding'> = {
       peerID: this.node.peerId.toString(),
+      networkMode: this.networkMode,
       username,
       kind,
       signingPublicKey: Buffer.from(identity.signingPublicKey).toString('base64'),
@@ -542,14 +562,18 @@ export class UsernameRegistry {
     const signature = signUsernameRegistrationPayload(registrationData, (payload) =>
       identity.sign(payload),
     );
+    const peerBinding = await signUsernameRegistrationPeerBinding(registrationData, (payloadBytes) =>
+      identity.libp2pPrivateKey.sign(payloadBytes),
+    );
 
     return {
       ...registrationData,
       signature,
-    } as UserRegistration;
+      peerBinding,
+    };
   }
 
-  #createReleasedRegistrationObject(username: string): UserRegistration {
+  async #createReleasedRegistrationObject(username: string): Promise<UserRegistration> {
     return this.#createRegistrationObject(username, 'released');
   }
 
@@ -570,7 +594,9 @@ export class UsernameRegistry {
 
     const registration = JSON.parse(rawData) as unknown;
     if (!this.isValidUserRegistration(registration)) return null;
+    if (registration.networkMode !== this.networkMode) return null;
     if (!verifyUsernameRegistrationSignature(registration)) return null;
+    if (!verifyUsernameRegistrationPeerBinding(registration)) return null;
 
     // Check if registration is too old (replay attack prevention)
     const age = currentTime - registration.timestamp;
@@ -746,8 +772,8 @@ export class UsernameRegistry {
     return publish.acceptedCount > 0;
   }
 
-  private createReleasedRegistrationValueBytes(username: string): Uint8Array {
-    const releaseRecord = this.#createReleasedRegistrationObject(username);
+  private async createReleasedRegistrationValueBytes(username: string): Promise<Uint8Array> {
+    const releaseRecord = await this.#createReleasedRegistrationObject(username);
     return UsernameRegistry.TEXT_ENCODER.encode(JSON.stringify(releaseRecord));
   }
 
@@ -760,7 +786,7 @@ export class UsernameRegistry {
     username: string,
   ): Promise<{ usernameUnregistered: boolean; peerIdUnregistered: boolean }> {
     const myPeerId = this.node.peerId.toString();
-    const valueBytes = this.createReleasedRegistrationValueBytes(username);
+    const valueBytes = await this.createReleasedRegistrationValueBytes(username);
     const [usernameRelease, peerRelease] = await Promise.allSettled([
       this.publishReleasedRegistrationForKey(this.buildUsernameByNameKey(username), valueBytes),
       this.publishReleasedRegistrationForKey(this.buildUsernameByPeerIdKey(myPeerId), valueBytes),
@@ -775,7 +801,7 @@ export class UsernameRegistry {
   private async releaseUsernameByName(username: string): Promise<boolean> {
     return this.publishReleasedRegistrationForKey(
       this.buildUsernameByNameKey(username),
-      this.createReleasedRegistrationValueBytes(username),
+      await this.createReleasedRegistrationValueBytes(username),
     );
   }
 

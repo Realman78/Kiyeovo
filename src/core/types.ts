@@ -166,12 +166,14 @@ export interface ErrorConstants {
 
 export interface UserRegistration {
   peerID: string
+  networkMode: NetworkMode
   timestamp: number
   username: string
   kind?: 'active' | 'released'
   signingPublicKey: string  // Ed25519 for signature verification
   offlinePublicKey: string // RSA for offline message encryption
   signature: string
+  peerBinding: string // Ed25519 signature from the libp2p peer identity key
 }
 
 // Message handling types
@@ -236,6 +238,10 @@ export interface OfflineSignedPayload {
   sender_info_hash: string   // SHA256 of encrypted sender info (base64)
   timestamp: number
   bucket_key: string         // Full bucket key for binding
+  message_type: 'encrypted' | 'hybrid'
+  expires_at: number
+  aes_key_hash?: string      // hybrid only: SHA256 of encrypted_aes_key (base64)
+  aes_iv_hash?: string       // hybrid only: SHA256 of aes_iv (base64)
   ack_only?: boolean         // Standalone ACK marker (authenticated by the signature)
 }
 

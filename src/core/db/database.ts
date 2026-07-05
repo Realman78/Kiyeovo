@@ -2,7 +2,11 @@
 
 import Database from 'better-sqlite3';
 import * as fs from 'fs';
+import { chmod, readFile, rename, rm, writeFile } from 'fs/promises';
 import * as path from 'path';
+import { gcm } from '@noble/ciphers/aes';
+import { scrypt } from '@noble/hashes/scrypt';
+import { randomBytes } from '@noble/hashes/utils';
 import { errStr, generalErrorHandler } from '../utils/general-error.js';
 import type {
     FileTransferStatus,
@@ -22,6 +26,7 @@ import {
     NETWORK_MODE_SETTING_KEY,
     PENDING_KEY_EXCHANGE_EXPIRATION,
     MESSAGE_TTL,
+    PROFILE_SCRYPT_N,
     getNetworkModeRuntime,
     isNetworkMode,
 } from '../constants.js';
@@ -32,6 +37,45 @@ const DEFAULT_SEARCH_PAGE_SIZE = 20;
 const MAX_SEARCH_PAGE_SIZE = 50;
 const MESSAGE_JUMP_CONTEXT_SIZE = 20;
 const MAX_MESSAGE_JUMP_WINDOW_SIZE = 200;
+
+interface DatabaseBackupScryptParams {
+    N: number;
+    r: number;
+    p: number;
+    dkLen: number;
+}
+
+interface DatabaseBackupHeader {
+    magic: string;
+    version: number;
+    kdf: 'scrypt';
+    scrypt: DatabaseBackupScryptParams;
+    cipher: 'AES-256-GCM';
+    salt: string;
+    nonce: string;
+    encoding: 'base64';
+}
+
+type DatabaseSidecarSuffix = '' | '-wal' | '-shm';
+
+interface DatabaseSwapBackupFile {
+    livePath: string;
+    backupPath: string;
+}
+
+const DATABASE_BACKUP_MAGIC = 'KIYEOVO-DB-BACKUP';
+const DATABASE_BACKUP_VERSION = 1;
+const DATABASE_BACKUP_HEADER_MAX_BYTES = 4096;
+const DATABASE_BACKUP_MIN_PASSWORD_LENGTH = 12;
+const DATABASE_BACKUP_SCRYPT_PARAMS: DatabaseBackupScryptParams = {
+    N: PROFILE_SCRYPT_N,
+    r: 8,
+    p: 1,
+    dkLen: 32,
+};
+const DATABASE_BACKUP_REQUIRED_TABLES = ['users', 'chats', 'messages', 'settings'] as const;
+const DATABASE_SIDECAR_SUFFIXES: DatabaseSidecarSuffix[] = ['', '-wal', '-shm'];
+const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 /** Escape LIKE wildcards so a 1-2 char fallback query matches literally. */
 function escapeLikePattern(value: string): string {
@@ -231,6 +275,17 @@ export interface FailedKeyExchange {
     timestamp: number
     content: string
     reason: string
+    created_at: Date
+}
+
+export interface KeyChangeEvent {
+    id: number
+    network_mode: NetworkMode
+    peer_id: string
+    username: string
+    old_signing_key: string
+    new_signing_key: string
+    source: string
     created_at: Date
 }
 
@@ -557,6 +612,20 @@ export class ChatDatabase {
             )
         `);
 
+        // Audit trail for observed contact signing-key changes.
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS key_change_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                network_mode TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}' CHECK(network_mode IN ('${NETWORK_MODES.FAST}','${NETWORK_MODES.ANONYMOUS}')),
+                peer_id TEXT NOT NULL,
+                username TEXT NOT NULL,
+                old_signing_key TEXT NOT NULL,
+                new_signing_key TEXT NOT NULL,
+                source TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
         // Settings table (for local preferences like contact_mode)
         this.db.exec(`
             CREATE TABLE IF NOT EXISTS settings (
@@ -830,6 +899,7 @@ export class ChatDatabase {
       -- Indexes for cleanup queries
       CREATE INDEX IF NOT EXISTS idx_failed_key_exchanges_timestamp ON failed_key_exchanges(timestamp);
       CREATE INDEX IF NOT EXISTS idx_failed_key_exchanges_mode_timestamp ON failed_key_exchanges(network_mode, timestamp);
+      CREATE INDEX IF NOT EXISTS idx_key_change_events_mode_peer_created ON key_change_events(network_mode, peer_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_contact_attempts_mode_created_at ON contact_attempts(network_mode, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_blocked_peers_mode_blocked_at ON blocked_peers(network_mode, blocked_at DESC);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_login_attempts_unique_mode_peer ON login_attempts(network_mode, peer_id);
@@ -964,6 +1034,7 @@ export class ChatDatabase {
         this.ensureColumnExists('contact_attempts', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
         this.ensureColumnExists('blocked_peers', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
         this.ensureColumnExists('failed_key_exchanges', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
+        this.ensureColumnExists('key_change_events', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
         this.ensureColumnExists('login_attempts', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
         this.ensureColumnExists('messages', 'local_send_state', 'TEXT');
         this.ensureColumnExists('messages', 'failed_reason', 'TEXT');
@@ -1053,7 +1124,20 @@ export class ChatDatabase {
             );
         } catch (error) {
             generalErrorHandler(error);
+            throw error;
         }
+    }
+
+    createEncryptedUserIdentityPairForMode(
+        mode: NetworkMode,
+        primary: Omit<EncryptedUserIdentityDb, 'id' | 'created_at' | 'network_mode' | 'identity_kind'>,
+        recovery: Omit<EncryptedUserIdentityDb, 'id' | 'created_at' | 'network_mode' | 'identity_kind'>
+    ): void {
+        const tx = this.db.transaction(() => {
+            this.createEncryptedUserIdentityForMode(mode, 'primary', primary);
+            this.createEncryptedUserIdentityForMode(mode, 'recovery', recovery);
+        });
+        tx();
     }
 
     getEncryptedUserIdentityForMode(
@@ -1096,33 +1180,38 @@ export class ChatDatabase {
     }
 
     // User operations
+    private insertUser(
+        user: Omit<User, 'created_at' | 'updated_at' | 'network_mode'>,
+        mode: NetworkMode
+    ): string {
+        const stmt = this.db.prepare(`
+            INSERT INTO users (network_mode, peer_id, signing_public_key, offline_public_key, signature, username)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(network_mode, peer_id) DO UPDATE SET
+                signing_public_key = excluded.signing_public_key,
+                offline_public_key = excluded.offline_public_key,
+                signature = excluded.signature,
+                username = excluded.username,
+                updated_at = CURRENT_TIMESTAMP
+        `);
+
+        try {
+            stmt.run(mode, user.peer_id, user.signing_public_key, user.offline_public_key, user.signature, user.username);
+            return user.peer_id;
+        } catch (error: any) {
+            console.error('Error creating user:', error);
+            if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+                return user.peer_id;
+            }
+            throw error;
+        }
+    }
+
     async createUser(
         user: Omit<User, 'created_at' | 'updated_at' | 'network_mode'> & { network_mode?: NetworkMode }
     ): Promise<string> {
         const mode = this.getActiveNetworkMode(user.network_mode);
-        return this.retryOperation(() => {
-            const stmt = this.db.prepare(`
-                INSERT INTO users (network_mode, peer_id, signing_public_key, offline_public_key, signature, username)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(network_mode, peer_id) DO UPDATE SET
-                    signing_public_key = excluded.signing_public_key,
-                    offline_public_key = excluded.offline_public_key,
-                    signature = excluded.signature,
-                    username = excluded.username,
-                    updated_at = CURRENT_TIMESTAMP
-            `);
-
-            try {
-                stmt.run(mode, user.peer_id, user.signing_public_key, user.offline_public_key, user.signature, user.username);
-                return user.peer_id;
-            } catch (error: any) {
-                console.error('Error creating user:', error);
-                if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
-                    return user.peer_id;
-                }
-                throw error;
-            }
-        });
+        return this.retryOperation(() => this.insertUser(user, mode));
     }
 
     updateUserKeys(
@@ -1455,6 +1544,45 @@ export class ChatDatabase {
         }
     }
 
+    // Signing-key change audit operations
+    recordKeyChangeEvent(
+        event: Omit<KeyChangeEvent, 'id' | 'created_at' | 'network_mode'> & { network_mode?: NetworkMode }
+    ): void {
+        const mode = this.getActiveNetworkMode(event.network_mode);
+        const stmt = this.db.prepare(`
+            INSERT INTO key_change_events (
+                network_mode,
+                peer_id,
+                username,
+                old_signing_key,
+                new_signing_key,
+                source
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+        `);
+        stmt.run(mode, event.peer_id, event.username, event.old_signing_key, event.new_signing_key, event.source);
+    }
+
+    getKeyChangeEvents(peerId: string, mode?: NetworkMode): KeyChangeEvent[] {
+        const activeMode = this.getActiveNetworkMode(mode);
+        const stmt = this.db.prepare(`
+            SELECT * FROM key_change_events
+            WHERE peer_id = ? AND network_mode = ?
+            ORDER BY created_at DESC, id DESC
+        `);
+        const rows = stmt.all(peerId, activeMode) as any[];
+        return rows.map(row => ({
+            id: row.id,
+            network_mode: row.network_mode,
+            peer_id: row.peer_id,
+            username: row.username,
+            old_signing_key: row.old_signing_key,
+            new_signing_key: row.new_signing_key,
+            source: row.source,
+            created_at: new Date(row.created_at)
+        }));
+    }
+
     cleanupExpiredNotifications(olderThanDays: number = 30): void {
         const cutoffTime = new Date(Date.now() - (olderThanDays * 24 * 60 * 60 * 1000)).toISOString();
         const stmt = this.db.prepare(`DELETE FROM notifications WHERE network_mode = ? AND status IN ('accepted', 'rejected', 'expired') AND created_at < ?`);
@@ -1470,50 +1598,80 @@ export class ChatDatabase {
     }
 
     // Chat operations
+    private assertUserExists(peerId: string, mode: NetworkMode): void {
+        const user = this.db
+            .prepare('SELECT peer_id FROM users WHERE peer_id = ? AND network_mode = ?')
+            .get(peerId, mode);
+        if (!user) {
+            throw new Error(`User with peer_id '${peerId}' not found in database`);
+        }
+    }
+
+    private insertChatWithParticipants(
+        chat: Omit<Chat, 'id' | 'updated_at' | 'network_mode'> & { participants: string[] },
+        mode: NetworkMode
+    ): number {
+        const stmt = this.db.prepare(`
+            INSERT INTO chats (network_mode, created_by, type, name, offline_bucket_secret, notifications_bucket_key, status, group_id, group_key, permanent_key, trusted_out_of_band, group_creator_peer_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+
+        const createdAt = chat.created_at instanceof Date ? chat.created_at.toISOString() : chat.created_at;
+        const result = stmt.run(
+            mode,
+            chat.created_by,
+            chat.type,
+            chat.type === 'group' ? chat.name : chat.created_by,
+            chat.offline_bucket_secret,
+            chat.notifications_bucket_key,
+            chat.status ?? (chat.type === 'group' ? 'pending' : 'active'),
+            chat.type === 'group' && chat?.group_id ? chat.group_id : null,
+            chat.type === 'group' && chat?.group_key ? chat.group_key : null,
+            chat.type === 'group' && chat?.permanent_key ? chat.permanent_key : null,
+            chat.trusted_out_of_band ? 1 : 0,
+            chat.group_creator_peer_id ?? null,
+            createdAt,
+            createdAt
+        );
+        const chatId = result.lastInsertRowid as number;
+
+        const participantStmt = this.db.prepare('INSERT INTO chat_participants (chat_id, peer_id, role) VALUES (?, ?, ?)');
+        for (const participant of chat.participants) {
+            participantStmt.run(chatId, participant, chat.created_by === participant ? 'admin' : 'member');
+        }
+
+        return chatId;
+    }
+
     async createChat(chat: Omit<Chat, 'id' | 'updated_at' | 'network_mode'> & { participants: string[] }): Promise<number> {
         return this.retryOperation(() => {
             log(`Creating chat: created_by=${chat.created_by}, participants=${chat.participants}`);
             const mode = this.getActiveNetworkMode();
-            const createdByUser = this.db
-                .prepare('SELECT peer_id FROM users WHERE peer_id = ? AND network_mode = ?')
-                .get(chat.created_by, mode);
-            if (!createdByUser) {
-                throw new Error(`User with peer_id '${chat.created_by}' not found in database`);
-            }
+            this.assertUserExists(chat.created_by, mode);
 
-            this.db.exec('BEGIN TRANSACTION');
-            const stmt = this.db.prepare(`
-                INSERT INTO chats (network_mode, created_by, type, name, offline_bucket_secret, notifications_bucket_key, status, group_id, group_key, permanent_key, trusted_out_of_band, group_creator_peer_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `);
-
-            const createdAt = chat.created_at instanceof Date ? chat.created_at.toISOString() : chat.created_at;
-            const result = stmt.run(
-                mode,
-                chat.created_by,
-                chat.type,
-                chat.type === 'group' ? chat.name : chat.created_by,
-                chat.offline_bucket_secret,
-                chat.notifications_bucket_key,
-                chat.status ?? (chat.type === 'group' ? 'pending' : 'active'),
-                chat.type === 'group' && chat?.group_id ? chat.group_id : null,
-                chat.type === 'group' && chat?.group_key ? chat.group_key : null,
-                chat.type === 'group' && chat?.permanent_key ? chat.permanent_key : null,
-                chat.trusted_out_of_band ? 1 : 0,
-                chat.group_creator_peer_id ?? null,
-                createdAt,
-                createdAt
-            );
-            const chatId = result.lastInsertRowid as number;
-
-            for (const participant of chat.participants) {
-                const stmt = this.db.prepare('INSERT INTO chat_participants (chat_id, peer_id, role) VALUES (?, ?, ?)');
-                stmt.run(chatId, participant, chat.created_by === participant ? 'admin' : 'member');
-            }
-
-            this.db.exec('COMMIT');
+            const transaction = this.db.transaction(() => this.insertChatWithParticipants(chat, mode));
+            const chatId = transaction();
 
             log(`Created chat with ID: ${chatId}`);
+            return chatId;
+        });
+    }
+
+    async createTrustedDirectContact(
+        user: Omit<User, 'created_at' | 'updated_at' | 'network_mode'> & { network_mode?: NetworkMode },
+        chat: Omit<Chat, 'id' | 'updated_at' | 'network_mode'> & { participants: string[] }
+    ): Promise<number> {
+        const mode = this.getActiveNetworkMode(user.network_mode);
+        return this.retryOperation(() => {
+            log(`Creating trusted direct contact: created_by=${chat.created_by}, contact=${user.peer_id}, participants=${chat.participants}`);
+            const transaction = this.db.transaction(() => {
+                this.assertUserExists(chat.created_by, mode);
+                this.insertUser(user, mode);
+                return this.insertChatWithParticipants(chat, mode);
+            });
+            const chatId = transaction();
+
+            log(`Created trusted direct contact chat with ID: ${chatId}`);
             return chatId;
         });
     }
@@ -4594,26 +4752,370 @@ export class ChatDatabase {
         }
     }
 
-    async backup(backupPath: string): Promise<void> {
-        await this.db.backup(backupPath);
+    async backupEncrypted(backupPath: string, password: string): Promise<void> {
+        ChatDatabase.assertStrongBackupPassword(password);
+
+        this.db.pragma('wal_checkpoint(TRUNCATE)');
+        const plaintext = this.db.serialize();
+        const salt = randomBytes(32);
+        const nonce = randomBytes(12);
+        const key = ChatDatabase.deriveBackupKey(password, salt);
+        const header = ChatDatabase.createBackupHeader(salt, nonce);
+        const cipher = gcm(key, nonce, ChatDatabase.backupHeaderAad(header));
+        const ciphertext = cipher.encrypt(plaintext);
+        const artifact = ChatDatabase.serializeBackupArtifact(header, ciphertext);
+
+        await writeFile(backupPath, artifact, { mode: 0o600 });
+        await chmod(backupPath, 0o600);
     }
 
-    async restore(backupPath: string): Promise<void> {
-        this.close();
+    async restoreEncrypted(backupPath: string, password: string): Promise<void> {
+        const tempPath = await ChatDatabase.decryptBackupToValidatedTempFile(this.dbPath, backupPath, password);
 
-        const fs = await import('fs/promises');
-        await fs.copyFile(backupPath, this.dbPath);
+        try {
+            this.close();
+            await ChatDatabase.replaceDatabaseWithValidatedTemp(this.dbPath, tempPath);
+            this.openRestoredDatabase();
+            log('Database restored from encrypted backup');
+        } catch (error) {
+            if (!this.db.open) {
+                try {
+                    this.openRestoredDatabase();
+                } catch (reopenError) {
+                    console.error('[DATABASE] Failed to reopen database after restore failure:', reopenError);
+                }
+            }
+            throw error;
+        } finally {
+            await ChatDatabase.removeIfExists(tempPath);
+        }
+    }
 
-        this.db = new Database(this.dbPath);
+    static async restoreEncryptedAtPath(dbPath: string, backupPath: string, password: string): Promise<void> {
+        const tempPath = await ChatDatabase.decryptBackupToValidatedTempFile(dbPath, backupPath, password);
 
-        this.db.pragma('journal_mode = WAL');
-        this.db.pragma('synchronous = NORMAL');
-        this.db.pragma('cache_size = 10000');
-        this.db.pragma('temp_store = memory');
-        this.db.pragma('mmap_size = 268435456'); // 256MB
-        this.db.pragma('busy_timeout = 30000'); // 30 second timeout
-        this.db.pragma('foreign_keys = ON');
+        try {
+            await ChatDatabase.replaceDatabaseWithValidatedTemp(dbPath, tempPath);
+            log('Database restored from encrypted backup');
+        } finally {
+            await ChatDatabase.removeIfExists(tempPath);
+        }
+    }
 
-        log('Database restored from backup');
+    private openRestoredDatabase(): void {
+        const restoredDb = new Database(this.dbPath);
+        try {
+            restoredDb.pragma('journal_mode = WAL');
+            restoredDb.pragma('synchronous = NORMAL');
+            restoredDb.pragma('cache_size = 10000');
+            restoredDb.pragma('temp_store = memory');
+            restoredDb.pragma('mmap_size = 268435456'); // 256MB
+            restoredDb.pragma('busy_timeout = 30000'); // 30 second timeout
+            restoredDb.pragma('foreign_keys = ON');
+            this.db = restoredDb;
+            this.checkIntegrity();
+        } catch (error) {
+            try {
+                restoredDb.close();
+            } catch {
+                // Ignore close errors while surfacing the original open failure.
+            }
+            throw error;
+        }
+    }
+
+    private static assertBackupPassword(password: string): void {
+        if (typeof password !== 'string' || password.trim().length === 0) {
+            throw new Error('Backup password is required');
+        }
+    }
+
+    // Enforced only when CREATING a backup (the artifact leaves the machine, so a weak
+    // password undermines its confidentiality). Restore intentionally does not gate on
+    // policy — the GCM tag is the real check — so a strong old backup always restores.
+    private static assertStrongBackupPassword(password: string): void {
+        ChatDatabase.assertBackupPassword(password);
+        if (password.length < DATABASE_BACKUP_MIN_PASSWORD_LENGTH) {
+            throw new Error(`Backup password must be at least ${DATABASE_BACKUP_MIN_PASSWORD_LENGTH} characters`);
+        }
+        const classes = [/[a-z]/, /[A-Z]/, /\d/, /[^a-zA-Z0-9]/].filter((re) => re.test(password)).length;
+        if (classes < 4) {
+            throw new Error('Backup password must include lowercase, uppercase, numbers, and a special character');
+        }
+    }
+
+    private static createBackupHeader(salt: Uint8Array, nonce: Uint8Array): DatabaseBackupHeader {
+        return {
+            magic: DATABASE_BACKUP_MAGIC,
+            version: DATABASE_BACKUP_VERSION,
+            kdf: 'scrypt',
+            scrypt: DATABASE_BACKUP_SCRYPT_PARAMS,
+            cipher: 'AES-256-GCM',
+            salt: Buffer.from(salt).toString('base64'),
+            nonce: Buffer.from(nonce).toString('base64'),
+            encoding: 'base64',
+        };
+    }
+
+    private static deriveBackupKey(password: string, salt: Uint8Array): Uint8Array {
+        return scrypt(
+            new TextEncoder().encode(password),
+            salt,
+            DATABASE_BACKUP_SCRYPT_PARAMS,
+        );
+    }
+
+    private static backupHeaderAad(header: DatabaseBackupHeader): Uint8Array {
+        return new TextEncoder().encode(JSON.stringify(ChatDatabase.canonicalBackupHeader(header)));
+    }
+
+    private static canonicalBackupHeader(header: DatabaseBackupHeader): DatabaseBackupHeader {
+        return {
+            magic: header.magic,
+            version: header.version,
+            kdf: header.kdf,
+            scrypt: {
+                N: header.scrypt.N,
+                r: header.scrypt.r,
+                p: header.scrypt.p,
+                dkLen: header.scrypt.dkLen,
+            },
+            cipher: header.cipher,
+            salt: header.salt,
+            nonce: header.nonce,
+            encoding: header.encoding,
+        };
+    }
+
+    private static serializeBackupArtifact(header: DatabaseBackupHeader, ciphertext: Uint8Array): Buffer {
+        return Buffer.concat([
+            Buffer.from(JSON.stringify(ChatDatabase.canonicalBackupHeader(header)), 'utf8'),
+            Buffer.from('\n', 'utf8'),
+            Buffer.from(Buffer.from(ciphertext).toString('base64'), 'utf8'),
+        ]);
+    }
+
+    private static async decryptBackupToValidatedTempFile(
+        dbPath: string,
+        backupPath: string,
+        password: string,
+    ): Promise<string> {
+        ChatDatabase.assertBackupPassword(password);
+
+        const plaintext = await ChatDatabase.decryptBackupFile(backupPath, password);
+        const dbDir = path.dirname(dbPath);
+        fs.mkdirSync(dbDir, { recursive: true });
+        const tempPath = path.join(
+            dbDir,
+            `${path.basename(dbPath)}.restore-${process.pid}-${Date.now()}-${ChatDatabase.randomHex(8)}.tmp`,
+        );
+
+        try {
+            await writeFile(tempPath, plaintext, { flag: 'wx', mode: 0o600 });
+            ChatDatabase.validateDatabaseFile(tempPath);
+            return tempPath;
+        } catch (error) {
+            await ChatDatabase.removeIfExists(tempPath);
+            throw error;
+        }
+    }
+
+    private static async decryptBackupFile(backupPath: string, password: string): Promise<Buffer> {
+        const artifact = await readFile(backupPath);
+        const { header, salt, nonce, ciphertext } = ChatDatabase.parseBackupArtifact(artifact);
+        const key = ChatDatabase.deriveBackupKey(password, salt);
+
+        try {
+            const cipher = gcm(key, nonce, ChatDatabase.backupHeaderAad(header));
+            return Buffer.from(cipher.decrypt(ciphertext));
+        } catch {
+            throw new Error('Failed to decrypt database backup - incorrect password or corrupted file');
+        }
+    }
+
+    private static parseBackupArtifact(artifact: Buffer): {
+        header: DatabaseBackupHeader;
+        salt: Buffer;
+        nonce: Buffer;
+        ciphertext: Buffer;
+    } {
+        const headerEnd = artifact.indexOf(0x0A);
+        if (headerEnd <= 0 || headerEnd > DATABASE_BACKUP_HEADER_MAX_BYTES) {
+            throw new Error('Invalid database backup format');
+        }
+
+        let parsedHeader: unknown;
+        try {
+            parsedHeader = JSON.parse(artifact.subarray(0, headerEnd).toString('utf8'));
+        } catch {
+            throw new Error('Invalid database backup header');
+        }
+
+        const header = ChatDatabase.validateBackupHeader(parsedHeader);
+        const body = artifact.subarray(headerEnd + 1).toString('utf8').trim();
+        const salt = ChatDatabase.decodeBase64(header.salt, 'backup salt', 32);
+        const nonce = ChatDatabase.decodeBase64(header.nonce, 'backup nonce', 12);
+        const ciphertext = ChatDatabase.decodeBase64(body, 'backup ciphertext');
+
+        if (ciphertext.length <= 16) {
+            throw new Error('Invalid database backup ciphertext');
+        }
+
+        return { header, salt, nonce, ciphertext };
+    }
+
+    private static validateBackupHeader(value: unknown): DatabaseBackupHeader {
+        if (value === null || typeof value !== 'object') {
+            throw new Error('Invalid database backup header');
+        }
+
+        const header = value as Partial<DatabaseBackupHeader>;
+        const scryptParams = header.scrypt as Partial<DatabaseBackupScryptParams> | undefined;
+        if (
+            !scryptParams
+            || header.magic !== DATABASE_BACKUP_MAGIC
+            || header.version !== DATABASE_BACKUP_VERSION
+            || header.kdf !== 'scrypt'
+            || header.cipher !== 'AES-256-GCM'
+            || header.encoding !== 'base64'
+            || typeof header.salt !== 'string'
+            || typeof header.nonce !== 'string'
+            || scryptParams.N !== DATABASE_BACKUP_SCRYPT_PARAMS.N
+            || scryptParams.r !== DATABASE_BACKUP_SCRYPT_PARAMS.r
+            || scryptParams.p !== DATABASE_BACKUP_SCRYPT_PARAMS.p
+            || scryptParams.dkLen !== DATABASE_BACKUP_SCRYPT_PARAMS.dkLen
+        ) {
+            throw new Error('Unsupported database backup format');
+        }
+
+        return ChatDatabase.canonicalBackupHeader({
+            magic: header.magic,
+            version: header.version,
+            kdf: header.kdf,
+            scrypt: {
+                N: scryptParams.N,
+                r: scryptParams.r,
+                p: scryptParams.p,
+                dkLen: scryptParams.dkLen,
+            },
+            cipher: header.cipher,
+            salt: header.salt,
+            nonce: header.nonce,
+            encoding: header.encoding,
+        });
+    }
+
+    private static decodeBase64(value: string, fieldName: string, expectedLength?: number): Buffer {
+        if (value.length === 0 || !BASE64_PATTERN.test(value)) {
+            throw new Error(`Invalid ${fieldName}`);
+        }
+
+        const bytes = Buffer.from(value, 'base64');
+        if (expectedLength !== undefined && bytes.length !== expectedLength) {
+            throw new Error(`Invalid ${fieldName}`);
+        }
+
+        return bytes;
+    }
+
+    private static validateDatabaseFile(filePath: string): void {
+        let validationDb: Database.Database | null = null;
+        try {
+            validationDb = new Database(filePath, { readonly: true, fileMustExist: true });
+            validationDb.pragma('schema_version');
+
+            const integrityResult = validationDb.pragma('integrity_check') as Array<{ integrity_check: string }>;
+            const integrityOk = integrityResult.length === 1 && integrityResult[0]?.integrity_check === 'ok';
+            if (!integrityOk) {
+                throw new Error('Invalid SQLite database integrity check');
+            }
+
+            const placeholders = DATABASE_BACKUP_REQUIRED_TABLES.map(() => '?').join(', ');
+            const rows = validationDb.prepare(
+                `SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (${placeholders})`,
+            ).all(...DATABASE_BACKUP_REQUIRED_TABLES) as Array<{ name: string }>;
+            const foundTables = new Set(rows.map((row) => row.name));
+            const missingTables = DATABASE_BACKUP_REQUIRED_TABLES.filter((table) => !foundTables.has(table));
+            if (missingTables.length > 0) {
+                throw new Error(`Invalid Kiyeovo database backup: missing ${missingTables.join(', ')}`);
+            }
+        } catch (error) {
+            throw new Error(`Invalid SQLite database backup: ${errStr(error)}`);
+        } finally {
+            if (validationDb) {
+                validationDb.close();
+            }
+        }
+    }
+
+    private static async replaceDatabaseWithValidatedTemp(dbPath: string, tempPath: string): Promise<void> {
+        const swapId = `restore-${process.pid}-${Date.now()}-${ChatDatabase.randomHex(8)}`;
+        const backupFiles: DatabaseSwapBackupFile[] = [];
+
+        try {
+            for (const suffix of DATABASE_SIDECAR_SUFFIXES) {
+                const livePath = `${dbPath}${suffix}`;
+                const backupPath = `${livePath}.${swapId}.bak`;
+                if (await ChatDatabase.renameIfExists(livePath, backupPath)) {
+                    backupFiles.push({ livePath, backupPath });
+                }
+            }
+
+            await rename(tempPath, dbPath);
+            await ChatDatabase.removeIfExists(`${dbPath}-wal`);
+            await ChatDatabase.removeIfExists(`${dbPath}-shm`);
+            ChatDatabase.validateDatabaseFile(dbPath);
+            await ChatDatabase.deleteSwapBackups(backupFiles);
+        } catch (error) {
+            await ChatDatabase.rollbackDatabaseSwap(dbPath, backupFiles);
+            throw error;
+        }
+    }
+
+    private static async rollbackDatabaseSwap(dbPath: string, backupFiles: DatabaseSwapBackupFile[]): Promise<void> {
+        for (const suffix of DATABASE_SIDECAR_SUFFIXES) {
+            await ChatDatabase.removeIfExists(`${dbPath}${suffix}`);
+        }
+
+        for (const backupFile of backupFiles) {
+            await rename(backupFile.backupPath, backupFile.livePath);
+        }
+    }
+
+    private static async deleteSwapBackups(backupFiles: DatabaseSwapBackupFile[]): Promise<void> {
+        for (const backupFile of backupFiles) {
+            try {
+                await ChatDatabase.removeIfExists(backupFile.backupPath);
+            } catch (error) {
+                console.warn('[DATABASE] Failed to remove restore rollback file:', backupFile.backupPath, error);
+            }
+        }
+    }
+
+    private static async renameIfExists(from: string, to: string): Promise<boolean> {
+        try {
+            await rename(from, to);
+            return true;
+        } catch (error) {
+            if (ChatDatabase.isNotFoundError(error)) {
+                return false;
+            }
+            throw error;
+        }
+    }
+
+    private static async removeIfExists(filePath: string): Promise<void> {
+        await rm(filePath, { force: true });
+    }
+
+    private static isNotFoundError(error: unknown): boolean {
+        return typeof error === 'object'
+            && error !== null
+            && 'code' in error
+            && (error as { code?: unknown }).code === 'ENOENT';
+    }
+
+    private static randomHex(byteLength: number): string {
+        return Buffer.from(randomBytes(byteLength)).toString('hex');
     }
 }

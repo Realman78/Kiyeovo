@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { ChatDatabase, type Chat, type Message } from './database.js';
-import type { OfflineMessage } from '../types.js';
+import type { NetworkMode, OfflineMessage } from '../types.js';
 
 type PersistableMessage = Omit<Message, 'created_at'>;
 
@@ -67,6 +67,44 @@ async function createGroupChat(database: ChatDatabase, groupId: string): Promise
   });
 }
 
+test('createChat rolls back failed participant inserts and leaves connection reusable', async (t) => {
+  const database = new ChatDatabase(':memory:');
+  t.after(() => database.close());
+
+  await createUser(database, 'local_peer', 'local');
+
+  const chatInput: Omit<Chat, 'id' | 'updated_at' | 'network_mode'> & { participants: string[] } = {
+    type: 'direct',
+    name: 'local',
+    created_by: 'local_peer',
+    offline_bucket_secret: 'failed_bucket_secret',
+    notifications_bucket_key: 'failed_notifications_key',
+    status: 'active',
+    offline_last_read_timestamp: 0,
+    offline_last_ack_sent: 0,
+    trusted_out_of_band: false,
+    muted: false,
+    key_version: 0,
+    created_at: new Date(1_000),
+    participants: ['local_peer', 'local_peer'],
+  };
+
+  await assert.rejects(
+    database.createChat(chatInput),
+    /UNIQUE constraint failed: chat_participants.chat_id, chat_participants.peer_id/,
+  );
+  assert.deepEqual(database.getAllChats(), []);
+
+  const chatId = await database.createChat({
+    ...chatInput,
+    participants: ['local_peer'],
+  });
+
+  assert.equal(typeof chatId, 'number');
+  assert.equal(database.getAllChats().length, 1);
+  assert.deepEqual(database.getChatParticipants(chatId).map((participant) => participant.peer_id), ['local_peer']);
+});
+
 function makeTextMessage(input: {
   id: string;
   chatId: number;
@@ -100,6 +138,27 @@ function getChat(database: ChatDatabase, chatId: number): Chat {
 
 function getMessage(database: ChatDatabase, chatId: number, messageId: string): Message | undefined {
   return database.getMessagesByChatId(chatId).find((message) => message.id === messageId);
+}
+
+function tamperBackupCiphertext(artifact: string): string {
+  const headerEnd = artifact.indexOf('\n');
+  assert.notEqual(headerEnd, -1);
+  const ciphertext = Buffer.from(artifact.slice(headerEnd + 1).trim(), 'base64');
+  assert.ok(ciphertext.length > 16);
+  const lastByteIndex = ciphertext.length - 1;
+  ciphertext[lastByteIndex] = (ciphertext[lastByteIndex] ?? 0) ^ 0x01;
+  return artifact.slice(0, headerEnd + 1) + ciphertext.toString('base64');
+}
+
+async function snapshotFile(filePath: string): Promise<{ size: number; bytes: Buffer }> {
+  const [stats, bytes] = await Promise.all([stat(filePath), readFile(filePath)]);
+  return { size: stats.size, bytes };
+}
+
+async function assertFileUnchanged(filePath: string, before: { size: number; bytes: Buffer }): Promise<void> {
+  const after = await snapshotFile(filePath);
+  assert.equal(after.size, before.size);
+  assert.deepEqual(after.bytes, before.bytes);
 }
 
 function makePending(messageId: string, bucketKey: string): {
@@ -152,6 +211,41 @@ async function withoutConsoleWarn<T>(fn: () => Promise<T>): Promise<T> {
     console.warn = originalWarn;
   }
 }
+
+function withoutConsoleLog(fn: () => void): void {
+  const originalLog = console.log;
+  console.log = () => undefined;
+  try {
+    fn();
+  } finally {
+    console.log = originalLog;
+  }
+}
+
+test('encrypted identity insert errors propagate to callers', () => {
+  const database = new ChatDatabase(':memory:');
+  try {
+    withoutConsoleLog(() => {
+      assert.throws(
+        () => database.createEncryptedUserIdentityForMode(
+          'invalid-mode' as NetworkMode,
+          'primary',
+          {
+            peer_id: 'peer_identity_insert_failure',
+            encrypted_data: Buffer.from('encrypted'),
+            salt: Buffer.alloc(32),
+            nonce: Buffer.alloc(12),
+          },
+        ),
+        /constraint/i,
+      );
+    });
+
+    assert.equal(database.getEncryptedUserIdentityForMode('fast', 'primary'), null);
+  } finally {
+    database.close();
+  }
+});
 
 test('direct inbound tryCreateMessage deduplicates by chat client id without mutating chat state', async (t) => {
   const { database, chatId } = await createDirectDatabase();
@@ -592,4 +686,153 @@ test('group sender and member sequences are monotonic and epoch scoped', () => {
   } finally {
     database.close();
   }
+});
+
+test('recordKeyChangeEvent and getKeyChangeEvents round-trip audit rows', () => {
+  const database = new ChatDatabase(':memory:');
+  try {
+    database.recordKeyChangeEvent({
+      peer_id: 'peer_key_change',
+      username: 'alice',
+      old_signing_key: 'old_signing_key',
+      new_signing_key: 'new_signing_key',
+      source: 'unit_test',
+    });
+
+    const events = database.getKeyChangeEvents('peer_key_change');
+
+    assert.equal(events.length, 1);
+    assert.equal(events[0]?.network_mode, 'fast');
+    assert.equal(events[0]?.peer_id, 'peer_key_change');
+    assert.equal(events[0]?.username, 'alice');
+    assert.equal(events[0]?.old_signing_key, 'old_signing_key');
+    assert.equal(events[0]?.new_signing_key, 'new_signing_key');
+    assert.equal(events[0]?.source, 'unit_test');
+    assert.ok(events[0]?.created_at instanceof Date);
+    assert.deepEqual(database.getKeyChangeEvents('other_peer'), []);
+  } finally {
+    database.close();
+  }
+});
+
+test('encrypted database backup hides plaintext, rejects invalid passwords and tampering, and round-trips rows', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'kiyeovo-db-encrypted-backup-test-'));
+  const sourcePath = join(dir, 'source.db');
+  const targetPath = join(dir, 'target.db');
+  const backupPath = join(dir, 'backup.kiyeovo-db-backup');
+  const tamperedPath = join(dir, 'tampered.kiyeovo-db-backup');
+  const backupPassword = 'Correct backup password 0013!';
+  const secretContent = 'ticket-0013 secret message plaintext marker';
+  const originalContent = 'target database original message';
+  let source: ChatDatabase | null = null;
+  let target: ChatDatabase | null = null;
+
+  t.after(async () => {
+    source?.close();
+    target?.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  source = new ChatDatabase(sourcePath);
+  const sourceChatId = await createDirectChat(source, 'source_peer', 'source');
+  await source.createMessage(makeTextMessage({
+    id: 'source_secret_message',
+    chatId: sourceChatId,
+    senderPeerId: 'source_peer',
+    content: secretContent,
+  }));
+  await source.backupEncrypted(backupPath, backupPassword);
+
+  const backupText = await readFile(backupPath, 'utf8');
+  assert.equal(backupText.includes(secretContent), false);
+  assert.equal((await stat(backupPath)).mode & 0o777, 0o600);
+
+  target = new ChatDatabase(targetPath);
+  const targetChatId = await createDirectChat(target, 'target_peer', 'target');
+  await target.createMessage(makeTextMessage({
+    id: 'target_original_message',
+    chatId: targetChatId,
+    senderPeerId: 'target_peer',
+    content: originalContent,
+  }));
+
+  await assert.rejects(
+    target.restoreEncrypted(backupPath, 'wrong backup password'),
+    /incorrect password|corrupted|decrypt/i,
+  );
+  assert.equal(getMessage(target, targetChatId, 'target_original_message')?.content, originalContent);
+
+  await writeFile(tamperedPath, tamperBackupCiphertext(backupText));
+  await assert.rejects(
+    target.restoreEncrypted(tamperedPath, backupPassword),
+    /incorrect password|corrupted|decrypt/i,
+  );
+  assert.equal(getMessage(target, targetChatId, 'target_original_message')?.content, originalContent);
+
+  await target.restoreEncrypted(backupPath, backupPassword);
+  assert.equal(getMessage(target, sourceChatId, 'source_secret_message')?.content, secretContent);
+  assert.equal(target.getMessageCount(sourceChatId), 1);
+});
+
+test('encrypted backup creation rejects weak passwords but restore does not gate on strength', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'kiyeovo-db-weak-password-test-'));
+  const dbPath = join(dir, 'chat.db');
+  const backupPath = join(dir, 'backup.kiyeovo-db-backup');
+  let database: ChatDatabase | null = null;
+
+  t.after(async () => {
+    database?.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  database = new ChatDatabase(dbPath);
+  await createDirectChat(database, 'weakpw_peer', 'weakpw');
+
+  // Too short, and missing character classes: both rejected before any file is written.
+  await assert.rejects(database.backupEncrypted(backupPath, 'short1!A'), /at least 12 characters/);
+  await assert.rejects(database.backupEncrypted(backupPath, 'alllowercaseletters'), /lowercase, uppercase/);
+  await assert.rejects(stat(backupPath), /ENOENT/); // rejected before any artifact is written
+
+  // A policy-compliant password creates a backup that round-trips; restore accepts it
+  // without re-checking policy (the GCM tag is the real gate).
+  const strongPassword = 'Strong backup pw 1!';
+  await database.backupEncrypted(backupPath, strongPassword);
+  await database.restoreEncrypted(backupPath, strongPassword);
+});
+
+test('malformed encrypted restore is rejected before pre-login path touches database sidecars', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'kiyeovo-db-malformed-restore-test-'));
+  const dbPath = join(dir, 'chat.db');
+  const malformedPath = join(dir, 'malformed.kiyeovo-db-backup');
+  const originalContent = 'pre-login original message';
+  let database: ChatDatabase | null = null;
+
+  t.after(async () => {
+    database?.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  database = new ChatDatabase(dbPath);
+  const chatId = await createDirectChat(database, 'prelogin_peer', 'prelogin');
+  await database.createMessage(makeTextMessage({
+    id: 'prelogin_original_message',
+    chatId,
+    senderPeerId: 'prelogin_peer',
+    content: originalContent,
+  }));
+
+  const dbBefore = await snapshotFile(dbPath);
+  const walBefore = await snapshotFile(`${dbPath}-wal`);
+  const shmBefore = await snapshotFile(`${dbPath}-shm`);
+  await writeFile(malformedPath, 'not a Kiyeovo encrypted database backup');
+
+  await assert.rejects(
+    ChatDatabase.restoreEncryptedAtPath(dbPath, malformedPath, 'backup password'),
+    /Invalid database backup/i,
+  );
+
+  await assertFileUnchanged(dbPath, dbBefore);
+  await assertFileUnchanged(`${dbPath}-wal`, walBefore);
+  await assertFileUnchanged(`${dbPath}-shm`, shmBefore);
+  assert.equal(getMessage(database, chatId, 'prelogin_original_message')?.content, originalContent);
 });

@@ -136,7 +136,11 @@ Security model:
 - scrypt KDF
 - optional OS keychain storage (`keytar`)
 - recovery phrase (BIP39)
+- recovery phrase login normalizes entered phrases by trimming, lowercasing, and collapsing whitespace before BIP39 validation and phrase-derived password derivation
 - login attempts + cooldown enforcement
+- new identity creation stores remembered passwords in the OS keychain only after the encrypted primary/recovery identity rows are saved; identity persistence failures abort startup and surface through the initialization error/retry path
+- successful recovery phrase login requires setting a new strong password, then rewrites the primary password-encrypted row and recovery phrase row in one transaction before optionally storing the new password in the OS keychain
+- contact signing keys are pinned trust-on-first-use state in `users` only when the row carries a non-empty registration `signature` from direct KX/DHT verification; creator-asserted group roster seeds keep `signature` empty and remain unpinned until a direct exchange verifies them. If a verified known contact's signature fails against the pinned signing key, a differing DHT/incoming signing key is recorded in `key_change_events` and the message/key-exchange path remains unverified without replacing the pinned key. First-contact, unverified roster-seed adoption, and missing-key population still pin after successful signature verification. Renderer warning/confirmation gating for recorded key changes is a follow-up.
 
 Current KDF defaults live in `src/core/constants.ts`:
 - `IDENTITY_SCRYPT_N = 2 ** 18`
@@ -147,7 +151,9 @@ These defaults are intentionally conservative for broader desktop compatibility.
 Trusted profile import/export is also supported for out-of-band onboarding:
 - exported profiles are signed, password-encrypted files containing username, peer ID, signing/offline/notifications public keys, and a default inbox key
 - importing a verified profile can seed a trusted direct chat without the normal username lookup / first-contact discovery path
+- importing a profile whose peer ID matches the local identity is rejected before contact lookup or chat creation, so users cannot trust their own exported profile as a contact
 - trusted imported chats are tracked separately in chat state (`trusted_out_of_band`) so the app can preserve that bootstrap behavior explicitly
+- trusted contact imports persist the contact user row and direct chat in one database transaction, so chat creation failure rolls back the contact insert and leaves retries clean
 - export does **not** require registration: the embedded username is only a display label (the importer can rename via `customName`), and the trusted chat is built from the profile's default inbox key, so a peer can export and be reachable out-of-band without ever publishing a DHT username
 - the `profile:export` IPC takes `(password, sharedSecret, filename, label)`. The renderer collects the destination via the native save dialog and a required display label (prefilled with the current username when registered). The main process validates inputs (label trimmed and bounded to 2–64 chars to match the import-side username constraint, file path required, `.kiyeovo` extension ensured) and embeds `label` as the profile username, falling back to the registered username when no label is provided
 - in the UI, export lives in a dedicated `ExportDialog` opened from the `Profile` tab (available in both registered and unregistered states); it is no longer part of `UserDialog`, which now covers only peer ID, change username, and unregister
@@ -175,6 +181,8 @@ Inbound first-contact behavior depends on contact mode:
 - `block` - rejects or drops the request before conversation bootstrap
 
 Contact attempts are persisted so the UI can show pending/recent inbound requests and the core can enforce timeout/cancellation/rate-limit behavior consistently across restarts.
+
+Inbound new-contact prompts resolve lookupByPeerId before prompting and display the DHT-verified username, not the self-asserted wire username. If the peer cannot be resolved in the username DHT, no spoofable prompt is shown; if the claimed and resolved usernames differ, the prompt and saved contact use the resolved username.
 
 #### 5.2 Key exchange
 
@@ -211,6 +219,8 @@ Cross-peer identity:
 
 Wire format — the plaintext that gets encrypted is a strict version-1 **application-message envelope** rather than a bare string: `{ v: 1, cid, kind, payload }`. Supported kinds are `text`, `file_offer`, `file_offer_cancel`, and `file_offer_nack`; a text payload contains `{ text, reply_to? }`. This keeps the cid, message kind, payload, and reply linkage private on the transport **and** in offline DHT-at-rest payloads. Payloads are shape- and bounds-validated before dispatch. Bare text, missing/unknown kinds, unsupported versions, and malformed envelopes are ignored and never rendered as text. Kiyeovo has no pre-1.0 peer compatibility path.
 
+Inbound JSON protocol stream reads (`chat`, `key-exchange`, `call-signal`, and `bucket-nudge`) are byte-capped per protocol and use an absolute read deadline. Oversize or stalled reads abort/reset the underlying libp2p stream before parsing so unauthenticated peers cannot force unbounded buffering. App stream handlers set explicit per-connection inbound stream caps, and node startup configures inbound upgrade count/rate/time bounds for the installed libp2p connection manager.
+
 One shared codec/dispatcher is used by direct realtime, direct offline, group GossipSub, and group offline catch-up/late-gap repair. The envelope + cid are built **once per send** and reused across delivery routes, so online/offline overlap dedupes on the same id. The outbound application-message API requires a caller-supplied id and encodes persistence ownership in its request type: text is transport-owned, a file offer is caller-owned (the file subsystem persists its row), and cancel/nack controls own no visible row. Direct application messages reuse the established direct session or existing offline bucket; group application messages retain the normal GossipSub + signed offline-backup behavior. Caller-owned rows must exist before transport begins, while invisible controls never create a `messages` row.
 
 File replies use the file-transfer protocol rather than the text envelope. A signed `file_offer` may carry optional `replyToCid` metadata, validated with the same cid shape/length rules and included in the signed offer payload. When present, both outgoing file rows and incoming pending-offer rows persist it as `reply_to_client_id`; the live pending-file event carries the same value so the renderer can show the quote before acceptance. Direct files are fully downloadable; group file offers preserve reply metadata through offer delivery and can be accepted by group members through the same pull protocol.
@@ -244,6 +254,7 @@ Group system uses two planes:
 - membership changes (join/leave/kick) rotate group key (`key_version`)
 - previous topic may stay during grace window to reduce transition gaps
 - sender sequence boundaries and per-member progress are tracked for epoch-safe offline replay
+- if a closed epoch (`used_until !== null`) lacks authoritative sender boundaries, offline catch-up caps each sender at the pre-scan local high-water mark; live epochs remain uncapped and late-gap repair at or below that mark is still allowed
 
 #### 6.3 Encrypted group-info metadata
 
@@ -387,6 +398,7 @@ Behavior highlights:
 - pre-check for direct contact and active connectivity before offer
 - outgoing ring timeout (30s)
 - busy/reject/end handling with local cleanup on both sides
+- blocking a direct-call peer ends any active local 1:1 call state, clears that peer's direct session/pending key exchange, and best-effort closes existing libp2p connections to that peer
 - media controls: mute/deafen/camera
 - camera is independent per participant; one side may enable video while the other stays audio-only
 - visual mode starts automatically when camera or screen-share media appears, but fullscreen remains manual
@@ -422,6 +434,8 @@ Coordination model:
 - **writer continuity:** a graceful leave hands authority to a deterministic successor (group creator if present, else lowest-sorted participant) with a roster-version bump; a writer crash uses the same deterministic failover, so peers with the same roster pick the same successor. Rosters are signed and reconciled by version, and a roster naming a writer other than the deterministic failover for its participant set is rejected
 - **no-renegotiation video:** a `sendrecv` video transceiver is pre-negotiated so camera toggles ride `replaceTrack` plus an app-level camera-state signal, never mid-call SDP renegotiation (same approach as 1:1)
 - recovery spans network change, peer crash, libp2p reconnect blips, and pure WebRTC failure; the renderer-side glare tie-break, timestamp-based call ordering, and cleanup-ends-session behavior are described in §12
+- incoming group-call control and pair signals from blocked peers are dropped before call state changes or renderer notifications, even if the blocked peer still shares a group with the local user
+- outbound group-call pair signals to blocked peers are denied in core before signing or sending, and blocking a live group-call participant notifies the renderer to close that peer's mesh connection and exclude them from reconnect probes until the session resets
 
 ---
 
@@ -431,18 +445,24 @@ Primary categories:
 
 1. Username registry
    - by-name and by-peer mapping
-   - signed payload with validator/select/update logic
+   - records contain `{ peerID, networkMode, username, signingPublicKey, offlinePublicKey, timestamp, kind, signature, peerBinding }`
+   - `networkMode` is required, included in the canonical payload, and must match the mode-specific username DHT namespace of the key; this prevents replaying a valid registration between fast and anonymous namespaces
+   - `signature` is the application Ed25519 signature over the canonical payload, and `peerBinding` is a second Ed25519 signature using the libp2p private key for `peerID` over `kiyeovo-username-peer-binding:v1:` plus the same canonical payload; both signature fields are excluded from the canonical payload
+   - validators, selectors, update validation, and local lookup paths reject records with missing or invalid signatures, missing or invalid peer binding, DHT key-slot or network-mode mismatches, stale timestamps, future timestamps, or usernames outside the shared 3–32 character alphanumeric/underscore policy
+   - username DHT validators reject record values above `8 KiB` before JSON parsing
+   - the patched kad-dht PUT_VALUE handler treats datastore not-found as a first write, but when an existing record is present any `validateUpdate` exception rejects the incoming value and returns the existing record, so update validators fail closed
 
 2. Direct offline stores
    - per-recipient bucket model
-   - message/store signatures + validateUpdate
+   - message/store signatures + validateUpdate; per-message signatures bind ciphertext/sender-info hashes, bucket key, timestamp, type, expiry, and hybrid AES metadata hashes
+   - validators, selectors, and validateUpdate reject compressed records above `64 KiB` before gunzip/JSON parsing
    - local UX capacity view is derived from the local mirror plus actively queued pending writes; failed offline-backup rows remain retryable local state but do not consume capacity
    - effective direct capacity is split into `30` sendable slots, `10` reserved group-control slots, and `1` reserved ACK slot
 
 3. Group offline stores
    - sender buckets per group and epoch
    - local UX capacity view shows only the current sender epoch (the bucket the next group message would use)
-   - group fullness is tracked by both message count and compressed store size (`64 KiB` app-level cap)
+   - group fullness is tracked by both message count and compressed store size (`64 KiB` app-level cap), and validator/selector/update paths reject oversized compressed records before gunzip/JSON parsing
 
 4. Group info records
    - `latest` pointer record
@@ -469,6 +489,7 @@ Core tables include:
 - `pending_offline_sends` (durable 1:1 offline-send queue)
 - `group_offline_sent_messages`
 - `pending_group_offline_backups` (durable group offline-backup retry)
+- `key_change_events` (mode-scoped audit rows for observed contact signing-key changes that were not auto-adopted)
 - `group_key_history`
 - `group_offline_cursors`
 - `group_pending_acks`
@@ -501,6 +522,7 @@ Current behavior:
 Operational notes:
 - bootstrap announce addresses are raw announce multiaddrs, not client-facing `/p2p/...` addresses
 - the process prints its Peer ID on startup; client-facing bootstrap entries are formed as `<announce_addr>/p2p/<peerId>`
+- the bootstrap Peer ID private key is persisted with owner-only permissions; startup aborts instead of replacing an existing key that cannot be loaded
 - anonymous bootstrap does not spawn Tor by itself; if you run `BOOTSTRAP_NETWORK_MODE=anonymous`, your onion service must forward the announced onion address to the local bootstrap listener (default: TCP 9001)
 - in deployment mode (see 11.6) a missing or invalid announce address aborts startup, and a corrupt identity file aborts instead of rotating the Peer ID
 
@@ -513,6 +535,7 @@ Operational notes:
 - announce addresses come from `RELAY_ANNOUNCE_ADDRS`
 - identity persists at `RELAY_PEER_ID_FILE` (default `./relay-peer-id.bin`)
 - the process prints its Peer ID on startup; client-facing relay entries are formed as `<announce_addr>/p2p/<peerId>`
+- the relay Peer ID private key is persisted with owner-only permissions; startup aborts instead of replacing an existing key that cannot be loaded
 - optional tuning env vars include `RELAY_MAX_RESERVATIONS`, `RELAY_RESERVATION_TTL_MS`, `RELAY_DEFAULT_DURATION_LIMIT_MS`, and `RELAY_DEFAULT_DATA_LIMIT_BYTES`
 - in deployment mode (see 11.6) a missing or invalid announce address aborts startup, and a corrupt identity file aborts instead of rotating the Peer ID
 - there is no relay layer in anonymous mode
@@ -539,7 +562,7 @@ Current navigation rollout status:
 - `Settings` is the single settings entry point and is a rail-only page with page-native action rows for About, Notifications & Sounds, downloads, network-mode switching, application configuration, database backup, account deletion, and quitting the app; the duplicate footer settings button and legacy settings modal have been removed
 - in anonymous mode, the Settings page also exposes Tor transport settings; edits require explicit confirmation and an app restart, and a failed automatic restart leaves a visible manual-restart action after the settings have been saved
 - changing network mode requires confirmation and an app restart; if the mode is saved but automatic restart fails, the Settings page keeps the running mode distinct from the pending saved mode and tells the user that a manual restart is required
-- database backup uses a native save dialog and leaves the user on Settings after completion; the backup is a raw SQLite copy and is not encrypted as a whole (encrypted identity blobs remain password-encrypted, but decrypted message content and other local data are readable), so it must be stored as sensitive data; account deletion requires a typed confirmation before wiping local data and restarting, removes the resolved `kiyeovo-uploads/` directory (pasted images and generated text uploads) while leaving downloads untouched, and uses a native error dialog before still restarting if upload cleanup fails after the database wipe; closing the confirmation dialog always clears the typed phrase
+- database backup uses a native save dialog, then asks for a separate backup password before leaving the user on Settings after completion. The backup artifact is a `KIYEOVO-DB-BACKUP` version-1 file: a JSON header line (magic/version, scrypt parameters, 32-byte salt, 12-byte nonce, AES-256-GCM/base64 encoding) plus a base64 AES-256-GCM ciphertext of the serialized SQLite bytes. The backup password is user-chosen and is not the login password; scrypt + AES-256-GCM matches the profile export style and the file is written with mode `0600`. Restore, including the pre-login restore-from-file path, authenticates and decrypts the artifact first, writes the plaintext only to a temp file next to `chat.db`, validates it as a Kiyeovo SQLite database, and only then closes/swaps the live database. The shared restore helper moves `chat.db`, `chat.db-wal`, and `chat.db-shm` to rollback `.bak` names, renames the validated temp file into place, removes stale sidecars so old WAL state cannot apply to the new DB, and restores the `.bak` set if the replacement fails validation/opening; account deletion requires a typed confirmation before wiping local data and restarting, removes the resolved `kiyeovo-uploads/` directory (pasted images and generated text uploads) while leaving downloads untouched, and uses a native error dialog before still restarting if upload cleanup fails after the database wipe; closing the confirmation dialog always clears the typed phrase
 - quitting from Settings requires confirmation and then uses Electron's existing graceful shutdown path, which closes network services and the database before process exit
 - `Help` is a rail-only Questions & Answers page with local searchable accordion content and category filters for explaining user-facing P2P concepts such as the app's high-level P2P/DHT model, dual network modes, anonymous mode, username registration, trusted profiles, offline delivery, offline file-sharing limits, bootstrap/relay servers, STUN/TURN call setup, troubleshooting, security/privacy expectations, backups, self-hosting, and feedback reporting
 - `Profile` is a rail-only page that is the single home for identity management (peer ID, username registration, change username, auto-register toggle, trusted-profile export, and unregister); it reuses the existing register and identity dialogs rather than re-implementing them inline. The auto-register toggle is a registered-only row on the tab itself (moved out of `UserDialog`); trusted-profile export is reachable in both states via `ExportDialog`
@@ -615,6 +638,7 @@ Current behavior:
 - calls are fast-mode only and use WebRTC media in the renderer
 - the default ICE list in `src/core/network/default-infrastructure.ts` is currently empty
 - users can add runtime ICE overrides from Setup in fast mode
+- in anonymous mode, Electron applies `disable_non_proxied_udp` as a WebRTC IP-handling backstop so accidental peer connections fail closed instead of gathering real-IP candidates
 - supported entry types are `stun`, `turn`, and `turns`
 - TURN entries require username + credential
 - multiple ICE servers are supported and passed to `RTCPeerConnection` in configured order; the browser's ICE agent may gather and check candidates in parallel, so this is not a strict first-server-then-next retry order
@@ -998,6 +1022,7 @@ Call UI state:
      - leave `OnlyLoadAppFromAsar` for a later follow-up
    - preload is bundled as a standalone artifact so it remains compatible with sandboxed Electron preload constraints
    - the renderer bridge is an explicit whitelist exposed through `contextBridge`; raw `ipcRenderer` is not exposed to the UI
+   - native open/save dialog paths are treated as main-issued session capabilities: file metadata and database backup/restore IPC accept only non-canceled dialog results granted by main, database backup/restore artifacts are password-encrypted and GCM-authenticated before any restore replacement, and metadata rejects symlinks/non-regular files
    - unpackaged Linux development may still require machine-level `chrome-sandbox` helper setup on some VM/distro combinations
    - IPC sender validation in the main process:
      - only the main app window's main frame can invoke privileged IPC handlers

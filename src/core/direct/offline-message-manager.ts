@@ -6,6 +6,7 @@ import { ed25519 } from '@noble/curves/ed25519';
 import { sha256 } from '@noble/hashes/sha2';
 import { errStr, generalErrorHandler } from '../utils/general-error.js';
 import {
+    DIRECT_OFFLINE_STORE_MAX_DECOMPRESSED_BYTES,
     MAX_MESSAGES_PER_STORE,
     MESSAGE_TTL,
     OFFLINE_ACK_RESERVE,
@@ -18,6 +19,22 @@ import { log } from '../../shared/logger.js';
 
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
+const DIRECT_OFFLINE_GUNZIP_OPTS = { maxOutputLength: DIRECT_OFFLINE_STORE_MAX_DECOMPRESSED_BYTES };
+
+function hashBase64Field(value: string): string {
+    return Buffer.from(sha256(Buffer.from(value, 'base64'))).toString('base64');
+}
+
+/**
+ * A direct offline bucket key contains the pairwise bucket secret in its middle
+ * segment; logging it verbatim leaks that secret into shareable log files. Render
+ * a stable, non-reversible tag (namespace + short hash) for diagnostics instead.
+ */
+export function redactBucketKey(bucketKey: string): string {
+    const namespace = bucketKey.split('/')[1] ?? 'offline';
+    const tag = Buffer.from(sha256(Buffer.from(bucketKey, 'utf8'))).toString('hex').slice(0, 12);
+    return `${namespace}/#${tag}`;
+}
 
 /**
  * Manages offline message storage and retrieval using DHT
@@ -181,7 +198,7 @@ export class OfflineMessageManager {
         appendBucketKey: boolean = true
     ): Promise<OfflineMessageStore> {
         const fetchPromises = bucketKeys.map(async (bucketKey) => {
-            log('fetching messages for bucket', bucketKey);
+            log('fetching messages for bucket', redactBucketKey(bucketKey));
             const key = new TextEncoder().encode(bucketKey);
             const bucketMessages: OfflineMessage[] = [];
             let valueEventCount = 0;
@@ -197,7 +214,7 @@ export class OfflineMessageManager {
                         valueEventCount++;
 
                         const compressedBuffer = Buffer.from(event.value);
-                        const decompressedBuffer = await gunzipAsync(compressedBuffer);
+                        const decompressedBuffer = await gunzipAsync(compressedBuffer, DIRECT_OFFLINE_GUNZIP_OPTS);
                         const store = JSON.parse(decompressedBuffer.toString('utf8')) as unknown;
 
                         if (!store || typeof store !== 'object' || !('messages' in store) || !Array.isArray(store.messages) || store.messages.length === 0) continue;
@@ -225,7 +242,7 @@ export class OfflineMessageManager {
                             .join(',');
 
                         log(
-                            `[OFFLINE][READ] bucket=${bucketKey.slice(0, 48)}... value#${valueEventCount} ` +
+                            `[OFFLINE][READ] bucket=${redactBucketKey(bucketKey)} value#${valueEventCount} ` +
                             `storeVersion=${storeVersion} storeLastUpdated=${storeLastUpdated} ` +
                             `raw=${store.messages.length} valid=${validMessages.length} ` +
                             `sampleIds=[${validIds}]`
@@ -240,20 +257,20 @@ export class OfflineMessageManager {
                 }
 
                 if (!foundValue) {
-                    log(`No value found in DHT for bucket key: ${bucketKey}`);
+                    log(`No value found in DHT for bucket key: ${redactBucketKey(bucketKey)}`);
                 } else {
                     const uniqueIds = new Set(bucketMessages.map(m => m.id)).size;
                     const duplicateCount = bucketMessages.length - uniqueIds;
                     const repeatedStoreWrites = parsedStoreCount - storeSignatures.size;
                     log(
-                        `[OFFLINE][READ] bucket=${bucketKey.slice(0, 48)}... summary ` +
+                        `[OFFLINE][READ] bucket=${redactBucketKey(bucketKey)} summary ` +
                         `valueEvents=${valueEventCount} parsedStores=${parsedStoreCount} uniqueStores=${storeSignatures.size} ` +
                         `repeatedStorePayloads=${Math.max(0, repeatedStoreWrites)} accumulatedMessages=${bucketMessages.length} duplicatesById=${Math.max(0, duplicateCount)}`
                     );
                 }
 
             } catch (error: unknown) {
-                generalErrorHandler(error, `Failed to fetch offline messages for bucket: ${bucketKey}`);
+                generalErrorHandler(error, `Failed to fetch offline messages for bucket: ${redactBucketKey(bucketKey)}`);
             }
 
             return bucketMessages;
@@ -409,7 +426,8 @@ export class OfflineMessageManager {
      * 1. Encrypt content and sender info with recipient's RSA public key
      * 2. Sign the hashes of encrypted data (for DHT validation)
      *
-     * The signature is over: {content_hash, sender_info_hash, timestamp, bucket_key}
+     * The signature binds ciphertext/sender-info hashes, timestamp, bucket key,
+     * message type, expiry, and hybrid AES metadata hashes.
      * This allows DHT validators to verify writes without decryption.
      */
     static createOfflineMessage(
@@ -475,11 +493,20 @@ export class OfflineMessageManager {
             const encryptedSenderInfoB64 = encryptedSenderInfo.toString('base64');
 
             const encryptedContentBuf = Buffer.from(encryptedContentB64, 'base64');
+            const expiresAt = timestamp + MESSAGE_TTL;
             const signedPayload: OfflineSignedPayload = {
                 content_hash: Buffer.from(sha256(encryptedContentBuf)).toString('base64'),
                 sender_info_hash: Buffer.from(sha256(encryptedSenderInfo)).toString('base64'),
                 timestamp,
                 bucket_key: bucketKey,
+                message_type: messageType,
+                expires_at: expiresAt,
+                ...(messageType === 'hybrid' && encryptedAesKey !== undefined && aesIv !== undefined
+                    ? {
+                        aes_key_hash: hashBase64Field(encryptedAesKey),
+                        aes_iv_hash: hashBase64Field(aesIv),
+                    }
+                    : {}),
                 ...(ackOnly ? { ack_only: true } : {}),
             };
 
@@ -497,7 +524,7 @@ export class OfflineMessageManager {
                 ...(encryptedAesKey !== undefined && { encrypted_aes_key: encryptedAesKey }),
                 ...(aesIv !== undefined && { aes_iv: aesIv }),
                 timestamp,
-                expires_at: timestamp + MESSAGE_TTL
+                expires_at: expiresAt
             };
         } catch (error: unknown) {
             const errorMessage = errStr(error);
@@ -564,6 +591,53 @@ export class OfflineMessageManager {
             }
             if (message.timestamp > Date.now() + OFFLINE_MESSAGE_MAX_FUTURE_SKEW_MS) {
                 log('Offline message timestamp too far in future');
+                return false;
+            }
+
+            if (message.message_type !== 'encrypted' && message.message_type !== 'hybrid') {
+                log('Offline message message_type invalid');
+                return false;
+            }
+            if (message.signed_payload.message_type !== message.message_type) {
+                log('Offline message message_type mismatch');
+                return false;
+            }
+            if (!Number.isFinite(message.expires_at) || message.expires_at <= 0) {
+                log('Offline message expires_at invalid');
+                return false;
+            }
+            if (!Number.isFinite(message.signed_payload.expires_at) || message.signed_payload.expires_at <= 0) {
+                log('Offline message signed expires_at invalid');
+                return false;
+            }
+            if (message.expires_at !== message.signed_payload.expires_at) {
+                log('Offline message expires_at mismatch');
+                return false;
+            }
+
+            if (message.message_type === 'hybrid') {
+                if (
+                    typeof message.encrypted_aes_key !== 'string' || message.encrypted_aes_key.length === 0 ||
+                    typeof message.aes_iv !== 'string' || message.aes_iv.length === 0
+                ) {
+                    log('Offline hybrid message missing AES fields');
+                    return false;
+                }
+                if (hashBase64Field(message.encrypted_aes_key) !== message.signed_payload.aes_key_hash) {
+                    log('Offline message aes_key_hash mismatch');
+                    return false;
+                }
+                if (hashBase64Field(message.aes_iv) !== message.signed_payload.aes_iv_hash) {
+                    log('Offline message aes_iv_hash mismatch');
+                    return false;
+                }
+            } else if (
+                message.encrypted_aes_key !== undefined ||
+                message.aes_iv !== undefined ||
+                message.signed_payload.aes_key_hash !== undefined ||
+                message.signed_payload.aes_iv_hash !== undefined
+            ) {
+                log('Offline encrypted message contains AES fields');
                 return false;
             }
 

@@ -247,6 +247,7 @@ export interface KiyeovoAPI {
   onGroupCallControlSignalReceived: (callback: (data: GroupCallControlSignalReceivedEvent) => void) => Unsubscribe;
   onGroupCallPairSignalReceived: (callback: (data: GroupCallPairSignalReceivedEvent) => void) => Unsubscribe;
   onGroupCallStateChanged: (callback: (data: GroupCallStateChangedEvent) => void) => Unsubscribe;
+  onGroupCallPeerBlocked: (callback: (peerId: string) => void) => Unsubscribe;
   onGroupCallError: (callback: (data: GroupCallErrorEvent) => void) => Unsubscribe;
 
   onKeyExchangeSent: (callback: (data: KeyExchangeEvent) => void) => Unsubscribe;
@@ -463,9 +464,9 @@ export interface KiyeovoAPI {
   restartApp: () => Promise<{ success: boolean; error: string | null }>;
   quitApp: () => Promise<{ success: boolean; error: string | null }>;
   deleteAccountAndData: () => Promise<{ success: boolean; error: string | null }>;
-  backupDatabase: (backupPath: string) => Promise<{ success: boolean; error: string | null }>;
-  restoreDatabase: (backupPath: string) => Promise<{ success: boolean; error: string | null }>;
-  restoreDatabaseFromFile: (backupPath: string) => Promise<{ success: boolean; error: string | null }>;
+  backupDatabase: (backupPath: string, password: string) => Promise<{ success: boolean; error: string | null }>;
+  restoreDatabase: (backupPath: string, password: string) => Promise<{ success: boolean; error: string | null }>;
+  restoreDatabaseFromFile: (backupPath: string, password: string) => Promise<{ success: boolean; error: string | null }>;
 
   showNotification: (options: {
     title: string;

@@ -157,6 +157,12 @@ export const BOOTSTRAP_PORT = 9000; // Default TCP port for the dedicated bootst
  * DHT settings
  */
 export const USERNAME_RECORD_PREFIX = 'kiyeovo-user-';
+export const USERNAME_MIN_LENGTH = 3;
+export const USERNAME_MAX_LENGTH = 32;
+export const USERNAME_REGEX = /^[A-Za-z0-9_]+$/;
+// Username records are small signed JSON blobs; 8 KiB leaves generous headroom
+// while rejecting oversized values before JSON parsing.
+export const USERNAME_RECORD_MAX_BYTES = 8 * 1024;
 export const K_BUCKET_SIZE = 20; // Kademlia bucket size for routing table maintenance
 export const PREFIX_LENGTH = 6; // Kademlia routing-table prefix length
 export const MDNS_SERVICE_TAG = 'kiyeovo.local';
@@ -312,6 +318,12 @@ export const DATABASE_CLEANUP_INTERVAL = 30 * MINUTE; // 30 minutes
 export const MAX_MESSAGES_PER_STORE = 41; // Hard cap for one offline DHT store payload (incl. ack reserve)
 export const OFFLINE_CONTROL_MESSAGE_RESERVE = 10; // Slots reserved for offline control traffic
 export const OFFLINE_ACK_RESERVE = 1; // Slot reserved for a standalone (superseding) offline ACK
+// Defensive cap to reject direct offline DHT values before gzip inflation.
+export const DIRECT_OFFLINE_STORE_MAX_COMPRESSED_BYTES = 64 * 1024; // 64KB
+// Cap on the *decompressed* size so a compression bomb (~1030:1 DEFLATE ratio on
+// a 64KB value ≈ 66MB) cannot exhaust memory during gunzip. Real stores are mostly
+// incompressible base64 ciphertext, so 2MiB is >30x headroom over any legit store.
+export const DIRECT_OFFLINE_STORE_MAX_DECOMPRESSED_BYTES = 2 * 1024 * 1024; // 2MiB
 export const MESSAGE_TTL = 7 * DAY; // 7 days
 export const OFFLINE_MESSAGE_MAX_FUTURE_SKEW_MS = 2 * MINUTE; // 2 minutes
 export const OFFLINE_ACK_MAX_FUTURE_SKEW_MS = 10 * MINUTE; // 10 minutes
@@ -350,7 +362,25 @@ export const FILE_PULL_CONFIRM_TIMEOUT = 30 * SECOND; // Last chunk sent, awaiti
 export const SILENT_REJECTION_THRESHOLD_GLOBAL = 20; // After N global rejections, stop responding (bandwidth optimization)
 export const SILENT_REJECTION_THRESHOLD_PER_PEER = 5; // After N rejections to same peer, stop responding (bandwidth optimization)
 export const CHATS_TO_CHECK_FOR_OFFLINE_MESSAGES = 10; // Max chats scanned per offline-message check pass
+export const INBOUND_STREAM_READ_TIMEOUT_MS = 30 * SECOND; // Default deadline for one inbound JSON stream read
+export const MAX_CHAT_ENVELOPE_BYTES = 64 * 1024; // Direct chat envelope cap
+export const MAX_CALL_SIGNAL_ENVELOPE_BYTES = 256 * 1024; // WebRTC SDP/ICE signaling envelope cap
+export const MAX_KEY_EXCHANGE_ENVELOPE_BYTES = 128 * 1024; // Signed key-exchange envelope cap
+export const MAX_BUCKET_NUDGE_ENVELOPE_BYTES = 16 * 1024; // Offline/refetch nudge envelope cap
+export const MAX_INBOUND_STREAMS_CHAT = 8; // Per-connection chat protocol streams
+export const MAX_INBOUND_STREAMS_BUCKET_NUDGE = 4; // Per-connection offline/refetch nudge streams
+export const MAX_INBOUND_STREAMS_CALL_SIGNAL = 8; // Per-connection WebRTC signaling streams
+export const MAX_INBOUND_STREAMS_FILE_TRANSFER = 8; // Per-connection file-pull streams
 export const MAX_MESSAGE_CONTENT_LENGTH = 2048; // Max direct/group message characters
+// Concurrency gate for unauthenticated first-contact work on /chat (inbound read +
+// key-exchange crypto from a peer with no session/chat). Established peers bypass it.
+export const MAX_UNAUTH_KEY_EXCHANGE_GLOBAL = 16; // Concurrent unauth first-contact handlers, all peers
+export const MAX_UNAUTH_KEY_EXCHANGE_PER_PEER = 2; // Concurrent unauth first-contact handlers, one peer
+
+export const CHAT_NODE_MAX_CONNECTIONS = 100;
+export const CHAT_NODE_INBOUND_CONNECTION_THRESHOLD_PER_HOST = 5; // New inbound connections per host per second
+export const CHAT_NODE_MAX_INCOMING_PENDING_CONNECTIONS = 10; // Parallel inbound upgrades before admission
+export const CHAT_NODE_INBOUND_UPGRADE_TIMEOUT_MS = 15 * SECOND;
 
 /**
  * Group chat constants
@@ -384,6 +414,13 @@ export const GROUP_INFO_REPUBLISH_RETRY_STEADY_DELAY = 10 * MINUTE; // 10 minute
 export const GROUP_INFO_REPUBLISH_MAX_ATTEMPTS = 20; // Retry cap before falling back to steady republish cadence
 // Defensive cap to keep group offline DHT values bounded even when message limit is increased.
 export const GROUP_OFFLINE_STORE_MAX_COMPRESSED_BYTES = 64 * 1024; // 64KB
+// Decompressed-size ceiling for group offline stores (see the direct-offline
+// counterpart above); rejects gzip bombs before they can exhaust memory.
+export const GROUP_OFFLINE_STORE_MAX_DECOMPRESSED_BYTES = 2 * 1024 * 1024; // 2MiB
+// Pre-parse ceiling for the (uncompressed) group-info latest/versioned DHT records.
+// These are small signed roster-metadata blobs; 256KiB is generous headroom while
+// bounding JSON.parse work on this unauthenticated, network-facing validator path.
+export const GROUP_INFO_RECORD_MAX_BYTES = 256 * 1024; // 256KiB
 export const GROUP_OFFLINE_LOCAL_CACHE_TTL_MS = 15 * MINUTE; // 15 minutes
 export const GROUP_OFFLINE_LOCAL_CACHE_MAX_ENTRIES = 256; // Max cached group offline snapshots
 export const GROUP_OFFLINE_CLEANUP_INTERVAL_MS = 30 * MINUTE; // 30 minutes

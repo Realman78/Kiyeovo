@@ -1,11 +1,29 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { generateKeyPair } from '@libp2p/crypto/keys';
+import type { PeerId, PrivateKey } from '@libp2p/interface';
+import { peerIdFromPrivateKey, peerIdFromString } from '@libp2p/peer-id';
 import { ed25519 } from '@noble/curves/ed25519';
-import { NETWORK_MODE_CONFIG, REREGISTRATION_INTERVAL, USERNAME_MAX_FUTURE_SKEW_MS } from '../constants.js';
-import type { UserRegistration } from '../types.js';
+import {
+  NETWORK_MODE_CONFIG,
+  NETWORK_MODES,
+  REREGISTRATION_INTERVAL,
+  USERNAME_MAX_FUTURE_SKEW_MS,
+  USERNAME_MAX_LENGTH,
+  USERNAME_RECORD_MAX_BYTES,
+} from '../constants.js';
+import { KeyExchange } from '../direct/key-exchange.js';
+import { ChatDatabase } from '../db/database.js';
+import { EncryptedUserIdentity } from '../identity/encrypted-user-identity.js';
+import type { ChatNode, NetworkMode, UserRegistration } from '../types.js';
 import { hashUsingSha256 } from '../utils/crypto.js';
 import {
+  PEER_BINDING_DOMAIN,
+  canonicalUsernameRegistrationPayloadJson,
+  isUsernameRegistrationRecord,
   signUsernameRegistrationPayload,
+  signUsernameRegistrationPeerBinding,
+  verifyUsernameRegistrationPeerBinding,
   verifyUsernameRegistrationSignature,
 } from './username-record.js';
 import {
@@ -13,11 +31,24 @@ import {
   usernameRegistrationValidateUpdate,
   usernameRegistrationValidator,
 } from './username-dht-validator.js';
+import { UsernameRegistry } from './username-registry.js';
 
 const encoder = new TextEncoder();
-const USERNAME_PREFIX = NETWORK_MODE_CONFIG.fast.dhtNamespaces.username;
 const PRIVATE_A = new Uint8Array(32).fill(7);
 const PRIVATE_B = new Uint8Array(32).fill(13);
+
+type TestPeer = {
+  privateKey: PrivateKey;
+  peerID: string;
+};
+
+async function makePeer(): Promise<TestPeer> {
+  const privateKey = await generateKeyPair('Ed25519');
+  return {
+    privateKey,
+    peerID: peerIdFromPrivateKey(privateKey).toString(),
+  };
+}
 
 function publicKey(privateKey: Uint8Array): string {
   return Buffer.from(ed25519.getPublicKey(privateKey)).toString('base64');
@@ -27,21 +58,29 @@ function sign(privateKey: Uint8Array, payloadJson: string): Uint8Array {
   return ed25519.sign(encoder.encode(payloadJson), privateKey);
 }
 
-function makeRegistration(overrides: Partial<Omit<UserRegistration, 'signature'>> & {
+async function makeRegistration(overrides: Partial<Omit<UserRegistration, 'signature' | 'peerBinding'>> & {
   privateKey?: Uint8Array;
-} = {}): UserRegistration {
+  peerPrivateKey?: PrivateKey;
+} = {}): Promise<UserRegistration> {
   const privateKey = overrides.privateKey ?? PRIVATE_A;
-  const unsigned: Omit<UserRegistration, 'signature'> = {
-    peerID: overrides.peerID ?? 'peer-a',
+  const peerPrivateKey = overrides.peerPrivateKey ?? await generateKeyPair('Ed25519');
+  const unsigned: Omit<UserRegistration, 'signature' | 'peerBinding'> = {
+    peerID: overrides.peerID ?? peerIdFromPrivateKey(peerPrivateKey).toString(),
+    networkMode: overrides.networkMode ?? NETWORK_MODES.FAST,
     username: overrides.username ?? 'alice',
     signingPublicKey: overrides.signingPublicKey ?? publicKey(privateKey),
     offlinePublicKey: overrides.offlinePublicKey ?? 'offline-key-a',
     timestamp: overrides.timestamp ?? Date.now(),
     ...(overrides.kind === undefined ? {} : { kind: overrides.kind }),
   };
+  const signature = signUsernameRegistrationPayload(unsigned, (payloadJson) => sign(privateKey, payloadJson));
+  const peerBinding = await signUsernameRegistrationPeerBinding(unsigned, (payloadBytes) =>
+    peerPrivateKey.sign(payloadBytes),
+  );
   return {
     ...unsigned,
-    signature: signUsernameRegistrationPayload(unsigned, (payloadJson) => sign(privateKey, payloadJson)),
+    signature,
+    peerBinding,
   };
 }
 
@@ -49,8 +88,13 @@ function encodeRecord(registration: UserRegistration): Uint8Array {
   return encoder.encode(JSON.stringify(registration));
 }
 
-function usernameKey(kind: 'by-name' | 'by-peer', hash: string): Uint8Array {
-  return encoder.encode(USERNAME_PREFIX + '/' + kind + '/' + hash);
+function usernameKey(
+  kind: 'by-name' | 'by-peer',
+  hash: string,
+  mode: NetworkMode = NETWORK_MODES.FAST,
+): Uint8Array {
+  const prefix = NETWORK_MODE_CONFIG[mode].dhtNamespaces.username;
+  return encoder.encode(prefix + '/' + kind + '/' + hash);
 }
 
 async function withoutConsoleWarn(fn: () => Promise<void>): Promise<void> {
@@ -63,9 +107,67 @@ async function withoutConsoleWarn(fn: () => Promise<void>): Promise<void> {
   }
 }
 
+async function* dhtValue(value: Uint8Array): AsyncIterable<unknown> {
+  yield { name: 'VALUE', value };
+}
+
+function isCanonicalBase64(value: string): boolean {
+  return /^[A-Za-z0-9+/]+={0,2}$/.test(value)
+    && Buffer.from(value, 'base64').toString('base64') === value;
+}
+
+type UsernameRegistrationTestContext = {
+  registration: UserRegistration;
+  registrationJson: string;
+  valueBytes: Uint8Array;
+};
+
+type UsernameRegistryHarness = {
+  userIdentity: EncryptedUserIdentity;
+  createRegistrationContext(username: string): Promise<UsernameRegistrationTestContext>;
+  persistRegisteredUser(context: UsernameRegistrationTestContext): Promise<void>;
+};
+
+type OfflineKeyExchangeHarness = {
+  database: Pick<ChatDatabase, 'getUserByPeerId'>;
+  usernameRegistry: Pick<UsernameRegistry, 'lookupByPeerId'>;
+  resolveRecipientOfflinePublicKeyBase64(peerId: PeerId, username: string): Promise<string>;
+};
+
+test('persistRegisteredUser stores the local row from the published registration record', async (t) => {
+  const database = new ChatDatabase(':memory:');
+  t.after(() => database.close());
+
+  const identity = await EncryptedUserIdentity.createEncrypted();
+  const registry = new UsernameRegistry(
+    { peerId: identity.identity } as unknown as ChatNode,
+    database,
+  ) as unknown as UsernameRegistryHarness;
+  registry.userIdentity = identity;
+
+  const context = await registry.createRegistrationContext('alice');
+  await registry.persistRegisteredUser(context);
+
+  const published = JSON.parse(new TextDecoder().decode(context.valueBytes)) as UserRegistration;
+  const user = database.getUserByPeerId(identity.id);
+  assert.ok(user);
+  assert.equal(user.signing_public_key, context.registration.signingPublicKey);
+  assert.equal(user.signing_public_key, published.signingPublicKey);
+  assert.equal(user.offline_public_key, context.registration.offlinePublicKey);
+  assert.equal(user.offline_public_key, published.offlinePublicKey);
+  assert.equal(user.signature, context.registration.signature);
+  assert.equal(user.signature, published.signature);
+  assert.equal(user.signature.length > 0, true);
+  assert.equal(isCanonicalBase64(user.signing_public_key), true);
+  assert.equal(isCanonicalBase64(user.signature), true);
+  assert.doesNotMatch(user.signing_public_key, /^(?:\d+,)+\d+$/);
+  assert.doesNotMatch(user.signature, /^(?:\d+,)+\d+$/);
+});
+
 test('username DHT validator accepts valid by-name and by-peer registrations', async () => {
-  const registration = makeRegistration();
+  const registration = await makeRegistration();
   assert.equal(verifyUsernameRegistrationSignature(registration), true);
+  assert.equal(verifyUsernameRegistrationPeerBinding(registration), true);
 
   await usernameRegistrationValidator(
     usernameKey('by-name', hashUsingSha256(registration.username)),
@@ -77,8 +179,54 @@ test('username DHT validator accepts valid by-name and by-peer registrations', a
   );
 });
 
+test('username DHT validator binds registrations to the key network mode', async () => {
+  const peer = await makePeer();
+  const fastRegistration = await makeRegistration({
+    username: 'alice',
+    peerID: peer.peerID,
+    peerPrivateKey: peer.privateKey,
+    networkMode: NETWORK_MODES.FAST,
+    timestamp: 1_000,
+  });
+  const anonymousRegistration = await makeRegistration({
+    username: fastRegistration.username,
+    peerID: peer.peerID,
+    peerPrivateKey: peer.privateKey,
+    networkMode: NETWORK_MODES.ANONYMOUS,
+    timestamp: 2_000,
+  });
+
+  const usernameHash = hashUsingSha256(fastRegistration.username);
+  const fastKey = usernameKey('by-name', usernameHash, NETWORK_MODES.FAST);
+  const anonymousKey = usernameKey('by-name', usernameHash, NETWORK_MODES.ANONYMOUS);
+  const replayedFastValue = encodeRecord(fastRegistration);
+  const anonymousValue = encodeRecord(anonymousRegistration);
+
+  await usernameRegistrationValidator(fastKey, replayedFastValue);
+  await usernameRegistrationValidator(anonymousKey, anonymousValue);
+
+  await assert.rejects(
+    () => usernameRegistrationValidator(anonymousKey, replayedFastValue),
+    /network mode mismatch/,
+  );
+
+  assert.equal(
+    usernameRegistrationSelector(anonymousKey, [replayedFastValue, anonymousValue]),
+    1,
+  );
+  assert.throws(
+    () => usernameRegistrationSelector(anonymousKey, [replayedFastValue]),
+    /network mode mismatch/,
+  );
+
+  await assert.rejects(
+    () => usernameRegistrationValidateUpdate(anonymousKey, anonymousValue, replayedFastValue),
+    /network mode mismatch/,
+  );
+});
+
 test('username DHT validator rejects signature, key-binding, and future timestamp failures', async () => {
-  const registration = makeRegistration();
+  const registration = await makeRegistration();
   const tampered = { ...registration, username: 'mallory' };
 
   await assert.rejects(
@@ -98,7 +246,7 @@ test('username DHT validator rejects signature, key-binding, and future timestam
   );
 
   await withoutConsoleWarn(async () => {
-    const future = makeRegistration({ timestamp: Date.now() + USERNAME_MAX_FUTURE_SKEW_MS + 1_000 });
+    const future = await makeRegistration({ timestamp: Date.now() + USERNAME_MAX_FUTURE_SKEW_MS + 1_000 });
     await assert.rejects(
       () => usernameRegistrationValidator(
         usernameKey('by-name', hashUsingSha256(future.username)),
@@ -109,11 +257,87 @@ test('username DHT validator rejects signature, key-binding, and future timestam
   });
 });
 
-test('username DHT selector chooses the newest valid record bound to the requested key', () => {
+test('username DHT validator rejects missing, malformed, and mis-bound peerBinding records', async () => {
+  const peerA = await makePeer();
+  const peerB = await makePeer();
+  const registration = await makeRegistration({ peerID: peerA.peerID, peerPrivateKey: peerA.privateKey });
+
+  const missingPeerBinding: Partial<UserRegistration> = { ...registration };
+  delete missingPeerBinding.peerBinding;
+  await assert.rejects(
+    () => usernameRegistrationValidator(
+      usernameKey('by-peer', hashUsingSha256(registration.peerID)),
+      encoder.encode(JSON.stringify(missingPeerBinding)),
+    ),
+    /Invalid username registration schema/,
+  );
+
+  const malformedPeerBinding = { ...registration, peerBinding: 'not base64' };
+  await assert.rejects(
+    () => usernameRegistrationValidator(
+      usernameKey('by-peer', hashUsingSha256(registration.peerID)),
+      encodeRecord(malformedPeerBinding),
+    ),
+    /Invalid username registration peer binding/,
+  );
+
+  const misBound = await makeRegistration({
+    peerID: peerA.peerID,
+    peerPrivateKey: peerB.privateKey,
+  });
+  await assert.rejects(
+    () => usernameRegistrationValidator(
+      usernameKey('by-peer', hashUsingSha256(peerA.peerID)),
+      encodeRecord(misBound),
+    ),
+    /Invalid username registration peer binding/,
+  );
+});
+
+test('username peerBinding uses a domain-separated signing input', async () => {
+  const peer = await makePeer();
+  const registration = await makeRegistration({ peerID: peer.peerID, peerPrivateKey: peer.privateKey });
+  const unsigned = {
+    peerID: registration.peerID,
+    networkMode: registration.networkMode,
+    username: registration.username,
+    signingPublicKey: registration.signingPublicKey,
+    offlinePublicKey: registration.offlinePublicKey,
+    timestamp: registration.timestamp,
+    ...(registration.kind === undefined ? {} : { kind: registration.kind }),
+  };
+  const canonicalBytes = encoder.encode(canonicalUsernameRegistrationPayloadJson(unsigned));
+  const domainBytes = encoder.encode(PEER_BINDING_DOMAIN);
+  const prefixedBytes = new Uint8Array(domainBytes.length + canonicalBytes.length);
+  prefixedBytes.set(domainBytes);
+  prefixedBytes.set(canonicalBytes, domainBytes.length);
+
+  const manuallyPrefixed = {
+    ...registration,
+    peerBinding: Buffer.from(await peer.privateKey.sign(prefixedBytes)).toString('base64'),
+  };
+  assert.equal(verifyUsernameRegistrationPeerBinding(manuallyPrefixed), true);
+
+  const unprefixed = {
+    ...registration,
+    peerBinding: Buffer.from(await peer.privateKey.sign(canonicalBytes)).toString('base64'),
+  };
+  assert.equal(verifyUsernameRegistrationPeerBinding(unprefixed), false);
+
+  await assert.rejects(
+    () => usernameRegistrationValidator(
+      usernameKey('by-peer', hashUsingSha256(unprefixed.peerID)),
+      encodeRecord(unprefixed),
+    ),
+    /Invalid username registration peer binding/,
+  );
+});
+
+test('username DHT selector chooses the newest valid record bound to the requested key', async () => {
   const key = usernameKey('by-name', hashUsingSha256('alice'));
-  const older = makeRegistration({ username: 'alice', timestamp: 1_000 });
-  const newer = makeRegistration({ username: 'alice', timestamp: 2_000 });
-  const mismatched = makeRegistration({ username: 'bob', timestamp: 3_000 });
+  const older = await makeRegistration({ username: 'alice', timestamp: 1_000 });
+  const newer = await makeRegistration({ username: 'alice', timestamp: 2_000 });
+  const mismatched = await makeRegistration({ username: 'bob', timestamp: 3_000 });
   const invalid = encoder.encode('{not-json');
 
   assert.equal(
@@ -122,19 +346,49 @@ test('username DHT selector chooses the newest valid record bound to the request
   );
 });
 
+test('username DHT selector ignores records with invalid peerBinding', async () => {
+  const peerA = await makePeer();
+  const peerB = await makePeer();
+  const key = usernameKey('by-peer', hashUsingSha256(peerA.peerID));
+  const validOlder = await makeRegistration({
+    peerID: peerA.peerID,
+    peerPrivateKey: peerA.privateKey,
+    timestamp: 1_000,
+  });
+  const misBoundNewer = await makeRegistration({
+    peerID: peerA.peerID,
+    peerPrivateKey: peerB.privateKey,
+    timestamp: 3_000,
+  });
+
+  assert.equal(
+    usernameRegistrationSelector(key, [encodeRecord(validOlder), encodeRecord(misBoundNewer)]),
+    0,
+  );
+});
+
 test('username DHT validateUpdate enforces timestamp and owner rules', async () => {
-  const existing = makeRegistration({ username: 'alice', peerID: 'peer-a', timestamp: Date.now() });
+  const peerA = await makePeer();
+  const peerB = await makePeer();
+  const existing = await makeRegistration({
+    username: 'alice',
+    peerID: peerA.peerID,
+    peerPrivateKey: peerA.privateKey,
+    timestamp: Date.now(),
+  });
   const key = usernameKey('by-name', hashUsingSha256(existing.username));
-  const sameOwnerNewer = makeRegistration({
+  const sameOwnerNewer = await makeRegistration({
     username: existing.username,
     peerID: existing.peerID,
+    peerPrivateKey: peerA.privateKey,
     timestamp: existing.timestamp + 1,
   });
   await usernameRegistrationValidateUpdate(key, encodeRecord(existing), encodeRecord(sameOwnerNewer));
 
-  const older = makeRegistration({
+  const older = await makeRegistration({
     username: existing.username,
     peerID: existing.peerID,
+    peerPrivateKey: peerA.privateKey,
     timestamp: existing.timestamp - 1,
   });
   await withoutConsoleWarn(async () => {
@@ -144,9 +398,10 @@ test('username DHT validateUpdate enforces timestamp and owner rules', async () 
     );
   });
 
-  const sameTimestampDifferentPayload = makeRegistration({
+  const sameTimestampDifferentPayload = await makeRegistration({
     username: existing.username,
     peerID: existing.peerID,
+    peerPrivateKey: peerA.privateKey,
     offlinePublicKey: 'changed-offline-key',
     timestamp: existing.timestamp,
   });
@@ -161,9 +416,10 @@ test('username DHT validateUpdate enforces timestamp and owner rules', async () 
     );
   });
 
-  const differentOwner = makeRegistration({
+  const differentOwner = await makeRegistration({
     username: existing.username,
-    peerID: 'peer-b',
+    peerID: peerB.peerID,
+    peerPrivateKey: peerB.privateKey,
     offlinePublicKey: 'offline-key-b',
     privateKey: PRIVATE_B,
     timestamp: existing.timestamp + 2,
@@ -176,8 +432,60 @@ test('username DHT validateUpdate enforces timestamp and owner rules', async () 
   });
 });
 
+test('username DHT validateUpdate rejects incoming records with invalid peerBinding', async () => {
+  const peerA = await makePeer();
+  const peerB = await makePeer();
+  const existing = await makeRegistration({
+    username: 'alice',
+    peerID: peerA.peerID,
+    peerPrivateKey: peerA.privateKey,
+    timestamp: Date.now(),
+  });
+  const incoming = await makeRegistration({
+    username: existing.username,
+    peerID: peerA.peerID,
+    peerPrivateKey: peerB.privateKey,
+    timestamp: existing.timestamp + 1,
+  });
+  const key = usernameKey('by-name', hashUsingSha256(existing.username));
+
+  await assert.rejects(
+    () => usernameRegistrationValidateUpdate(key, encodeRecord(existing), encodeRecord(incoming)),
+    /Invalid username registration peer binding/,
+  );
+});
+
+test('username registration schema enforces the shared username policy', async () => {
+  const valid = await makeRegistration({ username: 'Alice_123' });
+  assert.equal(isUsernameRegistrationRecord(valid), true);
+
+  for (const username of ['ab', 'a'.repeat(USERNAME_MAX_LENGTH + 1), 'bad-name', 'bad.name', 'bad name']) {
+    const invalid = await makeRegistration({ username });
+    assert.equal(isUsernameRegistrationRecord(invalid), false);
+    await assert.rejects(
+      () => usernameRegistrationValidator(
+        usernameKey('by-name', hashUsingSha256(username)),
+        encodeRecord(invalid),
+      ),
+      /Invalid username registration schema/,
+    );
+  }
+});
+
+test('username DHT validator rejects oversized values before JSON parse', async () => {
+  const oversizedInvalidJson = encoder.encode('{'.repeat(USERNAME_RECORD_MAX_BYTES + 1));
+
+  await assert.rejects(
+    () => usernameRegistrationValidator(
+      usernameKey('by-name', hashUsingSha256('alice')),
+      oversizedInvalidJson,
+    ),
+    /exceeds 8192 byte limit/,
+  );
+});
+
 test('username DHT validator rejects malformed schemas and invalid key formats', async () => {
-  const shortUsername = makeRegistration({ username: 'ab' });
+  const shortUsername = await makeRegistration({ username: 'ab' });
   await assert.rejects(
     () => usernameRegistrationValidator(
       usernameKey('by-name', hashUsingSha256(shortUsername.username)),
@@ -186,7 +494,7 @@ test('username DHT validator rejects malformed schemas and invalid key formats',
     /Invalid username registration schema/,
   );
 
-  const registration = makeRegistration();
+  const registration = await makeRegistration();
   await assert.rejects(
     () => usernameRegistrationValidator(
       encoder.encode('/wrong-username/by-name/' + hashUsingSha256(registration.username)),
@@ -197,7 +505,7 @@ test('username DHT validator rejects malformed schemas and invalid key formats',
 
   await assert.rejects(
     () => usernameRegistrationValidator(
-      encoder.encode(USERNAME_PREFIX + '/by-name'),
+      encoder.encode(NETWORK_MODE_CONFIG.fast.dhtNamespaces.username + '/by-name'),
       encodeRecord(registration),
     ),
     /Invalid username key format/,
@@ -205,7 +513,7 @@ test('username DHT validator rejects malformed schemas and invalid key formats',
 
   await assert.rejects(
     () => usernameRegistrationValidator(
-      encoder.encode(USERNAME_PREFIX + '/by-email/' + hashUsingSha256(registration.username)),
+      encoder.encode(NETWORK_MODE_CONFIG.fast.dhtNamespaces.username + '/by-email/' + hashUsingSha256(registration.username)),
       encodeRecord(registration),
     ),
     new RegExp('Invalid username key kind/hash'),
@@ -213,16 +521,20 @@ test('username DHT validator rejects malformed schemas and invalid key formats',
 });
 
 test('username DHT validateUpdate allows released and stale active records to be replaced', async () => {
-  const released = makeRegistration({
+  const peerA = await makePeer();
+  const peerB = await makePeer();
+  const released = await makeRegistration({
     username: 'alice',
-    peerID: 'peer-a',
+    peerID: peerA.peerID,
+    peerPrivateKey: peerA.privateKey,
     kind: 'released',
     timestamp: Date.now(),
   });
   const releasedKey = usernameKey('by-name', hashUsingSha256(released.username));
-  const takeoverAfterRelease = makeRegistration({
+  const takeoverAfterRelease = await makeRegistration({
     username: released.username,
-    peerID: 'peer-b',
+    peerID: peerB.peerID,
+    peerPrivateKey: peerB.privateKey,
     offlinePublicKey: 'offline-key-b',
     privateKey: PRIVATE_B,
     timestamp: released.timestamp + 1,
@@ -233,15 +545,17 @@ test('username DHT validateUpdate allows released and stale active records to be
     encodeRecord(takeoverAfterRelease),
   );
 
-  const staleActive = makeRegistration({
+  const staleActive = await makeRegistration({
     username: 'carol',
-    peerID: 'peer-a',
+    peerID: peerA.peerID,
+    peerPrivateKey: peerA.privateKey,
     timestamp: Date.now() - (REREGISTRATION_INTERVAL * 2) - 1_000,
   });
   const staleKey = usernameKey('by-name', hashUsingSha256(staleActive.username));
-  const takeoverAfterStale = makeRegistration({
+  const takeoverAfterStale = await makeRegistration({
     username: staleActive.username,
-    peerID: 'peer-b',
+    peerID: peerB.peerID,
+    peerPrivateKey: peerB.privateKey,
     offlinePublicKey: 'offline-key-b',
     privateKey: PRIVATE_B,
     timestamp: staleActive.timestamp + 1,
@@ -254,4 +568,52 @@ test('username DHT validateUpdate allows released and stale active records to be
       encodeRecord(takeoverAfterStale),
     );
   });
+});
+
+test('lookupByPeerId locally rejects records for a different peer ID', async () => {
+  const requestedPeer = await makePeer();
+  const otherPeer = await makePeer();
+  const record = await makeRegistration({
+    peerID: otherPeer.peerID,
+    peerPrivateKey: otherPeer.privateKey,
+    timestamp: Date.now(),
+  });
+  const registry = new UsernameRegistry(
+    {
+      services: {
+        dht: {
+          get: () => dhtValue(encodeRecord(record)),
+        },
+      },
+    } as unknown as ChatNode,
+    {
+      getSessionNetworkMode: () => NETWORK_MODES.FAST,
+    } as unknown as ChatDatabase,
+  );
+
+  await assert.rejects(
+    () => registry.lookupByPeerId(requestedPeer.peerID),
+    /Peer ID not found in DHT/,
+  );
+});
+
+test('offline key resolution fails closed on mismatched DHT records', async () => {
+  const requestedPeer = await makePeer();
+  const otherPeer = await makePeer();
+  const record = await makeRegistration({
+    peerID: otherPeer.peerID,
+    peerPrivateKey: otherPeer.privateKey,
+    timestamp: Date.now(),
+  });
+  const keyExchange = Object.create(KeyExchange.prototype) as OfflineKeyExchangeHarness;
+  keyExchange.database = { getUserByPeerId: () => null };
+  keyExchange.usernameRegistry = { lookupByPeerId: async () => record };
+
+  await assert.rejects(
+    () => keyExchange.resolveRecipientOfflinePublicKeyBase64(
+      peerIdFromString(requestedPeer.peerID),
+      'alice',
+    ),
+    /peer ID mismatch/,
+  );
 });

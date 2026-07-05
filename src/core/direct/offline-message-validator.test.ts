@@ -1,9 +1,16 @@
 import assert from 'node:assert/strict';
+import { generateKeyPairSync } from 'node:crypto';
 import test from 'node:test';
 import { gzipSync } from 'node:zlib';
 import { ed25519 } from '@noble/curves/ed25519';
 import { sha256 } from '@noble/hashes/sha2';
-import { MAX_MESSAGES_PER_STORE, MESSAGE_TTL, NETWORK_MODE_CONFIG } from '../constants.js';
+import {
+  DIRECT_OFFLINE_STORE_MAX_COMPRESSED_BYTES,
+  DIRECT_OFFLINE_STORE_MAX_DECOMPRESSED_BYTES,
+  MAX_MESSAGES_PER_STORE,
+  MESSAGE_TTL,
+  NETWORK_MODE_CONFIG,
+} from '../constants.js';
 import { toBase64Url } from '../utils/miscellaneous.js';
 import {
   type OfflineMessageDHT,
@@ -14,6 +21,8 @@ import {
   offlineMessageValidateUpdate,
   offlineMessageValidator,
 } from './offline-message-validator.js';
+import { OfflineMessageManager } from './offline-message-manager.js';
+import { MessageEncryption } from './message-encryption.js';
 
 const encoder = new TextEncoder();
 const PRIVATE_KEY = new Uint8Array(32).fill(23);
@@ -25,6 +34,8 @@ const BUCKET_KEY = NETWORK_MODE_CONFIG.fast.dhtNamespaces.offline
 function base64(value: string | Uint8Array): string {
   return Buffer.from(value).toString('base64');
 }
+
+const PUBLIC_KEY_BASE64 = base64(PUBLIC_KEY_BYTES);
 
 function sha256Base64(base64Value: string): string {
   return Buffer.from(sha256(Buffer.from(base64Value, 'base64'))).toString('base64');
@@ -38,13 +49,29 @@ function makeMessage(overrides: Partial<OfflineMessageDHT> & {
   signedBucketKey?: string;
 } = {}): OfflineMessageDHT {
   const timestamp = overrides.timestamp ?? Date.now();
+  const expiresAt = overrides.expires_at ?? timestamp + MESSAGE_TTL;
+  const messageType = overrides.message_type ?? 'encrypted';
   const content = overrides.content ?? base64('encrypted-content');
   const encryptedSenderInfo = overrides.encrypted_sender_info ?? base64('encrypted-sender-info');
+  let encryptedAesKey = overrides.encrypted_aes_key;
+  let aesIv = overrides.aes_iv;
+  if (messageType === 'hybrid') {
+    encryptedAesKey = encryptedAesKey ?? base64('encrypted-aes-key');
+    aesIv = aesIv ?? base64('aes-iv');
+  }
   const signedPayload: OfflineSignedPayload = overrides.signed_payload ?? {
     content_hash: sha256Base64(content),
     sender_info_hash: sha256Base64(encryptedSenderInfo),
     timestamp,
     bucket_key: overrides.signedBucketKey ?? BUCKET_KEY,
+    message_type: messageType,
+    expires_at: expiresAt,
+    ...(messageType === 'hybrid'
+      ? {
+          aes_key_hash: sha256Base64(encryptedAesKey as string),
+          aes_iv_hash: sha256Base64(aesIv as string),
+        }
+      : {}),
   };
   return {
     id: overrides.id ?? 'message-1',
@@ -52,12 +79,21 @@ function makeMessage(overrides: Partial<OfflineMessageDHT> & {
     content,
     signature: overrides.signature ?? signPayload(signedPayload),
     signed_payload: signedPayload,
-    message_type: overrides.message_type ?? 'encrypted',
+    message_type: messageType,
     timestamp,
-    expires_at: overrides.expires_at ?? Date.now() + MESSAGE_TTL,
-    ...(overrides.encrypted_aes_key === undefined ? {} : { encrypted_aes_key: overrides.encrypted_aes_key }),
-    ...(overrides.aes_iv === undefined ? {} : { aes_iv: overrides.aes_iv }),
+    expires_at: expiresAt,
+    ...(encryptedAesKey === undefined ? {} : { encrypted_aes_key: encryptedAesKey }),
+    ...(aesIv === undefined ? {} : { aes_iv: aesIv }),
   };
+}
+
+function makeRecipientKeys(): { publicKey: string; privateKey: string } {
+  const { publicKey, privateKey } = generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+  });
+  return { publicKey, privateKey };
 }
 
 function makeStore(overrides: Partial<OfflineMessageStoreDHT> & {
@@ -97,7 +133,35 @@ async function withoutConsoleLog(fn: () => Promise<void>): Promise<void> {
 }
 
 test('offline DHT validator accepts a signed store bound to the bucket key', async () => {
-  await offlineMessageValidator(encoder.encode(BUCKET_KEY), encodeStore(makeStore()));
+  const encoded = encodeStore(makeStore());
+  assert.equal(encoded.length <= DIRECT_OFFLINE_STORE_MAX_COMPRESSED_BYTES, true);
+
+  await offlineMessageValidator(encoder.encode(BUCKET_KEY), encoded);
+});
+
+test('offline DHT validator rejects oversized compressed stores before decompression', async () => {
+  const oversizedValue = new Uint8Array(DIRECT_OFFLINE_STORE_MAX_COMPRESSED_BYTES + 1);
+
+  await withoutConsoleLog(async () => {
+    await assert.rejects(
+      () => offlineMessageValidator(encoder.encode(BUCKET_KEY), oversizedValue),
+      /Direct offline store too large/,
+    );
+  });
+});
+
+test('offline DHT validator rejects a compression bomb that passes the compressed-size cap', async () => {
+  // Highly compressible payload: tiny gzipped, but inflates far past the decompressed
+  // ceiling. Passes the compressed-byte cap, so the maxOutputLength guard must catch it.
+  const bomb = gzipSync(Buffer.alloc(DIRECT_OFFLINE_STORE_MAX_DECOMPRESSED_BYTES + 1, 0x41));
+  assert.equal(bomb.length <= DIRECT_OFFLINE_STORE_MAX_COMPRESSED_BYTES, true);
+
+  await withoutConsoleLog(async () => {
+    await assert.rejects(
+      () => offlineMessageValidator(encoder.encode(BUCKET_KEY), bomb),
+      /Failed to decompress or parse DHT value/,
+    );
+  });
 });
 
 test('offline DHT validator rejects bucket-binding and message-hash tampering', async () => {
@@ -127,14 +191,177 @@ test('offline DHT validator rejects bucket-binding and message-hash tampering', 
   });
 });
 
+test('offline DHT validator rejects newly signed metadata tampering', async () => {
+  const hybrid = makeMessage({ id: 'hybrid-message', message_type: 'hybrid' });
+
+  await withoutConsoleLog(async () => {
+    await assert.rejects(
+      () => offlineMessageValidator(
+        encoder.encode(BUCKET_KEY),
+        encodeStore(makeStore({ messages: [{ ...hybrid, encrypted_aes_key: base64('tampered-aes-key') }] })),
+      ),
+      /aes_key_hash mismatch/,
+    );
+  });
+
+  await withoutConsoleLog(async () => {
+    await assert.rejects(
+      () => offlineMessageValidator(
+        encoder.encode(BUCKET_KEY),
+        encodeStore(makeStore({ messages: [{ ...hybrid, aes_iv: base64('tampered-iv') }] })),
+      ),
+      /aes_iv_hash mismatch/,
+    );
+  });
+
+  const encrypted = makeMessage({ id: 'encrypted-message' });
+
+  await withoutConsoleLog(async () => {
+    await assert.rejects(
+      () => offlineMessageValidator(
+        encoder.encode(BUCKET_KEY),
+        encodeStore(makeStore({ messages: [{ ...encrypted, message_type: 'hybrid' }] })),
+      ),
+      /message_type mismatch/,
+    );
+  });
+
+  await withoutConsoleLog(async () => {
+    await assert.rejects(
+      () => offlineMessageValidator(
+        encoder.encode(BUCKET_KEY),
+        encodeStore(makeStore({ messages: [{ ...encrypted, expires_at: encrypted.expires_at + 1 }] })),
+      ),
+      /expires_at mismatch/,
+    );
+  });
+
+  await withoutConsoleLog(async () => {
+    await assert.rejects(
+      () => offlineMessageValidator(
+        encoder.encode(BUCKET_KEY),
+        encodeStore(makeStore({
+          messages: [{
+            ...encrypted,
+            encrypted_aes_key: base64('smuggled-aes-key'),
+            aes_iv: base64('smuggled-iv'),
+          }],
+        })),
+      ),
+      /encrypted message contains AES fields/,
+    );
+  });
+});
+
+test('offline manager verifies and decrypts honest encrypted and hybrid messages', () => {
+  const { publicKey, privateKey } = makeRecipientKeys();
+
+  const encryptedContent = 'short offline message';
+  const encrypted = OfflineMessageManager.createOfflineMessage(
+    'sender-peer',
+    'sender',
+    encryptedContent,
+    publicKey,
+    PRIVATE_KEY,
+    BUCKET_KEY,
+  );
+  assert.equal(encrypted.message_type, 'encrypted');
+  assert.equal(
+    OfflineMessageManager.verifyOfflineMessageSignature(encrypted, PUBLIC_KEY_BASE64, BUCKET_KEY),
+    true,
+  );
+  assert.equal(MessageEncryption.decryptOfflineMessage(encrypted, privateKey), encryptedContent);
+
+  const hybridContent = 'long offline message '.repeat(20);
+  const hybrid = OfflineMessageManager.createOfflineMessage(
+    'sender-peer',
+    'sender',
+    hybridContent,
+    publicKey,
+    PRIVATE_KEY,
+    BUCKET_KEY,
+  );
+  assert.equal(hybrid.message_type, 'hybrid');
+  assert.equal(
+    OfflineMessageManager.verifyOfflineMessageSignature(hybrid, PUBLIC_KEY_BASE64, BUCKET_KEY),
+    true,
+  );
+  assert.equal(MessageEncryption.decryptOfflineMessage(hybrid, privateKey), hybridContent);
+});
+
+test('offline manager signature verification rejects tampered signed metadata', async () => {
+  const { publicKey } = makeRecipientKeys();
+  const hybrid = OfflineMessageManager.createOfflineMessage(
+    'sender-peer',
+    'sender',
+    'long offline message '.repeat(20),
+    publicKey,
+    PRIVATE_KEY,
+    BUCKET_KEY,
+  );
+  const encrypted = OfflineMessageManager.createOfflineMessage(
+    'sender-peer',
+    'sender',
+    'short offline message',
+    publicKey,
+    PRIVATE_KEY,
+    BUCKET_KEY,
+  );
+
+  await withoutConsoleLog(async () => {
+    assert.equal(
+      OfflineMessageManager.verifyOfflineMessageSignature(
+        { ...hybrid, encrypted_aes_key: base64('tampered-aes-key') },
+        PUBLIC_KEY_BASE64,
+        BUCKET_KEY,
+      ),
+      false,
+    );
+    assert.equal(
+      OfflineMessageManager.verifyOfflineMessageSignature(
+        { ...hybrid, aes_iv: base64('tampered-iv') },
+        PUBLIC_KEY_BASE64,
+        BUCKET_KEY,
+      ),
+      false,
+    );
+    assert.equal(
+      OfflineMessageManager.verifyOfflineMessageSignature(
+        { ...encrypted, message_type: 'hybrid' },
+        PUBLIC_KEY_BASE64,
+        BUCKET_KEY,
+      ),
+      false,
+    );
+    assert.equal(
+      OfflineMessageManager.verifyOfflineMessageSignature(
+        { ...encrypted, expires_at: encrypted.expires_at + 1 },
+        PUBLIC_KEY_BASE64,
+        BUCKET_KEY,
+      ),
+      false,
+    );
+  });
+});
+
 test('offline DHT selector and validateUpdate prefer newest non-stale stores', async () => {
   const older = encodeStore(makeStore({ version: 1, last_updated: 1_000 }));
   const newerSameVersion = encodeStore(makeStore({ version: 1, last_updated: 2_000 }));
   const higherVersion = encodeStore(makeStore({ version: 2, last_updated: 1_500 }));
+  const oversizedValue = new Uint8Array(DIRECT_OFFLINE_STORE_MAX_COMPRESSED_BYTES + 1);
 
   assert.equal(
     offlineMessageSelector(encoder.encode(BUCKET_KEY), [older, higherVersion, newerSameVersion]),
     1,
+  );
+  assert.equal(
+    offlineMessageSelector(encoder.encode(BUCKET_KEY), [oversizedValue, higherVersion]),
+    1,
+  );
+
+  await assert.rejects(
+    () => offlineMessageValidateUpdate(encoder.encode(BUCKET_KEY), higherVersion, oversizedValue),
+    /Direct offline store too large/,
   );
 
   await assert.rejects(
@@ -244,9 +471,12 @@ test('offline DHT validator rejects replay-sensitive timestamp and expiry failur
     sender_info_hash: sha256Base64(base64('encrypted-sender-info')),
     timestamp: signedTimestamp,
     bucket_key: BUCKET_KEY,
+    message_type: 'encrypted',
+    expires_at: signedTimestamp + MESSAGE_TTL,
   };
   const mismatchedTimestamp = makeMessage({
     timestamp: signedTimestamp + 1,
+    expires_at: signedTimestamp + MESSAGE_TTL,
     signed_payload: timestampMismatchPayload,
   });
   await withoutConsoleLog(async () => {

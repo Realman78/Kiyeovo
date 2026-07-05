@@ -18,6 +18,7 @@ import {
   GROUP_STATE_RESYNC_REQUEST_COOLDOWN_MS,
   getNetworkModeRuntime,
   GROUP_PENDING_ACK_RETIRE_AGE_MS,
+  GROUP_OFFLINE_STORE_MAX_DECOMPRESSED_BYTES,
 } from '../../constants.js';
 import {
   GroupMessageType,
@@ -337,6 +338,7 @@ export class GroupCreator {
             groupId,
             groupName,
             inviterPeerId: myPeerId,
+            inviteePeerId: peerId,
             inviteId,
             createdAt: now,
             expiresAt,
@@ -407,6 +409,15 @@ export class GroupCreator {
       // No pending invite = already processed (dedup) or never sent
       log(
         `[GROUP][TRACE][RESP][DROP] group=${response.groupId} from=${response.responderPeerId.slice(-8)} reason=no_pending_invite`,
+      );
+      return;
+    }
+
+    // Defense-in-depth: the pending invite is already keyed by target peer, but also
+    // reject if the signed invitee binding doesn't match the responder.
+    if (storedInvite.inviteePeerId !== response.responderPeerId) {
+      log(
+        `[GROUP][TRACE][RESP][DROP] group=${response.groupId} from=${response.responderPeerId.slice(-8)} reason=invitee_binding_mismatch invitee=${storedInvite.inviteePeerId.slice(-8)}`,
       );
       return;
     }
@@ -1749,7 +1760,7 @@ export class GroupCreator {
       if (event.name !== 'VALUE' || event.value.length === 0) continue;
       let parsed: GroupOfflineStore;
       try {
-        const decompressed = gunzipSync(Buffer.from(event.value));
+        const decompressed = gunzipSync(Buffer.from(event.value), { maxOutputLength: GROUP_OFFLINE_STORE_MAX_DECOMPRESSED_BYTES });
         parsed = JSON.parse(decompressed.toString('utf8')) as GroupOfflineStore;
       } catch {
         continue;

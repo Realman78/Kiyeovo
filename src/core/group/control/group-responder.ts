@@ -79,6 +79,15 @@ export class GroupResponder {
     // Verify signature
     this.verifySignature(invite, inviter.signing_public_key);
 
+    // The invite is bound to a specific invitee; reject one addressed to anyone else
+    // (a leaked/forwarded bearer token cannot be redeemed by a different peer).
+    if (invite.inviteePeerId !== this.deps.myPeerId) {
+      log(
+        `[GROUP][INVITE][DROP] group=${groupId} reason=invitee_mismatch invitee=${invite.inviteePeerId.slice(-8)} me=${this.deps.myPeerId.slice(-8)}`,
+      );
+      return;
+    }
+
     // Check expiry
     if (Date.now() > expiresAt) {
       log(

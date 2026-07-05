@@ -34,7 +34,7 @@ import {
 import { DEFAULT_WEBRTC_ICE_SERVERS } from '../core/network/default-infrastructure.js';
 import { ensureAppDataDir } from '../core/utils/miscellaneous.js';
 import { basename, join } from 'path';
-import { copyFile, lstat, mkdir, readdir, realpath, rm, stat } from 'fs/promises';
+import { lstat, mkdir, readdir, realpath, rm, stat } from 'fs/promises';
 import { log } from '../shared/logger.js';
 import { isImageFile } from '../shared/file-types.js';
 import { errStr } from '../core/utils/general-error.js';
@@ -51,6 +51,11 @@ import {
   resolveUploadsDirectory,
   validateUploadImageFileName,
 } from './ipc-handler-helpers.js';
+import {
+  grantDialogPath,
+  resolveDialogGrantedFileMetadata,
+  resolveGrantedDialogPath,
+} from './dialog-path-grants.js';
 import { writeFileWithCopySuffix } from '../core/lib/file-storage.js';
 import type { InitialSetupStatus, SaveTextUploadResponse } from '../shared/kiyeovo-api.js';
 
@@ -287,7 +292,7 @@ export function setupIPCHandlers(
   setupGroupCallHandlers(trustedIpcMain, getP2PCore);
 
   // Contact request handlers
-  setupContactRequestHandlers(trustedIpcMain, getP2PCore);
+  setupContactRequestHandlers(trustedIpcMain, getP2PCore, getMainWindow);
 
   // Bootstrap node handlers
   setupBootstrapHandlers(trustedIpcMain, getP2PCore);
@@ -775,12 +780,23 @@ function setupGroupCallHandlers(
   });
 }
 
+function notifyGroupCallPeerBlocked(
+  getMainWindow: () => BrowserWindow | null,
+  peerId: string
+): void {
+  const win = getMainWindow();
+  if (win && !win.isDestroyed()) {
+    win.webContents.send(IPC_CHANNELS.GROUP_CALL_PEER_BLOCKED, peerId);
+  }
+}
+
 /**
  * Contact request handlers
  */
 function setupContactRequestHandlers(
   ipcMain: IpcMainHandleRegistrar,
-  getP2PCore: () => P2PCore | null
+  getP2PCore: () => P2PCore | null,
+  getMainWindow: () => BrowserWindow | null
 ): void {
   ipcMain.handle(IPC_CHANNELS.ACCEPT_CONTACT_REQUEST, async (_event, peerId: string) => {
     try {
@@ -827,6 +843,8 @@ function setupContactRequestHandlers(
       if (block) {
         const knownUsername = pending?.username ?? p2pCore.database.getUserByPeerId(peerId)?.username ?? null;
         p2pCore.database.blockPeer(peerId, knownUsername, 'Rejected contact request');
+        await p2pCore.messageHandler.teardownBlockedPeer(peerId);
+        notifyGroupCallPeerBlocked(getMainWindow, peerId);
         log(`Rejected and blocked ${knownUsername ?? peerId}`);
       } else {
         log(`Rejected contact request from ${pending?.username ?? peerId}`);
@@ -1363,6 +1381,10 @@ function setupFileDialogHandlers(ipcMain: IpcMainHandleRegistrar): void {
       });
 
       const filePath = result.filePaths[0] || null;
+      if (!result.canceled && filePath) {
+        grantDialogPath(filePath);
+      }
+
       let mediaToken: string | null = null;
       if (!result.canceled && filePath && isImageFile(filePath)) {
         try {
@@ -1412,9 +1434,13 @@ function setupFileDialogHandlers(ipcMain: IpcMainHandleRegistrar): void {
       }
 
       const result = await dialog.showSaveDialog(dialogOptions);
+      const filePath = result.filePath || null;
+      if (!result.canceled && filePath) {
+        grantDialogPath(filePath);
+      }
 
       return {
-        filePath: result.filePath || null,
+        filePath,
         canceled: result.canceled
       };
     } catch (error) {
@@ -1425,11 +1451,11 @@ function setupFileDialogHandlers(ipcMain: IpcMainHandleRegistrar): void {
 
   ipcMain.handle(IPC_CHANNELS.GET_FILE_METADATA, async (_event, filePath: string) => {
     try {
-      const stats = await stat(filePath);
+      const metadata = await resolveDialogGrantedFileMetadata({ filePath });
       return {
         success: true,
-        name: basename(filePath),
-        size: stats.size,
+        name: metadata.name,
+        size: metadata.size,
         error: null
       };
     } catch (error) {
@@ -2220,6 +2246,8 @@ function setupChatSettingsHandlers(
 
       log(`[IPC] Blocking user: ${peerId}`);
       p2pCore.database.blockPeer(peerId, username, reason);
+      await p2pCore.messageHandler.teardownBlockedPeer(peerId);
+      notifyGroupCallPeerBlocked(getMainWindow, peerId);
       log(`[IPC] User ${peerId} blocked`);
 
       return { success: true, error: null };
@@ -3266,15 +3294,16 @@ function setupAppHandlers(ipcMain: IpcMainHandleRegistrar, getP2PCore: () => P2P
     }
   });
 
-  ipcMain.handle(IPC_CHANNELS.BACKUP_DATABASE, async (_event, backupPath: string) => {
+  ipcMain.handle(IPC_CHANNELS.BACKUP_DATABASE, async (_event, backupPath: string, password: string) => {
     try {
+      const grantedBackupPath = resolveGrantedDialogPath(backupPath);
       const p2pCore = getP2PCore();
       if (!p2pCore) {
         return { success: false, error: 'P2P core not initialized' };
       }
 
-      log(`[IPC] Backing up database to: ${backupPath}`);
-      await p2pCore.database.backup(backupPath);
+      log(`[IPC] Backing up database to: ${grantedBackupPath}`);
+      await p2pCore.database.backupEncrypted(grantedBackupPath, password);
       log('[IPC] Database backup completed');
 
       return { success: true, error: null };
@@ -3284,20 +3313,16 @@ function setupAppHandlers(ipcMain: IpcMainHandleRegistrar, getP2PCore: () => P2P
     }
   });
 
-  ipcMain.handle(IPC_CHANNELS.RESTORE_DATABASE, async (_event, backupPath: string) => {
+  ipcMain.handle(IPC_CHANNELS.RESTORE_DATABASE, async (_event, backupPath: string, password: string) => {
     try {
+      const grantedBackupPath = resolveGrantedDialogPath(backupPath);
       const p2pCore = getP2PCore();
       if (!p2pCore) {
         return { success: false, error: 'P2P core not initialized' };
       }
 
-      log(`[IPC] Restoring database from: ${backupPath}`);
-
-      // Close current database connection
-      p2pCore.database.close();
-
-      // Restore the database
-      await p2pCore.database.restore(backupPath);
+      log(`[IPC] Restoring database from: ${grantedBackupPath}`);
+      await p2pCore.database.restoreEncrypted(grantedBackupPath, password);
 
       log('[IPC] Database restored. Restarting app...');
 
@@ -3310,41 +3335,14 @@ function setupAppHandlers(ipcMain: IpcMainHandleRegistrar, getP2PCore: () => P2P
     }
   });
 
-  ipcMain.handle(IPC_CHANNELS.RESTORE_DATABASE_FROM_FILE, async (_event, backupPath: string) => {
+  ipcMain.handle(IPC_CHANNELS.RESTORE_DATABASE_FROM_FILE, async (_event, backupPath: string, password: string) => {
     try {
+      const grantedBackupPath = resolveGrantedDialogPath(backupPath);
       const dataDir = ensureAppDataDir();
       const dbPath = join(dataDir, 'chat.db');
 
-      log(`[IPC] Restoring database (no core) from: ${backupPath} -> ${dbPath}`);
-
-      // Clean up any existing database and WAL files first
-      const fs = await import('fs/promises');
-      try {
-        await fs.unlink(dbPath);
-        log('[IPC] Removed existing chat.db');
-      } catch {
-        // File doesn't exist, that's ok
-      }
-      try {
-        await fs.unlink(`${dbPath}-wal`);
-        log('[IPC] Removed existing chat.db-wal');
-      } catch {
-        // File doesn't exist, that's ok
-      }
-      try {
-        await fs.unlink(`${dbPath}-shm`);
-        log('[IPC] Removed existing chat.db-shm');
-      } catch {
-        // File doesn't exist, that's ok
-      }
-
-      // Copy the backup file
-      await copyFile(backupPath, dbPath);
-      log('[IPC] Database file copied successfully');
-
-      // Verify the file exists
-      await stat(dbPath);
-      log('[IPC] Database file verified');
+      log(`[IPC] Restoring database (no core) from: ${grantedBackupPath} -> ${dbPath}`);
+      await ChatDatabase.restoreEncryptedAtPath(dbPath, grantedBackupPath, password);
 
       log('[IPC] Database restored. Restarting app...');
       requestAppRestart();

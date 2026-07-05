@@ -787,6 +787,10 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
       }
     });
 
+    const unsubGroupCallPeerBlocked = window.kiyeovoAPI.onGroupCallPeerBlocked((peerId) => {
+      groupCallService.handlePeerBlocked(peerId);
+    });
+
     const unsubGroupCallError = window.kiyeovoAPI.onGroupCallError((data) => {
       toast.error(data.error);
     });
@@ -872,6 +876,7 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
       unsubGroupCallControlSignalReceived();
       unsubGroupCallPairSignalReceived();
       unsubGroupCallStateChanged();
+      unsubGroupCallPeerBlocked();
       unsubGroupCallError();
       unsubCallService();
       unsubGroupCallService();

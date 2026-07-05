@@ -8,13 +8,15 @@ import type { NetworkMode } from '../../../core/types';
 import { RecoveryPhraseDisplayDialog } from './RecoveryPhraseDisplayDialog';
 import { RecoveryPhraseLoginDialog } from './RecoveryPhraseLoginDialog';
 import { NetworkModeSwitchDialog } from '../NetworkModeSwitchDialog';
+import { BackupPasswordDialog } from '../backup/BackupPasswordDialog';
+import { errStr } from '../../../core/utils/general-error';
 
 export interface PasswordValidationResult {
   valid: boolean;
   message?: string;
 }
 
-export function validatePasswordStrength(password: string): PasswordValidationResult {
+function validatePasswordStrength(password: string): PasswordValidationResult {
   if (password.length < 12) {
     return {
       valid: false,
@@ -83,10 +85,15 @@ export function PasswordPrompt({
   const [recoveryPhraseInput, setRecoveryPhraseInput] = useState('');
   const [isProcessingRecovery, setIsProcessingRecovery] = useState(false);
   const [showModeSwitchDialog, setShowModeSwitchDialog] = useState(false);
+  const [backupPasswordDialogOpen, setBackupPasswordDialogOpen] = useState(false);
+  const [selectedBackupPath, setSelectedBackupPath] = useState<string | null>(null);
+  const [restoreBackupError, setRestoreBackupError] = useState<string | null>(null);
+  const [isRestoringBackup, setIsRestoringBackup] = useState(false);
 
   const passwordInputRef = useRef<HTMLInputElement>(null);
 
   const isNewPassword = passwordRequest.isNewPassword ?? false;
+  const isNewIdentity = isNewPassword && Boolean(passwordRequest.recoveryPhrase);
 
   useEffect(() => {
     if (passwordRequest.prefilledPassword && !password) {
@@ -180,20 +187,52 @@ export function PasswordPrompt({
       const result = await window.kiyeovoAPI.showOpenDialog({
         title: 'Select Database Backup',
         filters: [
-          { name: 'Database Files', extensions: ['db'] },
+          { name: 'Database Backup', extensions: ['kiyeovo-db-backup'] },
           { name: 'All Files', extensions: ['*'] }
         ]
       });
 
       if (!result.canceled && result.filePath) {
-        const restoreResult = await window.kiyeovoAPI.restoreDatabaseFromFile(result.filePath);
-        if (!restoreResult.success) {
-          console.error('Failed to restore database:', restoreResult.error);
-        }
-        // App will restart automatically after successful restore
+        setSelectedBackupPath(result.filePath);
+        setRestoreBackupError(null);
+        setBackupPasswordDialogOpen(true);
       }
     } catch (error) {
       console.error('Failed to import backup:', error);
+      setRestoreBackupError(errStr(error, 'Failed to import backup'));
+    }
+  };
+
+  const handleBackupPasswordOpenChange = (open: boolean) => {
+    if (open) {
+      setBackupPasswordDialogOpen(true);
+      return;
+    }
+    if (isRestoringBackup) return;
+
+    setBackupPasswordDialogOpen(false);
+    setSelectedBackupPath(null);
+    setRestoreBackupError(null);
+  };
+
+  const handleRestoreBackup = async (backupPassword: string) => {
+    if (!selectedBackupPath || isRestoringBackup) return;
+
+    setIsRestoringBackup(true);
+    setRestoreBackupError(null);
+    try {
+      const restoreResult = await window.kiyeovoAPI.restoreDatabaseFromFile(selectedBackupPath, backupPassword);
+      if (!restoreResult.success) {
+        const message = restoreResult.error || 'Failed to restore database';
+        setRestoreBackupError(message);
+        console.error('Failed to restore database:', message);
+      }
+      // App will restart automatically after successful restore
+    } catch (error) {
+      console.error('Failed to import backup:', error);
+      setRestoreBackupError(errStr(error, 'Failed to import backup'));
+    } finally {
+      setIsRestoringBackup(false);
     }
   };
 
@@ -209,10 +248,12 @@ export function PasswordPrompt({
     <div className='flex flex-col gap-4 justify-center items-center'>
       <div className='flex flex-col gap-2 text-center'>
         <h1 className="text-xl font-mono font-semibold tracking-wide text-foreground">
-          {isNewPassword ? "NEW IDENTITY" : "UNLOCK IDENTITY"}
+          {isNewPassword ? (isNewIdentity ? "NEW IDENTITY" : "SET PASSWORD") : "UNLOCK IDENTITY"}
         </h1>
         <p className="text-sm text-muted-foreground">
-          {isNewPassword ? "Create a strong password that will be used to log into your identity" : "Enter password to decrypt identity information"}
+          {isNewPassword
+            ? `${isNewIdentity ? "Create" : "Set"} a strong password that will be used to log into your identity`
+            : "Enter password to decrypt identity information"}
         </p>
       </div>
       <form onSubmit={handleFormSubmit} className="space-y-6 w-96">
@@ -347,7 +388,7 @@ export function PasswordPrompt({
           ) : (
             <>
               <Shield className="w-4 h-4" />
-              {isNewPassword ? 'Create Identity' : 'Decrypt & Access'}
+              {isNewPassword ? (isNewIdentity ? 'Create Identity' : 'Set Password') : 'Decrypt & Access'}
             </>
           )}
         </Button>
@@ -377,7 +418,7 @@ export function PasswordPrompt({
                 variant="outline"
                 className="w-full"
                 onClick={handleImportBackup}
-                disabled={isSubmitting || isLocked}
+                disabled={isSubmitting || isLocked || isRestoringBackup}
               >
                 <Database className="w-4 h-4" />
                 Import from Backup
@@ -417,6 +458,18 @@ export function PasswordPrompt({
         onOpenChange={setShowRecoveryDialog}
         recoveryPhrase={passwordRequest.recoveryPhrase}
         onConfirm={handleRecoveryConfirm}
+      />
+
+      <BackupPasswordDialog
+        open={backupPasswordDialogOpen}
+        onOpenChange={handleBackupPasswordOpenChange}
+        title="Decrypt Database Backup"
+        description="Enter the backup password for this file."
+        confirmLabel="Restore Backup"
+        submittingLabel="Restoring..."
+        submitting={isRestoringBackup}
+        error={restoreBackupError}
+        onSubmit={handleRestoreBackup}
       />
 
       <RecoveryPhraseLoginDialog

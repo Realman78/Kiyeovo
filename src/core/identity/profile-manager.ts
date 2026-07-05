@@ -8,7 +8,7 @@ import type { EncryptedUserIdentity } from './encrypted-user-identity.js';
 import { errStr, generalErrorHandler } from '../utils/general-error.js';
 import { toBase64Url } from '../utils/miscellaneous.js';
 import { sha256 } from '@noble/hashes/sha2';
-import { Chat, ChatDatabase } from '../db/database.js';
+import { ChatDatabase } from '../db/database.js';
 import { PROFILE_SCRYPT_N } from '../constants.js';
 import { log } from '../../shared/logger.js';
 
@@ -143,6 +143,13 @@ export class ProfileManager {
       // Import and decrypt profile
       const profile = await ProfileManager.importProfile(filename, password);
 
+      if (profile.peerId === myPeerId) {
+        return {
+          success: false,
+          error: 'Cannot import your own profile'
+        };
+      }
+
       const existingUser = database.getUserByPeerId(profile.peerId);
       if (existingUser) {
         log(`User ${existingUser.username} (${profile.peerId.slice(0, 12)}...) already exists in your contacts`);
@@ -152,7 +159,7 @@ export class ProfileManager {
         };
       }
 
-      const localUsername = customName || profile.username;
+      const localUsername = (customName ?? profile.username).trim();
 
       if (localUsername.length < 2 || localUsername.length > 64) {
         log('Username must be between 2 and 64 characters');
@@ -162,15 +169,13 @@ export class ProfileManager {
         };
       }
 
-      await database.createUser({
+      const chatId = await database.createTrustedDirectContact({
         peer_id: profile.peerId,
         username: localUsername,
         signing_public_key: profile.signingPublicKey,
         offline_public_key: profile.offlinePublicKey,
         signature: profile.signature
-      });
-
-      const chatId = await database.createChat({
+      }, {
         type: 'direct',
         name: profile.peerId,
         created_by: myPeerId,
@@ -180,9 +185,11 @@ export class ProfileManager {
         offline_last_read_timestamp: 0,
         offline_last_ack_sent: 0,
         trusted_out_of_band: true,
+        muted: false,
+        key_version: 0,
         status: 'active',
         created_at: new Date()
-      } as Omit<Chat, 'id' | 'updated_at'> & { participants: string[] });
+      });
 
       const fingerprint = ProfileManager.calculateFingerprint(profile);
 

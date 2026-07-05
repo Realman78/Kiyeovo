@@ -5,6 +5,8 @@ import { promisify } from 'util';
 import { fromBase64Url } from '../utils/miscellaneous.js';
 import { generalErrorHandler } from '../utils/general-error.js';
 import {
+  DIRECT_OFFLINE_STORE_MAX_COMPRESSED_BYTES,
+  DIRECT_OFFLINE_STORE_MAX_DECOMPRESSED_BYTES,
   MAX_MESSAGES_PER_STORE,
   MESSAGE_TTL,
   NETWORK_MODE_CONFIG,
@@ -12,7 +14,20 @@ import {
 } from '../constants.js';
 
 const gunzipAsync = promisify(gunzip);
+const DIRECT_OFFLINE_GUNZIP_OPTS = { maxOutputLength: DIRECT_OFFLINE_STORE_MAX_DECOMPRESSED_BYTES };
 const OFFLINE_BUCKET_PREFIXES = Object.values(NETWORK_MODE_CONFIG).map((config) => config.dhtNamespaces.offline);
+
+function hashBase64Field(value: string): string {
+  return Buffer.from(sha256(Buffer.from(value, 'base64'))).toString('base64');
+}
+
+function assertDirectOfflineCompressedSize(value: Uint8Array): void {
+  if (value.length > DIRECT_OFFLINE_STORE_MAX_COMPRESSED_BYTES) {
+    throw new Error(
+      `Direct offline store too large (${value.length}B > ${DIRECT_OFFLINE_STORE_MAX_COMPRESSED_BYTES}B)`,
+    );
+  }
+}
 
 /**
  * The signed payload structure included in each offline message
@@ -22,6 +37,11 @@ export interface OfflineSignedPayload {
   sender_info_hash: string;   // SHA256 of encrypted sender info (base64)
   timestamp: number;
   bucket_key: string;         // Full bucket key for binding
+  message_type: 'encrypted' | 'hybrid';
+  expires_at: number;
+  aes_key_hash?: string;      // hybrid only: SHA256 of encrypted_aes_key (base64)
+  aes_iv_hash?: string;       // hybrid only: SHA256 of aes_iv (base64)
+  ack_only?: boolean;
 }
 
 /**
@@ -75,6 +95,7 @@ export interface OfflineMessageStoreDHT {
  *    - Verify content_hash matches SHA256(encrypted_content)
  *    - Verify sender_info_hash matches SHA256(encrypted_sender_info)
  *    - Verify bucket_key in signed_payload matches the actual bucket key
+ *    - Verify message_type, expires_at, and hybrid AES metadata hashes match the signed payload
  *
  * @throws Error if validation fails (DHT rejects the write)
  */
@@ -92,12 +113,14 @@ export async function offlineMessageValidator(
       throw new Error(`Invalid sender public key length: ${senderPubKey.length}, expected 32`);
     }
 
+    assertDirectOfflineCompressedSize(value);
+
     // 3. Decompress and parse value (OfflineMessageStore)
     let store: OfflineMessageStoreDHT;
     try {
-      const decompressedBuffer = await gunzipAsync(Buffer.from(value));
+      const decompressedBuffer = await gunzipAsync(Buffer.from(value), DIRECT_OFFLINE_GUNZIP_OPTS);
       store = JSON.parse(decompressedBuffer.toString('utf8'));
-    } catch (error) {
+    } catch {
       throw new Error('Failed to decompress or parse DHT value');
     }
 
@@ -237,6 +260,44 @@ function validateSingleMessage(
     throw new Error(`Message ${msg.id} timestamp mismatch with signed payload`);
   }
 
+  if (msg.message_type !== 'encrypted' && msg.message_type !== 'hybrid') {
+    throw new Error(`Message ${msg.id} message_type invalid`);
+  }
+  if (msg.signed_payload.message_type !== msg.message_type) {
+    throw new Error(`Message ${msg.id} message_type mismatch with signed payload`);
+  }
+  if (!Number.isFinite(msg.expires_at) || msg.expires_at <= 0) {
+    throw new Error(`Message ${msg.id} expires_at invalid`);
+  }
+  if (!Number.isFinite(msg.signed_payload.expires_at) || msg.signed_payload.expires_at <= 0) {
+    throw new Error(`Message ${msg.id} signed expires_at invalid`);
+  }
+  if (msg.expires_at !== msg.signed_payload.expires_at) {
+    throw new Error(`Message ${msg.id} expires_at mismatch with signed payload`);
+  }
+
+  if (msg.message_type === 'hybrid') {
+    if (
+      typeof msg.encrypted_aes_key !== 'string' || msg.encrypted_aes_key.length === 0 ||
+      typeof msg.aes_iv !== 'string' || msg.aes_iv.length === 0
+    ) {
+      throw new Error(`Message ${msg.id} hybrid AES fields missing`);
+    }
+    if (hashBase64Field(msg.encrypted_aes_key) !== msg.signed_payload.aes_key_hash) {
+      throw new Error(`Message ${msg.id} aes_key_hash mismatch`);
+    }
+    if (hashBase64Field(msg.aes_iv) !== msg.signed_payload.aes_iv_hash) {
+      throw new Error(`Message ${msg.id} aes_iv_hash mismatch`);
+    }
+  } else if (
+    msg.encrypted_aes_key !== undefined ||
+    msg.aes_iv !== undefined ||
+    msg.signed_payload.aes_key_hash !== undefined ||
+    msg.signed_payload.aes_iv_hash !== undefined
+  ) {
+    throw new Error(`Message ${msg.id} encrypted message contains AES fields`);
+  }
+
   // 2. Verify content_hash matches SHA256(encrypted_content)
   const contentBytes = Buffer.from(msg.content, 'base64');
   const actualContentHash = Buffer.from(sha256(contentBytes)).toString('base64');
@@ -310,7 +371,8 @@ export async function offlineMessageValidateUpdate(
  * Decompress and parse a gzipped OfflineMessageStoreDHT record
  */
 function decompressStore(value: Uint8Array): OfflineMessageStoreDHT {
-  const decompressedBuffer = gunzipSync(Buffer.from(value));
+  assertDirectOfflineCompressedSize(value);
+  const decompressedBuffer = gunzipSync(Buffer.from(value), DIRECT_OFFLINE_GUNZIP_OPTS);
   return JSON.parse(decompressedBuffer.toString('utf8'));
 }
 

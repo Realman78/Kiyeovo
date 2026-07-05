@@ -1,15 +1,16 @@
-import { writeFile, readFile } from 'fs/promises';
+import { writeFile, readFile, chmod } from 'fs/promises';
 import { existsSync } from 'fs';
 import { peerIdFromPrivateKey } from '@libp2p/peer-id';
 import { generateKeyPair, privateKeyFromProtobuf, privateKeyToProtobuf } from '@libp2p/crypto/keys';
 import type { PrivateKey, PeerId, Ed25519PrivateKey } from '@libp2p/interface';
 import { log } from '../../shared/logger.js';
+import { errStr } from '../utils/general-error.js';
 
 export interface LoadOrCreateOptions {
   /**
    * Fail-closed identity handling for deployments. When `true`, an existing
    * identity file that cannot be read/decoded aborts (throws) instead of
-   * silently generating a new key and overwriting the file — which would
+   * silently generating a new key and overwriting the file, which would
    * rotate the node's Peer ID. A genuinely absent file is still created.
    * Defaults to `false`, preserving the lenient desktop/dev recovery behaviour.
    */
@@ -30,6 +31,8 @@ export class PeerIdManager {
     if (existsSync(filePath)) {
       try {
         const keyBytes = await readFile(filePath);
+        // Keys written by older versions were created with the default umask.
+        await chmod(filePath, 0o600);
 
         privateKey = privateKeyFromProtobuf(keyBytes) as Ed25519PrivateKey;
 
@@ -37,11 +40,11 @@ export class PeerIdManager {
 
         loadedExisting = true;
         log(`Loaded peer ID: ${peerId.toString()}`);
-      } catch (err: any) {
+      } catch (err: unknown) {
         if (failClosed) {
           throw new Error(
             `Refusing to start: identity file "${filePath}" exists but could not be ` +
-              `read or decoded (${err?.message ?? err}). Not regenerating, to avoid ` +
+              `read, decoded, or permission-hardened (${errStr(err)}). Not regenerating, to avoid ` +
               `rotating the Peer ID. Fix or deliberately remove the file, then retry.`
           );
         }
@@ -62,15 +65,15 @@ export class PeerIdManager {
       log(`Generated new peer ID: ${peerId.toString()}`);
     }
 
-    // In fail-closed mode, never rewrite a file we successfully loaded — only
+    // In fail-closed mode, never rewrite a file we successfully loaded - only
     // persist a freshly generated key (genuine first run). The lenient default
     // keeps the original always-write behaviour.
     if (!failClosed || !loadedExisting) {
       try {
         const keyBytes = privateKeyToProtobuf(privateKey);
-        await writeFile(filePath, keyBytes);
+        await writeFile(filePath, keyBytes, { mode: 0o600 });
         log(`Private key saved to ${filePath}`);
-      } catch (err: any) {
+      } catch (err: unknown) {
         // Fail-closed: a first-run key that cannot be persisted would start with
         // an ephemeral Peer ID and rotate on the next restart (e.g. a missing or
         // unwritable bind mount). Abort instead of running with a key on disk
@@ -78,11 +81,11 @@ export class PeerIdManager {
         if (failClosed) {
           throw new Error(
             `Refusing to start: generated a new identity but could not save it to ` +
-              `"${filePath}" (${err?.message ?? err}). Refusing to run with an ` +
+              `"${filePath}" (${errStr(err)}). Refusing to run with an ` +
               `ephemeral Peer ID that would rotate on restart. Fix the path/permissions, then retry.`
           );
         }
-        console.warn(`Failed to save private key: ${err.message}`);
+        console.warn(`Failed to save private key: ${errStr(err)}`);
       }
     }
 

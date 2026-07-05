@@ -66,12 +66,22 @@ import {
   ERRORS,
   getNetworkModeRuntime,
   NETWORK_MODES,
+  INBOUND_STREAM_READ_TIMEOUT_MS,
+  MAX_BUCKET_NUDGE_ENVELOPE_BYTES,
+  MAX_CALL_SIGNAL_ENVELOPE_BYTES,
+  MAX_CHAT_ENVELOPE_BYTES,
+  MAX_INBOUND_STREAMS_BUCKET_NUDGE,
+  MAX_INBOUND_STREAMS_CALL_SIGNAL,
+  MAX_INBOUND_STREAMS_CHAT,
+  MAX_UNAUTH_KEY_EXCHANGE_GLOBAL,
+  MAX_UNAUTH_KEY_EXCHANGE_PER_PEER,
   RESUME_RELAY_GRACE_MS,
   RESUME_RELAY_READY_WAIT_MS,
   RESUME_RELAY_READY_POLL_MS,
 } from '../constants.js';
 import { triggerFastRelayRefresh } from '../network/relay-keepalive.js';
 import { SessionManager } from '../direct/session-manager.js';
+import { LeasePool } from './lease-pool.js';
 import { MessageEncryption } from '../direct/message-encryption.js';
 import {
   dispatchEnvelope,
@@ -88,7 +98,7 @@ import { PeerConnectionHandler } from '../direct/peer-connection-handler.js';
 import { StreamHandler } from '../transport/stream-handler.js';
 import { KeyExchange } from '../direct/key-exchange.js';
 import { ChatDatabase, User, type PendingOfflineSend } from '../db/database.js';
-import { OfflineMessageManager } from '../direct/offline-message-manager.js';
+import { OfflineMessageManager, redactBucketKey } from '../direct/offline-message-manager.js';
 import { OfflineSendQueue } from '../direct/offline-send-queue.js';
 import { UsernameRegistry } from '../username/username-registry.js';
 import { FileHandler } from './file-handler.js';
@@ -193,6 +203,12 @@ export class MessageHandler {
   private groupInfoSyncPending = new Set<string>();
   private offlineCheckRunSeq = 0;
   private lastPowerResumeAt = 0;
+  // Bounds concurrent unauthenticated first-contact work (read + key-exchange crypto) on
+  // /chat from peers with no session/chat; established peers bypass it (contact headroom).
+  private unauthKeyExchangeLeases = new LeasePool(
+    MAX_UNAUTH_KEY_EXCHANGE_GLOBAL,
+    MAX_UNAUTH_KEY_EXCHANGE_PER_PEER,
+  );
   // Single-flight for offline checks, keyed by scope
   private offlineCheckInFlight = new Map<string, Promise<OfflineCheckResult>>();
   private offlineCheckPending = new Map<string, Promise<OfflineCheckResult>>();
@@ -791,6 +807,7 @@ export class MessageHandler {
       }
     }, {
       runOnLimitedConnection: true,
+      maxInboundStreams: MAX_INBOUND_STREAMS_BUCKET_NUDGE,
     });
 
     void this.node.handle(this.chatProtocol, async (context: StreamHandlerContext) => {
@@ -806,13 +823,35 @@ export class MessageHandler {
       }
       StreamHandler.logIncomingConnection(remoteId, this.chatProtocol);
 
+      // Bound unauthenticated first-contact work (the inbound read + key-exchange crypto)
+      // from strangers with a global + per-peer concurrency gate. Established peers — an
+      // active session or an existing direct chat — bypass it, so an inbound flood from
+      // fresh peerIds can't starve real contacts of their first-contact/rotation streams.
+      const isEstablishedPeer =
+        Boolean(this.sessionManager.getSession(remoteId)) ||
+        Boolean(this.database.getChatByPeerId(remoteId));
+      const unauthLease = isEstablishedPeer ? null : this.unauthKeyExchangeLeases.tryAcquire(remoteId);
+      if (!isEstablishedPeer && !unauthLease) {
+        console.warn(`[CHAT][THROTTLE] peer=${remoteId.slice(-8)} reason=unauth_capacity_reached`);
+        try { stream.abort(new Error('chat handshake capacity reached')); } catch { /* best-effort */ }
+        return;
+      }
+
       try {
-        const message = await StreamHandler.readMessageFromStream<EncryptedMessage>(stream);
+        const message = await StreamHandler.readMessageFromStream<EncryptedMessage>(stream, {
+          maxBytes: MAX_CHAT_ENVELOPE_BYTES,
+          timeoutMs: INBOUND_STREAM_READ_TIMEOUT_MS,
+        });
         StreamHandler.logReceivedMessage(message);
 
         if (MessageEncryption.isKeyExchange(message)) {
           const hadUserAtStart = !!this.database.getUserByPeerId(remoteId);
-          await this.keyExchange.handleKeyExchange(remoteId, message as AuthenticatedEncryptedMessage, stream);
+          await this.keyExchange.handleKeyExchange(
+            remoteId,
+            message as AuthenticatedEncryptedMessage,
+            stream,
+            () => unauthLease?.release(),
+          );
           this.reactivateRetiredPendingAcksForPeer(remoteId);
           // Fallback B only for initial handshake from an existing known contact.
           if (message.content === 'key_exchange_init' && hadUserAtStart) {
@@ -854,9 +893,12 @@ export class MessageHandler {
         this.sessionManager.updateSessionUsage(remoteId);
       } catch (error: unknown) {
         generalErrorHandler(error, `Error handling message from ${remoteId}`);
+      } finally {
+        unauthLease?.release();
       }
     }, {
       runOnLimitedConnection: true,
+      maxInboundStreams: MAX_INBOUND_STREAMS_CHAT,
     });
 
     void this.node.handle(this.callSignalProtocol, async (context: StreamHandlerContext) => {
@@ -864,7 +906,10 @@ export class MessageHandler {
       try {
         if (this.database.isBlocked(remoteId)) return;
 
-        const signal = await StreamHandler.readMessageFromStream<CallSignalMessage>(stream);
+        const signal = await StreamHandler.readMessageFromStream<CallSignalMessage>(stream, {
+          maxBytes: MAX_CALL_SIGNAL_ENVELOPE_BYTES,
+          timeoutMs: INBOUND_STREAM_READ_TIMEOUT_MS,
+        });
         await this.handleIncomingCallSignal(remoteId, signal);
       } catch (error: unknown) {
         generalErrorHandler(error, `Error handling call signal from ${remoteId}`);
@@ -877,6 +922,7 @@ export class MessageHandler {
       }
     }, {
       runOnLimitedConnection: true,
+      maxInboundStreams: MAX_INBOUND_STREAMS_CALL_SIGNAL,
     });
   }
 
@@ -1684,6 +1730,44 @@ export class MessageHandler {
     return { success: true, error: null };
   }
 
+  async teardownBlockedPeer(peerId: string): Promise<void> {
+    const activeCall = this.activeCall?.peerId === peerId
+      ? { callId: this.activeCall.callId }
+      : null;
+
+    if (activeCall) {
+      try {
+        const result = await this.hangupCall(peerId, activeCall.callId, 'hangup');
+        if (!result.success) {
+          console.warn(
+            `[BLOCK] Active call teardown signal failed peer=${peerId.slice(-8)} call=${activeCall.callId.slice(0, 8)} reason=${result.error ?? 'unknown'}`,
+          );
+        }
+      } catch (error: unknown) {
+        console.warn(
+          `[BLOCK] Active call teardown threw peer=${peerId.slice(-8)} call=${activeCall.callId.slice(0, 8)} reason=${errStr(error)}`,
+        );
+      } finally {
+        if (this.isActiveCallMatch(peerId, activeCall.callId)) {
+          this.clearActiveCall('hangup');
+        }
+      }
+    }
+
+    try {
+      this.sessionManager.removePendingKeyExchange(peerId);
+      this.sessionManager.clearSession(peerId);
+    } catch (error: unknown) {
+      console.warn(`[BLOCK] Failed to clear session for peer=${peerId.slice(-8)} reason=${errStr(error)}`);
+    }
+
+    try {
+      await this.closePeerConnections(peerId, 'block');
+    } catch (error: unknown) {
+      console.warn(`[BLOCK] Failed to close peer connections for peer=${peerId.slice(-8)} reason=${errStr(error)}`);
+    }
+  }
+
   private async routeBucketNudge(remoteId: string, nudgePayload: BucketNudgePayload | null): Promise<void> {
     if (!nudgePayload) {
       log(`[NUDGE] Ignoring non-group nudge from ${remoteId.slice(-8)}`);
@@ -2009,33 +2093,28 @@ export class MessageHandler {
   }
 
   private async readBucketNudgePayload(stream: StreamHandlerContext['stream']): Promise<BucketNudgePayload | null> {
-    const chunks: Uint8Array[] = [];
-    for await (const chunk of stream.source) {
-      chunks.push((chunk as any).subarray());
-    }
-    if (chunks.length === 0) return null;
-
-    const totalLength = chunks.reduce((sum, c) => sum + c.length, 0);
-    const combined = new Uint8Array(totalLength);
-    let offset = 0;
-    for (const chunk of chunks) {
-      combined.set(chunk, offset);
-      offset += chunk.length;
-    }
-
+    let parsed: { kind?: string; groupId?: string };
     try {
-      const parsed = JSON.parse(new TextDecoder().decode(combined)) as { kind?: string; groupId?: string };
-      if (parsed.kind === 'DIRECT_SESSION_RESET') {
-        return { kind: 'DIRECT_SESSION_RESET' };
+      parsed = await StreamHandler.readMessageFromStream<{ kind?: string; groupId?: string }>(stream, {
+        maxBytes: MAX_BUCKET_NUDGE_ENVELOPE_BYTES,
+        timeoutMs: INBOUND_STREAM_READ_TIMEOUT_MS,
+      });
+    } catch (error: unknown) {
+      if (error instanceof SyntaxError) {
+        // Ignore empty or invalid payloads and treat as plain nudges.
+        return null;
       }
-      if (parsed.kind === 'DIRECT_OFFLINE_REFETCH') {
-        return { kind: 'DIRECT_OFFLINE_REFETCH' };
-      }
-      if (parsed.kind === 'GROUP_REKEY_REFETCH' && typeof parsed.groupId === 'string' && parsed.groupId.length > 0) {
-        return { kind: 'GROUP_REKEY_REFETCH', groupId: parsed.groupId };
-      }
-    } catch {
-      // Ignore invalid payloads and treat as plain nudge.
+      throw error;
+    }
+
+    if (parsed.kind === 'DIRECT_SESSION_RESET') {
+      return { kind: 'DIRECT_SESSION_RESET' };
+    }
+    if (parsed.kind === 'DIRECT_OFFLINE_REFETCH') {
+      return { kind: 'DIRECT_OFFLINE_REFETCH' };
+    }
+    if (parsed.kind === 'GROUP_REKEY_REFETCH' && typeof parsed.groupId === 'string' && parsed.groupId.length > 0) {
+      return { kind: 'GROUP_REKEY_REFETCH', groupId: parsed.groupId };
     }
     return null;
   }
@@ -2425,6 +2504,24 @@ export class MessageHandler {
     return MessageHandler.OFFLINE_FALLBACK_REGEX.test(errorText);
   }
 
+  private async closePeerConnections(peerId: string, context: string): Promise<void> {
+    const connections = this.node.getConnections().filter(
+      conn => conn.remotePeer.toString() === peerId,
+    );
+    if (connections.length === 0) {
+      return;
+    }
+
+    log(`[CONNECTION][PRUNE] closing ${connections.length} connection(s) to ${peerId.slice(0, 8)} context=${context}`);
+    const closeResults = await Promise.allSettled(connections.map(conn => conn.close()));
+    const failed = closeResults.filter((result) => result.status === 'rejected');
+    if (failed.length > 0) {
+      console.warn(
+        `[CONNECTION][PRUNE] failed to close ${failed.length}/${connections.length} connection(s) to ${peerId.slice(0, 8)} context=${context}`,
+      );
+    }
+  }
+
   /**
    * Close any connections we still hold to a peer that just failed to receive a
    * message within the send budget. When a peer goes away abruptly (e.g. laptop
@@ -2436,14 +2533,7 @@ export class MessageHandler {
    * offline DHT PUT is less likely to route through the dead peer.
    */
   private async pruneUnreachablePeerConnections(peerId: string): Promise<void> {
-    const stale = this.node.getConnections().filter(
-      conn => conn.remotePeer.toString() === peerId,
-    );
-    if (stale.length === 0) {
-      return;
-    }
-    log(`[OFFLINE-SEND][PRUNE] closing ${stale.length} stale connection(s) to ${peerId.slice(0, 8)} after send failure`);
-    await Promise.allSettled(stale.map(conn => conn.close()));
+    await this.closePeerConnections(peerId, 'offline-send-failure');
   }
 
   private async storeOfflineMessageFallback(
@@ -3410,7 +3500,7 @@ export class MessageHandler {
         const chatIdForLog = hasChatId(info) ? String(info.chat_id) : 'n/a';
         console.warn(
           `[MODE-GUARD][REJECT][offline_lookup] run=${runId} chatId=${chatIdForLog} peer=${info.peer_id} ` +
-          `reason=bucket_prefix_mismatch expectedPrefix=${this.expectedOfflineBucketPrefix} got=${readBucketKey.slice(0, 64)}...`
+          `reason=bucket_prefix_mismatch expectedPrefix=${this.expectedOfflineBucketPrefix} got=${redactBucketKey(readBucketKey)}`
         );
         continue;
       }

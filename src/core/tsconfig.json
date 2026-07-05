@@ -1,4 +1,5 @@
 {
   "extends": "../electron/tsconfig.json",
-  "include": ["./**/*"]
+  "include": ["./**/*"],
+  "exclude": ["./**/*.test.ts", "./**/*.test.tsx", "./test-suite.ts"]
 }

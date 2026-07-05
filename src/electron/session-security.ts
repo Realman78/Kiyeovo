@@ -1,9 +1,11 @@
 import type { BrowserWindow, Session, WebContents, WebFrameMain } from 'electron';
+import type { NetworkMode } from '../core/types.js';
 import { ALLOWED_RENDERER_PERMISSIONS } from './constants.js';
 import { isTrustedAppOrigin, type AppUrlPolicyOptions } from './app-url-policy.js';
 
 type SessionSecurityOptions = AppUrlPolicyOptions & {
   getMainWindow: () => BrowserWindow | null;
+  networkMode: NetworkMode;
   selectDisplayMediaSource?: () => Promise<Electron.Video | null>;
 };
 
@@ -88,10 +90,21 @@ function isAllowedDisplayMediaRequest(
   return isTrustedAppOrigin(requestingUrl, options);
 }
 
+export function applyWebRTCIPHandlingPolicy(
+  session: Pick<Session, 'setWebRTCIPHandlingPolicy'>,
+  mode: NetworkMode,
+): void {
+  if (mode === 'anonymous') {
+    session.setWebRTCIPHandlingPolicy('disable_non_proxied_udp');
+  }
+}
+
 export function applySessionSecurityPolicies(
   session: Session,
   options: SessionSecurityOptions,
 ): void {
+  applyWebRTCIPHandlingPolicy(session, options.networkMode);
+
   session.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
     const requestingUrl = details.requestingUrl || requestingOrigin || webContents?.getURL() || '';
     const allowed = isAllowedRendererPermission(

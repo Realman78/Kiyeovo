@@ -26,6 +26,10 @@ import {
   groupInfoVersionedValidator, groupInfoVersionedSelector, groupInfoVersionedValidateUpdate,
 } from '../group/dht/group-dht-validator.js';
 import {
+  CHAT_NODE_INBOUND_CONNECTION_THRESHOLD_PER_HOST,
+  CHAT_NODE_INBOUND_UPGRADE_TIMEOUT_MS,
+  CHAT_NODE_MAX_CONNECTIONS,
+  CHAT_NODE_MAX_INCOMING_PENDING_CONNECTIONS,
   K_BUCKET_SIZE,
   NETWORK_MODES,
   PREFIX_LENGTH,
@@ -374,7 +378,10 @@ export async function createChatNode(
       connectionEncrypters: [noise()],
       streamMuxers: [yamux()],
       connectionManager: {
-        maxConnections: 100,
+        maxConnections: CHAT_NODE_MAX_CONNECTIONS,
+        inboundConnectionThreshold: CHAT_NODE_INBOUND_CONNECTION_THRESHOLD_PER_HOST,
+        maxIncomingPendingConnections: CHAT_NODE_MAX_INCOMING_PENDING_CONNECTIONS,
+        inboundUpgradeTimeout: CHAT_NODE_INBOUND_UPGRADE_TIMEOUT_MS,
       },
       connectionMonitor: {
         enabled: true,

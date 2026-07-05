@@ -219,7 +219,7 @@ const chatSlice = createSlice({
       const isDuplicate = state.messages.some(msg => msg.id === id);
 
       if (isDuplicate) {
-        console.log(`Message ${id} already exists, skipping duplicate but updating chat metadata`);
+        console.log(`Message ${id} already exists, skipping duplicate`);
       } else {
         state.messages.push(action.payload);
         insertedOrUpdated = true;
@@ -240,8 +240,13 @@ const chatSlice = createSlice({
       if (chatIndex !== -1) {
         const chat = state.chats[chatIndex];
 
-        chat.lastMessage = action.payload.content;
-        chat.lastMessageTimestamp = action.payload.timestamp;
+        if (insertedOrUpdated) {
+          const latestSettledMessage = getLastSettledChatMessage(state.messages, chatId);
+          if (latestSettledMessage) {
+            chat.lastMessage = latestSettledMessage.content;
+            chat.lastMessageTimestamp = latestSettledMessage.timestamp;
+          }
+        }
         if (!isFromCurrentUser) {
           const prevInboundTs = chat.lastInboundActivityTimestamp ?? 0;
           chat.lastInboundActivityTimestamp = Math.max(prevInboundTs, action.payload.timestamp);
@@ -259,7 +264,9 @@ const chatSlice = createSlice({
           chat.unreadCount += 1;
         }
 
-        state.chats.sort((a, b) => b.lastMessageTimestamp - a.lastMessageTimestamp);
+        if (insertedOrUpdated) {
+          state.chats.sort((a, b) => b.lastMessageTimestamp - a.lastMessageTimestamp);
+        }
       }
     },
     removeMessageById: (state, action: PayloadAction<{ messageId: string; chatId: number }>) => {
@@ -313,10 +320,10 @@ const chatSlice = createSlice({
     },
     removeChat: (state, action: PayloadAction<number>) => {
       state.chats = state.chats.filter((chat) => chat.id !== action.payload);
+      state.messages = state.messages.filter((m) => m.chatId !== action.payload);
       state.sendingMessages = state.sendingMessages.filter((m) => m.chatId !== action.payload);
+      delete state.replyTargetByChatId[action.payload];
       if (state.activeChat?.id === action.payload) {
-        state.messages = [];
-        state.sendingMessages = [];
         state.activeChat = null;
       }
     },
@@ -415,17 +422,13 @@ const chatSlice = createSlice({
       const chat = state.chats.find((candidate) => candidate.id === chatId);
       if (chat) {
         chat.lastMessage = preview?.content ?? 'SYSTEM: No messages yet';
-        if (preview) {
-          chat.lastMessageTimestamp = preview.timestamp;
-        }
+        chat.lastMessageTimestamp = preview?.timestamp ?? 0;
       }
       if (state.activeChat?.id === chatId) {
         state.activeChat.lastMessage = preview?.content ?? 'SYSTEM: No messages yet';
-        if (preview) {
-          state.activeChat.lastMessageTimestamp = preview.timestamp;
-        }
+        state.activeChat.lastMessageTimestamp = preview?.timestamp ?? 0;
       }
-      if (preview) {
+      if (chat) {
         state.chats.sort((a, b) => b.lastMessageTimestamp - a.lastMessageTimestamp);
       }
     },

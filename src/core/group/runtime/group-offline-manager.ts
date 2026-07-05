@@ -14,6 +14,7 @@ import {
   GROUP_OFFLINE_LOCAL_CACHE_TTL_MS,
   GROUP_OFFLINE_MESSAGE_TTL_MS,
   GROUP_OFFLINE_STORE_MAX_COMPRESSED_BYTES,
+  GROUP_OFFLINE_STORE_MAX_DECOMPRESSED_BYTES,
   GROUP_ROTATION_GRACE_WINDOW_MS,
   getNetworkModeRuntime,
   GROUP_MISSING_USED_UNTIL_SCAN_EPOCH_CAP,
@@ -541,11 +542,13 @@ export class GroupOfflineManager {
         let lastReadTs = cursor?.last_read_timestamp ?? 0;
         let lastReadMessageId = cursor?.last_read_message_id ?? '';
         let highestSeenSeq = this.deps.database.getMemberSeq(chat.group_id, epoch.key_version, senderPeerId);
+        const closedEpochSeqCeiling = highestSeenSeq;
         const senderBoundary = versionMeta?.senderSeqBoundaries?.[senderPeerId];
         let deliveredForSender = 0;
         let skippedSeen = 0;
         let skippedInvalidSignature = 0;
         let skippedByBoundary = 0;
+        let skippedClosedEpochNoBoundary = 0;
         let repairedLate = 0;
 
         for (const msg of orderedMessages) {
@@ -581,8 +584,15 @@ export class GroupOfflineManager {
             continue;
           }
 
-          if (senderBoundary !== undefined && msg.seq > senderBoundary) {
-            skippedByBoundary++;
+          if (senderBoundary !== undefined) {
+            if (msg.seq > senderBoundary) {
+              skippedByBoundary++;
+              continue;
+            }
+          } else if (epoch.used_until !== null && msg.seq > closedEpochSeqCeiling) {
+            // Closed epochs without authoritative sender boundaries fail closed here;
+            // roster enumeration and DHT validation remain defense-in-depth.
+            skippedClosedEpochNoBoundary++;
             continue;
           }
 
@@ -710,7 +720,8 @@ export class GroupOfflineManager {
         log(
           `[GROUP-OFFLINE][TIMING][CHAT:${chat.id}] epoch=${epoch.key_version} sender=${sender.username} ` +
           `bucketMessages=${orderedMessages.length} delivered=${deliveredForSender} skippedSeen=${skippedSeen} ` +
-          `repairedLate=${repairedLate} skippedBoundary=${skippedByBoundary} skippedSig=${skippedInvalidSignature} `
+          `repairedLate=${repairedLate} skippedBoundary=${skippedByBoundary} ` +
+          `skippedClosedEpochNoBoundary=${skippedClosedEpochNoBoundary} skippedSig=${skippedInvalidSignature} `
         );
       }
 
@@ -1113,7 +1124,7 @@ export class GroupOfflineManager {
         if (event.name !== 'VALUE' || event.value.length === 0) continue;
         valueEvents++;
         try {
-          const decompressed = await gunzipAsync(Buffer.from(event.value));
+          const decompressed = await gunzipAsync(Buffer.from(event.value), { maxOutputLength: GROUP_OFFLINE_STORE_MAX_DECOMPRESSED_BYTES });
           const store = JSON.parse(decompressed.toString('utf8')) as GroupOfflineStore;
           if (
             !best

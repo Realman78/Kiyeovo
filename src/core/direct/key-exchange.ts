@@ -8,10 +8,12 @@ import type { ChatNode, ConversationSession, AuthenticatedEncryptedMessage, Mess
 import { EncryptedUserIdentity } from '../identity/encrypted-user-identity.js';
 import { SessionManager } from './session-manager.js';
 import {
+  INBOUND_STREAM_READ_TIMEOUT_MS,
   KEY_EXCHANGE_MAX_FUTURE_SKEW_MS,
   KEY_EXCHANGE_RATE_LIMIT_DEFAULT,
   KEY_ROTATION_TIMEOUT,
   MAX_KEY_EXCHANGE_AGE,
+  MAX_KEY_EXCHANGE_ENVELOPE_BYTES,
   NETWORK_MODES,
   PENDING_KEY_EXCHANGE_EXPIRATION,
   RECENT_KEY_EXCHANGE_ATTEMPTS_WINDOW,
@@ -104,6 +106,30 @@ export class KeyExchange {
     if (message.linkIntent !== undefined) payload.linkIntent = message.linkIntent;
     if (message.linkDecision !== undefined) payload.linkDecision = message.linkDecision;
     return payload;
+  }
+
+  private recordSigningKeyChangeEvent(
+    peerId: string,
+    username: string,
+    oldSigningKey: string | null | undefined,
+    newSigningKey: string | null | undefined,
+    source: string
+  ): void {
+    if (!oldSigningKey || !newSigningKey || oldSigningKey === newSigningKey) {
+      return;
+    }
+
+    this.database.recordKeyChangeEvent({
+      peer_id: peerId,
+      username,
+      old_signing_key: oldSigningKey,
+      new_signing_key: newSigningKey,
+      source
+    });
+  }
+
+  private getPinnedSigningPublicKey(user: User | null | undefined): string {
+    return user?.signature ? user.signing_public_key : '';
   }
 
   constructor(
@@ -231,13 +257,15 @@ export class KeyExchange {
     peerId: string
   ): Promise<{ valid: boolean; signingPublicKey: string | null }> {
     const dbUser = this.database.getUserByPeerId(peerId);
-    if (dbUser?.signing_public_key) {
+    const pinnedSigningPublicKey = this.getPinnedSigningPublicKey(dbUser) || null;
+
+    if (pinnedSigningPublicKey) {
       const valid = EncryptedUserIdentity.verifyKeyExchangeSignature(
-        signature, message, dbUser.signing_public_key
+        signature, message, pinnedSigningPublicKey
       );
 
       if (valid) {
-        return { valid: true, signingPublicKey: dbUser.signing_public_key };
+        return { valid: true, signingPublicKey: pinnedSigningPublicKey };
       }
     }
 
@@ -245,34 +273,47 @@ export class KeyExchange {
     try {
       const userRegistration = await this.usernameRegistry.lookup(username);
       if (userRegistration.peerID !== peerId) {
-        return { valid: false, signingPublicKey: null };
+        return { valid: false, signingPublicKey: pinnedSigningPublicKey };
+      }
+
+      if (pinnedSigningPublicKey && userRegistration.signingPublicKey !== pinnedSigningPublicKey) {
+        this.recordSigningKeyChangeEvent(
+          peerId,
+          username,
+          pinnedSigningPublicKey,
+          userRegistration.signingPublicKey,
+          'signature_dht_fallback'
+        );
+        return { valid: false, signingPublicKey: pinnedSigningPublicKey };
       }
 
       const valid = EncryptedUserIdentity.verifyKeyExchangeSignature(
         signature, message, userRegistration.signingPublicKey
       );
 
-      if (dbUser) {
-        this.database.updateUserKeys({
-          peer_id: peerId,
-          signing_public_key: userRegistration.signingPublicKey,
-          offline_public_key: userRegistration.offlinePublicKey,
-          signature: userRegistration.signature
-        });
-      } else {
-        await this.database.createUser({
-          peer_id: peerId,
-          username: username,
-          signing_public_key: userRegistration.signingPublicKey,
-          offline_public_key: userRegistration.offlinePublicKey,
-          signature: userRegistration.signature
-        });
+      if (valid) {
+        if (dbUser) {
+          this.database.updateUserKeys({
+            peer_id: peerId,
+            signing_public_key: userRegistration.signingPublicKey,
+            offline_public_key: userRegistration.offlinePublicKey,
+            signature: userRegistration.signature
+          });
+        } else {
+          await this.database.createUser({
+            peer_id: peerId,
+            username: username,
+            signing_public_key: userRegistration.signingPublicKey,
+            offline_public_key: userRegistration.offlinePublicKey,
+            signature: userRegistration.signature
+          });
+        }
       }
 
       return { valid, signingPublicKey: userRegistration.signingPublicKey };
     } catch (error: unknown) {
       generalErrorHandler(error);
-      return { valid: false, signingPublicKey: null };
+      return { valid: false, signingPublicKey: pinnedSigningPublicKey };
     }
   }
 
@@ -509,6 +550,9 @@ export class KeyExchange {
     }
     if (!recipientOfflinePublicKeyBase64) {
       const registration = await this.usernameRegistry.lookupByPeerId(peerIdStr);
+      if (registration.peerID !== peerIdStr) {
+        throw new Error(`Username record peer ID mismatch for ${targetUsername}`);
+      }
       recipientOfflinePublicKeyBase64 = registration.offlinePublicKey;
     }
     if (!recipientOfflinePublicKeyBase64) {
@@ -659,7 +703,12 @@ export class KeyExchange {
   /**
    * Handle incoming key exchange messages
    */
-  async handleKeyExchange(remoteId: string, message: AuthenticatedEncryptedMessage, stream: Stream): Promise<void> {
+  async handleKeyExchange(
+    remoteId: string,
+    message: AuthenticatedEncryptedMessage,
+    stream: Stream,
+    onFirstContactPending?: () => void,
+  ): Promise<void> {
     if (!message.ephemeralPublicKey) {
       console.error('Key exchange message missing ephemeral public key');
       return;
@@ -678,7 +727,7 @@ export class KeyExchange {
 
     try {
       if (message.content === 'key_exchange_init') {
-        await this.handleKeyExchangeInit(remoteId, message, stream, userIdentity, myUsername);
+        await this.handleKeyExchangeInit(remoteId, message, stream, userIdentity, myUsername, onFirstContactPending);
       } else if (message.content === 'key_exchange_response') {
         await this.handleInboundAcceptedKeyExchangeResponse(remoteId, message, {
           stream,
@@ -808,41 +857,58 @@ export class KeyExchange {
       return null;
     }
 
+    let verifiedSender: UserRegistration;
+    try {
+      verifiedSender = await this.resolveContactRequestSenderFromDht(remoteId, senderUsername);
+    } catch (error: unknown) {
+      log(`Rejecting unresolved contact request from ${senderUsername}: ${errStr(error)}`);
+      return null;
+    }
+
     // Silent mode - just log the attempt
     const contactAttemptId = this.database.logContactAttempt({
       sender_peer_id: remoteId,
-      sender_username: senderUsername,
+      sender_username: verifiedSender.username,
       message: message.content || 'Contact request',
       message_body: initialMessageBody,
       timestamp: Date.now()
     });
 
-    return await this.handleActiveContactRequest(remoteId, message, contactAttemptId, initialMessageBody, onPendingCreated);
+    return await this.handleActiveContactRequest(
+      remoteId,
+      message,
+      verifiedSender,
+      contactAttemptId,
+      initialMessageBody,
+      onPendingCreated,
+    );
   }
 
   // Handle contact request in active mode (with user prompt and timeout)
   private async handleActiveContactRequest(
     remoteId: string,
     message: AuthenticatedEncryptedMessage,
+    verifiedSender: UserRegistration,
     contactAttemptId: number,
     initialMessageBody: string,
     onPendingCreated?: () => Promise<void>,
   ): Promise<UserRegistration | User> {
     const senderUsername = message.senderUsername;
+    const verifiedUsername = verifiedSender.username;
     const receivedAt = Date.now();
 
     if (!message.ephemeralPublicKey || !message.signature) {
       throw new Error('Key exchange missing signature or ephemeral public key - this should never happen');
     }
 
-    this.emitIncomingContactRequest(remoteId, message, initialMessageBody);
+    this.emitIncomingContactRequest(remoteId, message, initialMessageBody, verifiedUsername);
     if (onPendingCreated) {
       try {
         await onPendingCreated();
       } catch (error) {
         console.warn(
           `[KEY-EXCHANGE][ACK][FAIL] ts=${new Date().toISOString()} ` +
-          `peer=${remoteId} username=${senderUsername} error=${errStr(error)}`,
+          `peer=${remoteId} username=${verifiedUsername} error=${errStr(error)}`,
         );
       }
     }
@@ -850,7 +916,7 @@ export class KeyExchange {
     try {
       result = await this.waitForContactRequestDecision(
         remoteId,
-        senderUsername,
+        verifiedUsername,
         initialMessageBody,
         receivedAt,
         this.getKeyExchangeDecisionExpiresAt(message.timestamp),
@@ -858,32 +924,33 @@ export class KeyExchange {
     } catch (error) {
       this.database.deleteContactAttempt(contactAttemptId);
       if (error instanceof Error && error.message === 'KEY_EXCHANGE_CANCELLED_BY_INITIATOR') {
-        log(`Contact request from ${senderUsername} cancelled by initiator`);
+        log(`Contact request from ${verifiedUsername} cancelled by initiator`);
       }
       throw error;
     }
 
     this.database.deleteContactAttempt(contactAttemptId);
     if (result === null) {
-      log(`Contact request from ${senderUsername} expired`);
+      log(`Contact request from ${verifiedUsername} expired`);
       throw new Error('REJECTION_TIMEOUT');
     }
 
     if (!result) {
-      log(`Contact request from ${senderUsername} rejected`);
+      log(`Contact request from ${verifiedUsername} rejected`);
       // Signal that rejection response needs to be sent
       throw new Error('REJECTION_NEEDED');
     }
 
-    return this.resolveAcceptedContactRequestSender(remoteId, senderUsername);
+    return this.resolveAcceptedContactRequestSender(remoteId, senderUsername, verifiedSender);
   }
 
   private emitIncomingContactRequest(
     remoteId: string,
     message: AuthenticatedEncryptedMessage,
     initialMessageBody: string,
+    displayUsername: string,
   ): void {
-    const senderUsername = message.senderUsername;
+    const senderUsername = displayUsername;
     const now = Date.now();
     const expiresAt = this.getKeyExchangeDecisionExpiresAt(message.timestamp);
 
@@ -954,7 +1021,13 @@ export class KeyExchange {
   private async resolveAcceptedContactRequestSender(
     remoteId: string,
     senderUsername: string,
+    preResolvedSender?: UserRegistration,
   ): Promise<UserRegistration | User> {
+    if (preResolvedSender) {
+      log(`Accepted contact request from ${preResolvedSender.username} (verified via DHT before prompt)`);
+      return preResolvedSender;
+    }
+
     const existingAcceptedUser = this.database.getUserByPeerId(remoteId);
     if (
       existingAcceptedUser?.signing_public_key &&
@@ -967,12 +1040,25 @@ export class KeyExchange {
       return existingAcceptedUser;
     }
 
+    return this.resolveContactRequestSenderFromDht(remoteId, senderUsername);
+  }
+
+  private async resolveContactRequestSenderFromDht(
+    remoteId: string,
+    claimedUsername: string,
+  ): Promise<UserRegistration> {
     try {
       const sender = await this.usernameRegistry.lookupByPeerId(remoteId);
       if (sender.peerID !== remoteId) {
-        throw new Error(`Username/peer mismatch for ${senderUsername}`);
+        throw new Error(`Username/peer mismatch for ${claimedUsername}`);
       }
-      log(`Accepted contact request from ${senderUsername} (verified via DHT)`);
+      if (sender.username !== claimedUsername) {
+        log(
+          `[KEY-EXCHANGE][CONTACT][USERNAME_MISMATCH] peer=${remoteId} ` +
+          `claimed=${claimedUsername} resolved=${sender.username}`,
+        );
+      }
+      log(`Contact request from ${sender.username} verified via DHT`);
       return sender;
     } catch (error: unknown) {
       throw new Error(`Sender not in DHT: ${errStr(error)}`);
@@ -1025,8 +1111,47 @@ export class KeyExchange {
       signature = sender.signature;
     }
 
+    const existingUser = this.database.getUserByPeerId(remoteId);
+    const pinnedSigningPublicKey = this.getPinnedSigningPublicKey(existingUser);
+    const pinnedKeys = {
+      signingPublicKey: pinnedSigningPublicKey,
+      offlinePublicKey: existingUser?.offline_public_key ?? '',
+      signature: existingUser?.signature ?? ''
+    };
+
     let signatureValid = false;
-    if (signingPublicKey) {
+    if (pinnedSigningPublicKey) {
+      signatureValid = EncryptedUserIdentity.verifyKeyExchangeSignature(
+        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+        message.signature!,
+        messageToVerify,
+        pinnedSigningPublicKey
+      );
+
+      if (signatureValid) {
+        const verifiedPinnedKeys = {
+          signingPublicKey: pinnedSigningPublicKey,
+          offlinePublicKey: signingPublicKey === pinnedSigningPublicKey
+            ? existingUser?.offline_public_key || offlinePublicKey
+            : existingUser?.offline_public_key ?? '',
+          signature: signingPublicKey === pinnedSigningPublicKey
+            ? existingUser?.signature || signature
+            : existingUser?.signature ?? ''
+        };
+        return { valid: true, keys: verifiedPinnedKeys };
+      }
+
+      if (signingPublicKey && signingPublicKey !== pinnedSigningPublicKey) {
+        this.recordSigningKeyChangeEvent(
+          remoteId,
+          sender.username,
+          pinnedSigningPublicKey,
+          signingPublicKey,
+          'key_exchange_init_incoming'
+        );
+        return { valid: false, keys: pinnedKeys };
+      }
+    } else if (signingPublicKey) {
       signatureValid = EncryptedUserIdentity.verifyKeyExchangeSignature(
         // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
         message.signature!,
@@ -1040,6 +1165,17 @@ export class KeyExchange {
       try {
         const refreshed = await this.usernameRegistry.lookupByPeerId(remoteId);
         if (refreshed.peerID === remoteId) {
+          if (pinnedSigningPublicKey && refreshed.signingPublicKey !== pinnedSigningPublicKey) {
+            this.recordSigningKeyChangeEvent(
+              remoteId,
+              sender.username,
+              pinnedSigningPublicKey,
+              refreshed.signingPublicKey,
+              'key_exchange_init_dht_refresh'
+            );
+            return { valid: false, keys: pinnedKeys };
+          }
+
           signingPublicKey = refreshed.signingPublicKey;
           offlinePublicKey = refreshed.offlinePublicKey;
           signature = refreshed.signature;
@@ -1079,9 +1215,24 @@ export class KeyExchange {
         offline_public_key: offlinePublicKey,
         signature: signature
       });
-    } else if (!existingUser.signing_public_key ||
+      return;
+    }
+
+    const pinnedSigningPublicKey = this.getPinnedSigningPublicKey(existingUser);
+    if (pinnedSigningPublicKey && pinnedSigningPublicKey !== signingPublicKey) {
+      this.recordSigningKeyChangeEvent(
+        remoteId,
+        username,
+        pinnedSigningPublicKey,
+        signingPublicKey,
+        'key_exchange_init_persist'
+      );
+    } else if (
+      !existingUser.signing_public_key ||
       existingUser.signing_public_key !== signingPublicKey ||
-      existingUser.offline_public_key !== offlinePublicKey) {
+      existingUser.offline_public_key !== offlinePublicKey ||
+      !existingUser.signature
+    ) {
       // Update placeholder/missing keys after successful verification
       this.database.updateUserKeys({
         peer_id: remoteId,
@@ -1331,26 +1482,15 @@ export class KeyExchange {
       `peer=${remoteId}`,
     );
 
-    let timeoutId: NodeJS.Timeout | undefined;
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      timeoutId = setTimeout(() => {
-        reject(new Error('Key exchange follow-up timeout'));
-      }, this.getKeyExchangeFollowupTimeoutMs());
+    const message = await StreamHandler.readMessageFromStream<AuthenticatedEncryptedMessage>(stream, {
+      maxBytes: MAX_KEY_EXCHANGE_ENVELOPE_BYTES,
+      timeoutMs: this.getKeyExchangeFollowupTimeoutMs(),
     });
-
-    const message = await Promise.race([
-      StreamHandler.readMessageFromStream<AuthenticatedEncryptedMessage>(stream),
-      timeoutPromise,
-    ]);
 
     log(
       `[KEY-EXCHANGE][FINALIZE][WAIT][MESSAGE] ts=${new Date().toISOString()} ` +
       `peer=${remoteId} durationMs=${Date.now() - startedAt} content=${message.content}`,
     );
-
-    if (timeoutId) {
-      clearTimeout(timeoutId);
-    }
 
     if (message.content === 'key_exchange_cancelled') {
       await this.assertKeyExchangeStreamResult(message, remoteId, 'key_exchange_cancelled', responderEphemeralPublicKey);
@@ -1442,7 +1582,8 @@ export class KeyExchange {
     message: AuthenticatedEncryptedMessage,
     stream: Stream,
     userIdentity: EncryptedUserIdentity,
-    myUsername: string
+    myUsername: string,
+    onFirstContactPending?: () => void,
   ): Promise<void> {
     try {
       const linkHandling = this.getIncomingKeyExchangeLinkHandling(remoteId, message);
@@ -1458,6 +1599,10 @@ export class KeyExchange {
         }
 
         ackSent = true;
+        // We've finished the unauthenticated crypto and are now waiting on the user's
+        // accept/reject decision; free the pre-auth concurrency slot so a pending prompt
+        // doesn't hold it for the (minutes-long) decision window.
+        onFirstContactPending?.();
         await this.sendKeyExchangeAck(stream, remoteId, myUsername, message.ephemeralPublicKey ?? '');
       };
 
@@ -1657,7 +1802,10 @@ export class KeyExchange {
       `sinceInitMs=${keyExchangeStartedAt === undefined ? 'unknown' : String(waitStartedAt - keyExchangeStartedAt)}`,
     );
     try {
-      const message = await StreamHandler.readMessageFromStream<AuthenticatedEncryptedMessage>(stream);
+      const message = await StreamHandler.readMessageFromStream<AuthenticatedEncryptedMessage>(stream, {
+        maxBytes: MAX_KEY_EXCHANGE_ENVELOPE_BYTES,
+        timeoutMs: INBOUND_STREAM_READ_TIMEOUT_MS,
+      });
       log(
         `[KEY-EXCHANGE][INIT_STREAM][MESSAGE] ts=${new Date().toISOString()} peer=${peerId} ` +
         `durationMs=${Date.now() - waitStartedAt} content=${message.content}`,
@@ -2348,7 +2496,7 @@ export class KeyExchange {
   private createRotationPromise(peerIdStr: string): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
       this.rotationPromises.set(peerIdStr,
-        { resolve: () => { resolve(true); }, reject: (_error: Error) => { resolve(false); } }
+        { resolve: () => { resolve(true); }, reject: () => { resolve(false); } }
       );
     });
   }

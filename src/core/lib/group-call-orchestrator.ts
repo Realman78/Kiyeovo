@@ -694,6 +694,13 @@ export class GroupCallOrchestrator {
   }
 
   async sendPairSignal(signal: GroupCallPairSignalOutgoingInput): Promise<{ success: boolean; error: string | null }> {
+    if (this.database.isBlocked(signal.toPeerId)) {
+      log(
+        `[GROUP-CALL][SIGNAL][DROP] type=${signal.type} group=${signal.groupId.slice(0, 8)} call=${signal.callId.slice(0, 8)} to=${signal.toPeerId.slice(-8)} reason=blocked_peer`,
+      );
+      return { success: false, error: 'peer is blocked' };
+    }
+
     if (!this.session) {
       // TEMP_LOG
       log(`[GROUP-CALL][PAIR][SEND][SKIP] type=${signal.type} to=${signal.toPeerId.slice(-8)} reason=no_session`);
@@ -2861,6 +2868,13 @@ export class GroupCallOrchestrator {
     remotePeerId: string,
     signal: Parameters<typeof verifyIncomingGroupCallSignal>[1],
   ): boolean {
+    if (this.database.isBlocked(remotePeerId)) {
+      log(
+        `[GROUP-CALL][SIGNAL][DROP] type=${signal.type} group=${signal.groupId.slice(0, 8)} call=${'callId' in signal ? signal.callId.slice(0, 8) : 'none'} from=${remotePeerId.slice(-8)} reason=blocked_peer`,
+      );
+      return false;
+    }
+
     const validation = verifyIncomingGroupCallSignal(remotePeerId, signal, {
       localPeerId: this.localPeerId(),
       getSigningPublicKey: (peerId) => this.database.getUserByPeerId(peerId)?.signing_public_key,
