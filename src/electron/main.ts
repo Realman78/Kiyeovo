@@ -617,7 +617,9 @@ async function initializeP2PAfterWindow() {
     log(`[CONFIG][ELECTRON] startup_mode=${startupNetworkMode}`);
     log(`[CONFIG][ELECTRON] tor_bootstrap=${startupNetworkMode === 'anonymous' ? 'enabled' : 'disabled'}`);
 
-    const libp2pPort = 9001;
+    // KIYEOVO_P2P_PORT lets tests/dev run multiple instances on one host
+    // without colliding on the listen port.
+    const libp2pPort = Number(process.env.KIYEOVO_P2P_PORT) || 9001;
     let torConfig: TorConfig | undefined;
 
     if (startupNetworkMode === 'anonymous') {
