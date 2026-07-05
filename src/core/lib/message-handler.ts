@@ -2973,6 +2973,18 @@ export class MessageHandler {
   }
 
   async sendMessage(targetUsernameOrPeerId: string, message: string, replyToCid?: string): Promise<SendMessageResponse> {
+    // Usernames are not unique locally; refuse to guess between duplicate
+    // contacts rather than resolve to an arbitrary one.
+    let targetIsPeerId = true;
+    try { peerIdFromString(targetUsernameOrPeerId); } catch { targetIsPeerId = false; }
+    if (!targetIsPeerId && this.database.countUsersByUsername(targetUsernameOrPeerId) > 1) {
+      return {
+        success: false,
+        messageSentStatus: null,
+        error: `You have multiple contacts named '${targetUsernameOrPeerId}'. Open their existing chat or use their peer ID instead.`,
+      };
+    }
+
     let user: User | null = null;
     // Reply feature: mint the cross-peer cid + build the transport envelope ONCE so
     // every delivery path (online, non-blocking offline queue, synchronous offline

@@ -1824,8 +1824,10 @@ export class FileHandler {
     }
   }
 
-  async sendFile(targetUsername: string, filePath: string, providedFileId?: string, replyToCidInput?: string): Promise<void> {
-    const user = this.database.getUserByPeerIdThenUsername(targetUsername);
+  async sendFile(targetPeerId: string, filePath: string, providedFileId?: string, replyToCidInput?: string): Promise<void> {
+    // Peer-id lookup only: usernames are not unique, so resolving by name can
+    // silently address a different contact with the same username.
+    const user = this.database.getUserByPeerId(targetPeerId);
     if (!user) {
       throw new Error('User not found');
     }

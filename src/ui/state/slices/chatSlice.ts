@@ -14,6 +14,9 @@ export interface PendingKeyExchange {
 }
 export interface ChatMessage {
   id: string;
+  // Renderer-only identity used to keep optimistic outbound rows mounted when
+  // they are reconciled to their persisted backend ids.
+  renderKey?: string;
   chatId: number;
   senderPeerId: string;
   senderUsername: string;
@@ -204,6 +207,30 @@ const chatSlice = createSlice({
       const isFromCurrentUser = action.payload.currentUserPeerId &&
                                  action.payload.senderPeerId === action.payload.currentUserPeerId;
       const isOptimisticSeedId = id.startsWith('contact-attempt-' + chatId + '-');
+      let incomingMessage = action.payload;
+
+      const isAlreadyPersisted = state.messages.some((msg) => msg.id === id);
+
+      // A duplicate echo has already been reconciled; absorbing here would eat a
+      // different in-flight row that happens to share the same content.
+      if (isFromCurrentUser && !id.startsWith('local-send-') && !isAlreadyPersisted) {
+        const matchedSending = state.sendingMessages.find((message) =>
+          message.chatId === chatId &&
+          message.senderPeerId === action.payload.senderPeerId &&
+          message.content === action.payload.content &&
+          message.messageType === action.payload.messageType &&
+          message.replyToClientId === action.payload.replyToClientId &&
+          message.localSendState === 'sending'
+        );
+
+        if (matchedSending) {
+          incomingMessage = {
+            ...action.payload,
+            renderKey: matchedSending.renderKey ?? matchedSending.id,
+          };
+          state.sendingMessages = state.sendingMessages.filter((message) => message.id !== matchedSending.id);
+        }
+      }
 
       if (!isOptimisticSeedId) {
         state.messages = state.messages.filter((msg) => {
@@ -219,9 +246,13 @@ const chatSlice = createSlice({
       const isDuplicate = state.messages.some(msg => msg.id === id);
 
       if (isDuplicate) {
+        const existing = state.messages.find((msg) => msg.id === id);
+        if (existing && !existing.renderKey && incomingMessage.renderKey) {
+          existing.renderKey = incomingMessage.renderKey;
+        }
         console.log(`Message ${id} already exists, skipping duplicate`);
       } else {
-        state.messages.push(action.payload);
+        state.messages.push(incomingMessage);
         insertedOrUpdated = true;
       }
 
@@ -445,7 +476,10 @@ const chatSlice = createSlice({
     },
     addSendingMessage: (state, action: PayloadAction<ChatMessage>) => {
       if (!state.sendingMessages.some((m) => m.id === action.payload.id)) {
-        state.sendingMessages.push(action.payload);
+        state.sendingMessages.push({
+          ...action.payload,
+          renderKey: action.payload.renderKey ?? action.payload.id,
+        });
       }
     },
     removeSendingMessage: (state, action: PayloadAction<string>) => {
@@ -470,14 +504,22 @@ const chatSlice = createSlice({
       delete state.replyTargetByChatId[action.payload];
     },
     finalizeSendingMessage: (state, action: PayloadAction<{ localMessageId: string; finalMessage: ChatMessage }>) => {
+      const localSending = state.sendingMessages.find((m) => m.id === action.payload.localMessageId);
+      const renderKey = action.payload.finalMessage.renderKey ?? localSending?.renderKey ?? action.payload.localMessageId;
       state.sendingMessages = state.sendingMessages.filter((m) => m.id !== action.payload.localMessageId);
       const isDuplicate = state.messages.some((m) => m.id === action.payload.finalMessage.id);
       if (!isDuplicate) {
         state.messages.push({
           ...action.payload.finalMessage,
+          renderKey,
           failedReason: undefined,
           retryAfterTs: undefined,
         });
+      } else {
+        const existing = state.messages.find((m) => m.id === action.payload.finalMessage.id);
+        if (existing && !existing.renderKey) {
+          existing.renderKey = renderKey;
+        }
       }
       state.messages.sort(compareMessageOrder);
 
