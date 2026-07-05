@@ -103,6 +103,7 @@ class GroupCallService {
   private readonly peers = new Map<string, PeerState>();
   private readonly pendingIceByPeerId = new Map<string, RTCIceCandidateInit[]>();
   private readonly offeredPeerIds = new Set<string>();
+  private readonly blockedPeerIds = new Set<string>();
   private pendingJoinAdmission: PendingJoinAdmission | null = null;
   private joinConnectTimer: ReturnType<typeof setTimeout> | null = null;
   private joinConnectContext: JoinConnectContext | null = null;
@@ -469,6 +470,7 @@ class GroupCallService {
     this.peers.clear();
     this.pendingIceByPeerId.clear();
     this.offeredPeerIds.clear();
+    this.blockedPeerIds.clear();
     this.remoteCameraOn.clear();
     this.remoteCameraSignalTs.clear();
     this.stopLocalAudio();
@@ -716,7 +718,7 @@ class GroupCallService {
 
     const targets = participants
       .map((participant) => participant.peerId)
-      .filter((peerId) => peerId !== this.localPeerId);
+      .filter((peerId) => peerId !== this.localPeerId && !this.blockedPeerIds.has(peerId));
     if (targets.length === 0) {
       return;
     }
@@ -756,7 +758,7 @@ class GroupCallService {
 
   private reconcilePeersWithAuthoritativeRoster(participantPeerIds: string[]): void {
     const allowedPeerIds = new Set(
-      participantPeerIds.filter((peerId) => peerId !== this.localPeerId),
+      participantPeerIds.filter((peerId) => peerId !== this.localPeerId && !this.blockedPeerIds.has(peerId)),
     );
     this.peers.forEach((_, peerId) => {
       if (!allowedPeerIds.has(peerId)) {
@@ -786,6 +788,11 @@ class GroupCallService {
       log(`[GROUP-CALL][WRITER_PROBE][SKIP_SINGLE] peer=${peerId.slice(-8)} reason=${!this.session ? 'no_session' : this.session.role !== 'writer' ? 'not_writer' : this.writerReconnectProbeInProgress ? 'already_in_progress' : 'no_local_peer_id'}`);
       return;
     }
+    if (this.blockedPeerIds.has(peerId)) {
+      // TEMP_LOG
+      log(`[GROUP-CALL][WRITER_PROBE][SKIP_SINGLE] peer=${peerId.slice(-8)} reason=blocked_peer`);
+      return;
+    }
     if (peerId === this.localPeerId || !this.session.participantPeerIds.includes(peerId)) {
       // TEMP_LOG
       log(`[GROUP-CALL][WRITER_PROBE][SKIP_SINGLE] peer=${peerId.slice(-8)} reason=${peerId === this.localPeerId ? 'self' : 'not_in_roster'}`);
@@ -813,7 +820,7 @@ class GroupCallService {
     }
 
     const targets = this.session.participantPeerIds
-      .filter((peerId) => peerId !== this.localPeerId && !this.isPeerConnectionHealthy(peerId));
+      .filter((peerId) => peerId !== this.localPeerId && !this.blockedPeerIds.has(peerId) && !this.isPeerConnectionHealthy(peerId));
     if (targets.length === 0) {
       // TEMP_LOG
       log('[GROUP-CALL][WRITER_PROBE][SKIP] reason=no_targets');
@@ -838,6 +845,11 @@ class GroupCallService {
     replace = false,
   ): Promise<void> {
     if (!this.session) {
+      return;
+    }
+    if (this.blockedPeerIds.has(peerId)) {
+      // TEMP_LOG
+      log(`[GROUP-CALL][OFFER][SKIP] to=${peerId.slice(-8)} reason=blocked_peer`);
       return;
     }
 
@@ -886,6 +898,12 @@ class GroupCallService {
 
   private async handleIncomingOffer(signal: Extract<GroupCallPairSignalForRenderer, { type: 'CALL_OFFER' }>): Promise<void> {
     if (!this.session) {
+      return;
+    }
+    if (this.blockedPeerIds.has(signal.fromPeerId)) {
+      // TEMP_LOG
+      log(`[GROUP-CALL][OFFER][DROP] from=${signal.fromPeerId.slice(-8)} reason=blocked_peer`);
+      this.closePeer(signal.fromPeerId, 'blocked');
       return;
     }
 
@@ -1335,6 +1353,14 @@ class GroupCallService {
       return { success: false, error: 'No active group call' };
     }
     return window.kiyeovoAPI.leaveGroupCall(this.session.chatId);
+  }
+
+  handlePeerBlocked(peerId: string): void {
+    this.blockedPeerIds.add(peerId);
+    this.pendingIceByPeerId.delete(peerId);
+    this.offeredPeerIds.delete(peerId);
+    this.closePeer(peerId, 'blocked');
+    this.emitState();
   }
 
   async handlePairSignal(signal: GroupCallPairSignalForRenderer): Promise<void> {

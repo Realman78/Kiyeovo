@@ -4,7 +4,7 @@ import { MessageHandler } from './message-handler.js';
 import { GroupCallOrchestrator } from './group-call-orchestrator.js';
 import { SessionManager } from '../direct/session-manager.js';
 import { CallActivityRegistry } from './call-activity-registry.js';
-import type { CallStateChangedEvent } from '../types.js';
+import type { CallStateChangedEvent, GroupCallPairSignalOutgoingInput } from '../types.js';
 
 const LOCAL_PEER = 'local_peer';
 const BLOCKED_PEER = 'blocked_peer';
@@ -15,6 +15,7 @@ type TeardownHarness = Record<string, unknown> & {
 };
 
 type GroupCallHarness = Record<string, unknown> & {
+  sendPairSignal: (signal: GroupCallPairSignalOutgoingInput) => Promise<{ success: boolean; error: string | null }>;
   handleIncomingControlSignal: (remotePeerId: string, signal: unknown) => Promise<boolean>;
   handleIncomingPairSignal: (remotePeerId: string, signal: unknown) => Promise<boolean>;
 };
@@ -162,4 +163,30 @@ test('group-call signals from blocked peers are dropped before renderer notifica
   assert.equal(handledPair, true);
   assert.deepEqual(controlEvents, []);
   assert.deepEqual(pairEvents, []);
+});
+
+test('group-call pair signals to blocked peers are dropped before wire send', async () => {
+  const { orchestrator } = createGroupCallHarness();
+  const sentSignals: unknown[] = [];
+  orchestrator.session = {
+    groupId: 'group-1',
+    callId: 'call-1',
+  };
+  orchestrator.trySendPairSignal = async (signal: unknown) => {
+    sentSignals.push(signal);
+    return true;
+  };
+
+  const result = await orchestrator.sendPairSignal({
+    type: 'CALL_OFFER',
+    groupId: 'group-1',
+    callId: 'call-1',
+    toPeerId: BLOCKED_PEER,
+    offerSdp: 'v=0',
+    mediaType: 'audio',
+  });
+
+  assert.equal(result.success, false);
+  assert.equal(result.error, 'peer is blocked');
+  assert.deepEqual(sentSignals, []);
 });

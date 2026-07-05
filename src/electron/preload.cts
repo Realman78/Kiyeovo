@@ -87,6 +87,7 @@ const kiyeovoAPI: KiyeovoAPI = {
   onGroupCallControlSignalReceived: (callback) => subscribe(IPC_CHANNELS.GROUP_CALL_CONTROL_SIGNAL_RECEIVED, callback),
   onGroupCallPairSignalReceived: (callback) => subscribe(IPC_CHANNELS.GROUP_CALL_PAIR_SIGNAL_RECEIVED, callback),
   onGroupCallStateChanged: (callback) => subscribe(IPC_CHANNELS.GROUP_CALL_STATE_CHANGED, callback),
+  onGroupCallPeerBlocked: (callback) => subscribe(IPC_CHANNELS.GROUP_CALL_PEER_BLOCKED, callback),
   onGroupCallError: (callback) => subscribe(IPC_CHANNELS.GROUP_CALL_ERROR, callback),
 
   onKeyExchangeSent: (callback) => subscribe(IPC_CHANNELS.KEY_EXCHANGE_SENT, callback),

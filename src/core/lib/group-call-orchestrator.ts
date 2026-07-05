@@ -694,6 +694,13 @@ export class GroupCallOrchestrator {
   }
 
   async sendPairSignal(signal: GroupCallPairSignalOutgoingInput): Promise<{ success: boolean; error: string | null }> {
+    if (this.database.isBlocked(signal.toPeerId)) {
+      log(
+        `[GROUP-CALL][SIGNAL][DROP] type=${signal.type} group=${signal.groupId.slice(0, 8)} call=${signal.callId.slice(0, 8)} to=${signal.toPeerId.slice(-8)} reason=blocked_peer`,
+      );
+      return { success: false, error: 'peer is blocked' };
+    }
+
     if (!this.session) {
       // TEMP_LOG
       log(`[GROUP-CALL][PAIR][SEND][SKIP] type=${signal.type} to=${signal.toPeerId.slice(-8)} reason=no_session`);

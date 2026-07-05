@@ -2235,6 +2235,10 @@ function setupChatSettingsHandlers(
       log(`[IPC] Blocking user: ${peerId}`);
       p2pCore.database.blockPeer(peerId, username, reason);
       await p2pCore.messageHandler.teardownBlockedPeer(peerId);
+      const win = getMainWindow();
+      if (win && !win.isDestroyed()) {
+        win.webContents.send(IPC_CHANNELS.GROUP_CALL_PEER_BLOCKED, peerId);
+      }
       log(`[IPC] User ${peerId} blocked`);
 
       return { success: true, error: null };

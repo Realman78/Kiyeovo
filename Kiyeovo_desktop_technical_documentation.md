@@ -435,6 +435,7 @@ Coordination model:
 - **no-renegotiation video:** a `sendrecv` video transceiver is pre-negotiated so camera toggles ride `replaceTrack` plus an app-level camera-state signal, never mid-call SDP renegotiation (same approach as 1:1)
 - recovery spans network change, peer crash, libp2p reconnect blips, and pure WebRTC failure; the renderer-side glare tie-break, timestamp-based call ordering, and cleanup-ends-session behavior are described in §12
 - incoming group-call control and pair signals from blocked peers are dropped before call state changes or renderer notifications, even if the blocked peer still shares a group with the local user
+- outbound group-call pair signals to blocked peers are denied in core before signing or sending, and blocking a live group-call participant notifies the renderer to close that peer's mesh connection and exclude them from reconnect probes until the session resets
 
 ---
 

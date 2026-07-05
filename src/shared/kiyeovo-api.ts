@@ -247,6 +247,7 @@ export interface KiyeovoAPI {
   onGroupCallControlSignalReceived: (callback: (data: GroupCallControlSignalReceivedEvent) => void) => Unsubscribe;
   onGroupCallPairSignalReceived: (callback: (data: GroupCallPairSignalReceivedEvent) => void) => Unsubscribe;
   onGroupCallStateChanged: (callback: (data: GroupCallStateChangedEvent) => void) => Unsubscribe;
+  onGroupCallPeerBlocked: (callback: (peerId: string) => void) => Unsubscribe;
   onGroupCallError: (callback: (data: GroupCallErrorEvent) => void) => Unsubscribe;
 
   onKeyExchangeSent: (callback: (data: KeyExchangeEvent) => void) => Unsubscribe;

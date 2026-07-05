@@ -81,6 +81,7 @@ export const IPC_CHANNELS = {
   GROUP_CALL_CONTROL_SIGNAL_RECEIVED: 'groupCall:controlSignalReceived',
   GROUP_CALL_PAIR_SIGNAL_RECEIVED: 'groupCall:pairSignalReceived',
   GROUP_CALL_STATE_CHANGED: 'groupCall:stateChanged',
+  GROUP_CALL_PEER_BLOCKED: 'groupCall:peerBlocked',
   GROUP_CALL_ERROR: 'groupCall:error',
   GET_SCREEN_SHARE_SUPPORT: 'call:getScreenShareSupport',
   SCREEN_SHARE_SOURCE_REQUEST: 'screenShare:sourceRequest',
