@@ -395,6 +395,7 @@ Behavior highlights:
 - pre-check for direct contact and active connectivity before offer
 - outgoing ring timeout (30s)
 - busy/reject/end handling with local cleanup on both sides
+- blocking a direct-call peer ends any active local 1:1 call state, clears that peer's direct session/pending key exchange, and best-effort closes existing libp2p connections to that peer
 - media controls: mute/deafen/camera
 - camera is independent per participant; one side may enable video while the other stays audio-only
 - visual mode starts automatically when camera or screen-share media appears, but fullscreen remains manual
@@ -430,6 +431,7 @@ Coordination model:
 - **writer continuity:** a graceful leave hands authority to a deterministic successor (group creator if present, else lowest-sorted participant) with a roster-version bump; a writer crash uses the same deterministic failover, so peers with the same roster pick the same successor. Rosters are signed and reconciled by version, and a roster naming a writer other than the deterministic failover for its participant set is rejected
 - **no-renegotiation video:** a `sendrecv` video transceiver is pre-negotiated so camera toggles ride `replaceTrack` plus an app-level camera-state signal, never mid-call SDP renegotiation (same approach as 1:1)
 - recovery spans network change, peer crash, libp2p reconnect blips, and pure WebRTC failure; the renderer-side glare tie-break, timestamp-based call ordering, and cleanup-ends-session behavior are described in §12
+- incoming group-call control and pair signals from blocked peers are dropped before call state changes or renderer notifications, even if the blocked peer still shares a group with the local user
 
 ---
 

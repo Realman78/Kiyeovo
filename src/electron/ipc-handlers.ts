@@ -832,6 +832,7 @@ function setupContactRequestHandlers(
       if (block) {
         const knownUsername = pending?.username ?? p2pCore.database.getUserByPeerId(peerId)?.username ?? null;
         p2pCore.database.blockPeer(peerId, knownUsername, 'Rejected contact request');
+        await p2pCore.messageHandler.teardownBlockedPeer(peerId);
         log(`Rejected and blocked ${knownUsername ?? peerId}`);
       } else {
         log(`Rejected contact request from ${pending?.username ?? peerId}`);
@@ -2233,6 +2234,7 @@ function setupChatSettingsHandlers(
 
       log(`[IPC] Blocking user: ${peerId}`);
       p2pCore.database.blockPeer(peerId, username, reason);
+      await p2pCore.messageHandler.teardownBlockedPeer(peerId);
       log(`[IPC] User ${peerId} blocked`);
 
       return { success: true, error: null };

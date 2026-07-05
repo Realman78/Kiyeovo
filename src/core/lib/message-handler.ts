@@ -1730,6 +1730,44 @@ export class MessageHandler {
     return { success: true, error: null };
   }
 
+  async teardownBlockedPeer(peerId: string): Promise<void> {
+    const activeCall = this.activeCall?.peerId === peerId
+      ? { callId: this.activeCall.callId }
+      : null;
+
+    if (activeCall) {
+      try {
+        const result = await this.hangupCall(peerId, activeCall.callId, 'hangup');
+        if (!result.success) {
+          console.warn(
+            `[BLOCK] Active call teardown signal failed peer=${peerId.slice(-8)} call=${activeCall.callId.slice(0, 8)} reason=${result.error ?? 'unknown'}`,
+          );
+        }
+      } catch (error: unknown) {
+        console.warn(
+          `[BLOCK] Active call teardown threw peer=${peerId.slice(-8)} call=${activeCall.callId.slice(0, 8)} reason=${errStr(error)}`,
+        );
+      } finally {
+        if (this.isActiveCallMatch(peerId, activeCall.callId)) {
+          this.clearActiveCall('hangup');
+        }
+      }
+    }
+
+    try {
+      this.sessionManager.removePendingKeyExchange(peerId);
+      this.sessionManager.clearSession(peerId);
+    } catch (error: unknown) {
+      console.warn(`[BLOCK] Failed to clear session for peer=${peerId.slice(-8)} reason=${errStr(error)}`);
+    }
+
+    try {
+      await this.closePeerConnections(peerId, 'block');
+    } catch (error: unknown) {
+      console.warn(`[BLOCK] Failed to close peer connections for peer=${peerId.slice(-8)} reason=${errStr(error)}`);
+    }
+  }
+
   private async routeBucketNudge(remoteId: string, nudgePayload: BucketNudgePayload | null): Promise<void> {
     if (!nudgePayload) {
       log(`[NUDGE] Ignoring non-group nudge from ${remoteId.slice(-8)}`);
@@ -2466,6 +2504,24 @@ export class MessageHandler {
     return MessageHandler.OFFLINE_FALLBACK_REGEX.test(errorText);
   }
 
+  private async closePeerConnections(peerId: string, context: string): Promise<void> {
+    const connections = this.node.getConnections().filter(
+      conn => conn.remotePeer.toString() === peerId,
+    );
+    if (connections.length === 0) {
+      return;
+    }
+
+    log(`[CONNECTION][PRUNE] closing ${connections.length} connection(s) to ${peerId.slice(0, 8)} context=${context}`);
+    const closeResults = await Promise.allSettled(connections.map(conn => conn.close()));
+    const failed = closeResults.filter((result) => result.status === 'rejected');
+    if (failed.length > 0) {
+      console.warn(
+        `[CONNECTION][PRUNE] failed to close ${failed.length}/${connections.length} connection(s) to ${peerId.slice(0, 8)} context=${context}`,
+      );
+    }
+  }
+
   /**
    * Close any connections we still hold to a peer that just failed to receive a
    * message within the send budget. When a peer goes away abruptly (e.g. laptop
@@ -2477,14 +2533,7 @@ export class MessageHandler {
    * offline DHT PUT is less likely to route through the dead peer.
    */
   private async pruneUnreachablePeerConnections(peerId: string): Promise<void> {
-    const stale = this.node.getConnections().filter(
-      conn => conn.remotePeer.toString() === peerId,
-    );
-    if (stale.length === 0) {
-      return;
-    }
-    log(`[OFFLINE-SEND][PRUNE] closing ${stale.length} stale connection(s) to ${peerId.slice(0, 8)} after send failure`);
-    await Promise.allSettled(stale.map(conn => conn.close()));
+    await this.closePeerConnections(peerId, 'offline-send-failure');
   }
 
   private async storeOfflineMessageFallback(

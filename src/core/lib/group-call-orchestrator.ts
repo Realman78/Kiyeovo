@@ -2861,6 +2861,13 @@ export class GroupCallOrchestrator {
     remotePeerId: string,
     signal: Parameters<typeof verifyIncomingGroupCallSignal>[1],
   ): boolean {
+    if (this.database.isBlocked(remotePeerId)) {
+      log(
+        `[GROUP-CALL][SIGNAL][DROP] type=${signal.type} group=${signal.groupId.slice(0, 8)} call=${'callId' in signal ? signal.callId.slice(0, 8) : 'none'} from=${remotePeerId.slice(-8)} reason=blocked_peer`,
+      );
+      return false;
+    }
+
     const validation = verifyIncomingGroupCallSignal(remotePeerId, signal, {
       localPeerId: this.localPeerId(),
       getSigningPublicKey: (peerId) => this.database.getUserByPeerId(peerId)?.signing_public_key,

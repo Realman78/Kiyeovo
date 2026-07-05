@@ -9,6 +9,7 @@ import './lib/frame-stream.test.js';
 import './transport/stream-handler.test.js';
 import './lib/file-storage.test.js';
 import './lib/file-handler.test.js';
+import './lib/blocking-enforcement.test.js';
 import './network/reconnect-controller.test.js';
 import './db/database.file-offer.test.js';
 import './identity/encrypted-user-identity.test.js';
