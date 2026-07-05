@@ -292,7 +292,7 @@ export function setupIPCHandlers(
   setupGroupCallHandlers(trustedIpcMain, getP2PCore);
 
   // Contact request handlers
-  setupContactRequestHandlers(trustedIpcMain, getP2PCore);
+  setupContactRequestHandlers(trustedIpcMain, getP2PCore, getMainWindow);
 
   // Bootstrap node handlers
   setupBootstrapHandlers(trustedIpcMain, getP2PCore);
@@ -780,12 +780,23 @@ function setupGroupCallHandlers(
   });
 }
 
+function notifyGroupCallPeerBlocked(
+  getMainWindow: () => BrowserWindow | null,
+  peerId: string
+): void {
+  const win = getMainWindow();
+  if (win && !win.isDestroyed()) {
+    win.webContents.send(IPC_CHANNELS.GROUP_CALL_PEER_BLOCKED, peerId);
+  }
+}
+
 /**
  * Contact request handlers
  */
 function setupContactRequestHandlers(
   ipcMain: IpcMainHandleRegistrar,
-  getP2PCore: () => P2PCore | null
+  getP2PCore: () => P2PCore | null,
+  getMainWindow: () => BrowserWindow | null
 ): void {
   ipcMain.handle(IPC_CHANNELS.ACCEPT_CONTACT_REQUEST, async (_event, peerId: string) => {
     try {
@@ -833,6 +844,7 @@ function setupContactRequestHandlers(
         const knownUsername = pending?.username ?? p2pCore.database.getUserByPeerId(peerId)?.username ?? null;
         p2pCore.database.blockPeer(peerId, knownUsername, 'Rejected contact request');
         await p2pCore.messageHandler.teardownBlockedPeer(peerId);
+        notifyGroupCallPeerBlocked(getMainWindow, peerId);
         log(`Rejected and blocked ${knownUsername ?? peerId}`);
       } else {
         log(`Rejected contact request from ${pending?.username ?? peerId}`);
@@ -2235,10 +2247,7 @@ function setupChatSettingsHandlers(
       log(`[IPC] Blocking user: ${peerId}`);
       p2pCore.database.blockPeer(peerId, username, reason);
       await p2pCore.messageHandler.teardownBlockedPeer(peerId);
-      const win = getMainWindow();
-      if (win && !win.isDestroyed()) {
-        win.webContents.send(IPC_CHANNELS.GROUP_CALL_PEER_BLOCKED, peerId);
-      }
+      notifyGroupCallPeerBlocked(getMainWindow, peerId);
       log(`[IPC] User ${peerId} blocked`);
 
       return { success: true, error: null };
