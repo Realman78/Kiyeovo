@@ -1159,7 +1159,7 @@ export const MessagesContainer = ({
         (senderChanged || senderStreak % 10 === 0);
       const isSelectable = !isPending && isMessageSelectable(message);
       return (
-        <Fragment key={message.id}>
+        <Fragment key={message.renderKey ?? message.id}>
           {showDateDivider && (
             <div className="w-full flex justify-center py-1">
               <span className="rounded-md bg-muted/50 px-3 py-1 text-xs text-muted-foreground">

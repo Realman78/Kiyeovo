@@ -3420,14 +3420,14 @@ function setupFileTransferHandlers(
 
       log(`[IPC] Sending file ${filePath} to ${peerId}`);
 
-      // Get username from peerId
       const user = p2pCore.database.getUserByPeerId(peerId);
       if (!user) {
         return { success: false, error: 'User not found' };
       }
 
-      // Send the file (this will emit progress events internally)
-      await p2pCore.messageHandler.getFileHandler().sendFile(user.username, filePath, fileId, replyToCid);
+      // Address by peer id, never username — usernames are not unique, so a
+      // duplicate contact name can resolve to the wrong peer.
+      await p2pCore.messageHandler.getFileHandler().sendFile(peerId, filePath, fileId, replyToCid);
 
       return { success: true, error: null };
     } catch (error) {
