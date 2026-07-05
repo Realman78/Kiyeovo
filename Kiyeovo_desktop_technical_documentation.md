@@ -515,6 +515,7 @@ Current behavior:
 Operational notes:
 - bootstrap announce addresses are raw announce multiaddrs, not client-facing `/p2p/...` addresses
 - the process prints its Peer ID on startup; client-facing bootstrap entries are formed as `<announce_addr>/p2p/<peerId>`
+- the bootstrap Peer ID private key is persisted with owner-only permissions; startup aborts instead of replacing an existing key that cannot be loaded
 - anonymous bootstrap does not spawn Tor by itself; if you run `BOOTSTRAP_NETWORK_MODE=anonymous`, your onion service must forward the announced onion address to the local bootstrap listener (default: TCP 9001)
 
 #### 11.2 Relay node
@@ -525,6 +526,7 @@ Operational notes:
 - relay listen address defaults to `/ip4/0.0.0.0/tcp/4002`
 - announce addresses come from `RELAY_ANNOUNCE_ADDRS`
 - the process prints its Peer ID on startup; client-facing relay entries are formed as `<announce_addr>/p2p/<peerId>`
+- the relay Peer ID private key is persisted with owner-only permissions; startup aborts instead of replacing an existing key that cannot be loaded
 - optional tuning env vars include `RELAY_MAX_RESERVATIONS`, `RELAY_RESERVATION_TTL_MS`, `RELAY_DEFAULT_DURATION_LIMIT_MS`, and `RELAY_DEFAULT_DATA_LIMIT_BYTES`
 - there is no relay layer in anonymous mode
 
