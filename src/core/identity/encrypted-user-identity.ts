@@ -18,6 +18,7 @@ import { log } from '../../shared/logger.js';
 // Try to import keytar for OS keychain support
 let keytar: any = null;
 let keytarLoaded = false;
+const KEYCHAIN_NAMESPACE = 'kiyeovo';
 
 async function loadKeytar() {
     if (keytarLoaded) return keytar;
@@ -33,6 +34,13 @@ async function loadKeytar() {
     }
 }
 
+async function readRememberedIdentityCredential(keytarInstance: any, accountId: string): Promise<string | null> {
+    return keytarInstance.getPassword(KEYCHAIN_NAMESPACE, accountId);
+}
+
+async function rememberIdentityCredential(keytarInstance: any, accountId: string, credential: string): Promise<void> {
+    await keytarInstance.setPassword(KEYCHAIN_NAMESPACE, accountId, credential);
+}
 
 interface DecryptedUserIdentityData {
     id: string
@@ -187,7 +195,7 @@ export class EncryptedUserIdentity {
 
                 if (creationKeytarInstance && response.rememberMe && response.password && !response.useRecoveryPhrase) {
                     try {
-                        await creationKeytarInstance.setPassword('kiyeovo', keychainIdentityId, response.password);
+                        await rememberIdentityCredential(creationKeytarInstance, keychainIdentityId, response.password);
                     } catch (error) {
                         console.warn('[IDENTITY] Failed to store password in OS keychain:', errStr(error));
                     }
@@ -290,7 +298,7 @@ export class EncryptedUserIdentity {
 
                         if (keytarInstance && newPasswordResponse.rememberMe && newPasswordResponse.password && !newPasswordResponse.useRecoveryPhrase) {
                             try {
-                                await keytarInstance.setPassword('kiyeovo', keychainIdentityId, newPasswordResponse.password);
+                                await rememberIdentityCredential(keytarInstance, keychainIdentityId, newPasswordResponse.password);
                             } catch (error) {
                                 console.warn('[IDENTITY] Failed to store password in OS keychain:', errStr(error));
                             }
@@ -326,7 +334,7 @@ export class EncryptedUserIdentity {
 
                 if (keytarInstance && response.rememberMe && response.password && !response.useRecoveryPhrase) {
                     try {
-                        await keytarInstance.setPassword('kiyeovo', keychainIdentityId, response.password);
+                        await rememberIdentityCredential(keytarInstance, keychainIdentityId, response.password);
                     } catch (error) {
                         console.warn('[IDENTITY] Failed to store password in OS keychain:', errStr(error));
                     }
@@ -726,7 +734,7 @@ export class EncryptedUserIdentity {
 
         if (keytarInstance) {
             try {
-                const storedPassword = await keytarInstance.getPassword('kiyeovo', identityId);
+                const storedPassword = await readRememberedIdentityCredential(keytarInstance, identityId);
                 if (storedPassword) {
                     prefilledPassword = storedPassword;
                 }
