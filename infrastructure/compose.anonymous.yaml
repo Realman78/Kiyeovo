@@ -1,0 +1,82 @@
+# Kiyeovo infrastructure — Anonymous mode (Tor onion bootstrap).
+#
+# Structurally different from Fast mode: a Tor hidden-service container in front
+# of a single bootstrap node. There is no relay in anonymous mode, and nothing
+# is published on the host — clients reach the bootstrap only via its .onion.
+#
+# The Tor container generates the onion and publishes its (public) hostname into
+# the CLI-managed ./run/onion bind mount; the bootstrap entrypoint waits for it
+# and derives its /onion3/<host>:9000 announce. The onion keys persist in the
+# bind-mounted ./data/tor so the .onion address survives recreation.
+
+name: kiyeovo-infra
+
+services:
+  tor:
+    image: ghcr.io/realman78/kiyeovo-tor:0.1.0
+    build:
+      # Absolute repo root injected by kiyeovo-infra (falls back to `..` for a raw
+      # `docker compose` run from infrastructure/).
+      context: ${KIYEOVO_BUILD_CONTEXT:-..}
+      dockerfile: infrastructure/Dockerfile.tor
+    platform: linux/amd64
+    restart: unless-stopped
+    # Start after the bootstrap CONTAINER is running so torrc's
+    # `HiddenServicePort 9000 bootstrap:9001` target resolves at config-parse
+    # time. No deadlock: the bootstrap entrypoint only polls for the onion
+    # hostname file, so it does not need Tor's process to start first.
+    depends_on:
+      - bootstrap
+    environment:
+      KIYEOVO_ONION_HOSTNAME_FILE: /run/onion/hostname
+    volumes:
+      - ./data/tor:/var/lib/tor
+      - ./run/onion:/run/onion
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  bootstrap:
+    image: ghcr.io/realman78/kiyeovo-infra-node:0.1.0
+    build:
+      # Absolute repo root injected by kiyeovo-infra (falls back to `..` for a raw
+      # `docker compose` run from infrastructure/).
+      context: ${KIYEOVO_BUILD_CONTEXT:-..}
+      dockerfile: infrastructure/Dockerfile.server
+    platform: linux/amd64
+    command: ["bootstrap"]
+    restart: unless-stopped
+    environment:
+      KIYEOVO_DEPLOY_MODE: "1"
+      KIYEOVO_SERVER_VERSION: "0.1.0"
+      BOOTSTRAP_NETWORK_MODE: anonymous
+      # Tor reaches this listener over the private network, so bind 0.0.0.0
+      # (not the 127.0.0.1 default — Tor is a separate container).
+      BOOTSTRAP_LISTEN_ADDRESS: /ip4/0.0.0.0/tcp/9001
+      BOOTSTRAP_PEER_ID_FILE: /data/bootstrap-peer-id.bin
+      BOOTSTRAP_DATASTORE_PATH: /data/datastore
+      KIYEOVO_RUNTIME_FILE: /run/kiyeovo/bootstrap.runtime.json
+      KIYEOVO_DATA_DIR: /data
+      KIYEOVO_RUNTIME_DIR: /run/kiyeovo
+      # Drives the entrypoint's onion-announce derivation.
+      KIYEOVO_ONION_HOSTNAME_FILE: /run/onion/hostname
+      KIYEOVO_ONION_VIRTUAL_PORT: "9000"
+      KIYEOVO_HEALTHCHECK_PORT: "9001"
+    volumes:
+      - ./data/bootstrap:/data
+      - ./run/bootstrap:/run/kiyeovo
+      - ./run/onion:/run/onion:ro
+    healthcheck:
+      test: ["CMD", "gosu", "kiyeovo:kiyeovo", "node", "/usr/local/bin/healthcheck.mjs"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # Longer: Tor must generate the onion before the bootstrap can announce.
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -513,16 +513,18 @@ Practical rule: relationship/context (`chats`, participants, statuses) is author
 `npm run bootstrap` launches a mode-aware validator node.
 
 Current behavior:
-- persistent Level datastore at `./bootstrap-datastore/<mode>`
+- persistent Level datastore at `./bootstrap-datastore/<mode>`, overridable with `BOOTSTRAP_DATASTORE_PATH` (used verbatim when set; the `<mode>` subdirectory only applies to the default)
 - validator stack active for username, direct offline, group offline, group info records
 - startup mode comes from `BOOTSTRAP_NETWORK_MODE=fast|anonymous`
 - announce addresses come from `BOOTSTRAP_ANNOUNCE_ADDRS` as a comma-separated list
+- identity persists at `BOOTSTRAP_PEER_ID_FILE` (default `./bootstrap-peer-id.bin`, `-anonymous` suffixed in anonymous mode)
 
 Operational notes:
 - bootstrap announce addresses are raw announce multiaddrs, not client-facing `/p2p/...` addresses
 - the process prints its Peer ID on startup; client-facing bootstrap entries are formed as `<announce_addr>/p2p/<peerId>`
 - the bootstrap Peer ID private key is persisted with owner-only permissions; startup aborts instead of replacing an existing key that cannot be loaded
 - anonymous bootstrap does not spawn Tor by itself; if you run `BOOTSTRAP_NETWORK_MODE=anonymous`, your onion service must forward the announced onion address to the local bootstrap listener (default: TCP 9001)
+- in deployment mode (see 11.6) a missing or invalid announce address aborts startup, and a corrupt identity file aborts instead of rotating the Peer ID
 
 #### 11.2 Relay node
 
@@ -531,9 +533,11 @@ Operational notes:
 Operational notes:
 - relay listen address defaults to `/ip4/0.0.0.0/tcp/4002`
 - announce addresses come from `RELAY_ANNOUNCE_ADDRS`
+- identity persists at `RELAY_PEER_ID_FILE` (default `./relay-peer-id.bin`)
 - the process prints its Peer ID on startup; client-facing relay entries are formed as `<announce_addr>/p2p/<peerId>`
 - the relay Peer ID private key is persisted with owner-only permissions; startup aborts instead of replacing an existing key that cannot be loaded
 - optional tuning env vars include `RELAY_MAX_RESERVATIONS`, `RELAY_RESERVATION_TTL_MS`, `RELAY_DEFAULT_DURATION_LIMIT_MS`, and `RELAY_DEFAULT_DATA_LIMIT_BYTES`
+- in deployment mode (see 11.6) a missing or invalid announce address aborts startup, and a corrupt identity file aborts instead of rotating the Peer ID
 - there is no relay layer in anonymous mode
 
 #### 11.3 Client connectivity UX
@@ -641,7 +645,7 @@ Current behavior:
 
 Practical self-hosting path:
 - run a TURN server such as coturn
-- open `3478/tcp`, `3478/udp`, and the relay port range you configure (for example `49160-49200` on both TCP and UDP)
+- open `3478/tcp`, `3478/udp`, and the UDP relay media port range you configure (for example `49160-49200/udp`)
 - add matching STUN/TURN URLs in the app UI instead of rebuilding
 
 Notes:
@@ -649,6 +653,267 @@ Notes:
 - test results describe the last explicit test rather than continuous health; they remain in memory for the app session and display how long ago the test completed
 - if an ICE entry list is saved, that runtime list is used instead of the empty default constant
 - users may acknowledge the missing-ICE Setup warning if they do not plan to use calls; call setup remains visibly unconfigured
+
+#### 11.6 Deployment contracts (containerised / CLI-managed servers)
+
+The bootstrap and relay entrypoints gain explicit, machine-readable contracts so
+the `kiyeovo-infra` CLI and a container supervisor can manage them without
+scraping logs or relying on default paths. None of this changes local
+`npm run bootstrap` / `npm run relay` or a hand-rolled systemd unit: every new
+behaviour is gated behind opt-in environment variables.
+
+Deployment mode:
+- `KIYEOVO_DEPLOY_MODE=1` (truthy: `1`/`true`/`yes`/`on`) switches both servers to
+  strict, fail-closed semantics. The CLI / Compose stack sets it; everything else
+  leaves it unset and keeps the lenient legacy behaviour.
+- Fail-closed identity: a present-but-unreadable/undecodable identity file aborts
+  startup instead of generating a new key and overwriting the file (which would
+  silently rotate the Peer ID). A genuinely absent file is still created on first
+  run — but if that first-run key cannot be saved (e.g. a missing or unwritable
+  bind mount) startup also aborts, rather than running with an ephemeral Peer ID
+  that would rotate on the next restart. Implemented as an opt-in `failClosed`
+  flag on `PeerIdManager.loadOrCreate`; the desktop's separate encrypted-identity
+  path is untouched.
+- Fail-fast announce: at least one valid announce address is required (both fast
+  and anonymous), and any invalid/wrong-mode announce aborts startup rather than
+  being silently dropped.
+
+Runtime metadata output (`src/core/server/runtime-metadata.ts`):
+- When `KIYEOVO_RUNTIME_FILE` is set, the process writes a single public-only JSON
+  file describing itself; unset means no file is written.
+- Lifecycle: any stale file is removed on startup before the node is healthy, the
+  fresh file is written once the node has started and addresses are known, and the
+  file is removed again on graceful shutdown — so a reader never sees stale or
+  half-written data (writes are atomic via temp-file + rename in the same
+  directory).
+- In deployment mode the startup stale-removal and the healthy write are
+  **required**: if either fails, startup aborts, because the JSON is the CLI's
+  control-plane contract — a "running" service whose metadata is stale or absent
+  must surface as a failure. Shutdown removal stays best-effort (the process is
+  already exiting). Outside deployment mode the whole lifecycle is best-effort
+  (logged, never fatal).
+- The file carries no secrets (never the private key or a TURN credential).
+- Schema (`schemaVersion: 1`):
+
+  ```json
+  {
+    "schemaVersion": 1,
+    "role": "bootstrap",
+    "networkMode": "fast",
+    "peerId": "12D3KooW...",
+    "announceAddrs": ["/ip4/203.0.113.10/tcp/9000"],
+    "clientAddrs": ["/ip4/203.0.113.10/tcp/9000/p2p/12D3KooW..."],
+    "version": "0.1.0",
+    "startedAt": "2026-06-27T12:00:00Z"
+  }
+  ```
+
+- `version` comes from `KIYEOVO_SERVER_VERSION` (the independent infra server
+  version, baked at image build), defaulting to `unknown`. It is independent of
+  the desktop app version.
+
+Server build target:
+- `npm run build:server` (`tsconfig.server.json`) compiles only the bootstrap and
+  relay entrypoints and their transitive imports to plain Node ESM under
+  `dist-server/`, with no Electron, renderer, `tsx`, or other dev tooling at
+  runtime. Listing just the two entrypoints in `include` lets `tsc` pull in
+  exactly the files the servers reference; the desktop-only modules (SQLite DB,
+  keytar identity, React) are confirmed absent from the compiled graph.
+- `scripts/postinstall.mjs` already skips the Electron / `better-sqlite3` rebuild
+  when `ROLE=bootstrap|relay` or `KIYEOVO_SKIP_ELECTRON_REBUILD=1`. `patch-package`
+  (which applies the required `@libp2p/kad-dht` patch the servers depend on) is a
+  runtime dependency so a production `npm ci --omit=dev` install still applies it.
+
+#### 11.7 Containerised deployment (Docker Compose)
+
+`infrastructure/` holds the Docker artefacts for self-hosting Fast bootstrap +
+relay and Anonymous onion bootstrap stacks. Docker Compose owns the service
+lifecycle (start/stop/restart/auto-restart); the `kiyeovo-infra` CLI (11.8) is a
+thin front-end over this, never a second supervisor.
+
+Image (`infrastructure/Dockerfile.server`):
+- One `amd64` image, role (`bootstrap`|`relay`) selected by the entrypoint
+  argument. Base is `node:22-bookworm-slim` pinned by digest (glibc, so
+  `classic-level`'s bundled `linux-x64` prebuild loads without a toolchain).
+- **Infra-node dependency boundary.** The image installs from a dedicated
+  manifest (`infrastructure/server.package.json` + `server.package-lock.json`),
+  **not** the root package — so it carries only the bootstrap/relay runtime graph
+  (16 deps + transitives), never the desktop/UI deps (React, Redux, Radix,
+  Tailwind, `better-sqlite3`, `keytar`, electron, …). The manifest pins each dep to
+  the version root resolves and mirrors root's `@libp2p/interface` override so the
+  tree dedupes the way the app is tested; `infrastructure/scripts/check-server-deps.mjs`
+  (`npm run check:server-deps`) fails the build if a server import is undeclared,
+  a pin drifts from root, or that override is dropped.
+- Multi-stage: the builder installs with `--ignore-scripts`, applies the kad-dht
+  patch, compiles `dist-server`, and prunes dev deps. The runtime stage copies only
+  the patched production `node_modules` + `dist-server` (+ the server manifest's
+  `package.json` for `type:module`), with no compilers or install tooling. The
+  result is a noticeably smaller image (~278 MB vs the earlier ~445 MB fat build).
+
+Ownership boundary (`infrastructure/docker-entrypoint.sh`):
+- The container starts as root **only** to `mkdir`/`chown` the bind-mounted data
+  and runtime directories, then `gosu`-drops to the unprivileged `kiyeovo` user and
+  `exec`s the server. The long-running process is never root. The image `USER`
+  stays root (so the entrypoint can chown), so the Compose healthcheck explicitly
+  re-drops via `gosu kiyeovo:kiyeovo`.
+
+Fast Compose (`infrastructure/compose.yaml`):
+- Two services from the one image, differing only by `command` (role) and env. Both
+  set `KIYEOVO_DEPLOY_MODE=1`, so the fail-closed identity, fail-fast announce, and
+  required runtime-metadata behaviours of 11.6 are active.
+- **Bind mounts** (not named volumes) under the selected instance dir:
+  `./data/<role>` → `/data` (identity file + datastore) and `./run/<role>` →
+  `/run/kiyeovo` (the runtime JSON the CLI reads). With `kiyeovo-infra`, those
+  relative paths resolve under `infrastructure/instances/fast/` for Fast mode and
+  `infrastructure/instances/anon/` for Anonymous mode. Bind mounts keep state on
+  the host across recreation and image changes, and let the host-side CLI read the
+  runtime metadata directly.
+- `restart: unless-stopped` (crash/boot auto-restart with `systemctl enable
+  docker`), `json-file` log rotation (`max-size`/`max-file`), published ports
+  `9000` (bootstrap) and `4002` (relay), and **no** Docker socket mounted.
+- Announce addresses are required (deploy mode); they come from
+  `infrastructure/instances/fast/.env` (`BOOTSTRAP_ANNOUNCE_ADDRS`,
+  `RELAY_ANNOUNCE_ADDRS`) when managed by `kiyeovo-infra`.
+- The repo Compose files keep `build:` blocks for local/dev builds, but their
+  `build.context` is `${KIYEOVO_BUILD_CONTEXT:-..}`. The CLI exports an absolute
+  repo-root `KIYEOVO_BUILD_CONTEXT` because it re-roots Compose's
+  `--project-directory` to the per-mode instance dir. Release bundles strip
+  `build:` blocks and run published images only.
+
+Healthcheck (`infrastructure/healthcheck.mjs`):
+- "Healthy" = process running + the runtime JSON present and well-formed
+  (`schemaVersion`, `role`, non-empty `peerId` and `clientAddrs`) + the local TCP
+  listener accepting a connection. It deliberately does **not** test external
+  reachability (a node behind a closed firewall/NAT is a network config issue, not
+  an unhealthy container).
+
+`down` preserves state: stopping/removing the containers leaves the bind-mounted
+instance `data/` and `run/` directories intact; identity and datastore persist
+while runtime JSON is normally removed by the service during graceful shutdown.
+Peer IDs survive `restart`, recreation, and image changes.
+
+#### 11.8 `kiyeovo-infra` CLI
+
+`infrastructure/kiyeovo-infra` is a Bash operations front-end over the Compose
+stack. It collects configuration and delegates the whole service lifecycle to
+Docker Compose — it is not a second supervisor. Fast and Anonymous mode are
+separate instances that can coexist on one host:
+
+```text
+infrastructure/instances/fast/   # Fast bootstrap + relay (+ optional TURN)
+infrastructure/instances/anon/   # Anonymous Tor onion bootstrap
+```
+
+The user-facing mode token is `fast` or `anonymous` (`anon` is accepted as an
+alias); the filesystem/project slug is `fast` or `anon`. The dispatcher-selected
+mode is authoritative. The instance `.env` is validated against that selection
+(`KIYEOVO_MODE=fast|anonymous`) but is not allowed to redirect a command to the
+other mode. Compose is invoked with a per-mode project name
+(`kiyeovo-infra-fast` / `kiyeovo-infra-anon`), per-mode `--project-directory`, and
+per-mode `--env-file`, so `--remove-orphans`, `down`, status drift checks, runtime
+JSON reads, peer IDs, onion keys, and TURN credentials are all scoped to one mode.
+If exactly one instance exists, the mode token may be omitted; once both exist,
+commands require the mode token so the CLI never guesses.
+
+Commands:
+- `<mode> init` — interactive wizard (or `--non-interactive` with
+  `--public-address`, `--bootstrap-port`, `--relay-port`, `--force`). Builds the
+  Fast announce multiaddrs (`/ip4/...` for an IPv4, `/dns4/...` for a DNS name),
+  writes `instances/<slug>/.env`, and creates that instance's `data/` + `run/`
+  bind-mount roots. Permissions are set explicitly (not left to the shell umask):
+  `.env` is `0600`; `run/` is `0755` so the host CLI can read runtime JSON after
+  the container chowns its contents to its own uid; `data/` is `0700` since it
+  holds the identity private key + datastore that only the in-container service
+  user needs. Ports are validated to `1..65535` and must differ. The old
+  `init --mode` flag is intentionally removed; the mode is positional.
+- `firewall` — prints the inbound rules to open and, if it detects
+  `ufw`/`firewalld`/`iptables`, the matching commands. It makes **no** changes.
+  Lists the bootstrap/relay TCP ports, plus (when TURN is enabled) `3478/tcp+udp`
+  and the UDP relay media range (`49160-49200/udp`). Anonymous mode reports that
+  no inbound rules are needed.
+- `up` / `down` / `restart` — thin wrappers over `docker compose`. `up` reminds the
+  operator to `systemctl enable docker` for reboot survival. `up`/`down` use
+  `--remove-orphans`, but the per-mode Compose project name means they only
+  reconcile the selected mode. `down` never passes `-v` and the data lives in bind
+  mounts, so identity + datastore are preserved.
+- `status` — per-service state, health, restart policy, and restart count (via
+  `docker inspect`), labelled with the active mode/project.
+- `logs [service]` — delegates to `docker compose logs`.
+- `addresses` — reads runtime JSON from `instances/<slug>/run/<role>/` and prints
+  the full `/p2p/<peerId>` multiaddrs to paste into Kiyeovo's Setup pages. It
+  trusts the JSON only for a running + healthy container; if the service is
+  unhealthy/stopped but a file remains (e.g. after a crash that skipped graceful
+  cleanup), the address is shown labelled as stale "last known", not as current.
+  When TURN is enabled it also prints the ICE `turn:` URL + username (credential
+  redacted unless `--show-turn-credential`), shown only while coturn is running.
+
+#### 11.8.1 Optional TURN (coturn) for Fast-mode calls
+
+`fast init` can additionally configure an optional coturn TURN server for calls.
+It is a Compose `turn` profile service that the CLI activates only when
+`KIYEOVO_TURN=1` in the Fast instance `.env`; it uses host networking because
+coturn's UDP relay media port range makes per-port Docker mapping impractical.
+coturn needs a numeric `external-ip` (it cannot derive one from a DNS name), so
+`init` defaults it to an IPv4 public address or otherwise requires
+`--turn-external-ip`. The credential is prompted for (`lt-cred-mech`,
+`realm=kiyeovo`) and written only to
+`infrastructure/instances/fast/secrets/turnserver.conf`, never to `.env`, env
+vars, the image, or Compose args. That file is `0644` inside the `0700`
+`instances/fast/secrets/` directory: coturn runs as an unprivileged user
+(`nobody`) and the file is bind-mounted straight into the container, so it must be
+world-readable, while the `0700` directory keeps other local host users from
+reading it. `down` always activates the `turn` profile for the selected project so
+a coturn container is torn down even if TURN was later disabled.
+
+#### 11.9 Anonymous mode (Tor onion bootstrap)
+
+Anonymous mode is structurally different from Fast mode: a Tor hidden-service
+container fronts a single bootstrap node. There is **no relay**, and nothing is
+published on the host — clients reach the bootstrap only via its `.onion`. It is a
+separate Compose file (`compose.anonymous.yaml`); the CLI selects it from the
+positional mode token (`anonymous`/`anon`) and validates
+`instances/anon/.env` contains `KIYEOVO_MODE=anonymous`.
+
+Tor image (`infrastructure/Dockerfile.tor`):
+- Digest-pinned `debian:bookworm-slim` + `tor` from the Debian repos + `gosu`.
+  Version policy (deliberate): the base is digest-pinned but `tor` is **not**
+  hard-pinned — we take bookworm + bookworm-security updates so Tor stays patched,
+  at the cost of exact reproducibility. `tor --version` is printed at build time.
+- `torrc` runs an inbound hidden service only (`SocksPort 0`): the bootstrap is a
+  rendezvous point peers connect to, it does not dial out.
+  `HiddenServicePort 9000 bootstrap:9001` forwards the onion's virtual port 9000
+  to the bootstrap container's listener over the private network.
+- The entrypoint runs as root only to `chown`/`chmod 0700` the persistent
+  `HiddenServiceDir`, then drops to `debian-tor`. It traps `SIGTERM`/`SIGINT` and
+  forwards them to the backgrounded Tor process for a clean stop.
+
+Onion orchestration:
+- Onion keys persist in the bind-mounted `./data/tor` → the `.onion` survives
+  recreation.
+- The `.onion` hostname is public (it's the dial address). It is shared with the
+  bootstrap via a **CLI-managed bind mount** (`./run/onion`, `1777` sticky —
+  public data only). `up` clears the published hostname before starting, and the
+  Tor entrypoint publishes it with a temp-file + rename, so if `./data/tor` is
+  rotated, the bootstrap can never read a stale or partial onion before Tor
+  republishes from the current keys. The secret keys never leave the `0700`
+  `HiddenServiceDir`.
+- The bootstrap entrypoint waits for that hostname, strips `.onion`, validates 56
+  base32 chars, and derives `BOOTSTRAP_ANNOUNCE_ADDRS=/onion3/<host>:9000` before
+  starting. The bootstrap listens on `0.0.0.0:9001` (overriding the `127.0.0.1`
+  default — Tor is a separate container).
+
+Startup ordering: **tor `depends_on` bootstrap** (not the reverse). Tor needs the
+`bootstrap` name to resolve when it parses `HiddenServicePort` at startup; the
+bootstrap entrypoint only polls for the hostname file, so it does not need Tor's
+process first. This breaks the chicken-and-egg without relying on a crash-restart.
+
+The CLI is mode-aware: `anonymous init` skips the public-IP/port questions (the
+onion is generated), `firewall` reports that no inbound rules are needed,
+`status` shows `tor` + `bootstrap` (no relay), and `addresses` prints the onion
+multiaddr **only while both the bootstrap is healthy and Tor is running** —
+otherwise it labels the onion as stale/last-known (an onion is unreachable without
+Tor even if the bootstrap is up). Anonymous and Fast stacks can run concurrently
+because their Compose project names and host state subtrees are distinct.
 
 ---
 

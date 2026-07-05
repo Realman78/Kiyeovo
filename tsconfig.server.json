@@ -1,0 +1,29 @@
+{
+  "//": "Server-only build target: compiles the bootstrap + relay entrypoints and their transitive imports to plain Node ESM under dist-server/. No Electron, renderer, tsx, or dev tooling. Listing only the two entrypoints in `include` lets tsc pull in exactly the files the servers reference, so desktop-only modules (db, keytar identity, React) are never compiled in.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "node",
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "forceConsistentCasingInFileNames": true,
+
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "skipLibCheck": true,
+
+    "noEmit": false,
+    "outDir": "dist-server",
+    "rootDir": "src",
+    "sourceMap": true,
+    "declaration": false,
+    "removeComments": false,
+    "types": ["node"]
+  },
+  "include": ["src/core/bootstrap.ts", "src/core/relay.ts"]
+}

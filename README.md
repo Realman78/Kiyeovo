@@ -1,44 +1,52 @@
 # Kiyeovo
 
-> Beta notice: this is the beta version of Kiyeovo. Expect rough edges, missing polish, and behavior changes before the first full release.
+> Beta notice: this is the beta version of Kiyeovo. Expect rough edges, missing polish, and behavior changes before the first full release on 7th of July 2026
 > Tested on: Linux (Debian, Ubuntu, Lubuntu, EndeavourOS) and macOS.
 
-Kiyeovo is a decentralized peer-to-peer messenger.
+Kiyeovo is a decentralized peer-to-peer communication app. It supports many features you would find in modern messaging applications, yet still stays fully decentralized & respects your privacy. No e-mail or any KYC data needed.
 
-- realtime direct messages are end-to-end encrypted
-- messages can fall back to offline delivery when the other side is not online
-- `fast` mode is for normal day-to-day use: lower latency, relays, and 1:1 audio/video calling
-- `anonymous` mode is for Tor-routed messaging. Better anonymity, but slower and less convenient
-- group chats, encrypted file transfer, and trusted profile import/export
+- realtime end-to-end encrypted messages
+- messages securely peristed when the other side is not online
+- group chats
+- `fast` mode is for normal day-to-day use: lower latency, relays, audio/video calling
+- `anonymous` mode is for Tor-routed messaging. Better anonymity, but slower and no call support
+- encrypted file transfer
+- trusted profile import/export
+- identity backup
 - no central account or message server; you can use the default bootstrap/relay setup or self-host (see the [guide](#bootstrap-and-relay-setup))
 
 For technical readers, contributors, and coding agents, start with [Kiyeovo_desktop_technical_documentation.md](./Kiyeovo_desktop_technical_documentation.md). That is the source-of-truth architecture overview.
 
-
-<img width="1274" height="739" alt="image" src="https://github.com/user-attachments/assets/787f23da-9317-4e70-a44b-cdf504163e8f" />
+<img width="1532" height="832" alt="image" src="https://github.com/user-attachments/assets/e25008f2-3c78-4886-992f-0fb50a765944" />
 
 
 ## Beta status
 
-The purpose of this beta release is to gain feedback on the core app functionality and feel.
+The purpose of this beta release is to gain feedback on the core app functionality and feel. Keep in mind, this is a single-developer effort so I physically cannot test on every platform. If you find any issues, please report them - they will be solved ASAP.
 
-The full version will come with:
+At the time of updating this README document (30th of June), all of the expected "bigger" features have already been added since the beta release.
+Some of the most notable added features:
 
-- big UX improvements
-- group audio/video calls (fast mode)
-- screen sharing in calls *(Added 12th of May)*
-- performance improvements
-- security hardening *(Electron hardening added 11th of May)*
-- easier self-hosted infrastructure setup
-- local API interface for agents and external tools
-- emojis 🪐 *(Added 12th of April)*
-- Platform-specific installers
+- Screen sharing in calls
+- Group calls
+- Group file sharing
+- Offline file sharing
+- Electron security hardening
+- Huge UX improvements such as: home screen redesign, first-time user onboard, typical messaging features
+- Lot of effort poured into making this "technical" app be simple enough for less-technical users
+- etc.
 
-## Quick start
+What's left:
+
+- Self hosting infrastcture CLI tool - makes self hosting setup much easier *(coming 1st of July)*
+- Testing & polishing *(30th of June - 6th of July)*
+- Platform specific installers which will be available on kiyeovo.marindedic.com - final step *(coming 7th of July - relase)*
+
+## Quick start if you don't want to wait for the full release
 
 > The default public bootstrap/relay nodes are temporarily offline. To run the beta, see [Bootstrap and relay setup](#bootstrap-and-relay-setup) for self-hosting your own infrastructure.
 
-> There is also a tutorial [here](https://marindedic.com/blog/p2p-messenger/), but you can just follow the steps below
+> There is also an **outdated** tutorial [here](https://marindedic.com/p2p-messenger/) (will be updated on 1st of July), but you can just follow the steps below
 
 Requirements for running:
 
@@ -101,9 +109,102 @@ The output should start with something like `-rwsr-xr-x 1 root root`. You may ne
 
 If your machine is not low-end, consider increasing `IDENTITY_SCRYPT_N` and `PROFILE_SCRYPT_N` in [src/core/constants.ts](./src/core/constants.ts) for stronger protection against local brute-force password attacks, but at the cost of slower unlock/import.
 
-## Bootstrap and relay setup
+## Bootstrap and relay setup (will be updated on 1st of July when the CLI tool becomes ready)
 
-### Fast mode
+The recommended way to self-host is the **released `kiyeovo-infra` bundle**. It
+runs the bootstrap, relay, optional Tor onion (anonymous mode), and optional
+coturn TURN server as pinned Docker containers, owns their lifecycle
+(start/stop/restart/auto-restart) through Docker Compose, and prints the exact
+addresses to paste into Kiyeovo's Setup pages.
+
+Most users should not clone this repository or build Kiyeovo from source just to
+self-host. The desktop app will be distributed separately (for Linux, as an
+AppImage), and the infrastructure bundle pulls versioned public images from
+GHCR.
+
+### Recommended: release bundle (Docker)
+
+Prerequisites: Docker Engine + the Compose plugin.
+
+Download and unpack the `kiyeovo-infra-<version>.tar.gz` asset from the Kiyeovo
+GitHub release:
+
+```bash
+VERSION=0.1.0
+wget "https://github.com/Realman78/Kiyeovo/releases/download/v${VERSION}/kiyeovo-infra-${VERSION}.tar.gz"
+wget "https://github.com/Realman78/Kiyeovo/releases/download/v${VERSION}/kiyeovo-infra-${VERSION}.tar.gz.sha256"
+sha256sum -c "kiyeovo-infra-${VERSION}.tar.gz.sha256"
+
+tar -xzf "kiyeovo-infra-${VERSION}.tar.gz"
+cd "kiyeovo-infra-${VERSION}"
+
+./kiyeovo-infra fast init       # Fast: bootstrap + relay; can also configure TURN
+./kiyeovo-infra fast firewall   # prints the ports to open (makes no changes)
+./kiyeovo-infra fast up         # pulls public GHCR images and starts Fast mode
+./kiyeovo-infra fast status     # check health
+./kiyeovo-infra fast addresses  # copy the printed multiaddrs into Kiyeovo
+```
+
+The bundle contains the CLI and Compose files. It does **not** contain the app
+source tree, Node.js dependencies, or Docker build context. `fast up` pulls the
+published image:
+
+```text
+ghcr.io/realman78/kiyeovo-infra-node:<version>
+```
+
+To run anonymous mode too:
+
+```bash
+./kiyeovo-infra anonymous init
+./kiyeovo-infra anonymous up
+./kiyeovo-infra anonymous status
+./kiyeovo-infra anonymous addresses
+```
+
+Anonymous mode pulls the same infra-node image plus:
+
+```text
+ghcr.io/realman78/kiyeovo-tor:<version>
+```
+
+Fast and Anonymous mode can coexist on one host. The CLI keeps their state and
+Compose projects separate:
+
+```text
+instances/fast/   -> project kiyeovo-infra-fast
+instances/anon/   -> project kiyeovo-infra-anon
+```
+
+If only one mode exists, the mode token may be omitted. Once both exist, name the
+mode explicitly so the CLI never guesses which stack you meant. For reboot
+survival: `sudo systemctl enable docker` (the containers use
+`restart: unless-stopped`).
+
+Operators who do not want Docker can use the advanced manual path below; the same
+servers can also run under systemd via the templates in `infrastructure/config/`.
+
+### Developer/source checkout testing
+
+Use this path only if you are testing unpublished source changes or building the
+infra images yourself:
+
+```bash
+git clone https://github.com/Realman78/Kiyeovo.git
+cd Kiyeovo/infrastructure
+
+./kiyeovo-infra fast init
+./kiyeovo-infra fast up --build
+```
+
+`--build` is for source checkouts. Release-bundle users should normally run
+`./kiyeovo-infra <mode> up` without `--build`.
+
+### Advanced: manual setup (no Docker)
+
+The steps below run the servers by hand and are the alternative to the CLI above.
+
+#### Fast mode
 
 1. Install dependencies
 
@@ -135,7 +236,7 @@ npm run relay
 4002  # relay
 ```
 
-5. You should be all set now. You can add the addresses to the list of known bootstrap and/or relay addresses in Kiyeovo by clicking on the network status text in the sidebar header - a dialog shall open up:
+5. You should be all set now. To register the servers in Kiyeovo, open the **Setup** tab in the left sidebar rail, then add each multiaddress with **Add server** — the bootstrap address under **Bootstrap servers** and the relay address under **Relay servers**:
 
 ```text
 /ip4/YOUR_PUBLIC_IP/tcp/9000/p2p/<BOOTSTRAP_PEER_ID>
@@ -143,7 +244,7 @@ npm run relay
 ```
 
 
-### Anonymous mode
+#### Anonymous mode
 
 1. Run the setup script
 
@@ -183,7 +284,7 @@ npm run bootstrap
 
 If you host both fast and anonymous bootstrap nodes on the same machine, keep fast mode on `0.0.0.0:9000` and anonymous mode on local `127.0.0.1:9001`.
 
-5. The setup is done. Now you can add the address to the list of known bootstrap addresses in Kiyeovo by clicking on the network status text in the sidebar header - a dialog shall open up:
+5. The setup is done. To register the server in Kiyeovo, open the **Setup** tab in the left sidebar rail, go to **Bootstrap servers**, and add the address with **Add server**:
 
 ```text
 /onion3/YOUR_ONION_HOST:9000/p2p/<BOOTSTRAP_PEER_ID>
@@ -191,7 +292,7 @@ If you host both fast and anonymous bootstrap nodes on the same machine, keep fa
 
 The relay is not needed in anonymous mode.
 
-### (Optional) STUN/TURN for calls in Fast mode
+#### (Optional) STUN/TURN for calls in Fast mode
 
 Calls are currently fast-mode direct 1:1 calls.
 
@@ -220,7 +321,7 @@ no-cli
 
 3. Run `systemctl enable --now coturn`
 
-4. The servers should be running now. You can add the server addresses inside Kiyeovo by clicking on the network status text in the sidebar header - a dialog shall open up:
+4. The servers should be running now. To register them in Kiyeovo, open the **Setup** tab in the left sidebar rail and go to **STUN/TURN servers**, then add each entry with **Add server**.
 
 You can add multiple ICE servers. Kiyeovo supports `stun`, `turn`, and `turns` entries.
 
