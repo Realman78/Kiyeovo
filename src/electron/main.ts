@@ -48,7 +48,7 @@ import { errStr } from '../core/utils/general-error.js';
 import { scheduleAppRelaunch } from './relaunch.js';
 import { createTrustedIpcMainHandle } from './trusted-ipc.js';
 import { applyWindowSecurityPolicies } from './window-security.js';
-import { applySessionSecurityPolicies } from './session-security.js';
+import { applySessionSecurityPolicies, applyWebRTCIPHandlingPolicy } from './session-security.js';
 import { setupDisplayMediaPicker } from './display-media-picker.js';
 import { DEV_SERVER_URL } from './constants.js';
 import {
@@ -831,8 +831,13 @@ async function initializeApp() {
       appEntryUrl,
       isDevelopment,
       getMainWindow: () => mainWindow,
-      networkMode: startupNetworkMode,
       selectDisplayMediaSource: displayMediaPicker.selectDisplayMediaSource,
+    });
+
+    // WebRTC IP-leak protection lives on WebContents (not Session) since
+    // Electron 39; cover every renderer this app ever creates.
+    app.on('web-contents-created', (_event, contents) => {
+      applyWebRTCIPHandlingPolicy(contents, startupNetworkMode);
     });
 
     // Setup IPC handlers

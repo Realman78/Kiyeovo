@@ -1,33 +1,33 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import type { Session } from 'electron';
+import type { WebContents } from 'electron';
 import { applyWebRTCIPHandlingPolicy } from './session-security.js';
 
-type WebRTCPolicySession = Pick<Session, 'setWebRTCIPHandlingPolicy'>;
-type WebRTCIPHandlingPolicy = Parameters<WebRTCPolicySession['setWebRTCIPHandlingPolicy']>[0];
+type WebRTCPolicyWebContents = Pick<WebContents, 'setWebRTCIPHandlingPolicy'>;
+type WebRTCIPHandlingPolicy = Parameters<WebRTCPolicyWebContents['setWebRTCIPHandlingPolicy']>[0];
 
 test('applyWebRTCIPHandlingPolicy restricts WebRTC candidate gathering in anonymous mode', () => {
   const policies: WebRTCIPHandlingPolicy[] = [];
-  const mockSession = {
+  const mockWebContents = {
     setWebRTCIPHandlingPolicy(policy) {
       policies.push(policy);
     },
-  } satisfies WebRTCPolicySession;
+  } satisfies WebRTCPolicyWebContents;
 
-  applyWebRTCIPHandlingPolicy(mockSession, 'anonymous');
+  applyWebRTCIPHandlingPolicy(mockWebContents, 'anonymous');
 
   assert.deepEqual(policies, ['disable_non_proxied_udp']);
 });
 
 test('applyWebRTCIPHandlingPolicy leaves fast mode at Electron default', () => {
   let wasCalled = false;
-  const mockSession = {
+  const mockWebContents = {
     setWebRTCIPHandlingPolicy() {
       wasCalled = true;
     },
-  } satisfies WebRTCPolicySession;
+  } satisfies WebRTCPolicyWebContents;
 
-  applyWebRTCIPHandlingPolicy(mockSession, 'fast');
+  applyWebRTCIPHandlingPolicy(mockWebContents, 'fast');
 
   assert.equal(wasCalled, false);
 });
