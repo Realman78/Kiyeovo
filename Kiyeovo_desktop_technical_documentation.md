@@ -70,7 +70,7 @@ Current repository layout in `src/core/`:
 - `group/runtime/` - realtime group messaging, offline reconciliation, state machine
 - `group/dht/` - group-info publish/validate/refetch flows
 - `identity/` - encrypted local identity and profile import/export
-- `network/` - libp2p node construction, bootstrap, relays, health, reconnect policy
+- `network/` - libp2p node construction, bootstrap, relays, health, reconnect policy. The desktop node's libp2p TCP listen port defaults to 9001, overridable via the `KIYEOVO_P2P_PORT` env var (`src/electron/main.ts`) — used by tests/dev to run multiple instances on one host
 - `transport/` - Tor transport, Tor lifecycle, protocol dialing, stream helpers
 - `username/` - username registry and DHT validator/record helpers
 - `lib/` - remaining cross-cutting coordinators that still orchestrate multiple domains (`MessageHandler`, `FileHandler`)
