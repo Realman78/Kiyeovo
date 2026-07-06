@@ -17,17 +17,32 @@ Status legend: [ ] queued · [~] in progress · [x] done
   assert that toast). Findings triaged with Marin 2026-07-06: downloads dir cwd-default FIXED
   (now ~/Downloads/Kiyeovo via homedir); stale doc line ~243 UPDATED; Register Identity CTA
   after relaunch is BY DESIGN (auto_register_<mode> setting can be 'never' — user's choice).
-- [ ] **3. Network edge cases / resilience (Fast mode)** — deliberately adverse conditions,
-  all local-infra simulable: multiple bootstraps (5-6) with some dead → onboarding must fail
-  over to a live one; ALL bootstraps dead → sane error UX, no hang; bootstrap killed
-  mid-session → reconnect + offline fallback engage; wrong unlock password then correct one.
-  **Scripted reproduction target from Marin (do not pre-analyze; reproduce first):** with a
-  shutdown bootstrap configured, ADDING a new bootstrap afterwards does not connect — suspected
-  real bug, network-dependent, occurs in Fast mode. Also test the MANY-HEALTHY case, not just
-  dead ones: e.g. 8 local bootstraps ALL healthy (Marin suspects "too many healthy" could
-  itself misbehave; he'll separately re-test against his real 7-8 server deployment later).
-  Starts on Marin's go-ahead after he reads the round-2 report. NOT coverable on this host: the relay DATA
-  path (needs NAT-isolated peers — requires a second machine or privileged netns; parked).
+- [x] **3. Network edge cases / resilience (Fast mode)** — done (`network-edges.spec.ts`, 6
+  tests, all local throwaway bootstrap nodes for full lifecycle control): failover among
+  partly-dead bootstraps (4 dead + 2 live, dead-first ordering) reaches real DHT connectivity;
+  an all-dead config surfaces the designed "All configured bootstrap nodes failed" error with
+  no hang and recovers once a live one is added; a killed-mid-session shared bootstrap leaves
+  already-connected peers messaging fine over their direct TCP connection and the per-bootstrap-
+  node liveness view (Setup > Bootstrap) honestly flips to "Unavailable"/"Reachable" across a
+  restart with the same identity; wrong-password unlock is rejected with the designed
+  "Incorrect password. Attempt N." copy (no crash, no unlock) and the correct password then
+  unlocks normally; 8 healthy local bootstraps connect cleanly (Marin's "too many healthy"
+  suspicion did NOT reproduce locally — he'll separately re-test against his real 7-8 server
+  deployment). **Marin's scripted repro (shutdown bootstrap + add a new live one) did NOT
+  reproduce**: both the natural full sequence (add, then click "Retry connection") and a fully
+  passive one (add, never click anything) recovered — the passive path self-heals in ~30s via
+  the periodic health-check's own automatic reconnect, which always re-reads the live bootstrap
+  list from the DB. If Marin's real environment still shows a stuck-disconnected state, the gap
+  is most likely real-network-latency-dependent (slower TCP teardown detection over a WAN vs.
+  instant loopback FIN on a local process kill), not a reachable logic bug — see the spec's
+  file-level comment and the round's report for the full evidence trail. Notable code-confirmed
+  finding along the way: the global CONNECTED/OFFLINE indicator (`getDHTConnectionStatus`) is
+  driven by "is any currently connected peer DHT-protocol-capable and pingable" with no
+  bootstrap-vs-contact distinction, so it stays "Connected" through a dead shared bootstrap as
+  long as a direct contact connection survives — genuinely degraded bootstrap health only shows
+  up in the granular per-node liveness view, not the header. NOT coverable on this host: the
+  relay DATA path (needs NAT-isolated peers — requires a second machine or privileged netns;
+  parked).
 - [ ] **4. Blocking + member removal** — blocked peer's messages stop arriving and re-requests
   are refused; a removed group member stops receiving group messages.
 - [ ] **5. Calls** — fake media devices (Chromium fake camera/mic flags) for headless call

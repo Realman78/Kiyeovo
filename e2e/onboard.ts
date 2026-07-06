@@ -46,7 +46,13 @@ export async function onboard(
     options: {
         password: string;
         username: string;
-        bootstrapMultiaddr: string;
+        /**
+         * One or more bootstrap multiaddrs to add during the wizard's Bootstrap
+         * step, in order, before waiting for real DHT connectivity — see
+         * network-edges.spec.ts (round 3) for a mixed dead+live multi-bootstrap
+         * scenario. A plain string is equivalent to a single-element array.
+         */
+        bootstrapMultiaddr: string | string[];
         relayMultiaddr: string;
         stunUrl: string;
     },
@@ -54,30 +60,14 @@ export async function onboard(
     const { password, username, bootstrapMultiaddr, relayMultiaddr, stunUrl } = options;
     const label = username;
     const onboardStart = Date.now();
+    const bootstrapMultiaddrs = Array.isArray(bootstrapMultiaddr) ? bootstrapMultiaddr : [bootstrapMultiaddr];
 
     await page.waitForLoadState('domcontentloaded');
 
-    await timedStage(label, 'network_mode+identity+recovery', async () => {
-        // --- 1. Network mode ---
-        await expect(page.getByText('Choose Network Mode')).toBeVisible({ timeout: 30_000 });
-        await page.getByRole('button', { name: 'Fast', exact: true }).click();
-
-        // --- 2. Identity creation ---
-        await expect(page.getByText('NEW IDENTITY')).toBeVisible({ timeout: 30_000 });
-        await page.getByPlaceholder('Enter password...').fill(password);
-        await page.getByPlaceholder('Confirm password...').fill(password);
-        await page.getByRole('button', { name: 'Create Identity' }).click();
-
-        await expect(page.getByText('RECOVERY PHRASE')).toBeVisible({ timeout: 15_000 });
-        await page.getByRole('button', { name: "I wrote it down" }).click();
-
-        // --- 3. Go through the guided first-run setup wizard for real ---
-        await expect(page.getByText("Let's get Kiyeovo connected!")).toBeVisible({ timeout: 60_000 });
-        await page.getByRole('button', { name: 'Start setup' }).click();
-    });
+    await timedStage(label, 'network_mode+identity+recovery', () => beginIdentityCreation(page, password));
 
     // --- 4a. Bootstrap ---
-    await timedStage(label, 'bootstrap', () => completeBootstrapStep(page, bootstrapMultiaddr));
+    await timedStage(label, 'bootstrap', () => completeBootstrapStep(page, bootstrapMultiaddrs));
     // --- 4b. Relay ---
     await timedStage(label, 'relay', () => completeRelayStep(page, relayMultiaddr));
     // --- 4c. Register a username ---
@@ -85,35 +75,126 @@ export async function onboard(
     // --- 4d. STUN/TURN (Calls) ---
     await timedStage(label, 'ice', () => completeIceStep(page, stunUrl));
 
-    await timedStage(label, 'finish_wizard', async () => {
-        // --- Ready screen -> land in Chats ---
-        await expect(page.getByText("You're ready to use Kiyeovo")).toBeVisible({ timeout: 15_000 });
-        await page.getByRole('button', { name: 'Start chatting' }).click();
-    });
+    await timedStage(label, 'finish_wizard', () => finishWizard(page));
 
-    const userState = await page.evaluate(() => window.kiyeovoAPI.getUserState());
-    if (!userState.peerId) {
-        throw new Error('kiyeovoAPI.getUserState() returned no peerId after onboarding');
-    }
-
+    const peerId = await readPeerId(page);
     console.log(`[timing][${label}] TOTAL onboard(): ${((Date.now() - onboardStart) / 1000).toFixed(1)}s`);
-    return { peerId: userState.peerId };
+    return { peerId };
 }
 
 /**
- * Adds the bootstrap multiaddr and retries the dial until the app reports
- * real DHT connectivity (kiyeovoAPI.getDHTConnectionStatus()) — not the
- * separate, ping-based per-node liveness indicator shown in the node list,
- * which past experience (against a sandboxed local node) found unreliable
- * even once the underlying DHT connection was actually up. The public
- * bootstrap node is slower to dial than the old throwaway local one, so this
- * retries generously.
+ * Steps 1-3 of onboard() in isolation: Network Mode -> Fast, identity
+ * creation, recovery-phrase ack, and "Start setup" on the first-run guide —
+ * landing on the wizard's Bootstrap step. Factored out so round 3's
+ * network-edges.spec.ts can script the Bootstrap step by hand (multiple
+ * add/retry cycles, asserting failure UX) instead of going through the whole
+ * of onboard() in one non-interruptible call.
  */
-async function completeBootstrapStep(page: Page, bootstrapMultiaddr: string): Promise<void> {
-    await expect(page.getByRole('heading', { name: 'Bootstrap servers' })).toBeVisible({ timeout: 15_000 });
+export async function beginIdentityCreation(page: Page, password: string): Promise<void> {
+    // --- 1. Network mode ---
+    await expect(page.getByText('Choose Network Mode')).toBeVisible({ timeout: 30_000 });
+    await page.getByRole('button', { name: 'Fast', exact: true }).click();
+
+    // --- 2. Identity creation ---
+    await expect(page.getByText('NEW IDENTITY')).toBeVisible({ timeout: 30_000 });
+    await page.getByPlaceholder('Enter password...').fill(password);
+    await page.getByPlaceholder('Confirm password...').fill(password);
+    await page.getByRole('button', { name: 'Create Identity' }).click();
+
+    await expect(page.getByText('RECOVERY PHRASE')).toBeVisible({ timeout: 15_000 });
+    await page.getByRole('button', { name: "I wrote it down" }).click();
+
+    // --- 3. Go through the guided first-run setup wizard for real ---
+    await expect(page.getByText("Let's get Kiyeovo connected!")).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('button', { name: 'Start setup' }).click();
+}
+
+/** Ready screen -> "Start chatting", landing in the main Chats UI. */
+export async function finishWizard(page: Page): Promise<void> {
+    await expect(page.getByText("You're ready to use Kiyeovo")).toBeVisible({ timeout: 15_000 });
+    await page.getByRole('button', { name: 'Start chatting' }).click();
+}
+
+/** Reads this instance's own Peer ID via kiyeovoAPI.getUserState() (no DOM parsing needed). */
+export async function readPeerId(page: Page): Promise<string> {
+    const userState = await page.evaluate(() => window.kiyeovoAPI.getUserState());
+    if (!userState.peerId) {
+        throw new Error('kiyeovoAPI.getUserState() returned no peerId');
+    }
+    return userState.peerId;
+}
+
+/** Reads the app's real DHT connectivity via kiyeovoAPI.getDHTConnectionStatus() (see waitForRealDhtConnection). */
+export async function getDhtConnected(page: Page): Promise<boolean | null> {
+    const status = await page.evaluate(() => window.kiyeovoAPI.getDHTConnectionStatus());
+    return status.success ? status.connected : null;
+}
+
+/**
+ * Fills and submits the Bootstrap step's "Add bootstrap server" dialog once.
+ * Exported standalone (on top of being used in a loop by completeBootstrapStep)
+ * so round 3's network-edges.spec.ts can add servers one at a time with its
+ * own assertions in between (e.g. after killing a previously-live bootstrap,
+ * or from the standalone Setup > Bootstrap page post-onboarding — see
+ * navigateToBootstrapSetup — which renders the exact same
+ * BootstrapSetup.tsx/SetupNodesView.tsx as the wizard step).
+ */
+export async function addBootstrapServer(page: Page, bootstrapMultiaddr: string): Promise<void> {
     await page.getByRole('button', { name: 'Add bootstrap server' }).click();
     await page.getByPlaceholder(/ip4\/1\.2\.3\.4/).fill(bootstrapMultiaddr);
     await page.getByRole('button', { name: 'Add server' }).click();
+}
+
+/**
+ * Clicks "Retry connection" once and waits for the button's own "Retrying…"
+ * busy state to clear — i.e. one full retryBootstrap() IPC round trip — but,
+ * unlike waitForRealDhtConnection, does NOT itself assert the outcome. Callers
+ * decide what a given attempt's result should mean (real DHT connected, an
+ * inline error, or genuinely still disconnected).
+ */
+export async function clickRetryBootstrapConnection(page: Page): Promise<void> {
+    await page.getByRole('button', { name: 'Retry connection' }).click();
+    await expect(page.getByRole('button', { name: 'Retrying…' })).toBeHidden({ timeout: 20_000 });
+}
+
+/**
+ * Navigates from the main app (post-onboarding) to Setup > Bootstrap — the
+ * same BootstrapSetup.tsx/SetupNodesView.tsx page the wizard's Bootstrap step
+ * renders (Sidebar.tsx's `children` swap is the only difference between the
+ * wizard and the standalone Setup tab; see InitialSetupWizard.tsx).
+ *
+ * Goes via the SidebarHeader's own CONNECTED/OFFLINE indicator
+ * (`onOpenBootstrapSetup`, SidebarHeader.tsx ~L384) rather than the sidebar
+ * rail's "Setup" entry — that indicator is exactly the "CONNECTED" data
+ * source round 3's network-edges.spec.ts cares about (it renders its own
+ * `isDHTConnected` snapshot as literal text "Connected"/"Offline"/
+ * "Connecting...", independent of — but same underlying source as —
+ * useDHTConnectionStatus's Redux `state.user.connected`), and clicking straight
+ * through it is also the more realistic path a real user recovering from a
+ * dead bootstrap would take.
+ */
+export async function navigateToBootstrapSetup(page: Page): Promise<void> {
+    await page.getByRole('button', { name: /Open Bootstrap setup/ }).click();
+    await expect(page.getByRole('heading', { name: 'Bootstrap servers' })).toBeVisible({ timeout: 10_000 });
+}
+
+/**
+ * Adds every given bootstrap multiaddr, in order, then retries the dial until
+ * the app reports real DHT connectivity (kiyeovoAPI.getDHTConnectionStatus())
+ * — not the separate, ping-based per-node liveness indicator shown in the
+ * node list, which past experience (against a sandboxed local node) found
+ * unreliable even once the underlying DHT connection was actually up. The
+ * public bootstrap node is slower to dial than the old throwaway local one,
+ * so this retries generously. Multiple addresses (round 3's
+ * network-edges.spec.ts: a mix of dead and live bootstraps) are all added
+ * before the first retry, matching how a real user filling in several
+ * bootstrap servers up front would drive the wizard.
+ */
+async function completeBootstrapStep(page: Page, bootstrapMultiaddrs: string[]): Promise<void> {
+    await expect(page.getByRole('heading', { name: 'Bootstrap servers' })).toBeVisible({ timeout: 15_000 });
+    for (const address of bootstrapMultiaddrs) {
+        await addBootstrapServer(page, address);
+    }
 
     await waitForRealDhtConnection(page);
 
@@ -136,19 +217,18 @@ async function completeBootstrapStep(page: Page, bootstrapMultiaddr: string): Pr
  * would just perpetually reset the status back to null out from under the
  * check and could loop forever without ever observing a real `true`.
  */
-async function waitForRealDhtConnection(page: Page): Promise<void> {
+export async function waitForRealDhtConnection(page: Page, attempts = 5): Promise<void> {
     // Observed real timing against the deployed bootstrap: dial + verify
     // completes in ~3.5s on a working attempt. 5 attempts x (15s settle-wait
     // cap + 8s poll) = 115s worst case, well above the observed norm without
     // approaching the test's 6-minute hard cap.
-    for (let attempt = 1; attempt <= 5; attempt += 1) {
-        await page.getByRole('button', { name: 'Retry connection' }).click();
-        await expect(page.getByRole('button', { name: 'Retrying…' })).toBeHidden({ timeout: 15_000 });
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+        await clickRetryBootstrapConnection(page);
 
         try {
             await expect.poll(async () => {
-                const status = await page.evaluate(() => window.kiyeovoAPI.getDHTConnectionStatus());
-                return status.success ? status.connected : 'error';
+                const connected = await getDhtConnected(page);
+                return connected ?? 'error';
             }, { timeout: 8_000, intervals: [2_000] }).toBe(true);
             return;
         } catch {
@@ -188,7 +268,7 @@ async function waitForRealDhtConnection(page: Page): Promise<void> {
  *   dialConfiguredFastRelays (src/core/network/node-relays.ts) short-circuits
  *   with "reservation already active" instead of re-dialing.
  */
-async function completeRelayStep(page: Page, relayMultiaddr: string): Promise<void> {
+export async function completeRelayStep(page: Page, relayMultiaddr: string): Promise<void> {
     await expect(page.getByRole('heading', { name: 'Relay servers' })).toBeVisible({ timeout: 15_000 });
     await page.getByRole('button', { name: 'Add relay server' }).click();
     await page.getByPlaceholder(/ip4\/1\.2\.3\.4/).fill(relayMultiaddr);
@@ -217,7 +297,7 @@ async function completeRelayStep(page: Page, relayMultiaddr: string): Promise<vo
 }
 
 /** Registers a username via the wizard's dedicated Register step, then continues. */
-async function completeRegisterStep(page: Page, username: string): Promise<void> {
+export async function completeRegisterStep(page: Page, username: string): Promise<void> {
     await expect(page.getByRole('heading', { name: 'Register a username' })).toBeVisible({ timeout: 15_000 });
     await page.getByRole('button', { name: 'Register username' }).click();
     await expect(page.getByRole('heading', { name: 'Register Identity' })).toBeVisible({ timeout: 15_000 });
@@ -260,7 +340,7 @@ async function completeRegisterStep(page: Page, username: string): Promise<void>
 }
 
 /** Adds a STUN server (optional step) and finishes the wizard. */
-async function completeIceStep(page: Page, stunUrl: string): Promise<void> {
+export async function completeIceStep(page: Page, stunUrl: string): Promise<void> {
     await expect(page.getByRole('heading', { name: 'STUN/TURN servers' })).toBeVisible({ timeout: 15_000 });
     await page.getByRole('button', { name: 'Add STUN/TURN server' }).click();
     await page.getByPlaceholder('stun:stun.l.google.com:19302').fill(stunUrl);

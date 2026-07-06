@@ -10,7 +10,24 @@ const tsxBin = path.join(repoRoot, 'node_modules', '.bin', 'tsx');
 export interface BootstrapNode {
     /** Full dialable multiaddr, e.g. /ip4/127.0.0.1/tcp/19501/p2p/12D3Koo... */
     multiaddr: string;
-    stop(): Promise<void>;
+    /** This instance's scratch dir (datastore + peer-id file) — pass back in via
+     * `startBootstrapNode({ scratchDir })` to relaunch with the SAME identity/
+     * multiaddr after a `stop({ keepScratchDir: true })` (round 3's "bootstrap
+     * dies mid-session, then comes back" scenario — a genuine restart of the
+     * same node, not a fresh one at a coincidentally-reused address). */
+    scratchDir: string;
+    /** By default also deletes the scratch dir (datastore + peer-id file). Pass
+     * `{ keepScratchDir: true }` to preserve it for a later same-identity
+     * restart via `startBootstrapNode({ scratchDir })`. */
+    stop(options?: { keepScratchDir?: boolean }): Promise<void>;
+}
+
+export interface StartBootstrapNodeOptions {
+    port?: number;
+    /** Reuse an existing scratch dir (see BootstrapNode.scratchDir) to restart
+     * a previously-stopped node with the same Peer ID/datastore, instead of
+     * minting a fresh throwaway identity. */
+    scratchDir?: string;
 }
 
 async function stopChild(child: ChildProcessWithoutNullStreams): Promise<void> {
@@ -36,8 +53,9 @@ async function stopChild(child: ChildProcessWithoutNullStreams): Promise<void> {
  * live bootstrap node to find each other via the DHT — there is no mDNS/LAN
  * discovery wired into the app's libp2p node (see src/core/network/node-factory.ts).
  */
-export async function startBootstrapNode(port = 19501): Promise<BootstrapNode> {
-    const scratchDir = await mkdtemp(path.join(tmpdir(), 'kiyeovo-e2e-bootstrap-'));
+export async function startBootstrapNode(options: number | StartBootstrapNodeOptions = {}): Promise<BootstrapNode> {
+    const { port = 19501, scratchDir: reusedScratchDir } = typeof options === 'number' ? { port: options } : options;
+    const scratchDir = reusedScratchDir ?? await mkdtemp(path.join(tmpdir(), 'kiyeovo-e2e-bootstrap-'));
 
     const child: ChildProcessWithoutNullStreams = spawn(
         tsxBin,
@@ -97,9 +115,12 @@ export async function startBootstrapNode(port = 19501): Promise<BootstrapNode> {
 
     return {
         multiaddr,
-        stop: async () => {
+        scratchDir,
+        stop: async (stopOptions?: { keepScratchDir?: boolean }) => {
             await stopChild(child);
-            await rm(scratchDir, { recursive: true, force: true });
+            if (!stopOptions?.keepScratchDir) {
+                await rm(scratchDir, { recursive: true, force: true });
+            }
         },
     };
 }
