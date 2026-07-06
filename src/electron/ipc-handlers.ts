@@ -46,6 +46,7 @@ import { createTrustedIpcMainHandle, type IpcMainHandleRegistrar } from './trust
 import { mintMediaToken } from './app-protocol.js';
 import { prepareTextUpload } from './text-upload.js';
 import {
+  createDebouncedInvoker,
   resolveCompletedImageMedia,
   resolveOpenFileLocationPath,
   resolveUploadsDirectory,
@@ -251,6 +252,9 @@ function getConfiguredIceServers(database: ChatDatabase): IceServerConfig[] {
 }
 
 const NODE_LIVENESS_PING_TIMEOUT_MS = 2000;
+// Debounce window for auto-reconnect after a bootstrap add: consecutive adds
+// coalesce into one retry that fires ~1s after the last add.
+const BOOTSTRAP_ADD_RETRY_DEBOUNCE_MS = 1000;
 
 // True only if we have a connection to this peer AND it answers a ping
 async function isPeerReachable(node: ChatNode, peerIdStr: string | null): Promise<boolean> {
@@ -884,6 +888,36 @@ function setupBootstrapHandlers(
     error,
   });
 
+  // Auto-reconnect after a bootstrap add. Debounced 1s and coalesced so a burst
+  // of adds produces a SINGLE dial against the complete list (not a first dial
+  // against a partial list that visibly fails mid-typing). The target p2pCore is
+  // resolved at fire time — if it was torn down (shutdown / network-mode
+  // relaunch) between the add and the debounce firing, the run is skipped
+  // silently. retryBootstrap() is single-flight: it refuses to run when a
+  // reconnect is already in progress and returns an 'aborted' result, which we
+  // only log — the periodic health-check reconnect re-reads the full bootstrap
+  // list from the DB, so the freshly added address is never lost.
+  const bootstrapAddRetry = createDebouncedInvoker({
+    delayMs: BOOTSTRAP_ADD_RETRY_DEBOUNCE_MS,
+    resolveTarget: getP2PCore,
+    run: async (p2pCore) => {
+      try {
+        const result = await p2pCore.retryBootstrap();
+        if (result.status === 'aborted') {
+          log('[IPC] Bootstrap add auto-retry aborted (reconnect already in progress); periodic checker will pick up the new address');
+        } else {
+          log(`[IPC] Bootstrap add auto-retry complete status=${result.status} connected=${result.connectedCount}`);
+        }
+      } catch (retryError) {
+        // Non-fatal: node is persisted and can be applied via manual retry later.
+        console.warn(`[IPC] Bootstrap add auto-retry failed: ${errStr(retryError)}`);
+      }
+    },
+    onError: (retryError) => {
+      console.warn(`[IPC] Bootstrap add auto-retry failed: ${errStr(retryError)}`);
+    },
+  });
+
   // Get current DHT connection status snapshot
   ipcMain.handle(IPC_CHANNELS.GET_DHT_CONNECTION_STATUS, async () => {
     try {
@@ -1157,6 +1191,12 @@ function setupBootstrapHandlers(
       log(`[IPC] Adding bootstrap node: ${normalized}`);
       p2pCore.database.addBootstrapNode(normalized);
       log('[IPC] Bootstrap node added');
+
+      // Best-effort: schedule a debounced reconnect so the new server is dialed
+      // automatically. Fires ~1s after the LAST add (see bootstrapAddRetry). We
+      // return success immediately without awaiting the retry — the DB write is
+      // the source of truth and the retry must never fail the add response.
+      bootstrapAddRetry.schedule();
 
       return { success: true, error: null };
     } catch (error) {
