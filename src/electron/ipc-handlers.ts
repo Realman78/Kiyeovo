@@ -251,13 +251,20 @@ function getConfiguredIceServers(database: ChatDatabase): IceServerConfig[] {
   }
 }
 
-const NODE_LIVENESS_PING_TIMEOUT_MS = 2000;
+const NODE_LIVENESS_PING_TIMEOUT_FAST_MS = 2_000;
+const NODE_LIVENESS_PING_TIMEOUT_ANONYMOUS_MS = 6_000;
 // Debounce window for auto-reconnect after a bootstrap add: consecutive adds
 // coalesce into one retry that fires ~1s after the last add.
 const BOOTSTRAP_ADD_RETRY_DEBOUNCE_MS = 1000;
 
+function getNodeLivenessPingTimeoutMs(mode: NetworkMode): number {
+  return mode === NETWORK_MODES.ANONYMOUS
+    ? NODE_LIVENESS_PING_TIMEOUT_ANONYMOUS_MS
+    : NODE_LIVENESS_PING_TIMEOUT_FAST_MS;
+}
+
 // True only if we have a connection to this peer AND it answers a ping
-async function isPeerReachable(node: ChatNode, peerIdStr: string | null): Promise<boolean> {
+async function isPeerReachable(node: ChatNode, peerIdStr: string | null, pingTimeoutMs: number): Promise<boolean> {
   if (!peerIdStr) {
     return false;
   }
@@ -268,7 +275,7 @@ async function isPeerReachable(node: ChatNode, peerIdStr: string | null): Promis
   try {
     const peerId = peerIdFromString(peerIdStr);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await (node.services as any).ping.ping(peerId, { signal: AbortSignal.timeout(NODE_LIVENESS_PING_TIMEOUT_MS) });
+    await (node.services as any).ping.ping(peerId, { signal: AbortSignal.timeout(pingTimeoutMs) });
     return true;
   } catch {
     return false;
@@ -964,6 +971,7 @@ function setupBootstrapHandlers(
     if (!p2pCore) {
       return { statuses: [] } satisfies NodesLivenessResponse;
     }
+    const pingTimeoutMs = getNodeLivenessPingTimeoutMs(p2pCore.database.getSessionNetworkMode());
     const statuses = await Promise.all((addresses ?? []).map(async (address) => {
       let peerIdStr: string | null = null;
       try {
@@ -971,7 +979,7 @@ function setupBootstrapHandlers(
       } catch {
         peerIdStr = null;
       }
-      return { address, connected: await isPeerReachable(p2pCore.node, peerIdStr) };
+      return { address, connected: await isPeerReachable(p2pCore.node, peerIdStr, pingTimeoutMs) };
     }));
     return { statuses } satisfies NodesLivenessResponse;
   });

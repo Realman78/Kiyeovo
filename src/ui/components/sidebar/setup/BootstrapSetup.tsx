@@ -11,6 +11,7 @@ import { store, type RootState } from '../../../state/store';
 import { applyLiveness, bumpSetupGeneration, mergeConfiguredNodes, setSetupNodes } from '../../../state/slices/setupNodesSlice';
 
 const SECTION = 'bootstrap' as const;
+const BOOTSTRAP_AUTO_RETRY_VISIBLE_MS = 12_000;
 
 function getUnexpectedErrorMessage(error: unknown): string {
   return errStr(error, UNEXPECTED_ERROR);
@@ -41,12 +42,34 @@ export function BootstrapSetup() {
   const [copiedAddress, setCopiedAddress] = useState<string | null>(null);
   const [loading, setLoading] = useState(!loadedOnce);
   const [retrying, setRetrying] = useState(false);
+  const [autoRetrying, setAutoRetrying] = useState(false);
   const [reordering, setReordering] = useState(false);
   const reorderInFlightRef = useRef(false);
+  const livenessInFlightRef = useRef(false);
+  const autoRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearAutoRetryTimer = () => {
+    if (autoRetryTimerRef.current === null) {
+      return;
+    }
+
+    clearTimeout(autoRetryTimerRef.current);
+    autoRetryTimerRef.current = null;
+  };
+
+  const showAutoRetrying = () => {
+    setAutoRetrying(true);
+    clearAutoRetryTimer();
+    autoRetryTimerRef.current = setTimeout(() => {
+      autoRetryTimerRef.current = null;
+      setAutoRetrying(false);
+    }, BOOTSTRAP_AUTO_RETRY_VISIBLE_MS);
+  };
 
   const refreshNodeLiveness = async (addresses: string[]) => {
-    if (addresses.length === 0) return;
+    if (addresses.length === 0 || livenessInFlightRef.current) return;
 
+    livenessInFlightRef.current = true;
     try {
       const { statuses } = await window.kiyeovoAPI.getNodesLiveness(addresses);
       dispatch(applyLiveness({
@@ -55,6 +78,8 @@ export function BootstrapSetup() {
       }));
     } catch {
       // Preserve the last-known status when a liveness probe fails.
+    } finally {
+      livenessInFlightRef.current = false;
     }
   };
 
@@ -102,8 +127,18 @@ export function BootstrapSetup() {
 
     return () => {
       clearInterval(timerId);
+      clearAutoRetryTimer();
     };
   }, []);
+
+  useEffect(() => {
+    if (!autoRetrying || !nodes.some((node) => node.connected === true)) {
+      return;
+    }
+
+    clearAutoRetryTimer();
+    setAutoRetrying(false);
+  }, [autoRetrying, nodes]);
 
   const showError = (message: string) => {
     setError(message);
@@ -178,6 +213,7 @@ export function BootstrapSetup() {
         await window.kiyeovoAPI.addBootstrapNode(normalizedAddress),
         'Failed to add bootstrap node',
       );
+      showAutoRetrying();
       dispatch(bumpSetupGeneration({ section: SECTION }));
       await refreshNodes();
       setNewAddress('');
@@ -268,9 +304,10 @@ export function BootstrapSetup() {
       error={error}
       copiedAddress={copiedAddress}
       newAddress={newAddress}
-      retrying={retrying}
+      retrying={retrying || autoRetrying}
+      retryingLabel={autoRetrying && !retrying ? 'Connecting…' : undefined}
       reordering={reordering}
-      retryDisabled={retrying || loading || nodes.length === 0}
+      retryDisabled={retrying || autoRetrying || loading || nodes.length === 0}
       onNewAddressChange={setNewAddress}
       onAdd={handleAdd}
       onRetry={handleRetry}
