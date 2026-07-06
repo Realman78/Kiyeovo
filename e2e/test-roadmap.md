@@ -43,8 +43,51 @@ Status legend: [ ] queued · [~] in progress · [x] done
   up in the granular per-node liveness view, not the header. NOT coverable on this host: the
   relay DATA path (needs NAT-isolated peers — requires a second machine or privileged netns;
   parked).
-- [ ] **4. Blocking + member removal** — blocked peer's messages stop arriving and re-requests
-  are refused; a removed group member stops receiving group messages.
+- [x] **4. Blocking + member removal** — done (`blocking.spec.ts`, 3 tests, built on
+  `setupThreePeerWorld`). (Suite parallelization prep 2026-07-06: 3 workers, per-file port
+  ranges, ~3.2 min full run when infra is healthy.) Doc coverage of blocking is thin (only
+  lists "blocked peers"/contact_mode under the security model and documents call-level
+  blocking), so the following is code-confirmed by reading src/core directly: blocking denies
+  ALL libp2p connections both ways at the transport layer (connection-gater.ts) plus
+  independent isBlocked checks on every inbound direct-protocol handler; teardownBlockedPeer
+  force-closes any existing connection immediately. Critically, blocking is NOT one-sided —
+  database.ts's offline-bucket-info queries filter out blocked peers at the SQL level, so even
+  the recipient's offline catch-up never looks at a blocked sender's bucket (message durably
+  stored, never deleted, just never fetched while blocked). From the blocked SENDER's side
+  there is no distinct signal at all: a failed send to a peer who blocked you settles to the
+  same `offline` state/label as a genuinely-offline peer — by design, not a gap. Direct
+  block/unblock via ChatHeaderMenu's "Block user"/"Unblock user" tested end to end including
+  resumption after unblock. Contact-request blocking: a NEW key-exchange attempt from an
+  already-blocked peer is silently dropped (`authorizeContactRequest`'s isBlocked check runs
+  before anything else, no reply sent) — distinct from a live "Reject & Block" of a currently-
+  pending request, which does send one explicit rejection before the block takes effect;
+  tested using world.ts's Bob/Charlie non-contact pair. Group member removal is a real, working
+  UI feature (ChatHeaderMenu's "Remove member" -> KickMemberDialog, creator-only): rotates the
+  group key, broadcasts the shrunk roster to remaining members (independently enforced via
+  group-messaging.ts's sender-not-participant check), and sends the removed member a dedicated
+  GROUP_KICK — their chat is kept (not deleted) in a new 'removed' status with composer
+  disabled ("You were removed from this group.") and a sidebar "ARCHIVED" badge; remaining
+  members see "<name> was removed from the group", the removed member sees "You were removed
+  from the group". All three scenarios matched the roadmap's original shape; no reshaping
+  needed. Stability follow-up (post-review, revised classification): the afternoon's roaming
+  cross-file failures were later traced to two ORPHANED Xvfb servers degrading the box
+  (killed; workers default lowered to 2) — but scenario C's failure persisted on the clean
+  box and was a REAL test bug, diagnosed live via DEBUG_MODE=true main-process logs: a group
+  text message rides gossipsub on a per-key-epoch topic; publish() with zero visible remote
+  subscribers retries once after 750ms then DELIBERATELY settles to offline-only delivery
+  (DHT bucket; recipients poll it every 5 MINUTES, or via the group menu's manual "Check
+  missed messages" — no sender-side nudge on this path). Every join and kick rotates the key,
+  so scenario C's two sends are each the FIRST message on a seconds-old topic, sometimes
+  landing before subscription propagation -> the bare 30s recipient wait could never succeed
+  on that designed fallback branch (~50% repro solo). Fixed with no timeout inflation:
+  `sendGroupMessageAwaitingFanout()` reads the app's own verdict off the sender's row (the
+  'offline' send-state label, rendered atomically with the bubble) and either does the plain
+  30s realtime wait or drives the recipient's designed "Check missed messages" recovery —
+  applied to all three group-fanout waits in the file. Product-side observation worth Marin's
+  eyes: the first group message sent within a few seconds of ANY membership change can
+  silently degrade to 5-minute-latency offline delivery with no automatic recipient nudge —
+  a real-user-visible UX gap, not just a test-suite problem (group-chat.spec.ts's fanout has
+  simply been lucky: its first send lands a few screenshot-seconds later than blocking's did).
 - [ ] **5. Calls** — fake media devices (Chromium fake camera/mic flags) for headless call
   tests; strategic value: first coverage of the deployed TURN/STUN server.
 - [ ] **6. Tor / anonymous mode (LAST — per Marin)** — Marin has pending work here, also

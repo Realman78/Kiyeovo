@@ -16,7 +16,13 @@ import { defineConfig } from '@playwright/test';
 // comfortably under 3GB, leaving headroom under 7.7GB total and one spare CPU
 // core (of 4) for Xvfb/the OS. Override with KIYEOVO_E2E_WORKERS if a given
 // box is smaller/larger.
-const DEFAULT_WORKERS = 3;
+// Revised 3 -> 2 after round 4 (blocking.spec.ts) added a THIRD heavy
+// three-Electron-instance spec file: with 3 workers, three heavy files now
+// regularly overlap (~9-10 concurrent instances mid-onboarding), which
+// starves 4 vCPUs and produced roaming DHT-stage timeouts across otherwise
+// healthy specs. Two workers cap the worst case at ~6 instances; measured
+// cost is ~1 extra minute of wall time for a stable suite.
+const DEFAULT_WORKERS = 2;
 
 export default defineConfig({
     testDir: './e2e',
