@@ -95,6 +95,7 @@ let isCoreInitialized = false;
 let hasStartedInitialization = false;
 let requiresNetworkModeSelection = false;
 let pendingPasswordRequest: PasswordRequest | null = null;
+let currentWebRtcPolicyMode: NetworkMode = DEFAULT_NETWORK_MODE;
 
 registerProtocolSchemes();
 
@@ -614,6 +615,8 @@ async function initializeP2PAfterWindow() {
     const dataDir = ensureAppDataDir();
     log(`[Electron] Data directory: ${dataDir}`);
     const startupNetworkMode = readPersistedNetworkMode();
+    currentWebRtcPolicyMode = startupNetworkMode;
+    applyWebRTCIPHandlingPolicy(mainWindow.webContents, startupNetworkMode);
     log(`[CONFIG][ELECTRON] startup_mode=${startupNetworkMode}`);
     log(`[CONFIG][ELECTRON] tor_bootstrap=${startupNetworkMode === 'anonymous' ? 'enabled' : 'disabled'}`);
 
@@ -818,6 +821,7 @@ async function initializeApp() {
     const isDevelopment = isDev();
     const appEntryUrl = isDevelopment ? DEV_SERVER_URL : getPackagedAppEntryUrl();
     const startupNetworkMode = readPersistedNetworkMode();
+    currentWebRtcPolicyMode = startupNetworkMode;
 
     // Setup minimal menu (keeps keyboard shortcuts working)
     setupMinimalMenu();
@@ -839,7 +843,7 @@ async function initializeApp() {
     // WebRTC IP-leak protection lives on WebContents (not Session) since
     // Electron 39; cover every renderer this app ever creates.
     app.on('web-contents-created', (_event, contents) => {
-      applyWebRTCIPHandlingPolicy(contents, startupNetworkMode);
+      applyWebRTCIPHandlingPolicy(contents, currentWebRtcPolicyMode);
     });
 
     // Setup IPC handlers
