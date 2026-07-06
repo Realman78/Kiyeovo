@@ -72,6 +72,22 @@ Changes (all in `src/core/direct/key-exchange.ts` + `constants.ts` + `message-ha
 - `e2e/electron.ts`: per-instance `p2pPort`, main-process log capture on `LaunchedApp.logs`.
 - Tests never check "Remember me", so the real system keychain is untouched.
 
+### 5. `e2e: three-peer group-chat test...` (8129ca5) + correction (b923fae)
+- `e2e/group-chat.spec.ts`: three peers, group creation/invite/accept/activation, message
+  fan-out asserted on every member — including delivery while a member views a different chat
+  (unread badge + message present on return). Bob↔Charlie are deliberately never contacts,
+  proving fan-out rides the group's own invite/welcome/topic machinery, not pairwise links.
+- **Correction (b923fae): ignore the "no push event for freshly arrived group invites" claim
+  in 8129ca5's commit message — it was wrong.** The sender's bucket-nudge triggers an offline
+  fetch whose `OFFLINE_MESSAGES_FETCH_COMPLETE` event refetches the invite list; a plain wait
+  sees the invite in ~11-16s with no UI nudge (verified in two runs). Three other preliminary
+  app-level observations from the group work were likewise withdrawn after checking the
+  technical documentation: delivery of group messages via the offline path while members are
+  online is documented dual-route design (shared envelope/cid, deduped); the lingering
+  "Sending..." label follows from offline-route acking; "Syncing group updates..." is the
+  group-call readiness gate, not a stuck sync. Net confirmed app bugs from the group-test
+  round: none.
+
 ## Fixed since review: deployed relay refusing reservations (2026-07-05)
 - Previously listed below as a known issue: the deployed relay (143.198.137.240:4002)
   deterministically refused every circuit-relay-v2 reservation (`RESERVATION_REFUSED`), so
