@@ -237,12 +237,12 @@ export function SetupNodesView({
                       </span>
 
                       <div className="min-w-0 flex-1 flex flex-col items-start">
-                        <div className={`truncate text-sm ${summary.isRaw ? 'font-mono' : 'font-medium'} text-foreground`}>
+                        <div title={node.address} className={`truncate max-w-full text-sm ${summary.isRaw ? 'font-mono' : 'font-medium'} text-foreground`}>
                           {summary.primary}
                         </div>
-                        <div className="mt-0.5 truncate font-mono text-xs text-muted-foreground" title={node.address}>
-                          <span className="lg:hidden">{summary.peerId ?? node.address}</span>
-                          <span className="hidden lg:inline">{node.address}</span>
+                        <div className="mt-0.5 truncate font-mono text-xs text-muted-foreground w-full" title={node.address}>
+                          <span className="lg:hidden max-w-[50%]">{summary.peerId ?? node.address}</span>
+                          <span className="hidden lg:inline max-w-[50%]">{node.address}</span>
                         </div>
                       </div>
 

@@ -43,10 +43,12 @@ export function BootstrapSetup() {
   const [retrying, setRetrying] = useState(false);
   const [reordering, setReordering] = useState(false);
   const reorderInFlightRef = useRef(false);
+  const livenessInFlightRef = useRef(false);
 
   const refreshNodeLiveness = async (addresses: string[]) => {
-    if (addresses.length === 0) return;
+    if (addresses.length === 0 || livenessInFlightRef.current) return;
 
+    livenessInFlightRef.current = true;
     try {
       const { statuses } = await window.kiyeovoAPI.getNodesLiveness(addresses);
       dispatch(applyLiveness({
@@ -55,6 +57,8 @@ export function BootstrapSetup() {
       }));
     } catch {
       // Preserve the last-known status when a liveness probe fails.
+    } finally {
+      livenessInFlightRef.current = false;
     }
   };
 
