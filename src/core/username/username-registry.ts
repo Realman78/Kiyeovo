@@ -453,15 +453,24 @@ export class UsernameRegistry {
   }
 
   private getPublishFailureError(publish: UsernamePublishResult, label: string): Error | null {
-    if (publish.acceptedCount === 0 && publish.rejectedCount > 0) {
+    // Success requires at least one remote peer to have verifiably stored the
+    // record. A publish whose walk reached zero storing peers used to fall
+    // through to success here, leaving the record only in the local datastore
+    // — unresolvable by anyone else — while the UI reported "registered"
+    // (fast-mode-username-lookup-issue.md, key finding 1).
+    if (publish.acceptedCount > 0) {
+      return null;
+    }
+
+    if (publish.rejectedCount > 0) {
       return new Error(`${label} rejected by DHT validators (${publish.rejectedCount} peer(s) rejected)`);
     }
 
-    if (publish.errorCount > 0 && publish.acceptedCount === 0) {
+    if (publish.errorCount > 0) {
       return new Error(`${label} failed: all ${publish.errorCount} peers unreachable`);
     }
 
-    return null;
+    return new Error(`${label} failed: no reachable DHT peers stored the record`);
   }
 
   private async rollbackPartiallyPublishedUsername(username: string): Promise<void> {
