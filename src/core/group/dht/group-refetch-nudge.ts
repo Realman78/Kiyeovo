@@ -21,6 +21,9 @@ interface CreatorNudgeDeps {
 const FORCE_DIAL_NUDGE_TYPES = new Set<string>([
   GroupMessageType.GROUP_INVITE,
   GroupMessageType.GROUP_KICK,
+  // The creator is actively waiting on this one to send the welcome and
+  // activate the group — the most latency-sensitive control message of all.
+  GroupMessageType.GROUP_INVITE_RESPONSE,
 ]);
 
 export function nudgeGroupRefetchIfKnownGroup(
