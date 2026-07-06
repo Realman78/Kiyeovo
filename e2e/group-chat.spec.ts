@@ -178,6 +178,51 @@ test('three peers form a group and messages fan out to every member @slow', asyn
         await attach(testInfo, pageBob, 'bob-group-active');
         await attach(testInfo, pageCharlie, 'charlie-group-active');
 
+        // The composer gate above is necessary but NOT sufficient for
+        // realtime fan-out: every join rotates the group key
+        // (group-creator.ts), gossip topics are derived per key epoch
+        // (group-messaging.ts's deriveTopic), and a member whose local
+        // key_version still lags the newest rotation (his composer has been
+        // enabled since his OWN join epoch) is not yet subscribed to the
+        // topic fan-out 1 will ride — publish() then sees too few remote
+        // subscribers and the send silently settles to offline-only DHT
+        // delivery (recipients poll that every 5 minutes), which a 30s
+        // realtime wait can never observe. That exact designed fallback was
+        // caught live (DEBUG_MODE main-process logs: "PublishError.
+        // NoPeersSubscribedToTopic" -> one 750ms retry -> "Falling back to
+        // offline delivery") while stabilizing blocking.spec.ts's identical
+        // first-send — and this file's fan-out 1 failed the same way once
+        // the suite went parallel (2-worker run, 2026-07-06). Converging all
+        // three members' key_version (via the UI's own getChats IPC — raw
+        // DB rows) closes that window while keeping every fan-out assertion
+        // below a pure realtime-gossip check, which is this file's charter.
+        // See blocking.spec.ts's file-level "Group realtime-vs-offline
+        // fan-out split" note for the full mechanism.
+        await timedStage('group', 'group_epoch_convergence', async () => {
+            await expect.poll(
+                async () => {
+                    const versions = await Promise.all([pageAlice, pageBob, pageCharlie].map(
+                        (page) => page.evaluate(async (name) => {
+                            const result = await window.kiyeovoAPI.getChats();
+                            if (!result.success) return -1;
+                            const chat = (result.chats as Array<Record<string, unknown>>).find(
+                                (c) => c.type === 'group' && c.name === name,
+                            );
+                            return chat ? Number(chat.key_version ?? 0) : -1;
+                        }, groupName),
+                    ));
+                    return versions.every((v) => v >= 1 && v === versions[0])
+                        ? 'converged'
+                        : `key_versions=[${versions.join(',')}]`;
+                },
+                {
+                    message: 'group key epochs never converged across all three members',
+                    timeout: 60_000,
+                    intervals: [500, 1_000],
+                },
+            ).toBe('converged');
+        });
+
         // --- Fan-out 1: creator (Alice) sends -> Bob and Charlie receive ---
         const messageFromAlice = 'Alice: welcome to the group, everyone!';
         await timedStage('group', 'fanout_alice_to_all', async () => {

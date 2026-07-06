@@ -145,13 +145,28 @@ import { sendContactRequest, sendChatMessage, timedStage } from './onboard';
 //   rotation). A bare 30s toBeVisible on the recipient can therefore NEVER
 //   succeed on that (designed!) fallback path — it wasn't a marginal
 //   timeout, it was the wrong wait for that branch, and no timeout was
-//   inflated to fix it. sendGroupMessageAwaitingFanout() below handles both
-//   designed branches honestly: it reads the app's own verdict off the
-//   sender's row (the 'offline' label — rendered atomically with the bubble,
-//   since a transport-owned group row is only persisted/evented AFTER the
-//   publish outcome is known, per group-messaging.ts's
-//   sendApplicationMessage ordering) and either does the plain realtime wait
-//   or drives the recipient's designed "Check missed messages" recovery.
+//   inflated to fix it. Three distinct designed layers emerged across the
+//   stabilization runs, each observed live at least once:
+//     1. EPOCH: a member who hasn't applied the newest rotation's
+//        GROUP_STATE_UPDATE is stranded on the old epoch — not subscribed
+//        to the new topic AND unable to even scan the new epoch's DHT
+//        bucket (checkGroupOfflineMessages only reads epochs <= the local
+//        key_version), so no wait or recovery can deliver to him until it
+//        lands -> awaitGroupEpochConvergence() gates every first-send-
+//        after-a-rotation on all relevant members' key_version matching.
+//     2. MESH: publish() succeeds with >= ONE remote subscriber, so a
+//        specific recipient can silently miss the realtime copy with no
+//        sender-side indication (partial-mesh miss); with ZERO subscribers
+//        the send settles offline-only and the sender's row says 'offline'.
+//     3. RECOVERY: the offline backup is stored UNCONDITIONALLY on every
+//        group send, so once epochs are converged, the group menu's
+//        "Check missed messages" action deterministically recovers any
+//        mesh miss. sendGroupMessageAwaitingFanout() reads the app's own
+//        verdict off the sender's row (the 'offline' label — rendered
+//        atomically with the bubble, since a transport-owned group row is
+//        only persisted/evented AFTER the publish outcome is known) and
+//        per recipient does the realtime wait, falling back to that
+//        designed recovery.
 //
 // Given three real onboardings + two contact exchanges + one group
 // create/invite/accept/activate round trip per world (group-chat.spec.ts
@@ -229,12 +244,15 @@ test('direct blocking stops messages both ways and lifts on unblock @slow', asyn
         await timedStage('block-direct', 'ordering_bound_control_via_group', async () => {
             await openChat(pageCharlie, groupName);
             await openChat(pageBob, groupName);
-            // Fan-out helper rather than a bare wait: if this control send
-            // hits the designed zero-subscriber offline fallback, Bob still
-            // receives it (via the designed recovery) and the ordering bound
-            // holds — delivery through EITHER designed path proves enough
-            // wall-clock passed with functioning infra for the blocked
-            // message to have surfaced if it were ever going to.
+            // Same epoch gate + fan-out helper as scenario C (see the
+            // file-level fan-out note): Bob must be ON the current key
+            // epoch for ANY designed path to deliver Charlie's message to
+            // him, and the helper then covers the designed offline/partial
+            // realtime-miss fallbacks. The ordering bound holds through
+            // either delivery path — it proves enough wall-clock passed
+            // with functioning infra for the blocked message to have
+            // surfaced if it were ever going to.
+            await awaitGroupEpochConvergence('block-direct', [pageAlice, pageBob, pageCharlie], groupName);
             await sendGroupMessageAwaitingFanout('block-direct', pageCharlie, [pageBob], controlMessage);
         });
 
@@ -369,11 +387,15 @@ test('the group creator can remove a member; removal cuts off group messaging bo
         await openChat(pageCharlie, groupName);
 
         // --- Positive control: baseline group messaging works right before
-        // the removal. This is the FIRST send on the key-v2 topic (created
-        // seconds earlier by Charlie's join rotation), i.e. exactly the
-        // marginal-mesh window described in the file-level fan-out note —
-        // the helper handles the designed offline fallback if it hits. ---
+        // the removal. This is the FIRST send on the newest key epoch's
+        // topic (each join rotates the key — Bob may still be applying the
+        // rotation Charlie's join produced), i.e. exactly the window
+        // dissected in the file-level fan-out note: first make sure every
+        // member is ON that epoch at all (without which no designed path
+        // can deliver to them — see awaitGroupEpochConvergence), then send,
+        // with the helper covering the residual realtime-mesh miss. ---
         const preKickMessage = `pre-kick-${runSuffix}`;
+        await awaitGroupEpochConvergence('block-group', [pageAlice, pageBob, pageCharlie], groupName);
         await timedStage('block-group', 'positive_control_pre_kick', async () => {
             await sendGroupMessageAwaitingFanout('block-group', pageAlice, [pageBob, pageCharlie], preKickMessage);
         });
@@ -419,6 +441,14 @@ test('the group creator can remove a member; removal cuts off group messaging bo
         // group. ---
         const afterKickMessage = `after-kick-${runSuffix}`;
         await timedStage('block-group', 'new_messages_skip_removed_member', async () => {
+            // Bob's removal system message (asserted above) already proves he
+            // processed a v3 GROUP_STATE_UPDATE on the non-resync path, but
+            // the resync path applies key_version silently — converge Alice
+            // and Bob on the post-kick epoch explicitly before the first v3
+            // send, for the same reason as the pre-kick gate. (Charlie is
+            // deliberately excluded: his row stays on the pre-kick epoch
+            // forever — that's the removal working.)
+            await awaitGroupEpochConvergence('block-group', [pageAlice, pageBob], groupName);
             await sendGroupMessageAwaitingFanout('block-group', pageAlice, [pageBob], afterKickMessage);
             await expect(chatMessage(pageCharlie, afterKickMessage)).toHaveCount(0);
         });
@@ -461,38 +491,70 @@ function offlineSendLabel(page: Page, messageText: string) {
  * fan-out split — see the file-level "Group realtime-vs-offline fan-out
  * split" note for the full mechanism and the live-debugging trail.
  *
- * Branch decision: the sender's own bubble only appears once the send has
- * fully settled (transport-owned group rows are persisted/evented AFTER the
- * publish/offline outcome is known), and the 'offline' label renders in the
- * same React commit as the bubble — so "bubble visible, then read the label
- * once" is a race-free read of the app's own verdict:
- * - no label  -> published online via gossipsub -> plain 30s realtime wait;
- * - 'offline' -> the designed zero-subscribers fallback (message durably in
- *   the group's DHT bucket, no recipient nudge on this path) -> drive each
- *   recipient's designed recovery, the group menu's "Check missed messages"
- *   action, then expect the message. This is the same recovery a real user
- *   is told to use (doc line ~341) — NOT a test-only backdoor.
+ * Two designed miss modes, both observed live while stabilizing scenario C:
+ * - Total miss: publish() saw ZERO remote subscribers, retried once (750ms),
+ *   settled offline-only — the sender's row carries the 'offline' label
+ *   (rendered atomically with the bubble: a transport-owned group row is
+ *   only persisted/evented AFTER the publish outcome is known), and NO
+ *   recipient will ever get a realtime copy.
+ * - Partial miss: publish() succeeded because at least ONE remote subscriber
+ *   was visible (that is its entire success criterion — group-messaging.ts's
+ *   publish() only throws when remoteRecipients.length === 0), but a
+ *   specific recipient whose subscription announcement hadn't reached the
+ *   sender's pubsub yet silently misses the realtime copy with NO
+ *   sender-side indication at all.
+ * Either way the message is durably in the group's DHT bucket — the
+ * offline backup (storeGroupMessage) runs UNCONDITIONALLY on every group
+ * send, independent of publish success — and the app's designed recovery
+ * for a recipient is the same: the periodic 5-minute check or the group
+ * menu's "Check missed messages" action (doc line ~341: "the manual
+ * missed-message action remains a fallback").
  *
- * The 30s sender-settle bound covers a slow DHT PUT on the offline-backup
- * write (the row renders only after it); the 30s per-recipient bounds match
- * every other real-infra delivery wait in this suite.
+ * So: sender settle (30s bound — covers a slow DHT PUT on the offline
+ * backup, which the row render waits for), then per recipient: give the
+ * realtime path a 15s window (observed realtime fan-out is 1-5s in this
+ * suite's timing logs — 3x margin; skipped entirely when the sender's own
+ * row already says 'offline', i.e. nobody will get a realtime copy), then
+ * fall back to driving that recipient's "Check missed messages" — up to two
+ * attempts x 15s, since a single fetch can transiently fail against the
+ * real DHT (the app toasts "Failed to fetch offline messages" and a real
+ * user would simply click again). The PUT is known-complete before the
+ * first fetch because the sender's bubble only rendered after it.
+ *
+ * PRECONDITION: callers must first pass awaitGroupEpochConvergence() for
+ * the sender + recipients — a recipient stranded on an older key epoch can
+ * be reached by NEITHER branch (the catch-up fetch only scans epochs <= his
+ * local key_version), which is precisely how stabilization run v6 failed.
+ *
+ * Deliberate scope note: this makes these waits assert "group delivery
+ * works via the app's designed paths", not "realtime gossip specifically
+ * works" — realtime fan-out coverage is group-chat.spec.ts's charter; this
+ * file's group sends are positive controls and ordering bounds for
+ * blocking/removal semantics, which either designed delivery path
+ * satisfies. No timeout was inflated: each bound above maps to one measured
+ * mechanism.
  */
 async function sendGroupMessageAwaitingFanout(label: string, sender: Page, recipients: Page[], text: string): Promise<void> {
     await sendChatMessage(sender, text);
     await expect(chatMessage(sender, text)).toBeVisible({ timeout: 30_000 });
 
     const wentOffline = await offlineSendLabel(sender, text).isVisible().catch(() => false);
-    if (!wentOffline) {
-        await Promise.all(recipients.map(
-            (recipient) => expect(chatMessage(recipient, text)).toBeVisible({ timeout: 30_000 }),
-        ));
-        return;
+    if (wentOffline) {
+        console.log(`[timing][${label}] group send fell back to offline delivery (designed zero-subscriber fallback); skipping realtime windows`);
     }
 
-    console.log(`[timing][${label}] group send fell back to offline delivery (designed zero-subscriber fallback); driving recipients' "Check missed messages" recovery`);
     for (const recipient of recipients) {
-        await checkMissedGroupMessages(recipient);
-        await expect(chatMessage(recipient, text)).toBeVisible({ timeout: 30_000 });
+        if (!wentOffline) {
+            const arrivedRealtime = await chatMessage(recipient, text)
+                .waitFor({ state: 'visible', timeout: 15_000 })
+                .then(() => true, () => false);
+            if (arrivedRealtime) continue;
+            console.log(`[timing][${label}] recipient missed the realtime group fan-out (designed partial-mesh miss); driving "Check missed messages" recovery`);
+        }
+        await expect(async () => {
+            await checkMissedGroupMessages(recipient);
+            await expect(chatMessage(recipient, text)).toBeVisible({ timeout: 15_000 });
+        }).toPass({ timeout: 45_000, intervals: [1_000] });
     }
 }
 
@@ -505,6 +567,64 @@ async function sendGroupMessageAwaitingFanout(label: string, sender: Page, recip
 async function checkMissedGroupMessages(page: Page): Promise<void> {
     await openChatHeaderMenu(page);
     await page.getByRole('button', { name: 'Check missed messages', exact: true }).click();
+}
+
+/**
+ * Reads a page's local key_version for the named group chat via the same
+ * `getChats` IPC the chat UI itself loads from (raw DB rows — the
+ * file-transfer.spec.ts precedent). -1 = chat/row not found yet.
+ */
+async function groupKeyVersion(page: Page, groupName: string): Promise<number> {
+    return page.evaluate(async (name) => {
+        const result = await window.kiyeovoAPI.getChats();
+        if (!result.success) return -1;
+        const chat = (result.chats as Array<Record<string, unknown>>).find(
+            (c) => c.type === 'group' && c.name === name,
+        );
+        return chat ? Number(chat.key_version ?? 0) : -1;
+    }, groupName);
+}
+
+/**
+ * Waits until every given page's local chat row for the group reports the
+ * SAME key_version (>= 1). Why this gate exists (observed live, run v6 of
+ * scenario C's stabilization): every join/kick rotates the group key
+ * (group-creator.ts), and a member who hasn't yet applied the corresponding
+ * GROUP_STATE_UPDATE is stranded on the previous epoch — he is neither
+ * subscribed to the new epoch's gossip topic NOR able to see its DHT bucket
+ * ("Check missed messages" only scans epochs <= the chat's local
+ * key_version, group-offline-manager.ts line ~488), so NO wait or designed
+ * recovery can deliver a new-epoch message to him until the state update
+ * lands. The fixture's composer-enabled activation gate does not cover
+ * this: a member's composer has been enabled since his own join epoch.
+ *
+ * Deliberately a DB-level poll (via the UI's own getChats IPC) rather than
+ * a wait on the "<name> joined the group" system message: state updates
+ * applied through the resync path (isResync=true,
+ * group-responder.ts handleGroupStateUpdate) update key_version WITHOUT
+ * appending the membership system message — observed in an earlier passing
+ * run where Bob's timeline showed no join row for Charlie at all.
+ *
+ * 60s bound: the state update rides a direct dial with a nudged
+ * offline-DHT fallback — same delivery class as the fixture's 60s
+ * invite/activation waits.
+ */
+async function awaitGroupEpochConvergence(label: string, pages: Page[], groupName: string): Promise<void> {
+    const start = Date.now();
+    await expect.poll(
+        async () => {
+            const versions = await Promise.all(pages.map((page) => groupKeyVersion(page, groupName)));
+            return versions.every((v) => v >= 1 && v === versions[0])
+                ? 'converged'
+                : `key_versions=[${versions.join(',')}]`;
+        },
+        {
+            message: `group key epochs never converged across all ${pages.length} members`,
+            timeout: 60_000,
+            intervals: [500, 1_000],
+        },
+    ).toBe('converged');
+    console.log(`[timing][${label}] group_epoch_convergence: ${((Date.now() - start) / 1000).toFixed(1)}s`);
 }
 
 /**
