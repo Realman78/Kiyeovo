@@ -88,8 +88,56 @@ Status legend: [ ] queued · [~] in progress · [x] done
   silently degrade to 5-minute-latency offline delivery with no automatic recipient nudge —
   a real-user-visible UX gap, not just a test-suite problem (group-chat.spec.ts's fanout has
   simply been lucky: its first send lands a few screenshot-seconds later than blocking's did).
-- [ ] **5. Calls** — fake media devices (Chromium fake camera/mic flags) for headless call
-  tests; strategic value: first coverage of the deployed TURN/STUN server.
+- [x] **5. Calls** — done (`calls.spec.ts`, 4 tests): first-ever automated coverage of the
+  WebRTC call path and of the deployed STUN/TURN server. Doc §8 (freshly audited, trusted as
+  accurate) + `callService.ts` code-confirmed the signaling model (`call-signal` protocol,
+  30s outgoing-ring timeout at `callService.ts:61`, renderer-owned `RTCPeerConnection`) and the
+  UI gate (`ChatHeader.tsx`: the phone button is entirely absent unless `networkMode==='fast'`
+  and the chat is direct, not group — driven entirely through that gated UI, no internal API
+  shortcuts). **A. Lifecycle**: ring → accept → both sides reach `active` (asserted via
+  `CallManagerCard`'s timer text advancing across a 5s hold, plus the header's "Hang up"
+  control) → clean hangup reverting both headers to "Start call". **B. Reject**: caller
+  returns to idle cleanly; code-confirmed finding — unlike contact-request rejection (which
+  shows an explicit toast), there is NO distinct "call rejected" UI signal anywhere in the call
+  path (grepped `callSlice.ts`/`Main.tsx`/card components) — the designed feedback IS just the
+  clean, immediate return to idle. **C. STUN/TURN evidence** (the strategic goal): no existing
+  debug/IPC surface exposes the renderer's `RTCPeerConnection` (`peerConnection` is a private
+  `CallService` field, never on `window`), and `page.addInitScript()` doesn't work for this app
+  (`document.readyState` is already `'interactive'` by the time `app.firstWindow()` resolves —
+  empirically confirmed, too late to beat the app's own module evaluation). Worked around
+  e2e-side only (no `src/**` changes): a plain `page.evaluate()` replaces the global
+  `window.RTCPeerConnection` with a capturing subclass at test setup, before any call starts —
+  safe because `callService.ts`'s `new RTCPeerConnection(...)` resolves that identifier as an
+  ordinary global lookup with no module-scoped alias. Real, reachable `getStats()` evidence
+  confirms both the `stun:`/`turn:` URLs actually reached the live peer connection every run.
+  **Honest gap, reported prominently**: the selected/gathered candidates were `host`/`host` in
+  all 3 solo runs, never `srflx`/`relay`, because this sandbox's only network interface carries
+  a directly-routable public IP with no NAT (`ip addr` confirmed) — two peers on one non-NATed
+  box complete ICE via a same-host `host` pair in well under 200ms, faster than STUN's ~168ms
+  binding round trip or TURN's ~385ms authenticated allocate (both independently verified
+  working via a bare `RTCPeerConnection`/raw UDP probe using the exact same deployed servers,
+  which DID yield a real `srflx`-equivalent STUN response and a genuine `typ relay` candidate
+  outside the app). This is a same-box test-topology artifact, not a Kiyeovo defect — a real
+  cross-NAT deployment is expected to produce srflx/relay candidates; honestly testing that
+  would need a second, differently-NATed machine, which this single-box suite can't provide.
+  **D. Ring timeout**: unanswered call times out at the designed 30s (measured 30.2-30.3s
+  across runs) and clears cleanly on both sides, including the never-answering callee's
+  incoming-ring card (core-driven `CALL_END` propagation, code-confirmed via `callSlice.ts`'s
+  `applyCoreCallState` clearing `incomingCall` alongside `activeCall` on a matching
+  callId/peerId). Harness gained `launchApp({ extraArgs })` (backward compatible) and
+  `onboard()`/`completeIceStep()` gained an optional `turn` param (also backward compatible) to
+  add a TURN entry (with username/credential) alongside STUN during the wizard's ICE step —
+  `IceSetup.tsx`'s Type segmented control gates the Username/Credential inputs on
+  `type !== 'stun'`. **Notable environment-quirk finding, not app-related**: this repo's bundled
+  Electron 39.8.6/Chromium 142 only honors the *singular* `--use-fake-device-for-media-stream`
+  / `--use-fake-ui-for-media-stream` switches — the more commonly documented *plural* `-streams`
+  forms are accepted by `app.commandLine.hasSwitch()` but silently never substitute a fake
+  AudioManager/VideoCaptureDevice (`getUserMedia` fails `NotFoundError`/`NO_HARDWARE` against
+  this host's real, hardware-less audio/video backends) — worth flagging if the bundled
+  Electron version ever changes. `e2e/e2e.env.local` (gitignored) now also carries
+  `KIYEOVO_E2E_TURN(_USERNAME|_CREDENTIAL)`, loaded via `config.ts`'s new dotenv wiring (falls
+  back to STUN-only, no TURN assertions, if absent). Group calls deliberately OUT of scope this
+  round (own follow-up).
 - [ ] **6. Tor / anonymous mode (LAST — per Marin)** — Marin has pending work here, also
   related to bootstraps; do not start without his go-ahead. Whole second network stack,
   needs Tor binaries (scripts/download-tor.sh).

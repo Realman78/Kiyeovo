@@ -55,6 +55,18 @@ export interface LaunchAppOptions {
      * `{ keepProfile: true }`).
      */
     profileDir?: string;
+    /**
+     * Extra Chromium/Electron command-line args appended after the fixed
+     * `['.', '--no-sandbox']` pair. Introduced for round 5 (calls.spec.ts):
+     * `--use-fake-device-for-media-stream` + `--use-fake-ui-for-media-stream`
+     * (singular "stream" — see calls.spec.ts's FAKE_MEDIA_ARGS comment for why
+     * the more commonly documented plural form doesn't work on this repo's
+     * bundled Electron/Chromium) make `getUserMedia`/`getDisplayMedia` return
+     * a synthetic camera/mic feed instead of hitting real hardware or a
+     * permission prompt, which headless call tests need. Backward
+     * compatible — omitted entirely by every existing caller.
+     */
+    extraArgs?: string[];
 }
 
 /**
@@ -76,7 +88,7 @@ export interface LaunchAppOptions {
  * on-disk identity and SQLite database.
  */
 export async function launchApp(options: LaunchAppOptions = {}): Promise<LaunchedApp> {
-    const { p2pPort, env } = options;
+    const { p2pPort, env, extraArgs } = options;
 
     const mainEntry = path.join(repoRoot, 'dist-electron', 'electron', 'main.js');
     if (!existsSync(mainEntry)) {
@@ -92,7 +104,7 @@ export async function launchApp(options: LaunchAppOptions = {}): Promise<Launche
         // --no-sandbox: the npm-installed Electron has no setuid sandbox helper,
         // and Ubuntu restricts unprivileged user namespaces, so the Chromium
         // sandbox cannot start on headless dev/CI boxes. Test harness only.
-        args: ['.', '--no-sandbox'],
+        args: ['.', '--no-sandbox', ...(extraArgs ?? [])],
         cwd: repoRoot,
         env: {
             ...(process.env as Record<string, string>),

@@ -55,9 +55,15 @@ export async function onboard(
         bootstrapMultiaddr: string | string[];
         relayMultiaddr: string;
         stunUrl: string;
+        /**
+         * Optional TURN/TURNS entry added alongside the STUN one during the
+         * wizard's ICE step (round 5, calls.spec.ts) — see completeIceStep.
+         * Omitted by every other caller, which keeps STUN-only behavior.
+         */
+        turn?: { type?: 'turn' | 'turns'; url: string; username: string; credential: string };
     },
 ): Promise<{ peerId: string }> {
-    const { password, username, bootstrapMultiaddr, relayMultiaddr, stunUrl } = options;
+    const { password, username, bootstrapMultiaddr, relayMultiaddr, stunUrl, turn } = options;
     const label = username;
     const onboardStart = Date.now();
     const bootstrapMultiaddrs = Array.isArray(bootstrapMultiaddr) ? bootstrapMultiaddr : [bootstrapMultiaddr];
@@ -73,7 +79,7 @@ export async function onboard(
     // --- 4c. Register a username ---
     await timedStage(label, 'register', () => completeRegisterStep(page, username));
     // --- 4d. STUN/TURN (Calls) ---
-    await timedStage(label, 'ice', () => completeIceStep(page, stunUrl));
+    await timedStage(label, 'ice', () => completeIceStep(page, stunUrl, turn));
 
     await timedStage(label, 'finish_wizard', () => finishWizard(page));
 
@@ -339,12 +345,60 @@ export async function completeRegisterStep(page: Page, username: string): Promis
     await page.getByRole('button', { name: 'Continue', exact: true }).click();
 }
 
-/** Adds a STUN server (optional step) and finishes the wizard. */
-export async function completeIceStep(page: Page, stunUrl: string): Promise<void> {
-    await expect(page.getByRole('heading', { name: 'STUN/TURN servers' })).toBeVisible({ timeout: 15_000 });
+const ICE_URL_PLACEHOLDER: Record<'stun' | 'turn' | 'turns', string> = {
+    stun: 'stun:stun.l.google.com:19302',
+    turn: 'turn:turn.example.com:3478',
+    turns: 'turns:turn.example.com:5349',
+};
+
+/**
+ * Adds a single STUN or TURN/TURNS entry via the (already-open, on the
+ * "STUN/TURN servers" step or the standalone Setup > Calls pane) IceSetup.tsx
+ * form. IceServerType matches the app's own type ('stun' | 'turn' | 'turns') —
+ * see src/ui/components/sidebar/setup/IceSetup.tsx: a segmented Type button
+ * group (plain buttons whose accessible name is the lowercase type string,
+ * e.g. `turn`) gates whether the Username/Credential inputs render at all
+ * (`!isStun`), and both the client-side draft validation and the server-side
+ * IPC handler (SET_ICE_SERVERS) reject a turn/turns entry missing either
+ * field, so `username`/`credential` are required whenever `type !== 'stun'`.
+ */
+export async function addIceServer(
+    page: Page,
+    entry: { type: 'stun' | 'turn' | 'turns'; url: string; username?: string; credential?: string },
+): Promise<void> {
     await page.getByRole('button', { name: 'Add STUN/TURN server' }).click();
-    await page.getByPlaceholder('stun:stun.l.google.com:19302').fill(stunUrl);
+    if (entry.type !== 'stun') {
+        await page.getByRole('button', { name: entry.type, exact: true }).click();
+    }
+    await page.getByPlaceholder(ICE_URL_PLACEHOLDER[entry.type]).fill(entry.url);
+    if (entry.type !== 'stun') {
+        await page.getByPlaceholder('Username').fill(entry.username ?? '');
+        await page.getByPlaceholder('Credential').fill(entry.credential ?? '');
+    }
     await page.getByRole('button', { name: 'Add server' }).click();
+}
+
+/**
+ * Adds a STUN server (optional step) — and, when `turn` is given, also a
+ * TURN/TURNS entry with credentials (round 5, calls.spec.ts's strategic
+ * evidence goal: prove the deployed TURN server actually relayed a call) —
+ * then finishes the wizard.
+ */
+export async function completeIceStep(
+    page: Page,
+    stunUrl: string,
+    turn?: { type?: 'turn' | 'turns'; url: string; username: string; credential: string },
+): Promise<void> {
+    await expect(page.getByRole('heading', { name: 'STUN/TURN servers' })).toBeVisible({ timeout: 15_000 });
+    await addIceServer(page, { type: 'stun', url: stunUrl });
+    if (turn) {
+        await addIceServer(page, {
+            type: turn.type ?? 'turn',
+            url: turn.url,
+            username: turn.username,
+            credential: turn.credential,
+        });
+    }
 
     await page.getByRole('button', { name: 'Finish setup' }).click();
 }

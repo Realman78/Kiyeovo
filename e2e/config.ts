@@ -1,4 +1,8 @@
 import { randomBytes } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import dotenv from 'dotenv';
 
 /**
  * Single source of truth for the network infrastructure the e2e suite points
@@ -14,6 +18,24 @@ import { randomBytes } from 'node:crypto';
  * the bootstrap source changes.
  */
 
+/**
+ * Round 5 (calls) secrets: e2e/e2e.env.local (gitignored via the repo's
+ * "*.local" rule) carries KIYEOVO_E2E_STUN/KIYEOVO_E2E_TURN(_USERNAME|
+ * _CREDENTIAL) so a real deployed TURN server's credentials never land in a
+ * committed file. Loaded with dotenv's default "don't override existing env"
+ * behavior, so a real CI env var still wins over the local file. Silently a
+ * no-op if the file doesn't exist (e.g. a contributor without TURN access —
+ * calls.spec.ts's STUN/TURN evidence scenario degrades gracefully, see its
+ * file-level comment).
+ */
+const envLocalPath = path.join(
+    path.resolve(fileURLToPath(new URL('.', import.meta.url))),
+    'e2e.env.local',
+);
+if (existsSync(envLocalPath)) {
+    dotenv.config({ path: envLocalPath });
+}
+
 const DEFAULT_BOOTSTRAP_MULTIADDR =
     '/ip4/143.198.137.240/tcp/9000/p2p/12D3KooWL9V168N9rzJ2HP5aWKdJMUDtbYWca5ojDtELWWggddVu';
 const DEFAULT_RELAY_MULTIADDR =
@@ -28,6 +50,31 @@ export const RELAY_MULTIADDR = process.env.KIYEOVO_E2E_RELAY ?? DEFAULT_RELAY_MU
 
 /** Real STUN server, configured through the app's Setup > Calls (ICE) flow. */
 export const STUN_URL = process.env.KIYEOVO_E2E_STUN ?? DEFAULT_STUN_URL;
+
+/**
+ * Real deployed TURN server (round 5, calls.spec.ts's strategic goal: prove
+ * the deployed TURN/STUN infra actually served a call). Undefined whenever
+ * any of the three env vars is missing — callers must treat TURN as optional
+ * and degrade gracefully (see calls.spec.ts's scenario C) rather than assume
+ * it's always configured. Only variable NAMES are referenced here; values
+ * come from e2e/e2e.env.local (gitignored) or a real env var, never from a
+ * committed file.
+ */
+export const TURN_SERVER = (
+    process.env.KIYEOVO_E2E_TURN
+    && process.env.KIYEOVO_E2E_TURN_USERNAME
+    && process.env.KIYEOVO_E2E_TURN_CREDENTIAL
+)
+    ? {
+        // Inferred from the URL's own scheme (matches the app's IceSetup.tsx
+        // Type picker / ipc-handlers.ts inferIceServerType prefix check) so a
+        // future turns: swap in e2e.env.local doesn't need a code change here.
+        type: (process.env.KIYEOVO_E2E_TURN.toLowerCase().startsWith('turns:') ? 'turns' : 'turn') as 'turn' | 'turns',
+        url: process.env.KIYEOVO_E2E_TURN,
+        username: process.env.KIYEOVO_E2E_TURN_USERNAME,
+        credential: process.env.KIYEOVO_E2E_TURN_CREDENTIAL,
+    }
+    : undefined;
 
 /** Escape hatch: spawn a throwaway local bootstrap node instead of dialing the real one. */
 export const USE_LOCAL_BOOTSTRAP = process.env.KIYEOVO_E2E_LOCAL_BOOTSTRAP === '1';
@@ -58,6 +105,7 @@ export const USE_LOCAL_BOOTSTRAP = process.env.KIYEOVO_E2E_LOCAL_BOOTSTRAP === '
  * | network-edges.spec.ts       | 9131-9138       | 19611-19612, 19691-19694, 19791-19793, 19891, 19921-19922, 19951, 20011, 20111-20118, 20311-20313 (all explicit — this file always spins up its own local bootstraps regardless of USE_LOCAL_BOOTSTRAP, to control liveness precisely) |
  * | blocking.spec.ts            | 9151-9153       | 19505 (only when USE_LOCAL_BOOTSTRAP=1) |
  * | group-join-catchup.spec.ts  | 9161-9163       | 19506 (only when USE_LOCAL_BOOTSTRAP=1) |
+ * | calls.spec.ts               | 9171-9172       | 19507 (only when USE_LOCAL_BOOTSTRAP=1) |
  *
  * Adding a new spec file: pick an unused p2pPort block (leave a gap of at
  * least 10 for headroom) and, if it calls startBootstrapNode() with no
