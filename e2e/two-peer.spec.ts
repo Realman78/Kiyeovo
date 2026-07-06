@@ -15,7 +15,7 @@ test.setTimeout(6 * 60_000);
 
 const PASSWORD = 'Correct-Horse-Battery-Staple9!';
 
-test('two peers create identities, connect, and exchange messages both ways', async () => {
+test('two peers create identities, connect, and exchange messages both ways @slow', async () => {
     const testInfo = test.info();
     const testStart = Date.now();
     let bootstrap: BootstrapNode | undefined;

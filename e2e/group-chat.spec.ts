@@ -22,7 +22,7 @@ test.setTimeout(6 * 60_000);
 
 const PASSWORD = 'Correct-Horse-Battery-Staple9!';
 
-test('three peers form a group and messages fan out to every member', async () => {
+test('three peers form a group and messages fan out to every member @slow', async () => {
     const testInfo = test.info();
     const testStart = Date.now();
     let bootstrap: BootstrapNode | undefined;

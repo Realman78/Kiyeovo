@@ -7,6 +7,15 @@ import { fileURLToPath } from 'node:url';
 
 const repoRoot = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '..');
 
+export interface CloseOptions {
+    /**
+     * Keep profileDir on disk instead of deleting it (used to relaunch the
+     * same identity later — the returning-user/offline-reconnect scenario —
+     * rather than the normal throwaway-profile teardown).
+     */
+    keepProfile?: boolean;
+}
+
 export interface LaunchedApp {
     app: ElectronApplication;
     /** The first BrowserWindow's renderer. */
@@ -15,8 +24,16 @@ export interface LaunchedApp {
     profileDir: string;
     /** Main-process stdout+stderr captured so far (e.g. the [CONFIG]/[Electron] logs). */
     logs: string[];
-    /** Close the app and delete profileDir. */
-    close(): Promise<void>;
+    /**
+     * Close the app and, by default, delete profileDir. Pass
+     * `{ keepProfile: true }` to keep the on-disk identity/database around for
+     * a later `launchApp({ profileDir })` relaunch. Always waits for the
+     * underlying OS process to fully exit (not just for Playwright's `close()`
+     * call to resolve) before returning — the app's single-instance lock is
+     * keyed on the profile dir, so a relaunch racing the old process's exit
+     * would otherwise just get rejected as a duplicate instance.
+     */
+    close(options?: CloseOptions): Promise<void>;
 }
 
 export interface LaunchAppOptions {
@@ -29,6 +46,15 @@ export interface LaunchAppOptions {
     p2pPort?: number;
     /** Extra env vars to merge in on top of the isolation defaults below. */
     env?: Record<string, string>;
+    /**
+     * Reuse an existing profile dir instead of minting a fresh one with
+     * mkdtemp. Used to relaunch the *same* identity against a persisted
+     * profile (see the offline-delivery/reconnect spec) — the directory must
+     * already contain the XDG env / HOME layout a prior launchApp() call created
+     * (i.e. it came from an earlier LaunchedApp.profileDir, closed with
+     * `{ keepProfile: true }`).
+     */
+    profileDir?: string;
 }
 
 /**
@@ -60,7 +86,7 @@ export async function launchApp(options: LaunchAppOptions = {}): Promise<Launche
         );
     }
 
-    const profileDir = await mkdtemp(path.join(tmpdir(), 'kiyeovo-e2e-'));
+    const profileDir = options.profileDir ?? await mkdtemp(path.join(tmpdir(), 'kiyeovo-e2e-'));
 
     const app = await electron.launch({
         // --no-sandbox: the npm-installed Electron has no setuid sandbox helper,
@@ -99,9 +125,28 @@ export async function launchApp(options: LaunchAppOptions = {}): Promise<Launche
         page,
         profileDir,
         logs,
-        close: async () => {
-            await app.close();
-            await rm(profileDir, { recursive: true, force: true });
+        close: async (closeOptions?: CloseOptions) => {
+            // app.close() resolves once Playwright's own teardown is done, but the
+            // single-instance lock is released only when the underlying OS process
+            // actually exits — waiting on the child process's own 'exit' event (not
+            // just Playwright's promise) is what makes an immediate relaunch against
+            // the same profileDir safe rather than racing a duplicate-instance
+            // rejection.
+            const alreadyExited = proc.exitCode !== null || proc.signalCode !== null;
+            const exited = alreadyExited
+                ? Promise.resolve()
+                : new Promise<void>((resolve) => proc.once('exit', () => resolve()));
+
+            await app.close().catch((error) => console.error('app.close() failed:', error));
+
+            await Promise.race([
+                exited,
+                new Promise<void>((resolve) => setTimeout(resolve, 15_000)),
+            ]);
+
+            if (!closeOptions?.keepProfile) {
+                await rm(profileDir, { recursive: true, force: true });
+            }
         },
     };
 }

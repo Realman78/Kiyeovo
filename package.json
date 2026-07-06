@@ -17,6 +17,7 @@
     "test:unit": "cross-env ELECTRON_RUN_AS_NODE=1 electron --import tsx src/core/test-suite.ts",
     "test:e2e": "playwright test",
     "test:e2e:headless": "xvfb-run -a -s \"-screen 0 1280x800x24\" playwright test",
+    "test:e2e:quick": "xvfb-run -a -s \"-screen 0 1280x800x24\" playwright test --grep-invert @slow",
     "lint": "eslint .",
     "bootstrap": "tsx src/core/bootstrap.ts",
     "relay": "tsx src/core/relay.ts",
