@@ -8,13 +8,32 @@ Status legend: [ ] queued · [~] in progress · [x] done
   (renderer-driven on-connect fetch). Harness gained `profileDir` reuse + `keepProfile` close.
   Slow specs tagged `@slow`; `test:e2e:quick` added. **Group-offline deliberately deferred to
   round 2's offline-file work or a later addition** (cost/benefit call, documented in-spec).
-- [ ] **2. File transfer** — send a file 1:1 and in a group, accept, verify received bytes.
-  **Must ALSO cover offline file delivery** (recipient offline during the send, receives the
-  file after relaunch) — explicitly requested by Marin; don't scope it to online-only.
-- [ ] **3. Blocking + member removal** — blocked peer's messages stop arriving and re-requests
+- [x] **2. File transfer** — done (`file-transfer.spec.ts` + `world.ts` fixture): 1:1 and
+  group transfers hash-verified on disk; wrong-chat routing asserted across all windows;
+  offline delivery COVERED and doc/code-confirmed supported (offer rides the same offline
+  DHT-bucket queue as text; only the download pull requires the SENDER online) — also closes
+  round 1's deferred group-offline gap. Untested edge for a later round: recipient accepts
+  while the SENDER is offline (pull should fail by design — what UX?). App-level findings for
+  Marin: downloads dir resolves relative to process.cwd() (fragile for packaged apps); doc
+  line ~243 ("row is removed") is stale vs code; relaunched peer shows Register Identity CTA.
+- [ ] **3. Network edge cases / resilience (Fast mode)** — deliberately adverse conditions,
+  all local-infra simulable: multiple bootstraps (5-6) with some dead → onboarding must fail
+  over to a live one; ALL bootstraps dead → sane error UX, no hang; bootstrap killed
+  mid-session → reconnect + offline fallback engage; wrong unlock password then correct one.
+  **Scripted reproduction target from Marin (do not pre-analyze; reproduce first):** with a
+  shutdown bootstrap configured, ADDING a new bootstrap afterwards does not connect — suspected
+  real bug, network-dependent, occurs in Fast mode. Also test the MANY-HEALTHY case, not just
+  dead ones: e.g. 8 local bootstraps ALL healthy (Marin suspects "too many healthy" could
+  itself misbehave; he'll separately re-test against his real 7-8 server deployment later).
+  Starts on Marin's go-ahead after he reads the round-2 report. NOT coverable on this host: the relay DATA
+  path (needs NAT-isolated peers — requires a second machine or privileged netns; parked).
+- [ ] **4. Blocking + member removal** — blocked peer's messages stop arriving and re-requests
   are refused; a removed group member stops receiving group messages.
-- [ ] **4. Calls (last)** — fake media devices (Chromium fake camera/mic flags) for headless
-  call tests; strategic value: first coverage of the deployed TURN/STUN server.
+- [ ] **5. Calls** — fake media devices (Chromium fake camera/mic flags) for headless call
+  tests; strategic value: first coverage of the deployed TURN/STUN server.
+- [ ] **6. Tor / anonymous mode (LAST — per Marin)** — Marin has pending work here, also
+  related to bootstraps; do not start without his go-ahead. Whole second network stack,
+  needs Tor binaries (scripts/download-tor.sh).
 
 Standing rules for every round: Sonnet implements, orchestrator reviews diff + screenshots and
 commits; agents read `Kiyeovo_desktop_technical_documentation.md` (grep the subsystem) and
