@@ -13,6 +13,21 @@ export interface BootstrapNode {
     stop(): Promise<void>;
 }
 
+async function stopChild(child: ChildProcessWithoutNullStreams): Promise<void> {
+    if (child.exitCode !== null || child.signalCode !== null) {
+        return;
+    }
+
+    await new Promise<void>((resolve) => {
+        const timeoutId = setTimeout(resolve, 5_000);
+        child.once('exit', () => {
+            clearTimeout(timeoutId);
+            resolve();
+        });
+        child.kill();
+    });
+}
+
 /**
  * Spawns `src/core/bootstrap.ts` (the same script `npm run bootstrap` runs) as a
  * child process, with its datastore and peer-id file redirected into a scratch
@@ -42,48 +57,48 @@ export async function startBootstrapNode(port = 19501): Promise<BootstrapNode> {
     let output = '';
     let settled = false;
 
-    const multiaddr = await new Promise<string>((resolve, reject) => {
-        const failEarly = (message: string) => {
-            if (settled) return;
-            settled = true;
-            reject(new Error(`${message}\n--- bootstrap node output ---\n${output}`));
-        };
-
-        const timeoutId = setTimeout(() => failEarly('Timed out waiting for bootstrap node to become ready'), 30_000);
-
-        const onData = (chunk: Buffer) => {
-            output += chunk.toString();
-            const match = output.match(/Listening on: (\S+)/);
-            if (match && !settled) {
+    let multiaddr: string;
+    try {
+        multiaddr = await new Promise<string>((resolve, reject) => {
+            const failEarly = (message: string) => {
+                if (settled) return;
                 settled = true;
-                clearTimeout(timeoutId);
-                resolve(match[1]!);
-            }
-        };
+                reject(new Error(`${message}\n--- bootstrap node output ---\n${output}`));
+            };
 
-        child.stdout.on('data', onData);
-        child.stderr.on('data', onData);
-        child.on('error', (error) => {
-            clearTimeout(timeoutId);
-            failEarly(`Failed to spawn bootstrap node: ${error.message}`);
+            const timeoutId = setTimeout(() => failEarly('Timed out waiting for bootstrap node to become ready'), 30_000);
+
+            const onData = (chunk: Buffer) => {
+                output += chunk.toString();
+                const match = output.match(/Listening on: (\S+)/);
+                if (match && !settled) {
+                    settled = true;
+                    clearTimeout(timeoutId);
+                    resolve(match[1]!);
+                }
+            };
+
+            child.stdout.on('data', onData);
+            child.stderr.on('data', onData);
+            child.on('error', (error) => {
+                clearTimeout(timeoutId);
+                failEarly(`Failed to spawn bootstrap node: ${error.message}`);
+            });
+            child.on('exit', (code, signal) => {
+                clearTimeout(timeoutId);
+                failEarly(`Bootstrap node exited early (code=${String(code)}, signal=${String(signal)})`);
+            });
         });
-        child.on('exit', (code, signal) => {
-            clearTimeout(timeoutId);
-            failEarly(`Bootstrap node exited early (code=${String(code)}, signal=${String(signal)})`);
-        });
-    });
+    } catch (error) {
+        await stopChild(child);
+        await rm(scratchDir, { recursive: true, force: true });
+        throw error;
+    }
 
     return {
         multiaddr,
         stop: async () => {
-            if (child.exitCode === null && child.signalCode === null) {
-                child.kill();
-                await new Promise<void>((resolve) => {
-                    child.once('exit', () => resolve());
-                    // Fallback in case 'exit' never fires for some reason.
-                    setTimeout(resolve, 5_000);
-                });
-            }
+            await stopChild(child);
             await rm(scratchDir, { recursive: true, force: true });
         },
     };

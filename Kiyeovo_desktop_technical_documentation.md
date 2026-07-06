@@ -193,12 +193,14 @@ Inbound new-contact prompts resolve lookupByPeerId before prompting and display 
 
 #### 5.2 Key exchange
 
-- message types: `key_exchange_init` / `response` / `rejected` / key rotation variants
-- signed payloads (Ed25519)
-- replay/future skew checks on timestamps
-- HKDF-derived directional session keys
-- automatic rotation after thresholds
-- first direct message can be carried encrypted in KX init payload to reduce plaintext exposure during bootstrap of a new conversation
+- message types: `key_exchange_init`, `key_exchange_ack`, `key_exchange_response`, `key_exchange_confirmed`, `key_exchange_cancelled`, `key_exchange_rejected`, `key_rotation`, `key_rotation_response`
+- signed payloads (Ed25519); replay/future-skew checks on timestamps
+- HKDF-derived directional session keys; automatic rotation after thresholds
+- first direct message can ride encrypted in the `key_exchange_init` payload to reduce plaintext exposure during bootstrap
+- handshake: `key_exchange_init` -> `key_exchange_ack` on the initiator's stream, then `key_exchange_response` -> `key_exchange_confirmed` after the responder dials back. The responder waits for `key_exchange_confirmed` on a finalization read bounded by a mode-aware timeout (30s fast / 45s anonymous), overridable per install via `key_exchange_followup_timeout_ms` and clamped to 5s-120s. The deadline covers a full peer-side round trip because initiator response verification may still fall back to a DHT username lookup.
+- initiator response verification: on genuine first contact (no pinned signing key), the `key_exchange_response` signature is verified against recipient identity keys already resolved from the DHT at initiation and stashed per peer, keeping the DHT lookup off the confirm critical path. Verification is still full Ed25519. If the stash is absent or mismatched, verification falls back to the DHT-refresh path. When a pinned key exists, the stash is ignored and normal pinned verification plus DHT-refresh/key-change detection is used. Keys verified via the stash are then persisted and pinned.
+- confirm before commit: the initiator sends `key_exchange_confirmed` while the responder is still listening, before storing local session state. A failed handoff aborts without creating a chat, so both sides fail symmetrically instead of the initiator keeping a phantom chat.
+- retriable finalization timeout: if the responder's finalization read times out, the accepted contact request is re-surfaced (re-emitted and re-logged) instead of silently dropped, bounded by the original request's decision window. A fresh accept derives a new responder session and retries.
 
 #### 5.3 Offline fallback
 
