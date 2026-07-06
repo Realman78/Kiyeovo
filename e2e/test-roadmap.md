@@ -13,9 +13,10 @@ Status legend: [ ] queued · [~] in progress · [x] done
   offline delivery COVERED and doc/code-confirmed supported (offer rides the same offline
   DHT-bucket queue as text; only the download pull requires the SENDER online) — also closes
   round 1's deferred group-offline gap. Untested edge for a later round: recipient accepts
-  while the SENDER is offline (pull should fail by design — what UX?). App-level findings for
-  Marin: downloads dir resolves relative to process.cwd() (fragile for packaged apps); doc
-  line ~243 ("row is removed") is stale vs code; relaunched peer shows Register Identity CTA.
+  while the SENDER is offline — designed behavior per Marin: fails with a toast (a test would
+  assert that toast). Findings triaged with Marin 2026-07-06: downloads dir cwd-default FIXED
+  (now ~/Downloads/Kiyeovo via homedir); stale doc line ~243 UPDATED; Register Identity CTA
+  after relaunch is BY DESIGN (auto_register_<mode> setting can be 'never' — user's choice).
 - [ ] **3. Network edge cases / resilience (Fast mode)** — deliberately adverse conditions,
   all local-infra simulable: multiple bootstraps (5-6) with some dead → onboarding must fail
   over to a live one; ALL bootstraps dead → sane error UX, no hang; bootstrap killed
