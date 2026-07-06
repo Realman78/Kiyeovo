@@ -57,6 +57,7 @@ export const USE_LOCAL_BOOTSTRAP = process.env.KIYEOVO_E2E_LOCAL_BOOTSTRAP === '
  * | file-transfer.spec.ts       | 9121-9123, 9124-9126 (two sequential setupThreePeerWorld() calls in the same file — see world.ts) | 19504 (only when USE_LOCAL_BOOTSTRAP=1; both calls share it, safe since they run sequentially within one file/worker) |
  * | network-edges.spec.ts       | 9131-9138       | 19611-19612, 19691-19694, 19791-19793, 19891, 19921-19922, 19951, 20011, 20111-20118, 20311-20313 (all explicit — this file always spins up its own local bootstraps regardless of USE_LOCAL_BOOTSTRAP, to control liveness precisely) |
  * | blocking.spec.ts            | 9151-9153       | 19505 (only when USE_LOCAL_BOOTSTRAP=1) |
+ * | group-join-catchup.spec.ts  | 9161-9163       | 19506 (only when USE_LOCAL_BOOTSTRAP=1) |
  *
  * Adding a new spec file: pick an unused p2pPort block (leave a gap of at
  * least 10 for headroom) and, if it calls startBootstrapNode() with no
