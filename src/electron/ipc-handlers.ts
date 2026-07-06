@@ -894,17 +894,20 @@ function setupBootstrapHandlers(
   // resolved at fire time — if it was torn down (shutdown / network-mode
   // relaunch) between the add and the debounce firing, the run is skipped
   // silently. retryBootstrap() is single-flight: it refuses to run when a
-  // reconnect is already in progress and returns an 'aborted' result, which we
-  // only log — the periodic health-check reconnect re-reads the full bootstrap
-  // list from the DB, so the freshly added address is never lost.
+  // reconnect is already in progress and returns a 'retry_in_progress' result,
+  // which we only log — the periodic health-check reconnect re-reads the full
+  // bootstrap list from the DB, so the freshly added address is never lost.
+  // ('aborted' is distinct: the dial itself timed out mid-flight.)
   const bootstrapAddRetry = createDebouncedInvoker({
     delayMs: BOOTSTRAP_ADD_RETRY_DEBOUNCE_MS,
     resolveTarget: getP2PCore,
     run: async (p2pCore) => {
       try {
         const result = await p2pCore.retryBootstrap();
-        if (result.status === 'aborted') {
-          log('[IPC] Bootstrap add auto-retry aborted (reconnect already in progress); periodic checker will pick up the new address');
+        if (result.status === 'retry_in_progress') {
+          log('[IPC] Bootstrap add auto-retry skipped (a reconnect is already in progress); periodic checker will pick up the new address');
+        } else if (result.status === 'aborted') {
+          log('[IPC] Bootstrap add auto-retry aborted (dial timed out mid-flight); periodic checker will pick up the new address');
         } else {
           log(`[IPC] Bootstrap add auto-retry complete status=${result.status} connected=${result.connectedCount}`);
         }
