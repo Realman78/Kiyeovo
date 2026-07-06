@@ -171,6 +171,10 @@ export const MDNS_SERVICE_TAG = 'kiyeovo.local';
  * Timing configuration
  */
 export const REREGISTRATION_INTERVAL = 5 * MINUTE;  // 5 minutes
+// After bootstrap connectivity is (re)established, re-publish the username
+// registration once, debounced by this delay so a reconnect + post-retry-verify
+// burst collapses into a single republish (bootstrap-switch discoverability).
+export const BOOTSTRAP_RECONNECT_REPUBLISH_DEBOUNCE_MS = 5 * SECOND; // 5 seconds
 export const PEER_DISCOVERY_INTERVAL = 1 * MINUTE;  // 1 minute
 export const GREETING_DELAY = 1 * SECOND;           // 1 second
 export const NETWORK_CHECK_DELAY = 3 * SECOND;      // 3 seconds

@@ -8,6 +8,8 @@ import {
   getBootstrapRetryTimeoutMs,
 } from './network/node-setup.js';
 import { UsernameRegistry } from './username/username-registry.js';
+import { createUsernameReconnectRepublisher } from './username/username-reconnect-republisher.js';
+import { generalErrorHandler } from './utils/general-error.js';
 import { MessageHandler } from './lib/message-handler.js';
 import { GroupCallOrchestrator } from './lib/group-call-orchestrator.js';
 import { CallActivityRegistry } from './lib/call-activity-registry.js';
@@ -406,6 +408,16 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
   const usernameRegistry = new UsernameRegistry(node, database);
   await usernameRegistry.initialize(userIdentity, sendRestoreUsername);
 
+  // When bootstrap connectivity is (re)established, re-publish the username
+  // registration so a user who switched bootstraps becomes discoverable in
+  // seconds instead of waiting for the 5-minute re-registration loop. Debounced
+  // (5s) so a reconnect + post-retry-verify burst collapses into one republish;
+  // it no-ops unless a username is currently registered.
+  const republishUsernameOnReconnect = createUsernameReconnectRepublisher({
+    getRegistry: () => usernameRegistry,
+    onError: (error) => generalErrorHandler(error, 'Failed to re-publish username after bootstrap reconnect'),
+  });
+
   // Initialize message handler
   sendStatus('Initializing message handler...', 'messaging');
 
@@ -546,6 +558,7 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
       POST_RECONNECT_RECENT_GROUP_CAP,
       callChatId !== null ? [callChatId] : undefined,
     );
+    republishUsernameOnReconnect.schedule();
   });
 
   groupCallOrchestrator.setDurableHintStorage((groupId: string) => messageHandler.storeGroupCallHint(groupId));
@@ -609,6 +622,10 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
 
       if (bootstrapRetryResult.connectedCount > 0) {
         emitDhtStatus(null, 'bootstrap_retry_warmup');
+        // Bootstrap connect succeeded: re-publish the username so a bootstrap
+        // switch becomes discoverable without waiting for the 5-minute loop.
+        // Debounced, so this coalesces with the post-retry-verify reconnect path.
+        republishUsernameOnReconnect.schedule();
         // Give fresh bootstrap connections time to complete identify/DHT warm-up before probing them.
         reconnectController.schedulePostRetryVerify(currentNetworkMode, () => {
           void checkDHTStatus('post_retry_verify');
@@ -627,6 +644,7 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
       console.log('[Core] Shutting down...');
       try {
         await relayKeepAlive.stop();
+        republishUsernameOnReconnect.cancel();
         groupCallOrchestrator.cleanup();
         await messageHandler.cleanup();
         reconnectController.clearPostRetryVerifyTimeout();

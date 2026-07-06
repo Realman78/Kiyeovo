@@ -292,6 +292,19 @@ export class UsernameRegistry {
     }
   }
 
+  /**
+   * Re-publish the current registration after bootstrap connectivity is
+   * (re)established. No-op unless a username is currently registered — reuses
+   * the periodic re-registration path rather than any new publish machinery, so
+   * failures log via the same generalErrorHandler backstop.
+   */
+  async republishRegistrationAfterReconnect(): Promise<void> {
+    if (!this.currentUsername) {
+      return;
+    }
+    await this.reregisterCurrentUsername();
+  }
+
   private async reregisterCurrentUsername(): Promise<void> {
     try {
       log(`Re-registering username: ${this.currentUsername}`);
