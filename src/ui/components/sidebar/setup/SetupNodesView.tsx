@@ -41,6 +41,7 @@ type SetupNodesViewProps = {
   copiedAddress: string | null;
   newAddress: string;
   retrying: boolean;
+  retryingLabel?: string;
   reordering?: boolean;
   addDisabled?: boolean;
   retryDisabled?: boolean;
@@ -118,6 +119,7 @@ export function SetupNodesView({
   copiedAddress,
   newAddress,
   retrying,
+  retryingLabel = 'Retrying…',
   reordering = false,
   addDisabled = false,
   retryDisabled = false,
@@ -381,7 +383,7 @@ export function SetupNodesView({
             {retrying ? (
               <>
                 <Loader2 className="animate-spin" />
-                Retrying…
+                {retryingLabel}
               </>
             ) : (
               <>
