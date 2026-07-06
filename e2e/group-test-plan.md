@@ -1,4 +1,4 @@
-# Plan: group-chat e2e test (not started — awaiting go-ahead)
+# Plan: group-chat e2e test (implemented — see group-chat.spec.ts)
 
 ## Goal
 A `e2e/group-chat.spec.ts` proving three real app instances can form a group and that every member's messages reach every other member.
