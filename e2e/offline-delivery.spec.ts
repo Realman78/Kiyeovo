@@ -55,8 +55,10 @@ test('direct messages sent while a peer is offline are delivered after they rela
     const usernameB = `bob_${runSuffix}`;
 
     try {
+        // Port 19503 (not the bare default 19501, which two-peer.spec.ts
+        // owns) — see e2e/config.ts's "PORT RANGES" table.
         const bootstrapMultiaddr = USE_LOCAL_BOOTSTRAP
-            ? (bootstrap = await startBootstrapNode()).multiaddr
+            ? (bootstrap = await startBootstrapNode(19503)).multiaddr
             : BOOTSTRAP_MULTIADDR;
 
         [peerA, peerB] = await Promise.all([

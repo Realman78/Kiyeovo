@@ -54,10 +54,19 @@ export interface SetupThreePeerWorldOptions {
     basePort: number;
     /** Prefix for this setup's [timing] stage logs. Defaults to 'world'. */
     label?: string;
+    /**
+     * Port for the throwaway local bootstrap node (only spun up when
+     * USE_LOCAL_BOOTSTRAP=1). Defaults to 19504 — not the bare default
+     * (19501), which two-peer.spec.ts owns — see e2e/config.ts's "PORT
+     * RANGES" table. file-transfer.spec.ts's two sequential calls in the same
+     * file both use this same default safely, since fullyParallel:false means
+     * they never run concurrently with each other.
+     */
+    localBootstrapPort?: number;
 }
 
 export async function setupThreePeerWorld(options: SetupThreePeerWorldOptions): Promise<ThreePeerWorld> {
-    const { basePort, label = 'world' } = options;
+    const { basePort, label = 'world', localBootstrapPort = 19504 } = options;
     let bootstrap: BootstrapNode | undefined;
     let peerAlice: LaunchedApp | undefined;
     let peerBob: LaunchedApp | undefined;
@@ -74,7 +83,7 @@ export async function setupThreePeerWorld(options: SetupThreePeerWorldOptions): 
 
     try {
         const bootstrapMultiaddr = USE_LOCAL_BOOTSTRAP
-            ? (bootstrap = await startBootstrapNode()).multiaddr
+            ? (bootstrap = await startBootstrapNode(localBootstrapPort)).multiaddr
             : BOOTSTRAP_MULTIADDR;
 
         [peerAlice, peerBob, peerCharlie] = await Promise.all([

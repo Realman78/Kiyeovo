@@ -41,14 +41,19 @@ test('three peers form a group and messages fan out to every member @slow', asyn
     const groupName = `grp_${runSuffix}`;
 
     try {
+        // Port 19502 (not the bare default 19501, which two-peer.spec.ts
+        // owns) and p2pPorts 9141-9143 (not 9101-9103, which two-peer.spec.ts
+        // also owns) — see e2e/config.ts's "PORT RANGES" table. Distinct
+        // per-file ranges let this file run concurrently with two-peer.spec.ts
+        // in a separate worker without colliding.
         const bootstrapMultiaddr = USE_LOCAL_BOOTSTRAP
-            ? (bootstrap = await startBootstrapNode()).multiaddr
+            ? (bootstrap = await startBootstrapNode(19502)).multiaddr
             : BOOTSTRAP_MULTIADDR;
 
         [peerAlice, peerBob, peerCharlie] = await Promise.all([
-            launchApp({ p2pPort: 9101 }),
-            launchApp({ p2pPort: 9102 }),
-            launchApp({ p2pPort: 9103 }),
+            launchApp({ p2pPort: 9141 }),
+            launchApp({ p2pPort: 9142 }),
+            launchApp({ p2pPort: 9143 }),
         ]);
         const { page: pageAlice } = peerAlice;
         const { page: pageBob } = peerBob;

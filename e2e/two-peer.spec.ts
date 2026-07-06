@@ -33,8 +33,11 @@ test('two peers create identities, connect, and exchange messages both ways @slo
     try {
         // KIYEOVO_E2E_LOCAL_BOOTSTRAP=1 restores the old throwaway-local-node
         // path; otherwise dial the real bootstrap infra directly.
+        // Port 19501 (the bare default — this file is the one that owns it;
+        // see e2e/config.ts's "PORT RANGES" table) so a concurrent worker
+        // running another file's startBootstrapNode() call never collides.
         const bootstrapMultiaddr = USE_LOCAL_BOOTSTRAP
-            ? (bootstrap = await startBootstrapNode()).multiaddr
+            ? (bootstrap = await startBootstrapNode(19501)).multiaddr
             : BOOTSTRAP_MULTIADDR;
 
         // Distinct libp2p listen ports so both instances can be live at once
