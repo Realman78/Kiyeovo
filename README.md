@@ -1,6 +1,6 @@
 # Kiyeovo
 
-> Beta notice: this is the beta version of Kiyeovo. Expect rough edges, missing polish, and behavior changes before the first full release on 7th of July 2026
+> Beta notice: this is the beta version of Kiyeovo. Expect rough edges, missing polish, and behavior changes before the first full release on 8th of July 2026
 > Tested on: Linux (Debian, Ubuntu, Lubuntu, EndeavourOS) and macOS.
 
 Kiyeovo is a decentralized peer-to-peer communication app. It supports many features you would find in modern messaging applications, yet still stays fully decentralized & respects your privacy. No e-mail or any KYC data needed.
