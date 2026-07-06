@@ -345,7 +345,6 @@ export const PROFILE_SCRYPT_N = 2 ** 17; // slightly less because of less sensit
  * Other
  */
 export const CHUNK_SIZE = 32 * 1024; // 32KB
-export const DOWNLOADS_DIR = 'kiyeovo-downloads';
 export const UPLOADS_DIR = 'kiyeovo-uploads';
 export const UPLOADS_QUOTA_WARN_BYTES = 100 * 1024 * 1024; // 100MB
 export const MAX_FILE_MESSAGE_SIZE = 1 * 1024 * 1024; // 1MB for JSON overhead

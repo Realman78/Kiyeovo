@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { getDefaultDownloadsDirectory, resolveConfiguredDownloadsDirectory } from '../core/lib/file-storage.js';
 import type {
   CompletedFileLocationDatabase,
   CompletedFileMediaDatabase,
@@ -72,6 +73,20 @@ test('resolveUploadsDirectoryFromSetting derives the app-owned uploads sibling d
     resolveUploadsDirectoryFromSetting('downloads', '/repo'),
     '/repo/kiyeovo-uploads',
   );
+  // No configured value: sibling of the absolute home-based downloads default,
+  // never cwd-relative.
+  assert.equal(
+    resolveUploadsDirectoryFromSetting(null, '/repo'),
+    join(homedir(), 'Downloads', 'kiyeovo-uploads'),
+  );
+});
+
+test('downloads directory defaults to an absolute home-based path, not cwd', () => {
+  assert.equal(getDefaultDownloadsDirectory(), join(homedir(), 'Downloads', 'Kiyeovo'));
+  assert.equal(resolveConfiguredDownloadsDirectory(null), join(homedir(), 'Downloads', 'Kiyeovo'));
+  assert.equal(resolveConfiguredDownloadsDirectory('  '), join(homedir(), 'Downloads', 'Kiyeovo'));
+  // Explicitly configured values keep their existing semantics.
+  assert.equal(resolveConfiguredDownloadsDirectory('/data/dl'), '/data/dl');
 });
 
 test('resolveCompletedImageMedia canonicalizes completed image paths and rejects invalid media', async (t) => {

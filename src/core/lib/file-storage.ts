@@ -1,12 +1,20 @@
 import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { basename, extname, isAbsolute, join, resolve } from 'node:path';
-import { DOWNLOADS_DIR } from '../constants.js';
 import { formatCopyTimestamp } from '../utils/miscellaneous.js';
 
 const MAX_FILENAME_ALLOCATION_ATTEMPTS = 1000;
 
+// The default must be an absolute, stable location: a cwd-relative default
+// scatters downloads by launch context (a packaged app started from a
+// .desktop entry can have cwd '/' or '$HOME'). Derived from homedir() rather
+// than Electron's app.getPath so core stays usable outside Electron.
+export function getDefaultDownloadsDirectory(): string {
+  return join(homedir(), 'Downloads', 'Kiyeovo');
+}
+
 export function resolveConfiguredDownloadsDirectory(configuredPath: string | null | undefined): string {
-  const value = configuredPath && configuredPath.trim() ? configuredPath : DOWNLOADS_DIR;
+  const value = configuredPath && configuredPath.trim() ? configuredPath : getDefaultDownloadsDirectory();
   return isAbsolute(value) ? value : resolve(process.cwd(), value);
 }
 

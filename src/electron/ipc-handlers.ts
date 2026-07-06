@@ -17,7 +17,7 @@ import {
   type IceServerType,
   type IceServersResponse,
 } from '../core/index.js';
-import { CHATS_TO_CHECK_FOR_OFFLINE_MESSAGES, DEFAULT_NETWORK_MODE, DOWNLOADS_DIR, FAST_MISSING_ICE_WARNING_ACKNOWLEDGED_SETTING_KEY, FAST_RELAY_MULTIADDRS_SETTING_KEY, FILE_OFFER_RATE_LIMIT, KEY_EXCHANGE_RATE_LIMIT_DEFAULT, MAX_FILE_SIZE, MAX_PENDING_FILES_PER_PEER, MAX_PENDING_FILES_TOTAL, NETWORK_MODE_ONBOARDED_SETTING_KEY, OFFLINE_MESSAGE_LIMIT, SILENT_REJECTION_THRESHOLD_GLOBAL, SILENT_REJECTION_THRESHOLD_PER_PEER, NETWORK_MODES, WEBRTC_ICE_SERVERS_SETTING_KEY, getInitialSetupStatusSettingKey, getTorConfig, isNetworkMode } from '../core/constants.js';
+import { CHATS_TO_CHECK_FOR_OFFLINE_MESSAGES, DEFAULT_NETWORK_MODE, FAST_MISSING_ICE_WARNING_ACKNOWLEDGED_SETTING_KEY, FAST_RELAY_MULTIADDRS_SETTING_KEY, FILE_OFFER_RATE_LIMIT, KEY_EXCHANGE_RATE_LIMIT_DEFAULT, MAX_FILE_SIZE, MAX_PENDING_FILES_PER_PEER, MAX_PENDING_FILES_TOTAL, NETWORK_MODE_ONBOARDED_SETTING_KEY, OFFLINE_MESSAGE_LIMIT, SILENT_REJECTION_THRESHOLD_GLOBAL, SILENT_REJECTION_THRESHOLD_PER_PEER, NETWORK_MODES, WEBRTC_ICE_SERVERS_SETTING_KEY, getInitialSetupStatusSettingKey, getTorConfig, isNetworkMode } from '../core/constants.js';
 import { validateMessageLength, validateUsername } from '../core/utils/validators.js';
 import { peerIdFromString } from '@libp2p/peer-id';
 import { multiaddr } from '@multiformats/multiaddr';
@@ -56,7 +56,7 @@ import {
   resolveDialogGrantedFileMetadata,
   resolveGrantedDialogPath,
 } from './dialog-path-grants.js';
-import { writeFileWithCopySuffix } from '../core/lib/file-storage.js';
+import { getDefaultDownloadsDirectory, writeFileWithCopySuffix } from '../core/lib/file-storage.js';
 import type { InitialSetupStatus, SaveTextUploadResponse } from '../shared/kiyeovo-api.js';
 
 function requestAppRestart(): void {
@@ -2532,7 +2532,7 @@ function setupChatSettingsHandlers(
       }
 
       const path = p2pCore.database.getSetting('downloads_directory');
-      const downloadsPath = path || DOWNLOADS_DIR;
+      const downloadsPath = path || getDefaultDownloadsDirectory();
 
       log(`[IPC] Get downloads directory: ${downloadsPath}`);
       return { success: true, path: downloadsPath, error: null };

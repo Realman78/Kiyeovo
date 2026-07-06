@@ -1,6 +1,7 @@
 import { lstat, realpath, stat } from 'fs/promises';
 import { dirname, isAbsolute, join, relative, resolve as resolvePath } from 'path';
-import { DOWNLOADS_DIR, UPLOADS_DIR } from '../core/constants.js';
+import { UPLOADS_DIR } from '../core/constants.js';
+import { getDefaultDownloadsDirectory } from '../core/lib/file-storage.js';
 import { isImageFile } from '../shared/file-types.js';
 
 const INVALID_PORTABLE_FILENAME_CHARACTERS = /[<>:"/\\|?*]/;
@@ -93,7 +94,7 @@ export function resolveUploadsDirectoryFromSetting(
   configuredDownloadsDir: string | null | undefined,
   cwd = process.cwd(),
 ): string {
-  const rawDownloadsDir = configuredDownloadsDir || DOWNLOADS_DIR;
+  const rawDownloadsDir = configuredDownloadsDir || getDefaultDownloadsDirectory();
   const downloadsDir = isAbsolute(rawDownloadsDir)
     ? rawDownloadsDir
     : resolvePath(cwd, rawDownloadsDir);
