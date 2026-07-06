@@ -242,7 +242,7 @@ export function SetupNodesView({
                         <div title={node.address} className={`truncate max-w-full text-sm ${summary.isRaw ? 'font-mono' : 'font-medium'} text-foreground`}>
                           {summary.primary}
                         </div>
-                        <div className="mt-0.5 truncate font-mono text-xs text-muted-foreground w-full" title={node.address}>
+                        <div className="mt-0.5 truncate font-mono text-xs text-muted-foreground w-full text-left" title={node.address}>
                           <span className="lg:hidden max-w-[50%]">{summary.peerId ?? node.address}</span>
                           <span className="hidden lg:inline max-w-[50%]">{node.address}</span>
                         </div>
