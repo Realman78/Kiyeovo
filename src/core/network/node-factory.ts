@@ -8,6 +8,7 @@ import { gossipsub } from '@chainsafe/libp2p-gossipsub';
 import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
 import { dcutr } from '@libp2p/dcutr';
 import { multiaddr } from '@multiformats/multiaddr';
+import { peerIdFromPrivateKey } from '@libp2p/peer-id';
 import { tcp, type TCPComponents } from '@libp2p/tcp';
 import type { Transport } from '@libp2p/interface';
 
@@ -391,7 +392,7 @@ export async function createChatNode(
         },
         abortConnectionOnPingFailure: false,
       },
-      connectionGater: createConnectionGater(database),
+      connectionGater: createConnectionGater(database, peerIdFromPrivateKey(privateKey)),
       services: createChatNodeServices(runtimeConfig),
     });
 
