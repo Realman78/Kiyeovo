@@ -113,6 +113,7 @@ import {
 } from '../group/runtime/group-messaging.js';
 import { GroupOfflineManager } from '../group/runtime/group-offline-manager.js';
 import type { GroupOfflineCheckOptions } from '../group/runtime/group-offline-manager.js';
+import { shouldTriggerJoinCompletionCatchup } from '../group/runtime/group-offline-triggers.js';
 import { GroupAckRepublisher } from '../group/control/group-ack-republisher.js';
 import { GroupInfoRepublisher } from '../group/dht/group-info-republisher.js';
 import { dialProtocolWithRelayFallback } from '../transport/protocol-dialer.js';
@@ -4277,9 +4278,30 @@ export class MessageHandler {
           break;
         }
         case GroupMessageType.GROUP_WELCOME: {
+          const beforeWelcomeChat = this.database.getChatByGroupId(groupId);
+          const beforeWelcome = {
+            groupStatus: beforeWelcomeChat?.group_status ?? null,
+            keyVersion: beforeWelcomeChat?.key_version ?? 0,
+          };
           await responder.handleGroupWelcome(parsed as any);
           deferredGroupInfoSyncGroups.add(groupId);
           this.groupMessaging.subscribeToGroupTopic(groupId)
+
+          // Join completion: a freshly-activated member may already have
+          // same-epoch messages waiting in the group offline bucket (they were
+          // published while the member was still converging). Kick off the
+          // per-chat coalesced offline catch-up now instead of waiting for the
+          // 5-minute periodic timer. Only on a genuine apply — a duplicate
+          // welcome leaves status/key_version unchanged and is skipped.
+          // checkGroupOfflineMessages still reads only epochs <= the local
+          // key_version, so pre-join history stays unreadable.
+          const afterWelcomeChat = this.database.getChatByGroupId(groupId);
+          if (afterWelcomeChat && shouldTriggerJoinCompletionCatchup(beforeWelcome, {
+            groupStatus: afterWelcomeChat.group_status ?? null,
+            keyVersion: afterWelcomeChat.key_version ?? 0,
+          })) {
+            this.scheduleGroupStateUpdateCatchup(afterWelcomeChat.id, groupId, 'group_welcome_applied');
+          }
           log(`[GROUP] Processed GROUP_WELCOME from ${senderInfo.username}`);
           break;
         }

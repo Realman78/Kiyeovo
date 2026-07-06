@@ -291,9 +291,13 @@ Implemented control events include:
 #### 6.5 Group offline content
 
 If realtime publish has no subscribers/reachability:
-- message is written to sender-specific group offline bucket (`groupId` + `keyVersion` + sender)
+- message is written to sender-specific group offline bucket (`groupId` + `keyVersion` + sender) — in fact the signed backup is written on **every** send, so the bucket is also the recovery source for a recipient who simply lagged the realtime copy
 - store is compressed, signed, and versioned
-- periodic and targeted checks reconcile missed content
+- missed content is reconciled by a **periodic** check (~5 min) plus **event-triggered** catch-ups that close the two latency windows without waiting for the timer, and a **manual** "Check missed messages" action as an always-available fallback. The event triggers are:
+  - **rotation applied** — after a `GROUP_STATE_UPDATE` advances the local `key_version` (an existing member converged onto a new epoch) the receive loop schedules a catch-up for that group; the **join-completion** path is covered too — once a `GROUP_WELCOME` is genuinely applied (chat becomes `active` at a real epoch, not a duplicate welcome) the freshly-joined member schedules the same catch-up, since same-epoch messages may already be waiting in the bucket
+  - **connectivity regained** — the renderer's on-reconnect sync (`syncRecentOfflineMessages`) checks the recency-bounded top chats for both direct and group offline content, and a destructive core reconnect additionally fires a recency-bounded recently-active group check
+  - **power resume / unlock** — the `powerMonitor` resume/unlock handler funnels through the same wake-recovery reconnect + on-reconnect sync, so group checks ride along for free
+  - all event triggers run the same fetch as the manual action (they never widen the epoch boundary — `checkGroupOfflineMessages` still reads only epochs `<=` the member's local `key_version`) and are **coalesced per chat** (an in-flight guard plus a single pending-slot re-queue), so a burst of rapid rotations collapses to one catch-up after the burst rather than one per rotation; a failed fetch just waits for the next trigger or the periodic backstop (no retry storms)
 - the offline-backup retry queue is **durable** (survives restart) with **manual retry**: a message delivered online but whose backup failed shows a distinct "Retry offline backup" affordance (re-stores only, does not re-send)
 
 #### 6.6 Nudge mechanism
