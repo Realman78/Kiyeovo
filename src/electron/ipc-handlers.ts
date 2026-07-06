@@ -2828,7 +2828,7 @@ function setupGroupHandlers(
     userIdentity: p2pCore.userIdentity,
     myPeerId: p2pCore.userIdentity.id,
     myUsername: username,
-    nudgeGroupRefetch: (peerId, groupId) => p2pCore.messageHandler.nudgePeerGroupRefetch(peerId, groupId),
+    nudgeGroupRefetch: (peerId, groupId, options) => p2pCore.messageHandler.nudgePeerGroupRefetch(peerId, groupId, options),
   });
 
   ipcMain.handle(IPC_CHANNELS.CHECK_GROUP_OFFLINE_MESSAGES, async (_event, chatIds?: number[]) => {
@@ -3121,7 +3121,7 @@ function setupGroupHandlers(
         userIdentity: p2pCore.userIdentity,
         myPeerId: p2pCore.userIdentity.id,
         myUsername: username,
-        nudgeGroupRefetch: (peerId, groupId) => p2pCore.messageHandler.nudgePeerGroupRefetch(peerId, groupId),
+        nudgeGroupRefetch: (peerId, groupId, options) => p2pCore.messageHandler.nudgePeerGroupRefetch(peerId, groupId, options),
       });
 
       await responder.respondToInvite(groupId, accept);

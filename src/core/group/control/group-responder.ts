@@ -39,7 +39,7 @@ export interface GroupResponderDeps {
   onGroupMembersUpdated?: (data: GroupMembersUpdatedEvent) => void;
   onMessageReceived?: (data: MessageReceivedEvent) => void;
   onOfflineInboxCapacityChanged?: (chatId: number) => void;
-  nudgeGroupRefetch?: (peerId: string, groupId: string) => void;
+  nudgeGroupRefetch?: (peerId: string, groupId: string, options?: { allowDialWithoutConnection?: boolean }) => void;
 }
 
 export class GroupResponder {

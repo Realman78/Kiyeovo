@@ -435,8 +435,12 @@ export class MessageHandler {
     return setting ? parseInt(setting, 10) : CHATS_TO_CHECK_FOR_OFFLINE_MESSAGES;
   }
 
-  public nudgePeerGroupRefetch(peerId: string, groupId: string): void {
-    this.sendBucketNudge(peerId, { kind: 'GROUP_REKEY_REFETCH', groupId }, `group:${peerId}:${groupId}`);
+  public nudgePeerGroupRefetch(
+    peerId: string,
+    groupId: string,
+    options?: { allowDialWithoutConnection?: boolean },
+  ): void {
+    this.sendBucketNudge(peerId, { kind: 'GROUP_REKEY_REFETCH', groupId }, `group:${peerId}:${groupId}`, options);
   }
 
   public nudgePeerDirectSessionReset(peerId: string): void {
