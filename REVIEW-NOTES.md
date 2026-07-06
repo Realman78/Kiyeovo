@@ -72,10 +72,19 @@ Changes (all in `src/core/direct/key-exchange.ts` + `constants.ts` + `message-ha
 - `e2e/electron.ts`: per-instance `p2pPort`, main-process log capture on `LaunchedApp.logs`.
 - Tests never check "Remember me", so the real system keychain is untouched.
 
+## Fixed since review: deployed relay refusing reservations (2026-07-05)
+- Previously listed below as a known issue: the deployed relay (143.198.137.240:4002)
+  deterministically refused every circuit-relay-v2 reservation (`RESERVATION_REFUSED`), so
+  fast-mode users got no relay fallback and the e2e onboarding treated the relay step as
+  best-effort. Root cause: the relay ran with js-libp2p's **default `maxReservations=15`**,
+  and this suite's own short-lived e2e test peers had exhausted all 15 slots. Server-side fix
+  by the operator on 2026-07-05: `maxReservations=512`, `reservationTtl=900000` (15 min),
+  service restarted (slots cleared). The relay step in `e2e/onboard.ts` now **asserts** a
+  successful reservation (polls `kiyeovoAPI.retryRelays()` for `connected >= 1`) instead of
+  shrugging, so a recurrence fails the suite loudly. Evidence, log lines, and post-fix suite
+  timings: `RELAY-VERIFICATION.md` at the repo root.
+
 ## Known issues intentionally NOT addressed here
-- The deployed relay (143.198.137.240:4002) deterministically refuses circuit-relay-v2
-  reservations (`RESERVATION_REFUSED`) — infra config, not app code. Fast-mode users currently
-  get no relay fallback; messaging in the e2e runs used direct TCP.
 - DHT username registration is occasionally rejected by validators (transient, retried by the
   onboarding helper; once observed persisting >2 min).
 - Pre-existing lint error (`no-unused-vars` for `stage` in `main.ts`'s Tor status callback) —

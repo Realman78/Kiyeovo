@@ -29,9 +29,9 @@ export async function timedStage<T>(label: string, name: string, fn: () => Promi
  *   4. Guided wizard, in order (src/ui/components/sidebar/setup/InitialSetupWizard.tsx):
  *        a. Bootstrap: add the given bootstrap multiaddr, retry until the
  *           app reports real DHT connectivity.
- *        b. Relay: add the given relay multiaddr and retry the reservation a
- *           few times, best-effort (see completeRelayStep for why this
- *           doesn't hard-fail the run).
+ *        b. Relay: add the given relay multiaddr and ASSERT the app obtains
+ *           a circuit-relay-v2 reservation (see completeRelayStep — this is
+ *           regression coverage for the relay slot-exhaustion incident).
  *        c. Register: register a username (required on *both* sides of a
  *           contact exchange — see the `isRegistered` gates in
  *           SidebarHeader.tsx and InvitationManager.tsx).
@@ -159,28 +159,34 @@ async function waitForRealDhtConnection(page: Page): Promise<void> {
 }
 
 /**
- * Adds the relay multiaddr and retries the reservation a few times,
- * best-effort.
+ * Adds the relay multiaddr and ASSERTS the app obtains a circuit-relay-v2
+ * reservation, failing the run loudly if the relay refuses.
  *
- * kiyeovoAPI.getRelayStatus() always returns `connected: null` for Fast-mode
- * relay nodes (see GET_RELAY_STATUS in src/electron/ipc-handlers.ts — actual
- * liveness for relays is only filled in by the same unreliable ping probe as
- * bootstrap's per-node status), so there's no IPC status to poll here. The
- * one real signal is RelaySetup's own toast, fired synchronously right after
- * a retry resolves ("Connected to N of M relay servers" vs "Could not
- * connect to any relay server").
+ * History — this assertion is regression coverage for a real incident: the
+ * deployed relay (e2e/config.ts) used to refuse *every* reservation with a
+ * protocol-level RESERVATION_REFUSED. Root cause was not app code: the relay
+ * ran with js-libp2p's default maxReservations=15, and this suite's own
+ * short-lived test peers had exhausted all 15 slots (the reservation TTL
+ * outlived the peers). The operator fixed the server on 2026-07-05
+ * (maxReservations=512, reservationTtl=900000ms, service restarted) and
+ * reservations now confirm in about a second — see RELAY-VERIFICATION.md at
+ * the repo root for the evidence. While the refusal looked like immovable
+ * infra, this step was deliberately best-effort (2 short attempts, warn and
+ * continue); now that the relay is healthy it hard-fails instead, so the
+ * suite screams if slot exhaustion (or any other refusal) ever recurs.
  *
- * This step does NOT hard-fail the run if the relay never confirms: the
- * deployed relay in e2e/config.ts has been observed rejecting every
- * reservation attempt with a protocol-level `RESERVATION_REFUSED` (visible
- * with DEBUG_MODE=1 in src/core/network/node-relays.ts logs) — a
- * deterministic server-side refusal (capacity/ACL on that shared, real
- * relay), not a transient dial failure, so retrying further would not help.
- * The wizard itself doesn't gate on relay reachability either (only on the
- * address being configured — see requiredSetupComplete() in
- * InitialSetupWizard.tsx), so a real user hitting this same refusal would
- * still go on to register/chat. See the e2e report for details — this is
- * flagged there as an open question for whoever operates that relay server.
+ * Why the assertion polls kiyeovoAPI.retryRelays() rather than the UI:
+ * - kiyeovoAPI.getRelayStatus() always returns `connected: null` for
+ *   Fast-mode relays (GET_RELAY_STATUS in src/electron/ipc-handlers.ts), so
+ *   there is no read-only status to poll.
+ * - RelaySetup's "Connected to N of M relay server(s)" toast — the old
+ *   best-effort signal — proved unreliable even on success: a run whose
+ *   main-process logs showed "[IPC] Relay retry complete connected=1/1"
+ *   still never matched the toast text in time.
+ * - retryRelays() is the exact IPC the wizard's "Retry connection" button
+ *   drives, and it is effectively a status read once the reservation exists:
+ *   dialConfiguredFastRelays (src/core/network/node-relays.ts) short-circuits
+ *   with "reservation already active" instead of re-dialing.
  */
 async function completeRelayStep(page: Page, relayMultiaddr: string): Promise<void> {
     await expect(page.getByRole('heading', { name: 'Relay servers' })).toBeVisible({ timeout: 15_000 });
@@ -188,32 +194,26 @@ async function completeRelayStep(page: Page, relayMultiaddr: string): Promise<vo
     await page.getByPlaceholder(/ip4\/1\.2\.3\.4/).fill(relayMultiaddr);
     await page.getByRole('button', { name: 'Add server' }).click();
 
-    await tryReserveRelay(page);
+    // Adding the relay already triggers a server-side reservation attempt
+    // (ADD_RELAY_NODE auto-applies via retryRelays()), so on a healthy relay
+    // the first poll usually confirms immediately. Observed timings: ~0.8s
+    // dial-to-reserved on success; ~300ms for a RESERVATION_REFUSED refusal.
+    // 30s is generous headroom for slow-infra days without approaching the
+    // test's 6-minute hard cap.
+    await expect.poll(async () => {
+        const result = await page.evaluate(() => window.kiyeovoAPI.retryRelays());
+        return result.success ? result.connected : 0;
+    }, {
+        message:
+            'Relay never confirmed a circuit-relay-v2 reservation (kiyeovoAPI.retryRelays() reported ' +
+            'connected=0 for the whole window). If the main-process logs show RESERVATION_REFUSED, check ' +
+            'the relay server\'s reservation slots — maxReservations exhaustion caused exactly this before ' +
+            '(see RELAY-VERIFICATION.md).',
+        timeout: 30_000,
+        intervals: [500, 1_000, 2_000],
+    }).toBeGreaterThanOrEqual(1);
 
     await page.getByRole('button', { name: 'Continue', exact: true }).click();
-}
-
-async function tryReserveRelay(page: Page): Promise<void> {
-    // Observed: the deployed relay refuses reservations near-instantly
-    // (~300ms, RESERVATION_REFUSED) — a deterministic server-side rejection,
-    // not something a longer wait would fix. 2 short attempts is enough to
-    // rule out a one-off fluke without burning the test's time budget.
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
-        await page.getByRole('button', { name: 'Retry connection' }).click();
-        await expect(page.getByRole('button', { name: 'Retrying…' })).toBeHidden({ timeout: 10_000 });
-
-        try {
-            await expect(page.getByText(/Connected to \d+ of \d+ relay server/)).toBeVisible({ timeout: 3_000 });
-            return;
-        } catch {
-            // Either the "could not connect" toast fired, or nothing landed in
-            // time — loop and retry a bounded number of times.
-        }
-    }
-    console.warn(
-        '[onboard] Relay server never confirmed a successful reservation after retries; ' +
-        'continuing anyway since the wizard only requires the address to be configured.',
-    );
 }
 
 /** Registers a username via the wizard's dedicated Register step, then continues. */
