@@ -126,6 +126,9 @@ export function BootstrapSetup() {
       case 'aborted':
         showError('Bootstrap retry was aborted');
         break;
+      case 'retry_in_progress':
+        toast.info('A reconnection attempt is already running — give it a moment');
+        break;
       default:
         toast.success('Bootstrap retry complete');
     }

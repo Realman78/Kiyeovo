@@ -1292,7 +1292,7 @@ export type BootstrapConnection = {
 };
 
 export type BootstrapConnectResult = {
-  status: 'connected' | 'all_failed' | 'no_candidates' | 'aborted';
+  status: 'connected' | 'all_failed' | 'no_candidates' | 'aborted' | 'retry_in_progress';
   connectedAddresses: string[];
   connectedPeerIds: string[];
   connectedCount: number;
@@ -1333,9 +1333,4 @@ export type RelayRetryResponse = {
   attempted: number;
   connected: number;
   error: string | null;
-};
-
-export type TorBootstrapTarget = {
-  host: string;
-  port: number;
 };

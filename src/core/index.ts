@@ -580,7 +580,7 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
       if (reconnectController.isReconnectInProgress()) {
         console.log('[Core] Reconnect already in progress, ignoring manual retry');
         return {
-          status: 'aborted',
+          status: 'retry_in_progress',
           connectedAddresses: [],
           connectedPeerIds: [],
           connectedCount: 0,

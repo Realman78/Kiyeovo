@@ -42,7 +42,7 @@ import { generalErrorHandler } from '../utils/general-error.js';
 import { createConnectionGater } from './connection-gater.js';
 import { ChatDatabase } from '../db/database.js';
 import { torTransport, validateTorConnection, type TorTransportComponents } from '../transport/tor-transport.js';
-import { resolveBootstrapAddressesForCurrentMode, extractTorBootstrapTargets } from './node-bootstrap.js';
+import { resolveBootstrapAddressesForCurrentMode } from './node-bootstrap.js';
 import { getConfiguredFastRelayAddrs, type FastRelayConfig } from './node-relays.js';
 import { log } from '../../shared/logger.js';
 
@@ -215,7 +215,6 @@ function logAnonymousModePreflight(runtimeConfig: ChatNodeRuntimeConfig): void {
 }
 
 async function validateAnonymousModeConnectivity(runtimeConfig: ChatNodeRuntimeConfig): Promise<boolean> {
-  const bootstrapTargets = extractTorBootstrapTargets(runtimeConfig.bootstrapResolution.addresses);
   console.log('Validating Tor connectivity...');
   const { available: torAvailable } = await validateTorConnection({
     socksProxy: {
@@ -224,7 +223,7 @@ async function validateAnonymousModeConnectivity(runtimeConfig: ChatNodeRuntimeC
     },
     connectionTimeout: runtimeConfig.torConfig.connectionTimeout,
     maxRetries: runtimeConfig.torConfig.maxRetries,
-  }, bootstrapTargets);
+  });
 
   return torAvailable;
 }
