@@ -295,33 +295,14 @@ async function openNewGroupDialog(page: Page): Promise<void> {
 
 /**
  * Waits for a pending group invite (GroupInviteList / GroupInviteItem) to
- * appear on the invitee's sidebar. GroupInviteList only calls
- * getGroupInvites() on mount and on an offline-fetch-complete event — there
- * is no push notification wired up for a freshly arrived invite (confirmed
- * by reading GroupInviteList.tsx and src/shared/ipc/channels.ts: only
- * GROUP_CHAT_ACTIVATED and GROUP_MEMBERS_UPDATED are pushed to the
- * renderer, nothing for the invite itself). A plain visibility wait covers
- * the case where the invite was already in the DB by the time the poll
- * starts; the Groups -> Chats rail round trip forces GroupInviteList to
- * remount (and therefore refetch) in case the first attempt was too early.
+ * appear on the invitee's sidebar. No manual refresh is needed: the sender's
+ * bucket-nudge (bucket-nudge protocol -> offline-bucket fetch ->
+ * OFFLINE_MESSAGES_FETCH_COMPLETE -> GroupInviteList refetch) pushes the
+ * invite into the list within seconds while both peers are online, with the
+ * periodic offline check (OFFLINE_MESSAGE_CHECK_INTERVAL) as the fallback.
  */
 async function waitForGroupInvite(page: Page, groupName: string): Promise<void> {
-    await expect(async () => {
-        const alreadyVisible = await page.getByText(groupName, { exact: true }).isVisible().catch(() => false);
-        if (alreadyVisible) return;
-        await page.getByRole('button', { name: 'Groups', exact: true }).click();
-        await page.getByRole('button', { name: 'Chats', exact: true }).click();
-        await expect(page.getByText(groupName, { exact: true })).toBeVisible({ timeout: 5_000 });
-    }).toPass({ timeout: 45_000, intervals: [3_000, 5_000] });
-
-    // The rail buttons above live under a hover-expand panel (SidebarRail.tsx
-    // — mouseenter widens it over the sidebar content with a width
-    // transition). Moving the pointer off it and letting the transition
-    // settle keeps a screenshot taken right after this call from catching a
-    // mid-animation double-exposure frame; purely cosmetic, no assertion
-    // depends on it.
-    await page.mouse.move(600, 300);
-    await page.waitForTimeout(300);
+    await expect(page.getByText(groupName, { exact: true })).toBeVisible({ timeout: 60_000 });
 }
 
 /** Accepts the (single) pending group invite with the given group name. */
