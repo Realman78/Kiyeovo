@@ -13,7 +13,7 @@ Kiyeovo is a decentralized peer-to-peer communication app. It supports many feat
 - encrypted file transfer
 - trusted profile import/export
 - identity backup
-- no central account or message server; connect through bootstrap/relay servers you trust, or self-host with the [guide](#bootstrap-and-relay-setup)
+- no central account or message server; use trusted bootstrap/relay servers or self-host with the [guide](#bootstrap-and-relay-setup)
 
 For technical readers, contributors, and coding agents, start with [Kiyeovo_desktop_technical_documentation.md](./Kiyeovo_desktop_technical_documentation.md). That is the source-of-truth architecture overview.
 
@@ -44,7 +44,7 @@ What's left:
 
 ## Quick start from source
 
-> Kiyeovo 1.0.0 does not bundle project-hosted default bootstrap/relay servers. Use self-hosted or community infrastructure; see [Servers](#servers) and [Bootstrap and relay setup](#bootstrap-and-relay-setup).
+> Before publishing 1.0.0 installers, replace the predefined server placeholders in [src/core/predefined-nodes.ts](./src/core/predefined-nodes.ts) and list the final values in [Servers](#servers). Until then, use self-hosted infrastructure from [Bootstrap and relay setup](#bootstrap-and-relay-setup).
 
 > There is also an **outdated** tutorial [here](https://marindedic.com/p2p-messenger/) (will be updated on 1st of July), but you can just follow the steps below
 
@@ -111,15 +111,15 @@ If your machine is not low-end, consider increasing `IDENTITY_SCRYPT_N` and `PRO
 
 ## Servers
 
-Kiyeovo 1.0.0 does not ship with project-hosted default bootstrap, relay, STUN,
-TURN, or anonymous onion bootstrap servers baked into the app. The setup screens
-therefore do not show a predefined "Kiyeovo trusted servers" offer in this
+Release TODO: replace the placeholders in
+[src/core/predefined-nodes.ts](./src/core/predefined-nodes.ts) with the real
+project-hosted bootstrap, relay, STUN, TURN, and anonymous onion bootstrap
+addresses before publishing 1.0.0 installers. Those setup links point users to
+this section, so list the final server values and shutdown policy here before
 release.
 
-To use Kiyeovo, add bootstrap/relay/ICE servers you trust, use community
-servers, or self-host with the infrastructure bundle below. If project-hosted
-public servers are published later, their exact addresses and shutdown policy
-will be listed in this section before the app advertises them.
+Until those values are final, use trusted community servers or self-host with the
+infrastructure bundle below.
 
 ## Bootstrap and relay setup
 
