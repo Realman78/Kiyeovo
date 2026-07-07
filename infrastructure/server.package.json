@@ -1,6 +1,6 @@
 {
   "name": "kiyeovo-infra-node",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "Infra-node dependency manifest for the Kiyeovo bootstrap/relay image. Generated from the root package — keep in sync (see infrastructure/scripts/check-server-deps.mjs).",
   "type": "module",

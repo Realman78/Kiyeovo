@@ -25,7 +25,7 @@
 #   __WORKDIR__               absolute path containing dist-server/, data/, run/
 #   __NODE_BIN__              absolute path to the node binary, outside /home
 #                             (e.g. /usr/bin/node; not an nvm/home install)
-#   __SERVER_VERSION__        value reported as KIYEOVO_SERVER_VERSION (e.g. 0.1.0)
+#   __SERVER_VERSION__        value reported as KIYEOVO_SERVER_VERSION (e.g. 1.0.0)
 #   __RELAY_ANNOUNCE_ADDRS__  public dial address clients use, e.g.
 #                             /ip4/<public-ip>/tcp/4002 or /dns4/<host>/tcp/4002
 #   __RELAY_PORT__            local TCP port to listen on (matches the announce port)

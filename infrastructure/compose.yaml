@@ -18,7 +18,7 @@ name: kiyeovo-infra
 
 services:
   bootstrap:
-    image: ghcr.io/realman78/kiyeovo-infra-node:0.1.0
+    image: ghcr.io/realman78/kiyeovo-infra-node:1.0.0
     build:
       # Absolute repo root injected by kiyeovo-infra so a re-rooted
       # --project-directory can't misplace the Dockerfile; `..` is the fallback
@@ -30,7 +30,7 @@ services:
     restart: unless-stopped
     environment:
       KIYEOVO_DEPLOY_MODE: "1"
-      KIYEOVO_SERVER_VERSION: "0.1.0"
+      KIYEOVO_SERVER_VERSION: "1.0.0"
       BOOTSTRAP_NETWORK_MODE: fast
       BOOTSTRAP_LISTEN_ADDRESS: /ip4/0.0.0.0/tcp/${BOOTSTRAP_PORT:-9000}
       BOOTSTRAP_ANNOUNCE_ADDRS: ${BOOTSTRAP_ANNOUNCE_ADDRS:?run ./kiyeovo-infra fast init, e.g. /ip4/<public-ip>/tcp/9000}
@@ -60,7 +60,7 @@ services:
         max-file: "3"
 
   relay:
-    image: ghcr.io/realman78/kiyeovo-infra-node:0.1.0
+    image: ghcr.io/realman78/kiyeovo-infra-node:1.0.0
     build:
       # Absolute repo root injected by kiyeovo-infra so a re-rooted
       # --project-directory can't misplace the Dockerfile; `..` is the fallback
@@ -72,7 +72,7 @@ services:
     restart: unless-stopped
     environment:
       KIYEOVO_DEPLOY_MODE: "1"
-      KIYEOVO_SERVER_VERSION: "0.1.0"
+      KIYEOVO_SERVER_VERSION: "1.0.0"
       RELAY_LISTEN_ADDRESS: /ip4/0.0.0.0/tcp/${RELAY_PORT:-4002}
       RELAY_ANNOUNCE_ADDRS: ${RELAY_ANNOUNCE_ADDRS:?run ./kiyeovo-infra fast init, e.g. /ip4/<public-ip>/tcp/4002}
       RELAY_PEER_ID_FILE: /data/relay-peer-id.bin

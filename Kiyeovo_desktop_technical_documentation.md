@@ -730,7 +730,7 @@ Runtime metadata output (`src/core/server/runtime-metadata.ts`):
     "peerId": "12D3KooW...",
     "announceAddrs": ["/ip4/203.0.113.10/tcp/9000"],
     "clientAddrs": ["/ip4/203.0.113.10/tcp/9000/p2p/12D3KooW..."],
-    "version": "0.1.0",
+    "version": "1.0.0",
     "startedAt": "2026-06-27T12:00:00Z"
   }
   ```
