@@ -1,10 +1,10 @@
 {
   "name": "Kiyeovo",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "description": "Desktop client for a decentralized p2p messenger",
-  "author": "Marin Dedic",
+  "author": "Marin Dedic <marin.dedic1308@gmail.com>",
   "main": "dist-electron/electron/main.js",
   "scripts": {
     "dev": "npm-run-all --parallel dev:ui dev:electron",
@@ -27,6 +27,7 @@
     "clean:electron": "node -e \"require('fs').rmSync('dist-electron', { recursive: true, force: true })\"",
     "transpile:electron": "npm run clean:electron && tsc -p src/electron/tsconfig.json && node scripts/build-preload.mjs",
     "dist:linux": "npm run transpile:electron && npm run build && electron-builder --linux --x64",
+    "dist:mac": "npm run transpile:electron && npm run build && electron-builder --mac",
     "download:tor": "bash scripts/download-tor.sh",
     "download:tor:all": "bash scripts/download-tor.sh all",
     "setup": "npm install && npm run download:tor",
