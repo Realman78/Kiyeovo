@@ -40,7 +40,7 @@ import { DEFAULT_NETWORK_MODE, NETWORK_MODE_ONBOARDED_SETTING_KEY } from '../cor
 import { ensureAppDataDir } from '../core/utils/miscellaneous.js';
 import { requestPasswordFromUI } from './password-prompt.js';
 import { setupIPCHandlers } from './ipc-handlers.js';
-import { TorManager, getTorBinaryPath, BUNDLED_TOR_SOCKS_PORT } from '../core/transport/tor-manager.js';
+import { TorManager, getTorBinaryPath, BUNDLED_TOR_SOCKS_PORT, BUNDLED_TOR_CONTROL_PORT } from '../core/transport/tor-manager.js';
 import { ChatDatabase } from '../core/db/database.js';
 import type { NetworkMode } from '../core/types.js';
 import { isDebugModeEnabled, log } from '../shared/logger.js';
@@ -623,6 +623,10 @@ async function initializeP2PAfterWindow() {
     // KIYEOVO_P2P_PORT lets tests/dev run multiple instances on one host
     // without colliding on the listen port.
     const libp2pPort = Number(process.env.KIYEOVO_P2P_PORT) || 9001;
+    // KIYEOVO_TOR_SOCKS_PORT / KIYEOVO_TOR_CONTROL_PORT let tests/dev run multiple
+    // anonymous-mode instances on one host without colliding on the bundled Tor ports.
+    const torSocksPort = Number(process.env.KIYEOVO_TOR_SOCKS_PORT) || BUNDLED_TOR_SOCKS_PORT;
+    const torControlPort = Number(process.env.KIYEOVO_TOR_CONTROL_PORT) || BUNDLED_TOR_CONTROL_PORT;
     let torConfig: TorConfig | undefined;
 
     if (startupNetworkMode === 'anonymous') {
@@ -639,6 +643,8 @@ async function initializeP2PAfterWindow() {
           dataDir,
           libp2pPort,
           torBinaryPath,
+          socksPort: torSocksPort,
+          controlPort: torControlPort,
           onStatus: (message, stage) => {
             log(`[TorManager] ${message}`);
             sendInitStatus(message, 'tor');
@@ -653,7 +659,9 @@ async function initializeP2PAfterWindow() {
 
         torConfig = {
           enabled: true,
-          socksPort: BUNDLED_TOR_SOCKS_PORT,
+          // Use the port the daemon actually bound so the SOCKS transport dials the
+          // right place when an override is active (defaults to BUNDLED_TOR_SOCKS_PORT).
+          socksPort: torManager.getSocksPort(),
           onionAddress,
         };
       } catch (torError) {

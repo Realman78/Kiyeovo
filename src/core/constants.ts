@@ -262,9 +262,8 @@ export const BOOTSTRAP_PEER_ID_FILE = './bootstrap-peer-id.bin';
  * - Tor Browser (9150/9151)
  */
 export const TOR_CONFIG = {
-  // Bundled Tor ports (used when we run our own Tor instance)
-  BUNDLED_SOCKS_PORT: 9550,
-  BUNDLED_CONTROL_PORT: 9551,
+  // Bundled Tor ports live in transport/tor-manager.ts (BUNDLED_TOR_SOCKS_PORT /
+  // BUNDLED_TOR_CONTROL_PORT), the single source of truth used to configure the daemon.
 
   // Default ports (fallback, or for system Tor)
   DEFAULT_SOCKS_HOST: '127.0.0.1',

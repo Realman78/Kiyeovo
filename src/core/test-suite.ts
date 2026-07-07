@@ -7,6 +7,7 @@ import './lib/lease-pool.test.js';
 import './lib/file-transfer.test.js';
 import './lib/frame-stream.test.js';
 import './transport/stream-handler.test.js';
+import './transport/tor-manager.test.js';
 import './lib/file-storage.test.js';
 import './lib/file-handler.test.js';
 import './lib/blocking-enforcement.test.js';
