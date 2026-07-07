@@ -623,6 +623,7 @@ Contextual infrastructure guidance is owned by `ConnectivityGuidanceProvider`, w
 - successful online sends and successful offline DHT delivery remain silent; guidance appears only for terminal send failures and is cooldown-limited to avoid repeated popups
 - action-bearing warning toasts use a wider desktop layout than ordinary toasts so guidance text and its Setup action remain readable without widening short notifications
 - toast auto-dismiss timing is owned by the Radix toast lifecycle, so all toast variants pause dismissal while hovered, focused, or while the window is blurred
+- the toast viewport is layered above in-app fullscreen call overlays so call-state errors and delivery guidance remain visible during active calls
 
 Setup readiness is owned by a provider around the main application. The rail consumes only readiness state, while Setup pages consume a stable refresh action. Successful Bootstrap, Relay, or ICE Setup add/remove actions trigger a new read so the rail indicator reflects configuration completeness without placing readiness state or invalidation counters in `Main`.
 
