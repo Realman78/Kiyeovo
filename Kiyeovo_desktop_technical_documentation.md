@@ -89,6 +89,7 @@ Current repository layout in `src/core/`:
 - `anonymous`
   - traffic via Tor SOCKS5 + onion announce addresses
   - focus: stronger network anonymity properties
+  - **bundled Tor requires its co-located runtime libraries.** The Tor Expert Bundle binary has no RUNPATH/RPATH and NEEDs shared libs (e.g. `libevent-2.1.so.7` on Linux, `*.dylib` on macOS) that are missing from system paths on many machines. `scripts/download-tor.sh` copies those sibling libs into `resources/tor/<platform>/` next to the binary, and `TorManager` prepends that directory to `LD_LIBRARY_PATH` (Linux) / `DYLD_LIBRARY_PATH` (macOS) when spawning Tor so they resolve; Windows resolves bundled DLLs next to the `.exe` natively. electron-builder's `extraResources` (`filter: **/*`) ships the whole directory, so the libs land beside the binary in the packaged app. **Do not "clean up" these libs** — deleting them breaks anonymous mode on any host lacking them in system paths.
 
 #### 2.2 No-bridge rule
 

@@ -128,9 +128,27 @@ export class TorManager {
       }
     }
 
+    // The bundled Tor binary has NO RUNPATH/RPATH and NEEDs co-located runtime
+    // libraries (e.g. libevent-2.1.so.7 on Linux, *.dylib on macOS) that ship
+    // beside it via scripts/download-tor.sh. Point the dynamic linker at the
+    // binary's own directory so those libs are found even when they're absent
+    // from system paths. Windows resolves DLLs next to the .exe natively.
+    const torBinaryDir = path.dirname(torBinaryPath);
+    const spawnEnv: NodeJS.ProcessEnv = { ...process.env };
+    const prependLibPath = (key: string) => {
+      const existing = spawnEnv[key];
+      spawnEnv[key] = existing ? `${torBinaryDir}${path.delimiter}${existing}` : torBinaryDir;
+    };
+    if (process.platform === 'linux') {
+      prependLibPath('LD_LIBRARY_PATH');
+    } else if (process.platform === 'darwin') {
+      prependLibPath('DYLD_LIBRARY_PATH');
+    }
+
     this.torProcess = spawn(torBinaryPath, ['-f', torrcPath], {
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: false,
+      env: spawnEnv,
     });
 
     this.torProcess.on('error', (err) => {

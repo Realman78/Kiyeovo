@@ -125,6 +125,15 @@ download_tor() {
         if [[ -n "$tor_binary" ]]; then
             cp "$tor_binary" "$target_dir/tor.exe"
             echo -e "${GREEN}Copied tor.exe to $target_dir${NC}"
+
+            # Copy any DLLs the bundle ships beside the .exe. Windows resolves
+            # DLLs next to the executable natively, so no lib-path env is needed
+            # at runtime, but the DLLs themselves must be present.
+            local win_tor_dir=$(dirname "$tor_binary")
+            find "$win_tor_dir" -maxdepth 1 -name "*.dll" -exec cp {} "$target_dir/" \; 2>/dev/null || true
+            if ls "$target_dir"/*.dll 1> /dev/null 2>&1; then
+                echo -e "${GREEN}Copied bundled runtime DLLs${NC}"
+            fi
         fi
     else
         # Try common locations in Tor Expert Bundle
@@ -141,12 +150,27 @@ download_tor() {
             chmod +x "$target_dir/tor"
             echo -e "${GREEN}Copied tor to $target_dir${NC}"
 
+            local tor_dir=$(dirname "$tor_binary")
+
+            # Copy the runtime libraries the bundle ships BESIDE the binary. The
+            # bundled tor has no RUNPATH/RPATH and NEEDs these co-located libs
+            # (e.g. libevent-2.1.so.7 on Linux) which are absent from system
+            # paths on many machines. tor-manager.ts points LD_LIBRARY_PATH /
+            # DYLD_LIBRARY_PATH at this dir at spawn time so they're resolved.
+            # maxdepth 1 keeps this to direct siblings (skips pluggable_transports).
+            if [[ "$platform" == linux-* ]]; then
+                # Copy every shared object shipped next to the binary (*.so, *.so.N...).
+                find "$tor_dir" -maxdepth 1 -name "*.so*" -exec cp -P {} "$target_dir/" \; 2>/dev/null || true
+                if ls "$target_dir"/*.so* 1> /dev/null 2>&1; then
+                    echo -e "${GREEN}Copied bundled runtime libraries${NC}"
+                fi
+            fi
+
             # Also copy required libraries for macOS and sign copied artifacts.
             if [[ "$platform" == darwin-* ]]; then
-                local tor_dir=$(dirname "$tor_binary")
-                # Copy any dylib files
-                find "$tor_dir" -name "*.dylib" -exec cp {} "$target_dir/" \; 2>/dev/null || true
-                if ls "$target_dir"/*.dylib 1> /dev/null 2>&1; then
+                # Copy any dylib files (including versioned *.dylib.N siblings).
+                find "$tor_dir" -maxdepth 1 -name "*.dylib*" -exec cp -P {} "$target_dir/" \; 2>/dev/null || true
+                if ls "$target_dir"/*.dylib* 1> /dev/null 2>&1; then
                     echo -e "${GREEN}Copied required libraries${NC}"
                 fi
 
@@ -155,10 +179,10 @@ download_tor() {
                 fi
 
                 if command -v codesign &> /dev/null; then
-                    if ls "$target_dir"/*.dylib 1> /dev/null 2>&1; then
+                    if ls "$target_dir"/*.dylib* 1> /dev/null 2>&1; then
                         while IFS= read -r dylib; do
                             codesign --force --sign - --timestamp=none "$dylib"
-                        done < <(find "$target_dir" -maxdepth 1 -name "*.dylib" -type f)
+                        done < <(find "$target_dir" -maxdepth 1 -name "*.dylib*" -type f)
                     fi
                     codesign --force --sign - --timestamp=none "$target_dir/tor"
                     codesign --verify --verbose=1 "$target_dir/tor" >/dev/null 2>&1 || true
