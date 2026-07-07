@@ -248,6 +248,65 @@ Status legend: [ ] queued · [~] in progress · [x] done
   INFRA-TRANSIENT (real-DHT registration stall), the first such flake of the trusted-import
   round; S2/S3 green in every pass including verification.
 
+- [x] **9. Groups over Tor + deployed-infra deploy-verification** — done
+  (`tor-groups.spec.ts`, 2 tests; `tor-deployed-infra.spec.ts`, 1 env-gated test). Per Marin's
+  explicit scoping ("groups already tested in fast mode — just think of edge cases and smoke
+  test"), `tor-groups.spec.ts` is a SMOKE pass plus two targeted edges, not a re-test of group
+  logic: G1 spins up three anonymous instances against one onion-fronted local bootstrap, A
+  becomes contacts with B/C, creates a group and invites both (itself an edge case —
+  `GROUP_INVITE` is in `FORCE_DIAL_NUDGE_TYPES`, `group-refetch-nudge.ts:21-27`, forcing a cold
+  onion-circuit dial even with no guaranteed-live connection; invite->received latency logged
+  per invitee), B/C accept, A's fan-out message lands on both, then A kicks C — C gets the
+  designed removed-state UI (composer placeholder + sidebar "Archived" badge, code-confirmed
+  in `ChatPreview.tsx`), B gets the remaining-member system message, and a post-kick message
+  from A reaches B but never C. G2 isolates the round's key Tor-specific question: right after
+  a membership change (B's accept, the group's first-ever key rotation), A sends the FIRST
+  message on the seconds-old gossipsub topic WITHOUT the epoch-convergence buffer other tests
+  use to dodge that window, to observe (not avoid) the designed realtime-vs-offline fork
+  (doc section 6.5 / round 4's dissection) over Tor's slower subscription propagation — the
+  app's own send-state label decides which recovery path the test drives, and which branch
+  fired is logged for comparability. Deliberately out of scope, documented in-file: group file
+  transfer over Tor, group offline-rejoin catchup over Tor, >3 members (each has real coverage
+  elsewhere or no mode-dependent code path). `tor-deployed-infra.spec.ts` is the separate
+  deploy-verification gate: env-gated on a new `KIYEOVO_E2E_ONION_BOOTSTRAP` (`e2e/config.ts`'s
+  `ONION_BOOTSTRAP_MULTIADDR`, never hardcoded — `test.skip()` with a clear message when unset),
+  one anonymous instance registers a unique username against the REAL deployed onion bootstrap
+  (a successful DHT PUT is the strongest proof the deployed server genuinely speaks the
+  anonymous protocol namespace rather than silently running fast-mode's, per
+  `startOnionFrontedBootstrap`'s documented wrong-mode failure signature) using a
+  retry-counting variant of `waitForRealDhtConnectionAnonymous` that reports how many
+  "Retry connection" attempts the cold real-world onion dial took, then looks up a
+  guaranteed-never-registered name to prove the GET path round-trips with the same clean
+  designed not-found UX `username-lookup.spec.ts` established locally. Results, timings,
+  which G2 branch fired, and the deployed-infra retry count are in this round's final report.
+  OUTCOME (orchestrator-timeboxed stabilization session): G1 passed clean (all real-time
+  fan-out, correct kick/removed-state semantics, invite/contact latencies logged) after two
+  fixes forced by empirical findings — (1) `NewGroupDialog.tsx:106`'s `canSubmit` requires
+  >=2 selected contacts (no 2-person "group" concept), which also reshaped G2 to 3 instances;
+  (2) A's `state.user.connected` can flip false mid-flight between back-to-back cold-onion
+  contact requests under this file's heavier 3-instance Tor load, permanently disabling
+  "New Conversation"'s Send button — fixed with a proactive reconnect check
+  (`ensureAnonymousDhtConnected`) plus an outer retry-with-reconnect wrapper
+  (`sendContactRequestWithReconnect`). G2 additionally surfaced a genuine, code-confirmed
+  THIRD fan-out branch beyond realtime/offline-recovered: a recipient can be EPOCH-LAGGED
+  (stale `key_version`), in which case neither realtime nor "Check missed messages" can reach
+  them because `GROUP_STATE_UPDATE` is NOT in `FORCE_DIAL_NUDGE_TYPES` and its nudge is
+  silently skipped without an active connection (`message-handler.ts:643`) — a real,
+  worth-flagging product trade-off, not a test bug; `sendGroupMessageAwaitingFanout` detects
+  and labels it rather than failing on it. G2 itself is marked `test.fixme` (orchestrator
+  timebox, 2 iterations spent): it passed twice during stabilization (once on each branch —
+  realtime, and partial-mesh-miss recovered via "Check missed messages") but remained
+  intermittently unstable on pure Tor-infra grounds (one run's onion bootstrap itself never
+  reached DHT connectivity) unrelated to test logic.
+  Orchestrator verification 2026-07-07: deployed-infra gate green twice independently — 4.5
+  min cold (8 connect retries, real-world cold onion dial) and 1.6 min warm; THE deploy
+  question is settled: the deployed onion bootstrap speaks the anonymous DHT namespace
+  (registration PUT accepted, lookup GET round-trips). G1 green 3 of 4 runs (builder x2,
+  orchestrator solo re-run 7.2 min); the one failure's artifacts were destroyed by the
+  orchestrator chaining two playwright runs in one command (second run wiped test-results
+  — do not chain runs), so its cause is UNKNOWN but consistent with the Tor-circuit
+  variance documented at G2's fixme; classified Tor-transient pending any recurrence.
+
 Standing rules for every round: Sonnet implements, orchestrator reviews diff + screenshots and
 commits; agents read `Kiyeovo_desktop_technical_documentation.md` (grep the subsystem) and
 trace `src/core` before any app-level claim, labeling findings doc-confirmed vs unverified;

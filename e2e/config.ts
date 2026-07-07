@@ -80,6 +80,22 @@ export const TURN_SERVER = (
 export const USE_LOCAL_BOOTSTRAP = process.env.KIYEOVO_E2E_LOCAL_BOOTSTRAP === '1';
 
 /**
+ * Round 9 (tor-deployed-infra.spec.ts, the deploy-verification gate): the
+ * REAL, deployed anonymous-mode onion bootstrap's full client multiaddr
+ * (`/onion3/<56-char-host>:9000/p2p/<peerId>` — same shape
+ * e2e/tor.ts's startOnionFrontedBootstrap mints for the throwaway local one).
+ * Carried only in e2e/e2e.env.local (gitignored via the repo's "*.local"
+ * rule, loaded above) or a real env var — NEVER hardcoded here, unlike
+ * BOOTSTRAP_MULTIADDR's fast-mode default above, because this address
+ * identifies a specific operator-run anonymous-mode server rather than a
+ * value safe to bake into a public repo. `undefined` when unset; callers
+ * (tor-deployed-infra.spec.ts) must `test.skip()` rather than assume a
+ * fallback — there is no throwaway-local substitute for "prove the real
+ * deployed infra speaks the anonymous protocol namespace".
+ */
+export const ONION_BOOTSTRAP_MULTIADDR = process.env.KIYEOVO_E2E_ONION_BOOTSTRAP;
+
+/**
  * Port-range registry (grep for "PORT RANGES" to find this again).
  *
  * playwright.config.ts keeps `fullyParallel: false`, so tests *within* one
@@ -109,6 +125,8 @@ export const USE_LOCAL_BOOTSTRAP = process.env.KIYEOVO_E2E_LOCAL_BOOTSTRAP === '
  * | username-lookup.spec.ts     | 9181-9189       | 20411-20419 (explicit — scenarios D/E always spin up their own local bootstraps regardless of USE_LOCAL_BOOTSTRAP, to control DHT-record liveness precisely; only 20411-20413 currently used, room left in the block) |
  * | tor-mode.spec.ts            | 9191-9199 (anonymous-mode libp2p listen ports) | 20421-20429 (onion-fronted local bootstrap TCP ports — see e2e/tor.ts's startOnionFrontedBootstrap; only 20421-20422 currently used) — ALSO owns its own bundled-Tor-daemon SocksPort/ControlPort pairs, a range no other spec file touches: 9561/9562 (instance A) and 9563/9564 (instance B), plus the fronting tor itself (SocksPort 0 — binds nothing) |
  * | trusted-import.spec.ts      | 9201-9209 (S1/S2 fast-mode + S3 anonymous-mode libp2p listen ports, mixed in one file) | 20431-20439 (S3's onion-fronted local bootstrap TCP port; only 20431 currently used — following tor-mode.spec.ts's row as the example) — ALSO owns its own bundled-Tor-daemon SocksPort/ControlPort pairs, a range no other spec file touches: 9571/9572 (instance A) and 9573/9574 (instance B) |
+ * | tor-groups.spec.ts          | 9211-9219 (anonymous-mode libp2p listen ports; G1 uses 9211-9213 for A/B/C, G2 uses 9214-9216 for its OWN A/B/C — see the file's G2 finding note: NewGroupDialog requires >=2 invitees, so G2 could not stay a leaner two-instance test as originally planned) | 20441-20449 (onion-fronted local bootstrap TCP ports; G1 uses 20441, G2 uses 20442) — ALSO owns its own bundled-Tor-daemon SocksPort/ControlPort pairs, a range no other spec file touches: 9575/9576 (instance A), 9577/9578 (instance B), 9579/9580 (instance C — G1 and G2 both reuse the same three pairs since tests within a file never run concurrently) |
+ * | tor-deployed-infra.spec.ts  | 9221 (anonymous-mode libp2p listen port) | none — this file targets the real DEPLOYED onion bootstrap (KIYEOVO_E2E_ONION_BOOTSTRAP) and spins up no local bootstrap of its own, onion-fronted or otherwise | — ALSO owns its own bundled-Tor-daemon SocksPort/ControlPort pair, a range no other spec file touches: 9581/9582 |
  *
  * Adding a new spec file: pick an unused p2pPort block (leave a gap of at
  * least 10 for headroom) and, if it calls startBootstrapNode() with no
