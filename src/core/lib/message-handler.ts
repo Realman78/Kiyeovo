@@ -48,7 +48,8 @@ import {
   MESSAGE_TIMEOUT,
   SESSION_MANAGER_CLEANUP_INTERVAL,
   BUCKET_NUDGE_COOLDOWN_MS,
-  BUCKET_NUDGE_DIAL_TIMEOUT_MS,
+  BUCKET_NUDGE_DIAL_TIMEOUT_FAST_MS,
+  BUCKET_NUDGE_DIAL_TIMEOUT_ANONYMOUS_MS,
   BUCKET_NUDGE_FETCH_DELAY_MS,
   DIRECT_OFFLINE_REFETCH_DELAY_MS,
   DIRECT_OFFLINE_INBOX_RECOVERY_COOLDOWN_MS,
@@ -220,6 +221,9 @@ export class MessageHandler {
   private groupAckRepublisher: GroupAckRepublisher;
   private groupInfoRepublisher: GroupInfoRepublisher;
   private readonly bucketNudgeProtocol: string;
+  // Per-stage stream-open budget for bucket nudges, resolved once from the session
+  // mode (fast: 5s; anonymous: 20s, for cold Tor onion circuits). See constants.
+  private readonly bucketNudgeDialTimeoutMs: number;
   private readonly chatProtocol: string;
   private readonly callSignalProtocol: string;
   private readonly expectedOfflineBucketPrefix: string;
@@ -336,6 +340,9 @@ export class MessageHandler {
     const sessionNetworkMode = database.getSessionNetworkMode();
     const modeConfig = getNetworkModeRuntime(sessionNetworkMode).config;
     this.bucketNudgeProtocol = modeConfig.bucketNudgeProtocol;
+    this.bucketNudgeDialTimeoutMs = sessionNetworkMode === NETWORK_MODES.ANONYMOUS
+      ? BUCKET_NUDGE_DIAL_TIMEOUT_ANONYMOUS_MS
+      : BUCKET_NUDGE_DIAL_TIMEOUT_FAST_MS;
     this.chatProtocol = modeConfig.chatProtocol;
     this.callSignalProtocol = modeConfig.callSignalProtocol;
     this.expectedOfflineBucketPrefix = `${modeConfig.dhtNamespaces.offline}/`;
@@ -695,7 +702,7 @@ export class MessageHandler {
               `connId=${conn.id} remoteAddr=${conn.remoteAddr.toString()} protocol=${this.bucketNudgeProtocol}`,
             );
             stream = await conn.newStream(this.bucketNudgeProtocol, {
-              signal: AbortSignal.timeout(BUCKET_NUDGE_DIAL_TIMEOUT_MS),
+              signal: AbortSignal.timeout(this.bucketNudgeDialTimeoutMs),
               runOnLimitedConnection: true,
             });
             streamSource = 'reuse';
@@ -718,10 +725,10 @@ export class MessageHandler {
           const targetPeerId = peerIdFromString(peerId);
           log(
             `[NUDGE][DIAL][START] attempt=${attemptId} peer=${peerId.slice(-8)} protocol=${this.bucketNudgeProtocol} ` +
-            `timeoutMs=${BUCKET_NUDGE_DIAL_TIMEOUT_MS}`,
+            `timeoutMs=${this.bucketNudgeDialTimeoutMs}`,
           );
           stream = await this.node.dialProtocol(targetPeerId, this.bucketNudgeProtocol, {
-            signal: AbortSignal.timeout(BUCKET_NUDGE_DIAL_TIMEOUT_MS),
+            signal: AbortSignal.timeout(this.bucketNudgeDialTimeoutMs),
             runOnLimitedConnection: true,
           });
           const dialMs = Date.now() - dialStartedAt;

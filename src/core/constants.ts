@@ -138,7 +138,17 @@ export const HOUR = 60 * MINUTE;
 export const DAY = 24 * HOUR;
 
 export const BUCKET_NUDGE_COOLDOWN_MS = 5 * SECOND;
-export const BUCKET_NUDGE_DIAL_TIMEOUT_MS = 5 * SECOND;
+// Per-stage budget for opening the bucket-nudge stream (both the connection-reuse
+// newStream and the fresh dialProtocol fallback). Mode-aware: 5s is fine over a
+// warm fast-mode connection, but a cold/slow Tor onion circuit routinely needs
+// 10-30s to build — a 5s cap aborts mid-handshake and the nudge's frames can land
+// on the recipient long after the sender gave up (a reset the recipient then reads
+// as a failure). Anonymous mode matches the codebase's other Tor budgets
+// (ANONYMOUS_BOOTSTRAP_ADDRESS_TIMEOUT_MS = 20s, file-pull first-frame anon = 30s).
+// Worst case reuse+dial run serially = 2× this, but the send is fire-and-forget
+// (see sendBucketNudge) so it blocks nothing user-facing.
+export const BUCKET_NUDGE_DIAL_TIMEOUT_FAST_MS = 5 * SECOND;
+export const BUCKET_NUDGE_DIAL_TIMEOUT_ANONYMOUS_MS = 20 * SECOND;
 export const BUCKET_NUDGE_FETCH_DELAY_MS = 4 * SECOND;
 export const DIRECT_OFFLINE_REFETCH_DELAY_MS = 500;
 export const DIRECT_OFFLINE_INBOX_RECOVERY_COOLDOWN_MS = 5 * SECOND;
