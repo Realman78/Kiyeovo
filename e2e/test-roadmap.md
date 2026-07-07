@@ -356,6 +356,49 @@ Status legend: [ ] queued · [~] in progress · [x] done
   — do not chain runs), so its cause is UNKNOWN but consistent with the Tor-circuit
   variance documented at G2's fixme; classified Tor-transient pending any recurrence.
 
+- [x] **10. Group-rotation force-dial nudge** — `group-rotation-nudge.spec.ts`, 4 tests (3
+  passing, R3 `test.fixme`), regression coverage for 7dc137f ("Force-dial the bucket nudge for
+  GROUP_STATE_UPDATE" — GROUP_STATE_UPDATE joined GROUP_INVITE/GROUP_KICK/GROUP_INVITE_RESPONSE
+  in `FORCE_DIAL_NUDGE_TYPES`, group-refetch-nudge.ts:21-38). R1 (fast): creator C relaunches
+  (fresh libp2p node, same profile) and kicks M1 within ~150-250ms of unlock, before any dial to
+  M2 could plausibly have happened; M2 sees the removal with no manual action and messaging
+  resumes. **Honest finding on the nudge branch, reported as instructed rather than papered
+  over**: across every fast-mode run (multiple), C observed `peerConnections=1` at
+  `[NUDGE][SEND][START]` for M2 — the `existing_connection_reuse` branch, not `forced_dial` —
+  because this box's tiny (3-4-peer) local-bootstrap network reconnects via kad-dht's own
+  self-bootstrap routing-table population so fast (sub-200ms) that the "genuinely zero
+  connections" window is effectively unwinnable from fast-mode UI-only timing; the fix's own
+  unit tests already cover the force-dial code path directly, and R3 (below) was designed
+  specifically to give the forced-dial branch a fair, slower-dial environment to fire in. R2
+  (fast): M2 is fully CLOSED (process gone) while C kicks M1 — C's forced dial genuinely fails
+  (`[NUDGE][SEND_FAIL] ... ECONNREFUSED ... peerConnections=0`, captured verbatim, no crash) —
+  and a RELAUNCHED M2 heals automatically via `Main.tsx`'s `syncRecentOfflineMessages` startup
+  effect (code-confirmed: fires unconditionally once `canFetchOffline` flips true, no code path
+  requires a manual click). **Second finding, code-confirmed via live DEBUG_MODE logs and fixed
+  in-test rather than filed separately**: the automatic resync path applies the roster/key_version
+  update correctly (observed ~1.3s from offline-check start to `[GROUP][STATE_UPDATE][APPLY]`)
+  but — because it runs with `isResync: true` — `appendMembershipSystemMessage` is deliberately
+  skipped (group-responder.ts:650/657, pre-existing gating unrelated to 7dc137f), so a relaunched
+  member who missed a kick gets NO visible "X was removed" notification in their chat timeline,
+  only a silently-updated member list; R2 asserts the roster/key_version directly instead of the
+  (by-design-absent) system message, and logs the absence explicitly as a UX gap worth
+  Marin's attention. R4 (fast smoke): kick M1 then immediately re-invite M1 via
+  InviteUsersDialog's fresh "Invite" action (not the pending-only "Re-invite" button, which
+  throws for a non-pending peer — code-confirmed no kicked/banned tracking exists anywhere,
+  `chat_participants` is fully deleted/reinserted every rotation) — creator stays responsive
+  through the churn (sends and sees its own message immediately after both dialogs close) and
+  M2, present for both rotations, converges on the final epoch with a correct roster. R3 (Tor,
+  same shape as R1): marked `test.fixme` per this round's own explicit escape hatch — three
+  consecutive attempts each failed in generic/shared Tor-onboarding infrastructure (fronting-tor
+  bootstrap stall, DHT-connectivity timeout, first-run-guide-visibility timeout — three different
+  symptoms in code this file doesn't own, already proven working by every other Tor spec) before
+  this test's own logic ever ran; matches tor-groups.spec.ts's own documented Tor-daemon
+  contention finding for this box. Full fast-mode pass (R1+R2+R4): 2.9 min, pgrep-verified no
+  leftover electron/Xvfb/bootstrap-node/tor processes after every run. New port range:
+  `group-rotation-nudge.spec.ts` p2pPorts 9231-9239, local-bootstrap 20451 (fast)/20452 (Tor
+  onion-fronted), Tor daemon pairs 9585/9586, 9587/9588, 9589/9590 — see e2e/config.ts's PORT
+  RANGES table.
+
 Standing rules for every round: Sonnet implements, orchestrator reviews diff + screenshots and
 commits; agents read `Kiyeovo_desktop_technical_documentation.md` (grep the subsystem) and
 trace `src/core` before any app-level claim, labeling findings doc-confirmed vs unverified;
