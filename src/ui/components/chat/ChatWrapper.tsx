@@ -129,12 +129,13 @@ const ChatWrapper = ({ active = true }: { active?: boolean }) => {
     ? `${groupCreatorLinkState.creatorName} (${groupCreatorLinkState.creatorPeerId})`
     : groupCreatorLinkState.creatorPeerId;
 
-  const isOfflineInboxExpanded = activeChat ? !!offlineInboxExpandedByChatId[activeChat.id] : false;
+  const canShowOfflineInbox = activeChat?.type === 'direct';
+  const isOfflineInboxExpanded = activeChat && canShowOfflineInbox ? !!offlineInboxExpandedByChatId[activeChat.id] : false;
   const isPendingFileInboxExpanded = activeChat ? !!pendingFileInboxExpandedByChatId[activeChat.id] : false;
   const isBottomOverlayExpanded = isOfflineInboxExpanded || isPendingFileInboxExpanded;
 
   const toggleOfflineInbox = useCallback(() => {
-    if (!activeChat) return;
+    if (!activeChat || activeChat.type !== 'direct') return;
     setOfflineInboxExpandedByChatId((prev) => ({
       ...prev,
       [activeChat.id]: !prev[activeChat.id],
@@ -158,7 +159,7 @@ const ChatWrapper = ({ active = true }: { active?: boolean }) => {
   }, [activeChat, dispatch]);
 
   const openOfflineInbox = useCallback(() => {
-    if (!activeChat) return;
+    if (!activeChat || activeChat.type !== 'direct') return;
     setOfflineInboxExpandedByChatId((prev) => {
       if (prev[activeChat.id]) {
         return prev;
@@ -901,11 +902,13 @@ const ChatWrapper = ({ active = true }: { active?: boolean }) => {
               {activeChat && (
                 <div className="pointer-events-none absolute bottom-full left-0 z-30">
                   <div className="pointer-events-auto flex items-end gap-0">
-                    <OfflineInboxCapacity
-                      chatId={activeChat.id}
-                      expanded={isOfflineInboxExpanded}
-                      onToggle={toggleOfflineInbox}
-                    />
+                    {activeChat.type === 'direct' && (
+                      <OfflineInboxCapacity
+                        chatId={activeChat.id}
+                        expanded={isOfflineInboxExpanded}
+                        onToggle={toggleOfflineInbox}
+                      />
+                    )}
                     <PendingFileInboxIndicator
                       chatId={activeChat.id}
                       chatType={activeChat.type}

@@ -475,7 +475,7 @@ Primary categories:
 
 3. Group offline stores
    - sender buckets per group and epoch
-   - local UX capacity view shows only the current sender epoch (the bucket the next group message would use)
+   - local capacity snapshots track only the current sender epoch (the bucket the next group message would use), but group chats do not show the direct-chat offline inbox capacity panel
    - group fullness is tracked by both message count and compressed store size (`64 KiB` app-level cap), and validator/selector/update paths reject oversized compressed records before gunzip/JSON parsing
 
 4. Group info records
@@ -980,7 +980,8 @@ Wake/resume behavior:
 - recent-chat offline sync preserves renderer-local unread counts and transient offline-fetch flags when it refreshes the chat list from the database, and overlapping reconnect/wake syncs use a renderer generation guard so an older run cannot apply a stale chat snapshot after a newer run has started
 
 Offline inbox capacity panel behavior:
-- the panel auto-opens for confirmed offline delivery, full-inbox errors, or explicit user open; it does not auto-open for the provisional non-blocking `sending` state before a direct message has actually fallen back to offline
+- the panel is a direct-chat UI only; group chats do not show it because group offline storage is a rolling catch-up backup window, not a recipient inbox with user-actionable capacity
+- in direct chats, the panel auto-opens for confirmed offline delivery, full-inbox errors, or explicit user open; it does not auto-open for the provisional non-blocking `sending` state before a direct message has actually fallen back to offline
 
 Pending file manager behavior:
 - the pending-file manager is separate from the offline inbox capacity panel because it reflects local recipient-side file-offer slots, not DHT bucket slots
