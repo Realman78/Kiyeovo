@@ -1,9 +1,8 @@
 import { useState } from "react";
-import { useDispatch, useSelector } from "react-redux";
+import { useDispatch } from "react-redux";
 import { Button } from "../../ui/Button";
 import { removeContactAttempt } from "../../../state/slices/chatSlice";
 import { useToast } from "../../ui/use-toast";
-import type { RootState } from "../../../state/store";
 import { errStr } from '../../../../core/utils/general-error';
 import { UNEXPECTED_ERROR } from "../../../constants";
 
@@ -13,19 +12,17 @@ type InvitationManagerProps = {
 
 export const InvitationManager = ({peerId}: InvitationManagerProps) => {
     const dispatch = useDispatch();
-    const isRegistered = useSelector((state: RootState) => state.user.registered);
-    const registrationInProgress = useSelector((state: RootState) => state.user.registrationInProgress);
     const [error, setError] = useState<string | undefined>(undefined);
     const [isAccepting, setIsAccepting] = useState(false);
     const [isRejecting, setIsRejecting] = useState(false);
     const { toast } = useToast();
 
+    // Accepting an inbound contact request does NOT require the acceptor to be
+    // registered: the acceptor's key-exchange response uses its (fallback)
+    // username and locally-derived keys, the initiator verifies it against the
+    // signing key it already resolved for us, and finalization creates a
+    // self-owned chat (a self-row is always present — see UsernameRegistry).
     const handleAccept = async () => {
-        if (!isRegistered || registrationInProgress) {
-            toast.warning('Finish registration first, then accept this contact request.');
-            return;
-        }
-
         setError(undefined);
         setIsAccepting(true);
 

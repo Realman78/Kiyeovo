@@ -815,11 +815,10 @@ function setupContactRequestHandlers(
       if (!p2pCore) {
         return { success: false, error: 'P2P core not initialized' };
       }
-      const currentUsername = p2pCore.usernameRegistry.getCurrentUsername();
-      if (!currentUsername) {
-        return { success: false, error: 'Finish registration first, then accept this contact request.' };
-      }
-
+      // Accepting a contact request does not require registration: the
+      // responder answers with its fallback username and locally-derived keys,
+      // and finalization creates a self-owned chat (the self-row is always
+      // present). See UsernameRegistry.ensureSelfUserRow / InvitationManager.
       log(`[IPC] Accepting contact request from peer: ${peerId}`);
       p2pCore.messageHandler.getKeyExchange().acceptPendingContact(peerId);
 

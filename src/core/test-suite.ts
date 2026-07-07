@@ -13,6 +13,7 @@ import './lib/file-handler.test.js';
 import './lib/blocking-enforcement.test.js';
 import './network/reconnect-controller.test.js';
 import './db/database.file-offer.test.js';
+import './db/database.trusted-import.test.js';
 import './identity/encrypted-user-identity.test.js';
 import './identity/profile-manager.test.js';
 import '../electron/dialog-path-grants.test.js';

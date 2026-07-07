@@ -12,6 +12,7 @@ import {
     completeIceStep,
     finishWizard,
     sendChatMessage,
+    sendContactRequest,
     timedStage,
     readPeerId,
 } from './onboard';
@@ -24,149 +25,158 @@ import {
 import { BOOTSTRAP_MULTIADDR, RELAY_MULTIADDR, STUN_URL, uniqueRunSuffix } from './config';
 
 // Round 8 of e2e/test-roadmap.md: trusted profile import/export (out-of-band
-// onboarding). ZERO prior e2e coverage in any mode before this file.
+// onboarding). RESHAPED after a fix landed for both of this file's two
+// original findings (which were reproduced as real failures against the
+// pre-fix build — see e2e/test-roadmap.md's round-8 entry for that original
+// narrative, kept there rather than duplicated here). This version asserts
+// the FIXED behavior, plus one surviving-by-design asymmetry.
 //
 // MANDATORY READING done before writing anything below: e2e/README.md,
 // e2e/config.ts's PORT RANGES table, e2e/electron.ts, e2e/onboard.ts,
-// e2e/bootstrap-node.ts, e2e/tor.ts, tor-mode.spec.ts, username-lookup.spec.ts;
-// Kiyeovo_desktop_technical_documentation.md lines ~145-165 (trusted profile
-// section); src/core/identity/profile-manager.ts (ProfileManager.
-// exportProfileDesktop/importTrustedUser), src/core/db/database.ts
-// (createTrustedDirectContact's one-transaction insert), src/core/lib/
-// message-handler.ts (maybeUpgradeTrustedOutOfBandChat, sendMessage's
-// initialUser/offline-bucket branch), src/core/direct/key-exchange.ts
-// (initiateKeyExchange, authorizeContactRequest, resolveContactRequestSenderFromDht),
-// src/core/transport/protocol-dialer.ts (dialProtocolWithRelayFallback), plus
-// the UI: src/ui/components/sidebar/profile/ExportDialog.tsx (+ ProfilePage.tsx,
-// which mounts it — reachable via the sidebar rail's "Profile" tab) and
+// e2e/bootstrap-node.ts, e2e/tor.ts, tor-mode.spec.ts, username-lookup.spec.ts,
+// two-peer.spec.ts; Kiyeovo_desktop_technical_documentation.md lines ~145-165
+// (trusted profile section); src/core/identity/profile-manager.ts
+// (ProfileManager.exportProfileDesktop/importTrustedUser), src/core/db/
+// database.ts (createTrustedDirectContact's one-transaction insert),
+// src/core/lib/message-handler.ts (maybeUpgradeTrustedOutOfBandChat,
+// sendMessage's initialUser/offline-bucket branch), src/core/direct/
+// key-exchange.ts (initiateKeyExchange, authorizeContactRequest,
+// resolveContactRequestSenderFromDht), src/core/transport/protocol-dialer.ts
+// (dialProtocolWithRelayFallback), src/core/username/username-registry.ts
+// (the FIX: `ensureSelfUserRow`, called from `initialize()`), plus the UI:
+// src/ui/components/sidebar/profile/ExportDialog.tsx (+ ProfilePage.tsx,
+// which mounts it — reachable via the sidebar rail's "Profile" tab),
 // src/ui/components/sidebar/header/ImportTrustedUserDialog.tsx (reachable via
-// SidebarHeader's "+" dropdown -> "Add user from file").
+// SidebarHeader's "+" dropdown -> "Add user from file"), and
+// src/ui/components/chat/input/InvitationManager.tsx (the FIX: handleAccept's
+// `isRegistered` early-return removed), src/electron/ipc-handlers.ts (the FIX:
+// setupContactRequestHandlers' accept handler's matching `isRegistered` check
+// removed).
 //
 // Every claim below is labeled doc-confirmed / code-confirmed / unverified.
 //
-// --- MAJOR FINDINGS (both empirically reproduced, then code-traced; they
-// drive S1's and S3's shapes) ---
-// The doc (line ~157) says export "does not require registration ... so a
-// peer can export and be reachable out-of-band without ever publishing a DHT
-// username". In the current build that story breaks on BOTH ends:
+// --- THE FIX (both halves code-confirmed against the working-tree diff) ---
+// FIX #1 — `UsernameRegistry.ensureSelfUserRow()` (username-registry.ts,
+// called from `initialize()` before any registration decision is made) now
+// seeds a minimal self-row into `users` (fallback username `user_<last8>`,
+// real signing/offline public keys, no signature) for EVERY identity at
+// identity-ready time, registered or not — a no-op if a row already exists,
+// so a real registration's row is never clobbered. This satisfies every
+// chat-creation path's `assertUserExists(chat.created_by)` (`chat.created_by`
+// is always the local identity's own peer ID), which previously threw a raw
+// `User with peer_id '<own peer id>' not found in database` on an
+// unregistered identity's very first chat-creation call — including
+// `createTrustedDirectContact` (trusted import). An unregistered IMPORTER can
+// now import a trusted profile; S1/S3 below assert this directly (previously
+// reproduced here as a real failure).
+// FIX #2 — the `isRegistered` accept gates are REMOVED from both
+// `InvitationManager.tsx`'s `handleAccept` (previously an early return with
+// `toast.warning('Finish registration first, then accept this contact
+// request.')`) and `ipc-handlers.ts`'s contact-request accept handler
+// (previously `{ success: false, error: 'Finish registration first...' }`
+// whenever `!currentUsername`). An unregistered recipient of a contact
+// request can now ACCEPT it: the responder replies with its fallback
+// username (from FIX #1's self-row) and locally-derived keys, and
+// finalization creates a self-owned chat (FIX #1's self-row guarantees this
+// always succeeds). S1/S3/S4 below assert this directly. NOTE: FIX #2 only
+// ever gated the ACCEPT step, never delivery — a *never*-registered acceptor
+// is reachable only via S1/S3's pinned-key trusted-import flow, because a
+// cold plain-peer-ID send (S4's shape, no import) requires the sender to
+// resolve the target via a DHT record that only registering publishes (see
+// S4's own header comment for the code trail); S4 therefore has its acceptor
+// register-then-unregister rather than never register.
 //
-// FINDING #1 — an unregistered IMPORTER cannot import at all. The "Add user
-// from file" entry point is never gated behind `isRegistered` in the UI
-// (unlike "New Conversation", which explicitly is — SidebarHeader.tsx's
-// `handleShowNewConversationDialog` vs. `handleShowImportTrustedUserDialog`),
-// and neither the doc nor the dialog warns about registration — yet a
-// genuinely-unregistered importer's FIRST-EVER import always fails, with a
-// raw, confusing, self-referential error: `User with peer_id '<the
-// IMPORTER'S OWN peer ID>' not found in database`. Root cause: EVERY
-// chat-creation path in `database.ts` — both the normal `createChat` (line
-// 1657) and `createTrustedDirectContact` (line 1675, used by trusted import)
-// — calls `assertUserExists(chat.created_by, mode)` where `chat.created_by`
-// is always the LOCAL identity's OWN peer ID, i.e. every chat-creation call
-// asserts the caller already has a `users` row for THEMSELVES. But nothing
-// in this app ever inserts a self-row into `users` except one path:
-// `UsernameRegistry.persistRegisteredUser` (username-registry.ts:539-566),
-// which only runs after a SUCCESSFUL username registration. `users` is
-// otherwise exclusively a contacts table (`insertUser`/`createUser`'s only
-// other call sites all pass a REMOTE peer's data — key-exchange.ts:331,1274,
-// 2744; group-responder.ts:474,631). So an unregistered identity has no
-// `users` row for itself at all, and `assertUserExists(self)` throws on its
-// very first chat-creation attempt of any kind.
-//
-// FINDING #2 — an unregistered EXPORTER cannot ACCEPT the resulting inbound
-// contact request. The export itself works unregistered (code-confirmed:
-// ProfileManager.exportProfileDesktop, profile-manager.ts:33-94, has no
-// registration check; empirically confirmed in S1/S3), and the importer's
-// contact request genuinely REACHES the unregistered exporter (receiving
-// runs `resolveContactRequestSenderFromDht(SENDER)`, key-exchange.ts:923-929
-// — it verifies the SENDER's registration, not the receiver's). But the
-// Accept button is UI-gated: InvitationManager.tsx's handleAccept (lines
-// 24-27) returns early with toast.warning('Finish registration first, then
-// accept this contact request.') whenever `!isRegistered`. So the exporter
-// can receive but never complete the contact.
-//
-// Net effect: the one feature explicitly pitched (doc + UI copy in
-// ProfilePage.tsx: "it works even if you never register a public username")
-// as usable without publishing a DHT username currently requires BOTH sides
-// to register before the chat becomes live — the only genuinely
-// registration-free steps are exporting the file and receiving/queuing the
-// inbound request. Finding #1 additionally surfaces as an opaque
-// internal-DB-shape error rather than any designed "please register first"
-// message (finding #2 at least has designed copy). S1 reproduces both with
-// real repros (not just code traces) before working around each by
-// registering at the moment the app actually forces it.
+// --- SURVIVING ASYMMETRY (code-confirmed, deliberate, NOT touched by the fix)
+// ---
+// The RECIPIENT of a contact request still verifies the SENDER's registration
+// via the sender's DHT username record: `authorizeContactRequest` ->
+// `resolveContactRequestSenderFromDht(remoteId, senderUsername)`
+// (key-exchange.ts ~923-929) runs on every inbound request regardless of the
+// recipient's own registration state, and a request from an unregistered
+// (unresolvable) sender is silently dropped (`Rejecting unresolved contact
+// request...`, logged, never surfaced to the sender as an error). So whichever
+// peer SENDS the first contact request (the importer in S1/S3's flow, since
+// the imported file lets the importer message first; the initiator in S4's
+// plain peer-ID flow) must still be registered before that first send, even
+// though the RECEIVER never needs to be. This is unrelated to either fixed
+// bug — it's `resolveContactRequestSenderFromDht` doing exactly its designed
+// job of proving the sender's claimed username is real — and every scenario
+// below documents it as the one registration step that still can't be
+// skipped.
 //
 // --- Scenario map ---
-// S1 (fast mode). A exports fully unregistered (that step IS registration-
-//   free, proven). B, also unregistered, first attempts the import to
-//   reproduce FINDING #1 with the exact error text, then registers and
-//   retries — now the import succeeds, (a) the resulting chat carries
-//   `trusted_out_of_band: true`, (b) shows the customName, (c) B's first
-//   message uses only the imported file's data for A's identity/keys — no
-//   DHT username lookup of A (code-confirmed: message-handler.ts:3009-3010's
-//   `getUserByPeerIdThenUsername` finds the locally-imported row before any
-//   lookup is attempted, and key-exchange.ts:591's
-//   `resolveRecipientOfflinePublicKeyBase64` checks the local DB row BEFORE
-//   falling back to `usernameRegistry.lookupByPeerId`) — and the request
-//   reaches the still-unregistered A. Then FINDING #2 is reproduced (A's
-//   Accept click only yields the "Finish registration first" toast), A
-//   registers, accepts, the message lands, and A replies — the chat is live
-//   both ways.
-// S2 (fast mode). Corrupted/truncated export file: ProfileManager.importProfile
-//   (profile-manager.ts:97-125) JSON.parses the file then AES-GCM-decrypts it
-//   (profile-manager.ts:237-260) BEFORE any database call is made at all, so a
-//   truncated/corrupted file fails at the decrypt step with the designed
-//   "Failed to decrypt profile - incorrect password or corrupted file" message
-//   (profile-manager.ts:258) and never reaches `createTrustedDirectContact`'s
-//   one-transaction insert (database.ts:1667-1682) — i.e. this failure mode
-//   demonstrates the RETRY half of doc line ~156 ("chat creation failure rolls
-//   back the contact insert and leaves retries clean") by construction: no
-//   partial state is ever written for a pre-transaction failure, so importing
-//   the ORIGINAL good file right after must succeed with no cleanup needed.
-//   Chosen over the "re-import an already-imported profile" alternative
-//   because it is the one that can actually be forced deterministically
-//   in-process (a corrupted byte), rather than needing a real mid-transaction
-//   failure (which would need a genuine `insertUser`/`insertChatWithParticipants`
-//   race — see the file's final-report notes on this). Both peers are fully
-//   REGISTERED in this scenario (unlike S1/S3) — deliberately, to keep this
-//   scenario about the corrupted-file/retry behavior only, not re-litigate
-//   the importer-registration finding above.
-// S3 (Tor mode, 12-min budget per the round-6 carryover). Two anonymous
-//   instances. The task's literal brief says "neither registers" — tried
-//   first, and (as expected from S1's finding, which is mode-agnostic: the
-//   `assertUserExists`/`persistRegisteredUser` code path has no fast/
-//   anonymous branching) B's import fails immediately with the same
-//   self-referential "not found in database" error, entirely LOCALLY, before
-//   any Tor dialing happens at all. B then registers (A, the exporter, stays
-//   unregistered through export, import, and the inbound dial — registering
-//   only at the very end, when finding #2's Accept gate forces it) and
-//   retries, to actually reach the round's KEY INVESTIGATION
-//   (traced in code before writing this test): the exported profile (UserProfilePlaintext,
+// S1 (fast mode). Both start fully unregistered. A (exporter) exports —
+//   registration-free, unaffected by either bug. B (importer), still
+//   unregistered, imports the file — FIX #1 in action: this now SUCCEEDS
+//   (previously: the self-referential DB error), producing a chat with
+//   `trusted_out_of_band: true` and the customName, using only the imported
+//   file's data for A's identity/keys (code-confirmed: message-handler.ts:
+//   3009-3010's `getUserByPeerIdThenUsername` finds the locally-imported row
+//   first; key-exchange.ts:591's `resolveRecipientOfflinePublicKeyBase64`
+//   checks the local DB row before falling back to
+//   `usernameRegistry.lookupByPeerId`) — B remains unregistered right through
+//   the import. B then registers ONLY because B is about to SEND the first
+//   message/contact request (the surviving asymmetry above), sends, and the
+//   request reaches A — still fully unregistered. A accepts UNREGISTERED —
+//   FIX #2 in action (previously: the "Finish registration first" toast made
+//   accepting impossible) — and the chat goes live both ways with A NEVER
+//   registering at any point in the test.
+// S2 (fast mode, unaffected by the fix). Corrupted/truncated export file:
+//   ProfileManager.importProfile (profile-manager.ts:97-125) JSON.parses the
+//   file then AES-GCM-decrypts it (profile-manager.ts:237-260) BEFORE any
+//   database call is made at all, so a truncated/corrupted file fails at the
+//   decrypt step with the designed "Failed to decrypt profile - incorrect
+//   password or corrupted file" message (profile-manager.ts:258) and never
+//   reaches `createTrustedDirectContact`'s one-transaction insert
+//   (database.ts:1667-1682) — i.e. this demonstrates the RETRY half of doc
+//   line ~156 ("chat creation failure rolls back the contact insert and
+//   leaves retries clean") by construction: no partial state is ever written
+//   for a pre-transaction failure, so importing the ORIGINAL good file right
+//   after must succeed with no cleanup needed. Both peers are REGISTERED here
+//   (unchanged by the fix — registering both is no longer NEEDED to dodge
+//   FIX #1's now-gone finding, but is kept anyway so this scenario stays
+//   about the corrupted-file/retry behavior only, not the registration gap).
+// S3 (Tor mode, 12-min budget per the round-6 carryover). Mirrors S1's shape
+//   over anonymous mode: both start unregistered, A exports over Tor, B
+//   imports over Tor while STILL unregistered (FIX #1, mode-agnostic —
+//   `ensureSelfUserRow` has no fast/anonymous branch), then registers only to
+//   send (the surviving asymmetry, also mode-agnostic). The round's KEY
+//   INVESTIGATION (traced in code, confirmed by the original repro before
+//   this reshape): the exported profile (UserProfilePlaintext,
 //   profile-manager.ts:51-61) carries username, peerId, signingPublicKey,
 //   offlinePublicKey, notificationsPublicKey, defaultInboxKey (=the shared
-//   secret), createdAt, signature — NO network address of any kind (no onion
-//   address, no multiaddr field at all). So when B dials A after import, the
-//   ONLY thing available is A's bare peer ID; the dial goes through
-//   dialProtocolWithRelayFallback -> `node.dialProtocol(targetPeerId, protocol)`
-//   (protocol-dialer.ts), which is libp2p's OWN kad-dht peer-routing
-//   (`findPeer`) resolving a PeerId to multiaddrs via the DHT routing table —
-//   a completely different mechanism from the app's own username-registry DHT
-//   records, and independent of whether either peer ever registered a
-//   username. Expected mechanism, stated before running: as long as A is
-//   connected to the shared anonymous DHT (which onboarding alone
-//   guarantees, registration or not), A's onion address should be
-//   peer-routable by peer ID alone. The test confirms it: B's contact
-//   request reaches A while A is STILL unregistered (no username-registry
-//   record for A exists anywhere at dial time — the request rendering on
-//   A's UI is itself the proof of peer-ID-only routing, corroborated by
-//   A's main-process key_exchange_init stream logs). A then registers
-//   (finding #2's Accept gate, mode-agnostic), accepts, and replies over
-//   onion circuits.
-// S4: not reached (S1-S3 exhausted the budget worth spending; see final
-//   report).
+//   secret), createdAt, signature — NO network address of any kind. So when B
+//   dials A after import, the ONLY thing available is A's bare peer ID; the
+//   dial goes through `dialProtocolWithRelayFallback` ->
+//   `node.dialProtocol(targetPeerId, protocol)` (protocol-dialer.ts), which is
+//   libp2p's OWN kad-dht peer-routing (`findPeer`) resolving a PeerId to
+//   multiaddrs via the DHT routing table — independent of either peer's
+//   username-registry state. The request reaches A while A is STILL
+//   unregistered (no username-registry record for A exists anywhere at dial
+//   time — the request rendering on A's UI is itself the proof of peer-ID-only
+//   routing, corroborated by A's main-process key_exchange_init stream logs).
+//   A then accepts UNREGISTERED (FIX #2, mode-agnostic) and replies over onion
+//   circuits — A NEVER registers, end to end, including the accept.
+// S4 (fast mode, new). The GENERAL, non-import case FIX #2 newly enables: a
+//   plain peer-ID contact request (via onboard.ts's `sendContactRequest`, no
+//   trusted-profile file involved at all) that lands as pending while the
+//   acceptor B is registered, then B UNREGISTERS before accepting — so B is
+//   unregistered at accept time, the moment FIX #2's gate used to block. Both
+//   A and B register up front: A because it's about to SEND (the surviving
+//   asymmetry), B because a cold plain-peer-ID send needs its target to be
+//   DHT-resolvable at all (`usernameRegistry.lookupByPeerId`, only populated
+//   by registering) — found live while running this suite that an acceptor
+//   who *never* registers is consequently unreachable by this flow at all,
+//   which is why S4 has B register-then-unregister rather than never
+//   registering; see the scenario's own header comment for the code trail.
+//   S1/S3 remain the only scenarios where the acceptor never registers, full
+//   stop — that shape only works because the trusted-import file pins the
+//   acceptor's keys locally, sidestepping the DHT lookup S4 can't avoid.
 //
 // Every scenario mints fresh uniqueRunSuffix() usernames for every
 // registration it performs (all against the real, persistent public DHT in
-// S1/S2; S3's registrations go to its own throwaway onion-fronted bootstrap).
+// S1/S2/S4; S3's registration goes to its own throwaway onion-fronted
+// bootstrap).
 
 const PASSWORD = 'Correct-Horse-Battery-Staple9!';
 const EXPORT_PASSWORD = 'Export-Correct-Horse-9!';
@@ -184,7 +194,13 @@ async function attach(testInfo: TestInfo, page: Page, name: string) {
 
 async function attachLogs(testInfo: TestInfo, peer: LaunchedApp | undefined, name: string) {
     if (!peer) return;
-    await testInfo.attach(name, { body: peer.logs.join(''), contentType: 'text/plain' });
+    // Written to a file (not attached via `body`) so the full logs persist
+    // under test-results/ with any reporter — `body` attachments are shown
+    // only as a truncated preview by the list reporter, which made the
+    // round's Tor dial-mechanism evidence unreadable after a failed run.
+    const logPath = testInfo.outputPath(`${name}.txt`);
+    await writeFile(logPath, peer.logs.join(''), 'utf8');
+    await testInfo.attach(name, { path: logPath, contentType: 'text/plain' });
 }
 
 /**
@@ -401,17 +417,16 @@ async function attemptImport(
 }
 
 // ---------------------------------------------------------------------------
-// S1. Export/import happy path + the round's two central findings, both
-// empirically reproduced before being worked around in-test: (1) an
-// unregistered IMPORTER's first import fails with a self-referential DB
-// error; (2) an unregistered EXPORTER cannot ACCEPT the importer's inbound
-// contact request either (InvitationManager.tsx:24-27 gates Accept on
-// `isRegistered` with only a toast). Net: the "no registration needed"
-// trusted-profile story currently requires BOTH sides to register before the
-// chat becomes live — the only genuinely registration-free steps are the
-// export itself and receiving/queuing the request.
+// S1. Export/import happy path exercising both fixes: (1) an unregistered
+// IMPORTER now imports successfully (FIX #1: UsernameRegistry.ensureSelfUserRow);
+// (2) an unregistered recipient now ACCEPTS the resulting inbound contact
+// request (FIX #2: the isRegistered gates removed from InvitationManager.tsx
+// and ipc-handlers.ts). B registers only once, and only because B is about to
+// SEND the first contact request (the surviving sender-verification
+// asymmetry — key-exchange.ts's resolveContactRequestSenderFromDht, see file
+// header) — A (the exporter/accepter) never registers at any point.
 // ---------------------------------------------------------------------------
-test('trusted profile export/import: unregistered importer hits a self-referential DB error, unregistered exporter cannot accept; both work after registering @slow', async () => {
+test('trusted profile export/import: unregistered importer succeeds, unregistered recipient accepts (A never registers) @slow', async () => {
     test.setTimeout(6 * 60_000);
     const testInfo = test.info();
     const testStart = Date.now();
@@ -421,7 +436,6 @@ test('trusted profile export/import: unregistered importer hits a self-referenti
     let failed = false;
 
     const runSuffix = uniqueRunSuffix();
-    const usernameA = `ti_a_${runSuffix}`;
     const usernameB = `ti_b_${runSuffix}`;
     const customNameForA = `alice_from_file_${runSuffix}`;
 
@@ -441,12 +455,12 @@ test('trusted profile export/import: unregistered importer hits a self-referenti
             relayMultiaddr: RELAY_MULTIADDR,
             stunUrl: STUN_URL,
         };
-        // Both start UNREGISTERED: A (the exporter) to prove the EXPORT step
-        // itself and RECEIVING a contact request are registration-free, and
-        // to reproduce finding #2 (the Accept gate); B (the importer) to
-        // reproduce finding #1 (the self-referential import error). Both
-        // findings are worked around in-test by registering at the moment
-        // the app actually forces it.
+        // Both start UNREGISTERED: A (the exporter) stays unregistered for
+        // the ENTIRE test — export, receive, and accept must all work without
+        // ever publishing a DHT username (FIX #2); B (the importer) starts
+        // unregistered to prove the import itself needs no registration
+        // (FIX #1), then registers only once it needs to SEND (the surviving
+        // sender-verification asymmetry — see file header).
         const [{ peerId: peerIdA }, { peerId: peerIdB }] = await timedStage('s1', 'onboard_both_unregistered', () => Promise.all([
             onboardWithoutRegistering(pageA, onboardOptions),
             onboardWithoutRegistering(pageB, onboardOptions),
@@ -467,53 +481,23 @@ test('trusted profile export/import: unregistered importer hits a self-referenti
         // Still unregistered after export — exporting itself never triggers registration.
         expect((await pageA.evaluate(() => window.kiyeovoAPI.getUserState())).isRegistered).toBe(false);
 
-        // --- FINDING REPRO: B (unregistered) attempts the import. Expected,
-        // per the file-header trace, to fail with a self-referential
-        // "not found in database" error naming B's OWN peer ID, thrown by
-        // `assertUserExists(chat.created_by)` (database.ts:1675) inside
-        // `createTrustedDirectContact`'s transaction — B has no `users` row
-        // for itself because it never registered (only
-        // `persistRegisteredUser`, username-registry.ts:539-566, ever inserts
-        // a self-row). Neither the doc nor the ImportTrustedUserDialog UI
-        // (never `isRegistered`-gated, unlike "New Conversation") predicts
-        // this. ---
+        // --- FIX #1 ASSERTION: B (still unregistered) imports directly and
+        // it now SUCCEEDS — previously this threw the self-referential
+        // "User with peer_id '<B's own peer ID>' not found in database" error
+        // from `assertUserExists(chat.created_by)` (database.ts:1675) inside
+        // `createTrustedDirectContact`'s transaction, because B had no
+        // `users` row for itself. `UsernameRegistry.ensureSelfUserRow`
+        // (username-registry.ts) now seeds that row at identity-ready time,
+        // registered or not. ---
         await openImportDialog(pageB);
-        const firstAttempt = await timedStage('s1', 'b_import_while_unregistered_fails', () => attemptImport(appB, pageB, {
+        const importResult = await timedStage('s1', 'b_imports_while_unregistered_succeeds', () => attemptImport(appB, pageB, {
             filePath: exportedFilePath,
             password: EXPORT_PASSWORD,
             customName: customNameForA,
         }));
-        console.log(`[s1] FINDING repro: unregistered-importer outcome=${firstAttempt.outcome} errorText="${firstAttempt.errorText ?? '(none)'}"`);
-        await attach(testInfo, pageB, 's1-04-b-import-failed-while-unregistered');
-        expect(firstAttempt.outcome).toBe('error');
-        expect(firstAttempt.errorText ?? '').toContain('not found in database');
-        expect(firstAttempt.errorText ?? '').toContain(peerIdB);
-
-        // No partial/orphaned state from the failed attempt.
-        expect((await pageB.evaluate(async () => {
-            const result = await window.kiyeovoAPI.getChats();
-            return result.success ? result.chats.length : -1;
-        }))).toBe(0);
-
-        // --- Work around the finding: close the still-open (errored) import
-        // dialog (the footer's Register CTA sits behind it), B registers
-        // (the app-level equivalent of the "please register first" message
-        // the UI never actually shows), THEN retries the identical import. ---
-        await pageB.getByRole('button', { name: 'Close', exact: true }).first().click();
-        await expect(pageB.getByRole('heading', { name: 'Add user from file' })).toBeHidden({ timeout: 10_000 });
-        await timedStage('s1', 'b_registers_to_work_around_finding', () => registerViaFooterCta(pageB, usernameB));
-        await attach(testInfo, pageB, 's1-05-b-registered');
-        expect((await pageB.evaluate(() => window.kiyeovoAPI.getUserState())).isRegistered).toBe(true);
-
-        await openImportDialog(pageB);
-        await stubOpenDialog(appB, exportedFilePath);
-        await pageB.getByRole('button', { name: /Browse|Change File/ }).click();
-        await expect(pageB.getByText(path.basename(exportedFilePath), { exact: true })).toBeVisible({ timeout: 10_000 });
-        await pageB.getByPlaceholder('Enter profile password...').fill(EXPORT_PASSWORD);
-        await pageB.getByPlaceholder('Leave empty to use name from file...').fill(customNameForA);
-        await pageB.getByRole('button', { name: 'Import', exact: true }).click();
-        await expect(pageB.getByText('Profile imported successfully!')).toBeVisible({ timeout: 20_000 });
-        await attach(testInfo, pageB, 's1-06-b-imported-after-registering');
+        console.log(`[s1] FIX #1 confirmed: unregistered-importer outcome=${importResult.outcome} (was 'error' pre-fix)`);
+        await attach(testInfo, pageB, 's1-04-b-imported-while-unregistered');
+        expect(importResult.outcome).toBe('success');
 
         const importedFingerprintText = await pageB.locator('.font-mono.text-xs.break-all').first().textContent();
         expect((importedFingerprintText ?? '').trim()).toBe(fingerprintA);
@@ -523,25 +507,36 @@ test('trusted profile export/import: unregistered importer hits a self-referenti
 
         // --- (a) chat exists with the trusted_out_of_band marker, (b) shows
         // the customName, code-confirmed via the same getChats() surface
-        // username-lookup.spec.ts's chatPeerIdForUsername uses. ---
-        const bChats = await pageB.evaluate(async () => {
+        // username-lookup.spec.ts's chatPeerIdForUsername uses, (c) B is
+        // STILL unregistered — importing itself never triggers or requires
+        // registration. ---
+        const bChatsAfterImport = await pageB.evaluate(async () => {
             const result = await window.kiyeovoAPI.getChats();
             return result.success ? result.chats : [];
         });
-        const importedChat = (bChats as Array<Record<string, unknown>>).find((c) => c.other_peer_id === peerIdA);
+        const importedChat = (bChatsAfterImport as Array<Record<string, unknown>>).find((c) => c.other_peer_id === peerIdA);
         expect(importedChat, 'B should have a chat with A keyed by A\'s real peer ID').toBeTruthy();
         expect(importedChat?.trusted_out_of_band).toBe(true);
         expect(importedChat?.username).toBe(customNameForA);
         console.log(`[s1] B's imported chat: trusted_out_of_band=${importedChat?.trusted_out_of_band} username=${importedChat?.username} other_peer_id=${importedChat?.other_peer_id}`);
+        expect((await pageB.evaluate(() => window.kiyeovoAPI.getUserState())).isRegistered).toBe(false);
 
-        // --- (c) messages flow: B sends first, USING ONLY the imported data
-        // for A's identity/keys — no DHT username lookup of A, who is STILL
+        // --- B registers ONLY now, because B is about to SEND the first
+        // contact request and the recipient-side verification always checks
+        // the SENDER's DHT registration (the surviving asymmetry — see file
+        // header) — this is not a workaround for either fixed bug. ---
+        await timedStage('s1', 'b_registers_because_b_is_about_to_send', () => registerViaFooterCta(pageB, usernameB));
+        await attach(testInfo, pageB, 's1-05-b-registered-to-send');
+        expect((await pageB.evaluate(() => window.kiyeovoAPI.getUserState())).isRegistered).toBe(true);
+
+        // --- Messages flow: B sends first, USING ONLY the imported data for
+        // A's identity/keys — no DHT username lookup of A, who is STILL
         // unregistered at this point. ---
         const probeMessage = 'Hi Alice — reaching you via your exported profile.';
         await expect(pageB.getByPlaceholder('Type a message...')).toBeVisible({ timeout: 15_000 });
         await timedStage('s1', 'b_sends_first_message', () => sendChatMessage(pageB, probeMessage));
         await expect(chatMessage(pageB, probeMessage)).toBeVisible({ timeout: 15_000 });
-        await attach(testInfo, pageB, 's1-07-b-sent-first-message');
+        await attach(testInfo, pageB, 's1-06-b-sent-first-message');
 
         // The request DOES reach A while A is unregistered (B is registered,
         // so A's `authorizeContactRequest` -> `resolveContactRequestSenderFromDht(B)`
@@ -551,54 +546,36 @@ test('trusted profile export/import: unregistered importer hits a self-referenti
         await timedStage('s1', 'contact_request_reaches_unregistered_a', async () => {
             await expect(pageA.getByText(usernameB, { exact: true }).first()).toBeVisible({ timeout: 60_000 });
         });
-        await attach(testInfo, pageA, 's1-08-a-request-visible-while-unregistered');
+        await attach(testInfo, pageA, 's1-07-a-request-visible-while-unregistered');
 
-        // --- FINDING #2 REPRO: A (unregistered) clicks Accept -> only a
-        // warning toast, no accept. Code-confirmed: InvitationManager.tsx's
-        // handleAccept (lines 24-27) returns early with
+        // --- FIX #2 ASSERTION: A (still unregistered) clicks Accept and it
+        // now SUCCEEDS — previously InvitationManager.tsx's handleAccept
+        // (lines 24-27, now removed) returned early with
         // toast.warning('Finish registration first, then accept this contact
-        // request.') whenever `!isRegistered` — so the doc's "reachable
-        // out-of-band without ever publishing a DHT username" (line ~157)
-        // cannot complete end to end: the exporter can RECEIVE but never
-        // ACCEPT while unregistered. ---
-        await timedStage('s1', 'a_accept_gated_while_unregistered', async () => {
-            await pageA.getByText(usernameB, { exact: true }).first().click();
-            await expect(pageA.getByRole('button', { name: 'Accept', exact: true })).toBeVisible({ timeout: 15_000 });
-            await pageA.getByRole('button', { name: 'Accept', exact: true }).click();
-            // .first(): the same copy can render twice (toast + aria-live
-            // announcement — same duplication network-edges.spec.ts documents
-            // for the bootstrap error), which trips strict mode otherwise.
-            await expect(pageA.getByText('Finish registration first, then accept this contact request.').first()).toBeVisible({ timeout: 10_000 });
-            // Still unregistered, composer never appeared.
-            await expect(pageA.getByPlaceholder('Type a message...')).toHaveCount(0);
-        });
-        await attach(testInfo, pageA, 's1-09-a-accept-gated-unregistered');
-        expect((await pageA.evaluate(() => window.kiyeovoAPI.getUserState())).isRegistered).toBe(false);
-
-        // --- Work around finding #2: A registers (the pending request's 5-min
-        // decision window — PENDING_KEY_EXCHANGE_EXPIRATION,
-        // src/core/constants.ts:319 — and B's initiator wait, which covers
-        // the whole window plus grace (getKeyExchangeWaitExpiresAt,
-        // key-exchange.ts:81-83), both easily outlast a ~5-30s registration),
-        // then accepts for real. ---
-        await timedStage('s1', 'a_registers_to_work_around_accept_gate', () => registerViaFooterCta(pageA, usernameA));
-        await timedStage('s1', 'a_accepts_after_registering', () => (
+        // request.') whenever `!isRegistered`. A never registers before,
+        // during, or after this — the doc's "reachable out-of-band without
+        // ever publishing a DHT username" now holds end to end. ---
+        await timedStage('s1', 'a_accepts_while_unregistered', () => (
             acceptContactRequestWithRetry(pageA, usernameB)
         ));
-        await attach(testInfo, pageA, 's1-10-a-accepted-after-registering');
+        await attach(testInfo, pageA, 's1-08-a-accepted-while-unregistered');
+        console.log('[s1] FIX #2 confirmed: unregistered recipient accepted successfully (was gated with a toast pre-fix)');
+        expect((await pageA.evaluate(() => window.kiyeovoAPI.getUserState())).isRegistered).toBe(false);
 
         await timedStage('s1', 'first_message_visible_on_a', () => (
             expect(chatMessage(pageA, probeMessage)).toBeVisible({ timeout: 30_000 })
         ));
 
-        // --- A replies — the chat is fully live both ways. ---
+        // --- A replies — the chat is fully live both ways, with A having
+        // NEVER registered at any point in this test. ---
         const replyMessage = 'Got it — this really is Alice, out of band.';
         await timedStage('s1', 'a_replies', async () => {
             await sendChatMessage(pageA, replyMessage);
             await expect(chatMessage(pageB, replyMessage)).toBeVisible({ timeout: 30_000 });
         });
-        await attach(testInfo, pageB, 's1-11-b-received-reply');
-        await attach(testInfo, pageA, 's1-12-a-final-state');
+        await attach(testInfo, pageB, 's1-09-b-received-reply');
+        await attach(testInfo, pageA, 's1-10-a-final-state');
+        expect((await pageA.evaluate(() => window.kiyeovoAPI.getUserState())).isRegistered).toBe(false);
     } catch (error) {
         failed = true;
         throw error;
@@ -642,11 +619,10 @@ test('importing a corrupted profile file fails cleanly and a retry with the real
         const { app: appA, page: pageA } = peerA;
         const { app: appB, page: pageB } = peerB;
 
-        // Both REGISTERED here (unlike S1) — this scenario is deliberately
-        // about the corrupted-file/retry behavior only; S1 already
-        // established that an unregistered importer can't complete ANY
-        // import at all (see file header), which would otherwise mask the
-        // corrupted-vs-good-file distinction this test exists to isolate.
+        // Both REGISTERED here (unlike S1) — no longer NEEDED to dodge
+        // FIX #1 (an unregistered importer works fine now, per S1), but kept
+        // anyway so this scenario stays about the corrupted-file/retry
+        // behavior only, not the registration gap S1/S3 already cover.
         const onboardOptions = {
             bootstrapMultiaddr: BOOTSTRAP_MULTIADDR,
             relayMultiaddr: RELAY_MULTIADDR,
@@ -740,16 +716,17 @@ async function closeAndReopenImportDialog(page: Page): Promise<boolean> {
 }
 
 // ---------------------------------------------------------------------------
-// S3. Anonymous mode: trusted import over Tor. First reproduces finding #1
-// mode-agnostically (neither registers, exactly per the task's literal
-// brief), then registers B to reach the round's KEY INVESTIGATION: does the
-// dial (peer ID only, no address in the exported profile) reach A — still
-// unregistered at dial time — over onion circuits? Finally reproduces
-// finding #2's Accept gate for A, registers A, and completes the chat. See
-// file-header comment for the expected mechanism (libp2p kad-dht peer
-// routing) stated before running.
+// S3. Anonymous mode: trusted import over Tor, mirroring S1's fixed shape.
+// Both start unregistered; B imports directly while unregistered (FIX #1,
+// mode-agnostic), then registers only to reach the round's KEY INVESTIGATION:
+// does the dial (peer ID only, no address in the exported profile) reach A —
+// still unregistered at dial time — over onion circuits? A then accepts while
+// STILL UNREGISTERED (FIX #2, mode-agnostic) and never registers at any point
+// in the test. See file-header comment for the expected dial mechanism
+// (libp2p kad-dht peer routing) stated before this investigation was first
+// run.
 // ---------------------------------------------------------------------------
-test('trusted profile export/import over Tor: peer-ID-only dial reaches the exporter via DHT peer routing @slow', async () => {
+test('trusted profile export/import over Tor: peer-ID-only dial reaches the exporter via DHT peer routing (A never registers) @slow', async () => {
     test.setTimeout(12 * 60_000);
     const testInfo = test.info();
     const testStart = Date.now();
@@ -787,6 +764,7 @@ test('trusted profile export/import over Tor: peer-ID-only dial reaches the expo
 
         expect((await pageA.evaluate(() => window.kiyeovoAPI.getUserState())).isRegistered).toBe(false);
         expect((await pageB.evaluate(() => window.kiyeovoAPI.getUserState())).isRegistered).toBe(false);
+        console.log(`[s3] A peerId=${peerIdA} B peerId=${peerIdB} — both anonymous-mode, both unregistered`);
 
         // --- A exports over Tor (export has no mode branching at all —
         // ProfileManager is mode-agnostic, so this is expected to work
@@ -796,49 +774,37 @@ test('trusted profile export/import over Tor: peer-ID-only dial reaches the expo
         ));
         await attach(testInfo, pageA, 's3-03-a-exported-over-tor');
 
-        // --- FINDING REPRO, mode-agnostic: B (unregistered) attempts the
-        // import over anonymous mode's own DB/IPC stack. Expected to fail
-        // with the SAME self-referential error as S1 — entirely locally,
-        // before any Tor dialing is even attempted (`assertUserExists` has
+        // --- FIX #1 ASSERTION, mode-agnostic: B (unregistered) imports
+        // directly over anonymous mode's own DB/IPC stack and it now
+        // SUCCEEDS — same as S1's fast-mode assertion, entirely locally,
+        // before any Tor dialing is even attempted (`ensureSelfUserRow` has
         // no fast/anonymous branch). ---
         await openImportDialog(pageB);
-        const firstAttempt = await timedStage('s3', 'b_import_while_unregistered_fails', () => attemptImport(appB, pageB, {
+        const importResult = await timedStage('s3', 'b_imports_while_unregistered_succeeds', () => attemptImport(appB, pageB, {
             filePath: exportedFilePath,
             password: EXPORT_PASSWORD,
             customName: 'alice-via-tor',
         }));
-        console.log(`[s3] FINDING repro (anonymous mode): outcome=${firstAttempt.outcome} errorText="${firstAttempt.errorText ?? '(none)'}"`);
-        await attach(testInfo, pageB, 's3-04-b-import-failed-while-unregistered');
-        expect(firstAttempt.outcome).toBe('error');
-        expect(firstAttempt.errorText ?? '').toContain('not found in database');
-        expect(firstAttempt.errorText ?? '').toContain(peerIdB);
-
-        // --- B registers (A, the exporter, still never does) to reach the
-        // real investigation. Close the still-open (errored) import dialog
-        // first — the footer's Register CTA sits behind it. ---
-        await pageB.getByRole('button', { name: 'Close', exact: true }).first().click();
-        await expect(pageB.getByRole('heading', { name: 'Add user from file' })).toBeHidden({ timeout: 10_000 });
-        await timedStage('s3', 'b_registers_over_tor_to_work_around_finding', () => registerViaFooterCta(pageB, usernameB));
-        await attach(testInfo, pageB, 's3-05-b-registered-over-tor');
-        expect((await pageB.evaluate(() => window.kiyeovoAPI.getUserState())).isRegistered).toBe(true);
-
-        await openImportDialog(pageB);
-        await stubOpenDialog(appB, exportedFilePath);
-        await pageB.getByRole('button', { name: /Browse|Change File/ }).click();
-        await expect(pageB.getByText(path.basename(exportedFilePath), { exact: true })).toBeVisible({ timeout: 10_000 });
-        await pageB.getByPlaceholder('Enter profile password...').fill(EXPORT_PASSWORD);
-        await pageB.getByPlaceholder('Leave empty to use name from file...').fill('alice-via-tor');
-        await pageB.getByRole('button', { name: 'Import', exact: true }).click();
-        await expect(pageB.getByText('Profile imported successfully!')).toBeVisible({ timeout: 20_000 });
-        await attach(testInfo, pageB, 's3-06-b-imported-over-tor-after-registering');
+        console.log(`[s3] FIX #1 confirmed (anonymous mode): unregistered-importer outcome=${importResult.outcome} (was 'error' pre-fix)`);
+        await attach(testInfo, pageB, 's3-04-b-imported-while-unregistered');
+        expect(importResult.outcome).toBe('success');
         await pageB.getByRole('button', { name: 'Done', exact: true }).click();
 
-        const bChats = await pageB.evaluate(async () => {
+        const bChatsAfterImport = await pageB.evaluate(async () => {
             const result = await window.kiyeovoAPI.getChats();
             return result.success ? result.chats : [];
         });
-        const importedChat = (bChats as Array<Record<string, unknown>>).find((c) => c.other_peer_id === peerIdA);
+        const importedChat = (bChatsAfterImport as Array<Record<string, unknown>>).find((c) => c.other_peer_id === peerIdA);
         expect(importedChat?.trusted_out_of_band).toBe(true);
+        expect((await pageB.evaluate(() => window.kiyeovoAPI.getUserState())).isRegistered).toBe(false);
+
+        // --- B registers ONLY now (A, the exporter, never does), because B
+        // is about to SEND the first contact request — the surviving
+        // sender-verification asymmetry, mode-agnostic (see file header) —
+        // to reach the round's KEY INVESTIGATION below. ---
+        await timedStage('s3', 'b_registers_over_tor_because_b_is_about_to_send', () => registerViaFooterCta(pageB, usernameB));
+        await attach(testInfo, pageB, 's3-05-b-registered-to-send-over-tor');
+        expect((await pageB.evaluate(() => window.kiyeovoAPI.getUserState())).isRegistered).toBe(true);
 
         // --- B sends the first message. This is where the KEY INVESTIGATION
         // plays out: B's node must dial A using ONLY A's peer ID (the
@@ -853,45 +819,46 @@ test('trusted profile export/import over Tor: peer-ID-only dial reaches the expo
         const probeMessage = 'Reaching you over Tor via your exported profile.';
         await expect(pageB.getByPlaceholder('Type a message...')).toBeVisible({ timeout: 15_000 });
         await timedStage('s3', 'b_sends_first_message_over_tor', () => sendChatMessage(pageB, probeMessage));
-        await attach(testInfo, pageB, 's3-07-b-sent-first-message-over-tor');
+        await attach(testInfo, pageB, 's3-06-b-sent-first-message-over-tor');
 
         await timedStage('s3', 'contact_request_reaches_unregistered_a_over_tor', async () => {
             await expect(pageA.getByText(usernameB, { exact: true }).first()).toBeVisible({ timeout: 180_000 });
         });
-        await attach(testInfo, pageA, 's3-08-a-request-visible-while-unregistered');
+        await attach(testInfo, pageA, 's3-07-a-request-visible-while-unregistered');
 
         const aLogsSoFar = peerA.logs.join('');
         const dialReachedA = /key_exchange_init|KEY-EXCHANGE\]\[INIT_STREAM\]/i.test(aLogsSoFar);
         console.log(`[s3] KEY INVESTIGATION confirmed: peer-ID-only dial via libp2p kad-dht peer routing reached A over Tor (no address at all was carried in the exported profile); log evidence present=${dialReachedA}`);
         expect((await pageA.evaluate(() => window.kiyeovoAPI.getUserState())).isRegistered).toBe(false);
 
-        // --- FINDING #2 is mode-agnostic too (InvitationManager.tsx:24-27):
-        // A, unregistered, cannot ACCEPT — register first, then accept. The
-        // pending request's 5-min decision window comfortably outlasts a
-        // Tor-DHT registration (~10-40s observed in tor-mode.spec.ts). ---
-        await timedStage('s3', 'a_registers_over_tor_to_work_around_accept_gate', () => (
-            registerViaFooterCta(pageA, `ti_tor_a_${runSuffix}`)
-        ));
-        // Retry-tolerant accept (see acceptContactRequestWithRetry's doc
-        // comment) — doubly relevant over Tor, where onion rendezvous jitter
-        // makes a finalization-timeout/re-surface cycle even more likely.
-        await timedStage('s3', 'a_accepts_after_registering_over_tor', () => (
+        // --- FIX #2 ASSERTION, mode-agnostic: A, still unregistered, clicks
+        // Accept and it now SUCCEEDS (previously InvitationManager.tsx's
+        // isRegistered gate made this impossible). Retry-tolerant accept
+        // (see acceptContactRequestWithRetry's doc comment) — relevant over
+        // Tor, where onion rendezvous jitter makes a
+        // finalization-timeout/re-surface cycle more likely. A never
+        // registers, before, during, or after this. ---
+        await timedStage('s3', 'a_accepts_while_unregistered_over_tor', () => (
             acceptContactRequestWithRetry(pageA, usernameB, 180_000)
         ));
-        await attach(testInfo, pageA, 's3-09-a-accepted-over-tor');
+        await attach(testInfo, pageA, 's3-08-a-accepted-while-unregistered-over-tor');
+        console.log('[s3] FIX #2 confirmed (anonymous mode): unregistered recipient accepted successfully over Tor (was gated with a toast pre-fix)');
+        expect((await pageA.evaluate(() => window.kiyeovoAPI.getUserState())).isRegistered).toBe(false);
 
         await timedStage('s3', 'first_message_visible_on_a_over_tor', () => (
             expect(chatMessage(pageA, probeMessage)).toBeVisible({ timeout: 45_000 })
         ));
-        await attach(testInfo, pageA, 's3-10-a-message-visible-over-tor');
+        await attach(testInfo, pageA, 's3-09-a-message-visible-over-tor');
 
-        // --- A replies over Tor — the imported chat is fully live. ---
+        // --- A replies over Tor — the imported chat is fully live, with A
+        // having NEVER registered at any point in this test. ---
         const replyMessage = 'Confirmed — Alice, reached over Tor purely by peer ID.';
         await timedStage('s3', 'a_replies_over_tor', async () => {
             await sendChatMessage(pageA, replyMessage);
             await expect(chatMessage(pageB, replyMessage)).toBeVisible({ timeout: 45_000 });
         });
-        await attach(testInfo, pageB, 's3-11-b-received-reply-over-tor');
+        await attach(testInfo, pageB, 's3-10-b-received-reply-over-tor');
+        expect((await pageA.evaluate(() => window.kiyeovoAPI.getUserState())).isRegistered).toBe(false);
     } finally {
         // Logs attached unconditionally (pass or fail): A's inbound
         // key_exchange_init stream lines ARE the dial-mechanism evidence
@@ -903,5 +870,135 @@ test('trusted profile export/import over Tor: peer-ID-only dial reaches the expo
         await peerB?.close().catch((error) => console.error('Failed to close peer B:', error));
         await onionBootstrap?.stop().catch((error) => console.error('Failed to stop onion-fronted bootstrap:', error));
         if (scratchDir) await rm(scratchDir, { recursive: true, force: true }).catch(() => {});
+    }
+});
+
+// ---------------------------------------------------------------------------
+// S4 (fast mode, new). The GENERAL, non-import case FIX #2 newly enables.
+//
+// NOTE on this scenario's shape (found while running this suite, not
+// speculated up front): a *never*-registered acceptor is NOT reachable via a
+// cold plain-peer-ID send at all, regardless of either fix — code-confirmed
+// in `message-handler.ts`'s `resolveUserAndPeerForSession` ->
+// `resolveUserRegistrationForSession` (~2315-2382): for a target with no
+// existing local `users`+`chats` row (true for a peer-ID target the sender
+// has never talked to before, e.g. B here, and NOT pinned by a trusted
+// import the way S1/S3's importer pins the exporter's keys), the sender's
+// *own* first move is `usernameRegistry.lookupByPeerId(target)` — a strict
+// DHT reverse lookup keyed on a `username_by_peer_id` record that only ever
+// gets published by `UsernameRegistry`'s registration flow. A target that has
+// never registered has no such record, so this lookup is a guaranteed MISS
+// (`console.warn('[USERNAME][LOOKUP][MISS] ...')`) and the send fails before
+// a key-exchange message is ever framed, let alone before FIX #2's
+// (now-removed) accept-side gate would matter — reproduced live: with B left
+// unregistered here, `sendContactRequest` timed out because A's own send
+// never got past this lookup (`User '<B's peer ID>' not found`, B's
+// `New Conversation` dialog just kept retrying "Send"). So there is no
+// reachable general-flow shape where the acceptor is unregistered THE WHOLE
+// TIME AND ALSO discoverable by a cold peer-ID send with no prior pinned
+// keys — S1/S3 (trusted import pins the keys, sidestepping this lookup
+// entirely) are the only way to exercise FIX #2 with an acceptor that never
+// registers at all.
+//
+// This scenario instead covers the other reachable general-flow shape: B
+// registers just long enough to be resolvable (so A's plain peer-ID send
+// succeeds), the request lands as pending on B, and B then UNREGISTERS
+// (`kiyeovoAPI.unregister()` — the same `UsernameRegistry.unregister()` call
+// UserDialog.tsx's "Unregister" button drives, invoked directly here since
+// the assertion is about accept-time gating, not the unregister UI itself)
+// BEFORE clicking Accept — so B is unregistered at the moment that matters
+// (the isRegistered check FIX #2 removed), even though B was registered
+// earlier. This is a real, non-contrived scenario: registration is not
+// permanent (explicit unregister, or a lapsed re-registration lease per
+// `UsernameRegistry`'s `startReregistration`), so "registered when
+// discovered, unregistered by the time I get around to accepting" is a shape
+// a real user can hit. A stays registered throughout (still the surviving
+// sender-verification asymmetry from the file header).
+// ---------------------------------------------------------------------------
+test('a plain peer-ID contact request completes when the acceptor unregisters before accepting @slow', async () => {
+    test.setTimeout(3 * 60_000);
+    const testInfo = test.info();
+    const testStart = Date.now();
+    let peerA: LaunchedApp | undefined;
+    let peerB: LaunchedApp | undefined;
+    let failed = false;
+
+    const runSuffix = uniqueRunSuffix();
+    const usernameA = `ti_s4_a_${runSuffix}`;
+    const usernameB = `ti_s4_b_${runSuffix}`;
+
+    try {
+        [peerA, peerB] = await timedStage('s4', 'launch_both_apps', () => Promise.all([
+            launchApp({ p2pPort: 9207 }),
+            launchApp({ p2pPort: 9208 }),
+        ]));
+        const { page: pageA } = peerA;
+        const { page: pageB } = peerB;
+
+        const onboardOptions = {
+            bootstrapMultiaddr: BOOTSTRAP_MULTIADDR,
+            relayMultiaddr: RELAY_MULTIADDR,
+            stunUrl: STUN_URL,
+        };
+        // Both register at first: A because it's about to SEND (the
+        // surviving sender-verification asymmetry); B because a cold
+        // plain-peer-ID send needs B to be DHT-resolvable at all (see the
+        // scenario note above) — B's registration is dropped further down,
+        // before accepting.
+        const [, { peerId: peerIdB }] = await timedStage('s4', 'onboard_both_registered', () => Promise.all([
+            onboard(pageA, { ...onboardOptions, password: PASSWORD, username: usernameA }),
+            onboard(pageB, { ...onboardOptions, password: PASSWORD, username: usernameB }),
+        ]));
+
+        const firstMessage = `Hi from A, no trusted-profile file involved ${runSuffix}`;
+        await timedStage('s4', 'a_sends_plain_peer_id_contact_request', () => (
+            sendContactRequest(pageA, peerIdB, firstMessage)
+        ));
+
+        // Confirm the request landed as pending on B WHILE B is still
+        // registered, before B drops registration — isolates the
+        // FIX #2 assertion below to accept-time gating only, not delivery.
+        await expect(pageB.getByText(usernameA, { exact: true }).first()).toBeVisible({ timeout: 30_000 });
+        expect((await pageB.evaluate(() => window.kiyeovoAPI.getUserState())).isRegistered).toBe(true);
+
+        // --- B unregisters while the request sits pending, so B is
+        // unregistered at the moment that matters: accept time. ---
+        await timedStage('s4', 'b_unregisters_before_accepting', () => (
+            pageB.evaluate(() => window.kiyeovoAPI.unregister())
+        ));
+        expect((await pageB.evaluate(() => window.kiyeovoAPI.getUserState())).isRegistered).toBe(false);
+
+        // --- FIX #2 ASSERTION (general, non-import flow): B, now
+        // unregistered, accepts a plain peer-ID contact request and it now
+        // SUCCEEDS — previously blocked by InvitationManager.tsx's
+        // `isRegistered` early-return / ipc-handlers.ts's matching gate. ---
+        await timedStage('s4', 'b_accepts_while_unregistered', () => (
+            acceptContactRequestWithRetry(pageB, usernameA)
+        ));
+        await attach(testInfo, pageB, 's4-01-b-accepted-while-unregistered');
+        console.log('[s4] FIX #2 confirmed (general contact-request flow): unregistered acceptor accepted a plain peer-ID request successfully');
+        expect((await pageB.evaluate(() => window.kiyeovoAPI.getUserState())).isRegistered).toBe(false);
+
+        await expect(chatMessage(pageB, firstMessage)).toBeVisible({ timeout: 30_000 });
+
+        // --- B replies, still unregistered — the chat is fully live both ways. ---
+        const replyMessage = `Got it, thanks ${runSuffix}`;
+        await timedStage('s4', 'b_replies_unregistered', async () => {
+            await sendChatMessage(pageB, replyMessage);
+            await expect(chatMessage(pageA, replyMessage)).toBeVisible({ timeout: 30_000 });
+        });
+        await attach(testInfo, pageA, 's4-02-a-received-reply');
+        expect((await pageB.evaluate(() => window.kiyeovoAPI.getUserState())).isRegistered).toBe(false);
+    } catch (error) {
+        failed = true;
+        throw error;
+    } finally {
+        console.log(`[timing][s4] TOTAL test: ${((Date.now() - testStart) / 1000).toFixed(1)}s`);
+        if (failed) {
+            await attachLogs(testInfo, peerA, 's4-a-main-process-logs');
+            await attachLogs(testInfo, peerB, 's4-b-main-process-logs');
+        }
+        await peerA?.close().catch((error) => console.error('Failed to close peer A:', error));
+        await peerB?.close().catch((error) => console.error('Failed to close peer B:', error));
     }
 });

@@ -207,11 +207,13 @@ Status legend: [ ] queued · [~] in progress · [x] done
   `env` passthrough, `onboard.ts`'s `beginIdentityCreation`/`sendContactRequest` gained optional
   mode/timeout params (both backward compatible, every other caller unaffected).
 
-- [x] **8. Trusted profile import/export** — done (`trusted-import.spec.ts`, 3 tests:
-  S1 fast-mode happy path + registration-gap finding, S2 corrupted-file/clean-retry, S3
-  anonymous-mode/Tor with the peer-ID-only-dial investigation; S4 import-while-exporter-offline
-  deliberately not reached — budget spent on the S1/S3 finding repros instead, documented
-  in-spec). **TWO MAJOR FINDINGS, both empirically reproduced then code-traced — the trusted-
+- [x] **8. Trusted profile import/export** — done (`trusted-import.spec.ts`, 4 tests after the
+  reshape below: S1 fast-mode happy path, S2 corrupted-file/clean-retry, S3 anonymous-mode/Tor
+  with the peer-ID-only-dial investigation, S4 general non-import contact-request flow).
+  Original round shipped with 3 tests (S1 fast-mode happy path + registration-gap finding, S2
+  corrupted-file/clean-retry, S3 anonymous-mode/Tor with the peer-ID-only-dial investigation; a
+  4th, import-while-exporter-offline, was deliberately not reached then — budget spent on the
+  S1/S3 finding repros instead). **TWO MAJOR FINDINGS, both empirically reproduced then code-traced — the trusted-
   profile "no registration needed" story currently breaks on BOTH ends:** (1) a genuinely-
   unregistered IMPORTER's first-ever trusted import always fails with the raw, self-referential
   error `User with peer_id '<importer's own peer ID>' not found in database` —
@@ -247,6 +249,53 @@ Status legend: [ ] queued · [~] in progress · [x] done
   error) which passed clean on an immediate solo re-run (1.7 min): classified
   INFRA-TRANSIENT (real-DHT registration stall), the first such flake of the trusted-import
   round; S2/S3 green in every pass including verification.
+  **RESHAPED after fix (2026-07-07):** both findings above are now FIXED —
+  `UsernameRegistry.ensureSelfUserRow()` (called from `initialize()`) seeds a minimal self-row
+  in `users` at identity-ready time so `assertUserExists(created_by)` no longer throws for an
+  unregistered identity (finding 1), and the `isRegistered` accept gates were removed from
+  both `InvitationManager.tsx` and `ipc-handlers.ts` (finding 2). The spec now asserts the
+  FIXED behavior: S1 has B import while UNREGISTERED (succeeds, `trusted_out_of_band` chat)
+  and A stay unregistered through the ENTIRE test including the accept; S3 mirrors that over
+  Tor (A never registers; the peer-ID-only-dial investigation assertions unchanged). One
+  requirement SURVIVES BY DESIGN: the recipient of a contact request still verifies the SENDER
+  via the sender's DHT username record (`resolveContactRequestSenderFromDht`,
+  key-exchange.ts ~925), so whichever peer sends the first contact request (the importer in
+  S1/S3) must register before that first send — documented in the spec's file header as the
+  surviving asymmetry, not a bug. S2 unchanged in substance (both peers still register — no
+  longer a workaround, just scenario isolation).
+
+  **S4 redesigned mid-verification — a 3rd finding, this one about test design, not the fix:**
+  the original reshape draft's S4 planned a plain peer-ID contact request (no trusted-profile
+  file) sent to an acceptor who never registers at all, mirroring S1/S3's "never registers"
+  shape without the import. Running it exposed that this shape is unreachable regardless of
+  either fix: for a peer-ID target with no existing local `users`/`chats` row, the SENDER's
+  first move (`message-handler.ts`'s `resolveUserAndPeerForSession` ->
+  `resolveUserRegistrationForSession`, ~2315-2382) is `usernameRegistry.lookupByPeerId(target)`
+  — a strict DHT reverse lookup on a `username_by_peer_id` record that only ever gets published
+  by registering. A target that never registers has no such record, so the lookup is a
+  guaranteed MISS and the send itself fails (`User '<peer id>' not found`) before a key-exchange
+  message is ever framed, let alone before FIX #2's accept-side gate would matter. Confirmed
+  live: with the acceptor left unregistered, `sendContactRequest` timed out retrying "Send" for
+  100s, never delivering. S1/S3 remain the only scenarios where the acceptor never registers at
+  all — that shape only works because the trusted-import file pins the acceptor's keys locally,
+  sidestepping this DHT lookup entirely; there is no way to reach a *never*-registered acceptor
+  via a cold, unpinned peer-ID send. S4 was redesigned to cover the other reachable general-flow
+  shape instead: both peers register up front (so the cold send succeeds), B's request lands as
+  pending, B then calls `kiyeovoAPI.unregister()` (the real `UsernameRegistry.unregister()` path
+  UserDialog.tsx's "Unregister" button drives) so B is unregistered specifically at accept time,
+  then accepts — still exercises FIX #2's removed gate, just via "registered when discovered,
+  unregistered by the time I accept" rather than "never registered." Full trace lives in the
+  spec's file header and S4's own header comment.
+
+  **Verification (2026-07-07, orchestrator finishing a dead agent's in-progress reshape):** full
+  suite green, 4/4, two consecutive clean passes. Final pass timings: S1 22.9s, S2 20.3s, S3
+  82.9s, S4 17.4s (total 2.4 min). One transient failure along the way, unrelated to the fix or
+  to either src change: S3's Tor-fronting-bootstrap helper (`tor.ts`, generic Tor-network
+  plumbing that runs before either Electron app even launches) timed out once waiting for the
+  real Tor network to reach "Bootstrapped 100%" (stalled mid relay-descriptor load past the 90s
+  budget) — an immediate solo re-run bootstrapped in 6.7s and the test passed in 72.9s;
+  classified INFRA-TRANSIENT (real Tor network variability), not a regression. pgrep-verified no
+  leftover electron/Xvfb/tor/bootstrap-node processes after every pass.
 
 - [x] **9. Groups over Tor + deployed-infra deploy-verification** — done
   (`tor-groups.spec.ts`, 2 tests; `tor-deployed-infra.spec.ts`, 1 env-gated test). Per Marin's
