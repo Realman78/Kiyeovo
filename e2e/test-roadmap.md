@@ -207,6 +207,47 @@ Status legend: [ ] queued · [~] in progress · [x] done
   `env` passthrough, `onboard.ts`'s `beginIdentityCreation`/`sendContactRequest` gained optional
   mode/timeout params (both backward compatible, every other caller unaffected).
 
+- [x] **8. Trusted profile import/export** — done (`trusted-import.spec.ts`, 3 tests:
+  S1 fast-mode happy path + registration-gap finding, S2 corrupted-file/clean-retry, S3
+  anonymous-mode/Tor with the peer-ID-only-dial investigation; S4 import-while-exporter-offline
+  deliberately not reached — budget spent on the S1/S3 finding repros instead, documented
+  in-spec). **TWO MAJOR FINDINGS, both empirically reproduced then code-traced — the trusted-
+  profile "no registration needed" story currently breaks on BOTH ends:** (1) a genuinely-
+  unregistered IMPORTER's first-ever trusted import always fails with the raw, self-referential
+  error `User with peer_id '<importer's own peer ID>' not found in database` —
+  `createTrustedDirectContact` (src/core/db/database.ts:1675) calls
+  `assertUserExists(chat.created_by)` on the importer's OWN peer ID, but nothing ever inserts
+  a self-row into `users` except `persistRegisteredUser`
+  (src/core/username/username-registry.ts:539-566), which only runs after a successful
+  username registration; the import UI ("Add user from file") is not `isRegistered`-gated
+  (unlike "New Conversation") and the doc says nothing about the importer, so this surfaces as
+  an opaque DB-shape error instead of any designed message. (2) an unregistered EXPORTER can
+  export and even RECEIVE the importer's contact request (inbound verification checks the
+  SENDER's DHT record, key-exchange.ts:923-929, not the receiver's), but cannot ACCEPT it:
+  InvitationManager.tsx:24-27 gates Accept on `isRegistered` with only a warning toast — so
+  doc line ~157's "reachable out-of-band without ever publishing a DHT username" cannot
+  complete end to end; BOTH sides must register before the chat goes live. The genuinely
+  registration-free steps are: exporting, importing-side dial/key resolution from the file's
+  data alone (no username lookup of the exporter, code-confirmed
+  message-handler.ts:3009-3010 + key-exchange.ts:591), and receiving/queuing the inbound
+  request. Also traced (code-confirmed): the
+  exported profile carries NO network address of any kind (UserProfilePlaintext,
+  src/core/identity/profile-manager.ts:51-61 — keys + peerId + inbox secret only), so the
+  importer's first dial resolves the exporter's address purely via libp2p kad-dht peer
+  routing by peer ID; S3 confirms this works over onion circuits (the request reaches the
+  exporter while the exporter is still unregistered — no username-registry record for them
+  exists anywhere at dial time). Export UI lives in ProfilePage.tsx -> ExportDialog.tsx (sidebar
+  rail "Profile" tab); the native save dialog is driven by stubbing `dialog.showSaveDialog`
+  via ElectronApplication.evaluate (same pattern file-transfer.spec.ts established for
+  showOpenDialog). See the spec's file-level comment for the full trace and the round's final
+  report for timings/flakiness classification.
+  Orchestrator verification 2026-07-07: builder had two 3/3 full passes; the orchestrator's
+  independent full pass hit ONE S1 failure (username registration against the real deployed
+  fast bootstrap never completed inside its 120s budget — dialog stayed open, no test-logic
+  error) which passed clean on an immediate solo re-run (1.7 min): classified
+  INFRA-TRANSIENT (real-DHT registration stall), the first such flake of the trusted-import
+  round; S2/S3 green in every pass including verification.
+
 Standing rules for every round: Sonnet implements, orchestrator reviews diff + screenshots and
 commits; agents read `Kiyeovo_desktop_technical_documentation.md` (grep the subsystem) and
 trace `src/core` before any app-level claim, labeling findings doc-confirmed vs unverified;
