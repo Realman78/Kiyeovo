@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import {
   Check,
   ChevronDown,
@@ -25,6 +25,9 @@ type SetupNodesViewProps = {
   icon: LucideIcon;
   title: string;
   description: string;
+  // Optional extra content rendered directly below the description paragraph
+  // (e.g. the predefined-nodes offering link on the Bootstrap surface).
+  belowDescription?: ReactNode;
   nodesTitle: string;
   nodeSingular: string;
   emptyTitle: string;
@@ -103,6 +106,7 @@ export function SetupNodesView({
   icon: Icon,
   title,
   description,
+  belowDescription,
   nodesTitle,
   nodeSingular,
   emptyTitle,
@@ -173,6 +177,7 @@ export function SetupNodesView({
             <h1 className="text-2xl font-semibold tracking-tight text-foreground">{title}</h1>
           </div>
           <p className="mt-0.5 text-md text-muted-foreground text-left">{description}</p>
+          {belowDescription}
         </header>
 
         {!!error && (

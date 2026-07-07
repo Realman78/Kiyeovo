@@ -279,6 +279,15 @@ export interface KiyeovoAPI {
     success: boolean;
     error: string | null;
   }>;
+  getPredefinedNodesSunsetDismissed: () => Promise<{
+    success: boolean;
+    dismissed: boolean;
+    error: string | null;
+  }>;
+  setPredefinedNodesSunsetDismissed: (dismissed: boolean) => Promise<{
+    success: boolean;
+    error: string | null;
+  }>;
 
   getContactAttempts: () => Promise<{
     success: boolean;

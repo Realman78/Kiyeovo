@@ -17,7 +17,7 @@ import {
   type IceServerType,
   type IceServersResponse,
 } from '../core/index.js';
-import { CHATS_TO_CHECK_FOR_OFFLINE_MESSAGES, DEFAULT_NETWORK_MODE, FAST_MISSING_ICE_WARNING_ACKNOWLEDGED_SETTING_KEY, FAST_RELAY_MULTIADDRS_SETTING_KEY, FILE_OFFER_RATE_LIMIT, KEY_EXCHANGE_RATE_LIMIT_DEFAULT, MAX_FILE_SIZE, MAX_PENDING_FILES_PER_PEER, MAX_PENDING_FILES_TOTAL, NETWORK_MODE_ONBOARDED_SETTING_KEY, OFFLINE_MESSAGE_LIMIT, SILENT_REJECTION_THRESHOLD_GLOBAL, SILENT_REJECTION_THRESHOLD_PER_PEER, NETWORK_MODES, WEBRTC_ICE_SERVERS_SETTING_KEY, getInitialSetupStatusSettingKey, getTorConfig, isNetworkMode } from '../core/constants.js';
+import { CHATS_TO_CHECK_FOR_OFFLINE_MESSAGES, DEFAULT_NETWORK_MODE, FAST_MISSING_ICE_WARNING_ACKNOWLEDGED_SETTING_KEY, FAST_RELAY_MULTIADDRS_SETTING_KEY, FILE_OFFER_RATE_LIMIT, KEY_EXCHANGE_RATE_LIMIT_DEFAULT, MAX_FILE_SIZE, MAX_PENDING_FILES_PER_PEER, MAX_PENDING_FILES_TOTAL, NETWORK_MODE_ONBOARDED_SETTING_KEY, OFFLINE_MESSAGE_LIMIT, PREDEFINED_NODES_SUNSET_DISMISSED_SETTING_KEY, SILENT_REJECTION_THRESHOLD_GLOBAL, SILENT_REJECTION_THRESHOLD_PER_PEER, NETWORK_MODES, WEBRTC_ICE_SERVERS_SETTING_KEY, getInitialSetupStatusSettingKey, getTorConfig, isNetworkMode } from '../core/constants.js';
 import { validateMessageLength, validateUsername } from '../core/utils/validators.js';
 import { peerIdFromString } from '@libp2p/peer-id';
 import { multiaddr } from '@multiformats/multiaddr';
@@ -2741,6 +2741,47 @@ function setupChatSettingsHandlers(
         return {
           success: false,
           error: errStr(error, 'Failed to save call setup warning preference'),
+        };
+      }
+    },
+  );
+
+  ipcMain.handle(IPC_CHANNELS.GET_PREDEFINED_NODES_SUNSET_DISMISSED, async () => {
+    try {
+      const dismissed = withSettingsDatabase(
+        getP2PCore,
+        (db) => db.getSetting(PREDEFINED_NODES_SUNSET_DISMISSED_SETTING_KEY) === 'true',
+      );
+      return { success: true, dismissed, error: null };
+    } catch (error) {
+      console.error('[IPC] Failed to get predefined-nodes sunset dismissed flag:', error);
+      return {
+        success: false,
+        dismissed: false,
+        error: errStr(error, 'Failed to get sunset notice preference'),
+      };
+    }
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.SET_PREDEFINED_NODES_SUNSET_DISMISSED,
+    async (_event, dismissed: boolean) => {
+      try {
+        if (typeof dismissed !== 'boolean') {
+          return { success: false, error: 'Invalid sunset notice preference' };
+        }
+        withSettingsDatabase(getP2PCore, (db) => {
+          db.setSetting(
+            PREDEFINED_NODES_SUNSET_DISMISSED_SETTING_KEY,
+            dismissed ? 'true' : 'false',
+          );
+        });
+        return { success: true, error: null };
+      } catch (error) {
+        console.error('[IPC] Failed to set predefined-nodes sunset dismissed flag:', error);
+        return {
+          success: false,
+          error: errStr(error, 'Failed to save sunset notice preference'),
         };
       }
     },

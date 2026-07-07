@@ -9,6 +9,12 @@ import { RadioTower } from 'lucide-react';
 import { SetupNodesView } from './SetupNodesView';
 import { store, type RootState } from '../../../state/store';
 import { applyLiveness, bumpSetupGeneration, mergeConfiguredNodes, setSetupNodes } from '../../../state/slices/setupNodesSlice';
+import {
+  PREDEFINED_NODES_OFFERING_LABEL,
+  PREDEFINED_NODES_README_URL,
+  isOfferingActive,
+} from '../../../../core/predefined-nodes';
+import { ExternalLink } from 'lucide-react';
 
 const SECTION = 'bootstrap' as const;
 const BOOTSTRAP_AUTO_RETRY_VISIBLE_MS = 12_000;
@@ -44,6 +50,11 @@ export function BootstrapSetup() {
   const [retrying, setRetrying] = useState(false);
   const [autoRetrying, setAutoRetrying] = useState(false);
   const [reordering, setReordering] = useState(false);
+  // Fast-mode only: relay/STUN/TURN don't exist in anonymous mode, which uses
+  // its own onion bootstrap. The offering advertises all four kinds, so it only
+  // makes sense on the fast-mode Bootstrap surface.
+  const [isFastMode, setIsFastMode] = useState(false);
+  const showOffering = isFastMode && isOfferingActive(Date.now());
   const reorderInFlightRef = useRef(false);
   const livenessInFlightRef = useRef(false);
   const autoRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -139,6 +150,22 @@ export function BootstrapSetup() {
     clearAutoRetryTimer();
     setAutoRetrying(false);
   }, [autoRetrying, nodes]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void window.kiyeovoAPI.getNetworkMode()
+      .then((result) => {
+        if (!cancelled && result.success) {
+          setIsFastMode(result.mode === 'fast');
+        }
+      })
+      .catch(() => {
+        // Leave the offering hidden if the mode can't be resolved.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const showError = (message: string) => {
     setError(message);
@@ -289,6 +316,17 @@ export function BootstrapSetup() {
       icon={RadioTower}
       title="Bootstrap servers"
       description="Bootstrap servers connect you to the network so you can discover people, participate in groups, receive & send offline messages."
+      belowDescription={showOffering ? (
+        <a
+          href={PREDEFINED_NODES_README_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="mt-1 inline-flex items-center gap-1.5 text-md text-primary hover:underline text-left"
+        >
+          {PREDEFINED_NODES_OFFERING_LABEL}
+          <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+        </a>
+      ) : undefined}
       nodesTitle="Configured servers"
       nodeSingular="bootstrap server"
       emptyTitle="No bootstrap servers configured"

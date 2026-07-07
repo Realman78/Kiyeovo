@@ -16,6 +16,9 @@ export const FAST_RELAY_MULTIADDRS_SETTING_KEY = 'fast_relay_multiaddrs';
 export const FAST_RELAY_MULTIADDRS_INITIALIZED_SETTING_KEY = 'fast_relay_multiaddrs_initialized';
 export const WEBRTC_ICE_SERVERS_SETTING_KEY = 'webrtc_ice_servers';
 export const FAST_MISSING_ICE_WARNING_ACKNOWLEDGED_SETTING_KEY = 'setup_missing_ice_warning_acknowledged_fast';
+// Persisted "one-time" flag for the predefined-nodes sunset notice: once the
+// user dismisses the shutdown notice it is never shown again.
+export const PREDEFINED_NODES_SUNSET_DISMISSED_SETTING_KEY = 'predefined_nodes_sunset_dismissed';
 
 export type ModeNamespaceKind =
   | 'offline'

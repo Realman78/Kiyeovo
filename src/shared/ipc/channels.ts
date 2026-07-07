@@ -167,6 +167,8 @@ export const IPC_CHANNELS = {
   SET_ICE_SERVERS: 'settings:setIceServers',
   GET_MISSING_ICE_WARNING_ACKNOWLEDGED: 'settings:getMissingIceWarningAcknowledged',
   SET_MISSING_ICE_WARNING_ACKNOWLEDGED: 'settings:setMissingIceWarningAcknowledged',
+  GET_PREDEFINED_NODES_SUNSET_DISMISSED: 'settings:getPredefinedNodesSunsetDismissed',
+  SET_PREDEFINED_NODES_SUNSET_DISMISSED: 'settings:setPredefinedNodesSunsetDismissed',
   RESTART_APP: 'app:restart',
   QUIT_APP: 'app:quit',
   DELETE_ACCOUNT_AND_DATA: 'app:deleteAccountAndData',
