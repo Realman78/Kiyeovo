@@ -13,6 +13,8 @@ import {
   X,
 } from 'lucide-react';
 import type { IceServerConfig, IceServerType } from '../../../../core/types';
+import { PREDEFINED_NODES_OFFERING_LABELS, isOfferingActive } from '../../../../core/predefined-nodes';
+import { PredefinedNodesOfferingLink } from './PredefinedNodesOfferingLink';
 import { errStr } from '../../../../core/utils/general-error';
 import { UNEXPECTED_ERROR } from '../../../constants';
 import { useRefreshSetupReadiness } from '../../../hooks/useSetupReadiness';
@@ -374,6 +376,10 @@ export function IceSetup() {
             STUN and TURN servers help set up audio and video calls when a direct connection between
             you and the other person isn't possible.
           </p>
+          {isOfferingActive(Date.now()) && (
+            // ICE setup only exists in fast mode, so no external-link confirmation needed.
+            <PredefinedNodesOfferingLink label={PREDEFINED_NODES_OFFERING_LABELS.ice} />
+          )}
         </header>
 
         {!!error && (

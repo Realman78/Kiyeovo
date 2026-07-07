@@ -17,7 +17,8 @@
  *   3. PREDEFINED_NODES             — the real multiaddrs / ICE URLs you host,
  *                                     used ONLY to detect (post-sunset) whether
  *                                     a user still has one of them saved.
- *   4. (optional) PREDEFINED_NODES_OFFERING_LABEL / *_SUNSET_* copy strings.
+ *   4. (optional) PREDEFINED_NODES_OFFERING_LABELS / *_SUNSET_* /
+ *      *_EXTERNAL_CONFIRM_* copy strings.
  * ============================================================================
  */
 
@@ -69,14 +70,29 @@ export const PREDEFINED_NODES: readonly PredefinedNode[] = [
   { kind: 'stun', value: 'stun:stun.placeholder.kiyeovo:3478' },
   // TURN (ICE url, no credentials — saved entries carry creds in separate fields)
   { kind: 'turn', value: 'turn:turn.placeholder.kiyeovo:3478' },
+  // Anonymous-mode bootstrap (onion multiaddr). The deployed onion bootstrap
+  // shuts down at the sunset too, so anonymous users must also get the notice.
+  { kind: 'bootstrap', value: '/onion3/placeholderplaceholderplaceholderplaceholderplacehold:9000/p2p/12D3KooWPLACEHOLDERonionbootstrap00000000000000000000000' },
 ] as const;
 
 // ---------------------------------------------------------------------------
 // Copy (kept as constants so wording is editable in one place).
 // TODO(marin): reword freely.
 // ---------------------------------------------------------------------------
-export const PREDEFINED_NODES_OFFERING_LABEL =
-  "Connect to one of Kiyeovo's trusted bootstrap / relay / STUN / TURN servers";
+// Per-surface offering copy: each setup page advertises only its own kind.
+export const PREDEFINED_NODES_OFFERING_LABELS = {
+  bootstrap: "Connect to one of Kiyeovo's trusted bootstrap servers",
+  relay: "Connect to one of Kiyeovo's trusted relay servers",
+  ice: "Connect to one of Kiyeovo's trusted STUN/TURN servers",
+} as const;
+
+// Anonymous mode: shown in a confirmation dialog before leaving the app —
+// anonymous users may not want to open an external website.
+export const PREDEFINED_NODES_EXTERNAL_CONFIRM_TITLE = 'Open external website?';
+export const PREDEFINED_NODES_EXTERNAL_CONFIRM_BODY =
+  'This opens the Kiyeovo README on github.com in your regular browser, outside the app and outside Tor.';
+export const PREDEFINED_NODES_EXTERNAL_CONFIRM_OPEN_LABEL = 'Open in browser';
+export const PREDEFINED_NODES_EXTERNAL_CONFIRM_CANCEL_LABEL = 'Cancel';
 
 export const PREDEFINED_NODES_SUNSET_TITLE = 'Kiyeovo predefined servers have shut down';
 export const PREDEFINED_NODES_SUNSET_BODY =

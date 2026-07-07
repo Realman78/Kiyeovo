@@ -10,11 +10,10 @@ import { SetupNodesView } from './SetupNodesView';
 import { store, type RootState } from '../../../state/store';
 import { applyLiveness, bumpSetupGeneration, mergeConfiguredNodes, setSetupNodes } from '../../../state/slices/setupNodesSlice';
 import {
-  PREDEFINED_NODES_OFFERING_LABEL,
-  PREDEFINED_NODES_README_URL,
+  PREDEFINED_NODES_OFFERING_LABELS,
   isOfferingActive,
 } from '../../../../core/predefined-nodes';
-import { ExternalLink } from 'lucide-react';
+import { PredefinedNodesOfferingLink } from './PredefinedNodesOfferingLink';
 
 const SECTION = 'bootstrap' as const;
 const BOOTSTRAP_AUTO_RETRY_VISIBLE_MS = 12_000;
@@ -50,11 +49,11 @@ export function BootstrapSetup() {
   const [retrying, setRetrying] = useState(false);
   const [autoRetrying, setAutoRetrying] = useState(false);
   const [reordering, setReordering] = useState(false);
-  // Fast-mode only: relay/STUN/TURN don't exist in anonymous mode, which uses
-  // its own onion bootstrap. The offering advertises all four kinds, so it only
-  // makes sense on the fast-mode Bootstrap surface.
+  // The offering shows in BOTH modes (the README carries fast AND onion
+  // bootstrap entries). Mode still matters for the click behavior: anonymous
+  // users get a confirmation dialog before an external website opens.
   const [isFastMode, setIsFastMode] = useState(false);
-  const showOffering = isFastMode && isOfferingActive(Date.now());
+  const showOffering = isOfferingActive(Date.now());
   const reorderInFlightRef = useRef(false);
   const livenessInFlightRef = useRef(false);
   const autoRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -317,15 +316,10 @@ export function BootstrapSetup() {
       title="Bootstrap servers"
       description="Bootstrap servers connect you to the network so you can discover people, participate in groups, receive & send offline messages."
       belowDescription={showOffering ? (
-        <a
-          href={PREDEFINED_NODES_README_URL}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="mt-1 inline-flex items-center gap-1.5 text-md text-primary hover:underline text-left"
-        >
-          {PREDEFINED_NODES_OFFERING_LABEL}
-          <ExternalLink className="h-3.5 w-3.5 shrink-0" />
-        </a>
+        <PredefinedNodesOfferingLink
+          label={PREDEFINED_NODES_OFFERING_LABELS.bootstrap}
+          confirmBeforeOpen={!isFastMode}
+        />
       ) : undefined}
       nodesTitle="Configured servers"
       nodeSingular="bootstrap server"

@@ -8,6 +8,8 @@ import { Route } from 'lucide-react';
 import { SetupNodesView } from './SetupNodesView';
 import { store, type RootState } from '../../../state/store';
 import { applyLiveness, bumpSetupGeneration, mergeConfiguredNodes, setSetupNodes } from '../../../state/slices/setupNodesSlice';
+import { PREDEFINED_NODES_OFFERING_LABELS, isOfferingActive } from '../../../../core/predefined-nodes';
+import { PredefinedNodesOfferingLink } from './PredefinedNodesOfferingLink';
 
 const SECTION = 'relay' as const;
 
@@ -238,6 +240,10 @@ export function RelaySetup() {
       icon={Route}
       title="Relay servers"
       description="Relay servers help your messages reach people when a direct peer-to-peer connection isn't available."
+      belowDescription={isOfferingActive(Date.now()) ? (
+        // Relay setup only exists in fast mode, so no external-link confirmation needed.
+        <PredefinedNodesOfferingLink label={PREDEFINED_NODES_OFFERING_LABELS.relay} />
+      ) : undefined}
       nodesTitle="Configured servers"
       nodeSingular="relay server"
       emptyTitle="No relay servers configured"
