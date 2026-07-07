@@ -10,11 +10,6 @@
     "files": ["dist-electron/**", "dist-ui/**", "package.json"],
     "extraResources": [
         {
-            "from": "resources/tor/${os}-${arch}",
-            "to": "tor/${os}-${arch}",
-            "filter": ["**/*"]
-        },
-        {
             "from": "resources/icons",
             "to": "icons",
             "filter": ["**/*"]
@@ -25,14 +20,34 @@
     ],
     "productName": "Kiyeovo",
     "linux": {
-        "target": "AppImage",
+        "target": ["AppImage", "deb"],
         "category": "Network",
-        "icon": "resources/icons"
+        "icon": "resources/icons",
+        "executableName": "kiyeovo",
+        "extraResources": [
+            {
+                "from": "resources/tor/linux-x64",
+                "to": "tor/linux-x64",
+                "filter": ["**/*"]
+            }
+        ]
     },
     "mac": {
-        "target": ["dmg", "zip"],
+        "target": [
+            { "target": "dmg", "arch": ["arm64", "x64"] },
+            { "target": "zip", "arch": ["arm64", "x64"] }
+        ],
         "category": "public.app-category.social-networking",
-        "icon": "resources/icons/app-icon.png"
+        "icon": "resources/icons/app-icon.png",
+        "identity": "-",
+        "notarize": false,
+        "extraResources": [
+            {
+                "from": "resources/tor/darwin-${arch}",
+                "to": "tor/darwin-${arch}",
+                "filter": ["**/*"]
+            }
+        ]
     },
     "win": {
         "target": ["nsis", "portable"],
