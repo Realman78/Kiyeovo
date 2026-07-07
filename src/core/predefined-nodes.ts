@@ -7,19 +7,11 @@
  * and all matching/timing logic below is a set of PURE, unit-tested functions
  * (see predefined-nodes.test.ts).
  *
- * ============================================================================
- * TODO(marin): BEFORE RELEASE, populate every placeholder below. Nothing here
- * is inlined anywhere else — edit only this file (plus one allowlist line, see
- * note on PREDEFINED_NODES_README_URL). The exact list you must fill in:
- *
- *   1. PREDEFINED_NODES_SUNSET_TS   — the real shutdown instant.
- *   2. PREDEFINED_NODES_README_URL  — the real README URL (see allowlist note).
- *   3. PREDEFINED_NODES             — the real multiaddrs / ICE URLs you host,
- *                                     used ONLY to detect (post-sunset) whether
- *                                     a user still has one of them saved.
- *   4. (optional) PREDEFINED_NODES_OFFERING_LABELS / *_SUNSET_* /
- *      *_EXTERNAL_CONFIRM_* copy strings.
- * ============================================================================
+ * Kiyeovo 1.0.0 intentionally ships with this offer disabled: there are no
+ * project-hosted public nodes configured in the binary. When those nodes exist,
+ * flip PREDEFINED_NODES_ENABLED, set a real sunset timestamp, document the
+ * values in README.md#servers, and populate PREDEFINED_NODES with exactly the
+ * values users would save locally.
  */
 
 export type PredefinedNodeKind = 'bootstrap' | 'relay' | 'stun' | 'turn';
@@ -36,48 +28,23 @@ export interface PredefinedNode {
   value: string;
 }
 
-// ---------------------------------------------------------------------------
-// TODO(marin): set the real sunset instant. Placeholder currently 2026-07-25.
-// Represented as epoch milliseconds so comparison is a trivial number compare.
-// Use Date.parse of an ISO string (parsed once, at module load) to keep it
-// human-readable in source.
-// ---------------------------------------------------------------------------
-export const PREDEFINED_NODES_SUNSET_TS: number = Date.parse('2026-07-25T00:00:00Z');
+export const PREDEFINED_NODES_ENABLED = false;
 
-// ---------------------------------------------------------------------------
-// TODO(marin): real README URL (ideally the "#servers" anchor).
+// Represented as epoch milliseconds so comparison is a trivial number compare.
+// Infinity keeps the sunset inactive while the predefined-node offer is disabled.
+export const PREDEFINED_NODES_SUNSET_TS: number = Number.POSITIVE_INFINITY;
+
 // IMPORTANT: this same string must ALSO appear in the external-URL allowlist so
 // the app is permitted to open it — it is already wired there by importing this
-// constant into src/electron/constants.ts (ALLOWED_EXTERNAL_URLS). Enter the
-// CANONICAL form: https, lowercase host, no trailing slash. The fragment
-// (#servers) is preserved by the open path.
-// ---------------------------------------------------------------------------
+// constant into src/electron/constants.ts (ALLOWED_EXTERNAL_URLS).
 export const PREDEFINED_NODES_README_URL =
   'https://github.com/Realman78/Kiyeovo/blob/main/README.md#servers';
 
-// ---------------------------------------------------------------------------
-// TODO(marin): replace these clearly-fake placeholders with the REAL servers
-// you host. These are used ONLY for post-sunset matching (detecting whether a
-// user still has one of your servers saved) — they are NOT shown in a picker.
-// Keep the shape; add/remove entries freely.
-// ---------------------------------------------------------------------------
-export const PREDEFINED_NODES: readonly PredefinedNode[] = [
-  // Bootstrap (libp2p multiaddr)
-  { kind: 'bootstrap', value: '/dns4/bootstrap.placeholder.kiyeovo/tcp/4001/p2p/12D3KooWPLACEHOLDERbootstrap0000000000000000000000000000' },
-  // Relay (libp2p multiaddr)
-  { kind: 'relay', value: '/dns4/relay.placeholder.kiyeovo/tcp/4002/p2p/12D3KooWPLACEHOLDERrelay000000000000000000000000000000000' },
-  // STUN (ICE url, no credentials)
-  { kind: 'stun', value: 'stun:stun.placeholder.kiyeovo:3478' },
-  // TURN (ICE url, no credentials — saved entries carry creds in separate fields)
-  { kind: 'turn', value: 'turn:turn.placeholder.kiyeovo:3478' },
-  // Anonymous-mode bootstrap (onion multiaddr). The deployed onion bootstrap
-  // shuts down at the sunset too, so anonymous users must also get the notice.
-  { kind: 'bootstrap', value: '/onion3/placeholderplaceholderplaceholderplaceholderplacehold:9000/p2p/12D3KooWPLACEHOLDERonionbootstrap00000000000000000000000' },
-] as const;
+// These are used only for post-sunset matching, not as an in-app picker source.
+export const PREDEFINED_NODES: readonly PredefinedNode[] = [] as const;
 
 // ---------------------------------------------------------------------------
 // Copy (kept as constants so wording is editable in one place).
-// TODO(marin): reword freely.
 // ---------------------------------------------------------------------------
 // Per-surface offering copy: each setup page advertises only its own kind.
 export const PREDEFINED_NODES_OFFERING_LABELS = {
@@ -122,7 +89,7 @@ export function isSunsetActive(now: number): boolean {
  * sunset only); fast-vs-anonymous gating is applied by the caller.
  */
 export function isOfferingActive(now: number): boolean {
-  return !isSunsetActive(now);
+  return PREDEFINED_NODES_ENABLED && !isSunsetActive(now);
 }
 
 /**

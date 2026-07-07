@@ -13,7 +13,7 @@ Kiyeovo is a decentralized peer-to-peer communication app. It supports many feat
 - encrypted file transfer
 - trusted profile import/export
 - identity backup
-- no central account or message server; you can use the default bootstrap/relay setup or self-host (see the [guide](#bootstrap-and-relay-setup))
+- no central account or message server; connect through bootstrap/relay servers you trust, or self-host with the [guide](#bootstrap-and-relay-setup)
 
 For technical readers, contributors, and coding agents, start with [Kiyeovo_desktop_technical_documentation.md](./Kiyeovo_desktop_technical_documentation.md). That is the source-of-truth architecture overview.
 
@@ -42,9 +42,9 @@ What's left:
 - Testing & polishing *(30th of June - 6th of July)*
 - Platform specific installers which will be available on kiyeovo.marindedic.com - final step *(coming 7th of July - relase)*
 
-## Quick start if you don't want to wait for the full release
+## Quick start from source
 
-> The default public bootstrap/relay nodes are temporarily offline. To run the beta, see [Bootstrap and relay setup](#bootstrap-and-relay-setup) for self-hosting your own infrastructure.
+> Kiyeovo 1.0.0 does not bundle project-hosted default bootstrap/relay servers. Use self-hosted or community infrastructure; see [Servers](#servers) and [Bootstrap and relay setup](#bootstrap-and-relay-setup).
 
 > There is also an **outdated** tutorial [here](https://marindedic.com/p2p-messenger/) (will be updated on 1st of July), but you can just follow the steps below
 
@@ -109,7 +109,19 @@ The output should start with something like `-rwsr-xr-x 1 root root`. You may ne
 
 If your machine is not low-end, consider increasing `IDENTITY_SCRYPT_N` and `PROFILE_SCRYPT_N` in [src/core/constants.ts](./src/core/constants.ts) for stronger protection against local brute-force password attacks, but at the cost of slower unlock/import.
 
-## Bootstrap and relay setup (will be updated on 1st of July when the CLI tool becomes ready)
+## Servers
+
+Kiyeovo 1.0.0 does not ship with project-hosted default bootstrap, relay, STUN,
+TURN, or anonymous onion bootstrap servers baked into the app. The setup screens
+therefore do not show a predefined "Kiyeovo trusted servers" offer in this
+release.
+
+To use Kiyeovo, add bootstrap/relay/ICE servers you trust, use community
+servers, or self-host with the infrastructure bundle below. If project-hosted
+public servers are published later, their exact addresses and shutdown policy
+will be listed in this section before the app advertises them.
+
+## Bootstrap and relay setup
 
 The recommended way to self-host is the **released `kiyeovo-infra` bundle**. It
 runs the bootstrap, relay, optional Tor onion (anonymous mode), and optional
@@ -130,7 +142,7 @@ Download and unpack the `kiyeovo-infra-<version>.tar.gz` asset from the Kiyeovo
 GitHub release:
 
 ```bash
-VERSION=0.1.0
+VERSION=1.0.0
 wget "https://github.com/Realman78/Kiyeovo/releases/download/v${VERSION}/kiyeovo-infra-${VERSION}.tar.gz"
 wget "https://github.com/Realman78/Kiyeovo/releases/download/v${VERSION}/kiyeovo-infra-${VERSION}.tar.gz.sha256"
 sha256sum -c "kiyeovo-infra-${VERSION}.tar.gz.sha256"
