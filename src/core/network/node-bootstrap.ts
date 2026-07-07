@@ -2,7 +2,7 @@ import { CODE_P2P, multiaddr } from '@multiformats/multiaddr';
 import type { PeerId } from '@libp2p/interface';
 import { peerIdFromString } from '@libp2p/peer-id';
 
-import type { BootstrapAddressResolution, BootstrapAttempt, BootstrapConnection, BootstrapConnectOptions, BootstrapConnectResult, ChatNode, DhtAdmissionApi, NetworkMode, TorBootstrapTarget } from '../types.js';
+import type { BootstrapAddressResolution, BootstrapAttempt, BootstrapConnection, BootstrapConnectOptions, BootstrapConnectResult, ChatNode, DhtAdmissionApi, NetworkMode } from '../types.js';
 
 import {
   MAX_BOOTSTRAP_NODES_FAST,
@@ -19,9 +19,11 @@ import { log } from '../../shared/logger.js';
 
 const MAX_BOOTSTRAP_CANDIDATES_PER_CONNECT = 6;
 const FAST_BOOTSTRAP_BATCH_TIMEOUT_MS = 10_000;
-const ANONYMOUS_BOOTSTRAP_BATCH_TIMEOUT_MS = 15_000;
+const ANONYMOUS_BOOTSTRAP_BATCH_TIMEOUT_MS = 20_000;
 const FAST_BOOTSTRAP_ADDRESS_TIMEOUT_MS = 5_000;
-const ANONYMOUS_BOOTSTRAP_ADDRESS_TIMEOUT_MS = 12_000;
+// Cold onion dials (descriptor fetch + circuit + rendezvous) routinely need
+// 10-20s; nothing pre-warms these circuits before a dial.
+const ANONYMOUS_BOOTSTRAP_ADDRESS_TIMEOUT_MS = 20_000;
 const BOOTSTRAP_RETRY_TIMEOUT_BUFFER_MS = 5_000;
 
 type BootstrapDialPolicy = {
@@ -489,35 +491,6 @@ export function resolveBootstrapAddressesForCurrentMode(
     networkMode,
     addresses: filterBootstrapAddressesForMode(networkMode, candidateAddresses),
   };
-}
-
-export function extractTorBootstrapTargets(addresses: string[]): TorBootstrapTarget[] {
-  const targets: TorBootstrapTarget[] = [];
-
-  for (const address of addresses) {
-    try {
-      const onionAddress = multiaddr(address)
-        .getComponents()
-        .find((component) => component.code === 445)
-        ?.value;
-
-      if (!onionAddress) {
-        continue;
-      }
-
-      const [host, rawPort] = onionAddress.split(':');
-      const port = parseInt(rawPort ?? '', 10);
-      if (!host || !Number.isFinite(port)) {
-        continue;
-      }
-
-      targets.push({ host: `${host}.onion`, port });
-    } catch {
-      console.warn(`[CONFIG][ANON] ignoring invalid bootstrap address during Tor validation: ${address}`);
-    }
-  }
-
-  return targets;
 }
 
 export function getBootstrapAddressesForCurrentMode(database: ChatDatabase, localPeerId?: string): string[] {

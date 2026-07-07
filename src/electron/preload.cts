@@ -115,6 +115,11 @@ const kiyeovoAPI: KiyeovoAPI = {
     IPC_CHANNELS.SET_MISSING_ICE_WARNING_ACKNOWLEDGED,
     acknowledged,
   ),
+  getPredefinedNodesSunsetDismissed: () => invoke(IPC_CHANNELS.GET_PREDEFINED_NODES_SUNSET_DISMISSED),
+  setPredefinedNodesSunsetDismissed: (dismissed) => invoke(
+    IPC_CHANNELS.SET_PREDEFINED_NODES_SUNSET_DISMISSED,
+    dismissed,
+  ),
 
   getContactAttempts: () => invoke(IPC_CHANNELS.GET_CONTACT_ATTEMPTS),
 

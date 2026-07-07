@@ -17,6 +17,7 @@ import { IncomingCallCard } from '../components/call/IncomingCallCard';
 import { CallManagerCard } from '../components/call/CallManagerCard';
 import { GroupCallManagerCard } from '../components/call/GroupCallManagerCard';
 import { ScreenShareSourcePicker } from '../components/call/ScreenShareSourcePicker';
+import { PredefinedNodesSunsetNotice } from '../components/PredefinedNodesSunsetNotice';
 import type { SetupSection, SidebarSection } from '../components/sidebar/navigation';
 import { BootstrapSetup } from '../components/sidebar/setup/BootstrapSetup';
 import { RelaySetup } from '../components/sidebar/setup/RelaySetup';
@@ -1213,6 +1214,7 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
       <CallManagerCard />
       <GroupCallManagerCard />
       <ScreenShareSourcePicker />
+      <PredefinedNodesSunsetNotice />
     </div>
   )
 }

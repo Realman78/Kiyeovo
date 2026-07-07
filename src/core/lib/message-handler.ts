@@ -48,7 +48,8 @@ import {
   MESSAGE_TIMEOUT,
   SESSION_MANAGER_CLEANUP_INTERVAL,
   BUCKET_NUDGE_COOLDOWN_MS,
-  BUCKET_NUDGE_DIAL_TIMEOUT_MS,
+  BUCKET_NUDGE_DIAL_TIMEOUT_FAST_MS,
+  BUCKET_NUDGE_DIAL_TIMEOUT_ANONYMOUS_MS,
   BUCKET_NUDGE_FETCH_DELAY_MS,
   DIRECT_OFFLINE_REFETCH_DELAY_MS,
   DIRECT_OFFLINE_INBOX_RECOVERY_COOLDOWN_MS,
@@ -113,6 +114,7 @@ import {
 } from '../group/runtime/group-messaging.js';
 import { GroupOfflineManager } from '../group/runtime/group-offline-manager.js';
 import type { GroupOfflineCheckOptions } from '../group/runtime/group-offline-manager.js';
+import { shouldTriggerJoinCompletionCatchup } from '../group/runtime/group-offline-triggers.js';
 import { GroupAckRepublisher } from '../group/control/group-ack-republisher.js';
 import { GroupInfoRepublisher } from '../group/dht/group-info-republisher.js';
 import { dialProtocolWithRelayFallback } from '../transport/protocol-dialer.js';
@@ -219,6 +221,9 @@ export class MessageHandler {
   private groupAckRepublisher: GroupAckRepublisher;
   private groupInfoRepublisher: GroupInfoRepublisher;
   private readonly bucketNudgeProtocol: string;
+  // Per-stage stream-open budget for bucket nudges, resolved once from the session
+  // mode (fast: 5s; anonymous: 20s, for cold Tor onion circuits). See constants.
+  private readonly bucketNudgeDialTimeoutMs: number;
   private readonly chatProtocol: string;
   private readonly callSignalProtocol: string;
   private readonly expectedOfflineBucketPrefix: string;
@@ -335,6 +340,9 @@ export class MessageHandler {
     const sessionNetworkMode = database.getSessionNetworkMode();
     const modeConfig = getNetworkModeRuntime(sessionNetworkMode).config;
     this.bucketNudgeProtocol = modeConfig.bucketNudgeProtocol;
+    this.bucketNudgeDialTimeoutMs = sessionNetworkMode === NETWORK_MODES.ANONYMOUS
+      ? BUCKET_NUDGE_DIAL_TIMEOUT_ANONYMOUS_MS
+      : BUCKET_NUDGE_DIAL_TIMEOUT_FAST_MS;
     this.chatProtocol = modeConfig.chatProtocol;
     this.callSignalProtocol = modeConfig.callSignalProtocol;
     this.expectedOfflineBucketPrefix = `${modeConfig.dhtNamespaces.offline}/`;
@@ -434,8 +442,12 @@ export class MessageHandler {
     return setting ? parseInt(setting, 10) : CHATS_TO_CHECK_FOR_OFFLINE_MESSAGES;
   }
 
-  public nudgePeerGroupRefetch(peerId: string, groupId: string): void {
-    this.sendBucketNudge(peerId, { kind: 'GROUP_REKEY_REFETCH', groupId }, `group:${peerId}:${groupId}`);
+  public nudgePeerGroupRefetch(
+    peerId: string,
+    groupId: string,
+    options?: { allowDialWithoutConnection?: boolean },
+  ): void {
+    this.sendBucketNudge(peerId, { kind: 'GROUP_REKEY_REFETCH', groupId }, `group:${peerId}:${groupId}`, options);
   }
 
   public nudgePeerDirectSessionReset(peerId: string): void {
@@ -690,7 +702,7 @@ export class MessageHandler {
               `connId=${conn.id} remoteAddr=${conn.remoteAddr.toString()} protocol=${this.bucketNudgeProtocol}`,
             );
             stream = await conn.newStream(this.bucketNudgeProtocol, {
-              signal: AbortSignal.timeout(BUCKET_NUDGE_DIAL_TIMEOUT_MS),
+              signal: AbortSignal.timeout(this.bucketNudgeDialTimeoutMs),
               runOnLimitedConnection: true,
             });
             streamSource = 'reuse';
@@ -713,10 +725,10 @@ export class MessageHandler {
           const targetPeerId = peerIdFromString(peerId);
           log(
             `[NUDGE][DIAL][START] attempt=${attemptId} peer=${peerId.slice(-8)} protocol=${this.bucketNudgeProtocol} ` +
-            `timeoutMs=${BUCKET_NUDGE_DIAL_TIMEOUT_MS}`,
+            `timeoutMs=${this.bucketNudgeDialTimeoutMs}`,
           );
           stream = await this.node.dialProtocol(targetPeerId, this.bucketNudgeProtocol, {
-            signal: AbortSignal.timeout(BUCKET_NUDGE_DIAL_TIMEOUT_MS),
+            signal: AbortSignal.timeout(this.bucketNudgeDialTimeoutMs),
             runOnLimitedConnection: true,
           });
           const dialMs = Date.now() - dialStartedAt;
@@ -2334,9 +2346,12 @@ export class MessageHandler {
       throw new Error('Cannot send file as first message. Send a text message first.');
     }
 
-    const { targetPeerId, resolvedOfflinePublicKey } = await this.resolveUserRegistrationForSession(targetUsernameOrPeerId);
+    const { targetPeerId, resolvedOfflinePublicKey, resolvedSigningPublicKey, resolvedSignature } =
+      await this.resolveUserRegistrationForSession(targetUsernameOrPeerId);
     const exchangedUser = await this.keyExchange.initiateKeyExchange(targetPeerId, targetUsernameOrPeerId, message, {
       recipientOfflinePublicKey: resolvedOfflinePublicKey,
+      recipientSigningPublicKey: resolvedSigningPublicKey,
+      recipientSignature: resolvedSignature,
     });
     if (!exchangedUser) {
       throw new Error('Key exchange failed');
@@ -2351,7 +2366,7 @@ export class MessageHandler {
 
   private async resolveUserRegistrationForSession(
     targetUsernameOrPeerId: string,
-  ): Promise<{ targetPeerId: PeerId; resolvedOfflinePublicKey: string }> {
+  ): Promise<{ targetPeerId: PeerId; resolvedOfflinePublicKey: string; resolvedSigningPublicKey: string; resolvedSignature: string }> {
     try {
       let isPeerId = false;
       try { peerIdFromString(targetUsernameOrPeerId); isPeerId = true; } catch { /* username */ }
@@ -2361,6 +2376,8 @@ export class MessageHandler {
       return {
         targetPeerId: peerIdFromString(userRegistration.peerID),
         resolvedOfflinePublicKey: userRegistration.offlinePublicKey,
+        resolvedSigningPublicKey: userRegistration.signingPublicKey,
+        resolvedSignature: userRegistration.signature,
       };
     } catch (lookupErr: unknown) {
       const lookupErrorText = errStr(lookupErr);
@@ -2973,6 +2990,18 @@ export class MessageHandler {
   }
 
   async sendMessage(targetUsernameOrPeerId: string, message: string, replyToCid?: string): Promise<SendMessageResponse> {
+    // Usernames are not unique locally; refuse to guess between duplicate
+    // contacts rather than resolve to an arbitrary one.
+    let targetIsPeerId = true;
+    try { peerIdFromString(targetUsernameOrPeerId); } catch { targetIsPeerId = false; }
+    if (!targetIsPeerId && this.database.countUsersByUsername(targetUsernameOrPeerId) > 1) {
+      return {
+        success: false,
+        messageSentStatus: null,
+        error: `You have multiple contacts named '${targetUsernameOrPeerId}'. Open their existing chat or use their peer ID instead.`,
+      };
+    }
+
     let user: User | null = null;
     // Reply feature: mint the cross-peer cid + build the transport envelope ONCE so
     // every delivery path (online, non-blocking offline queue, synchronous offline
@@ -4260,9 +4289,30 @@ export class MessageHandler {
           break;
         }
         case GroupMessageType.GROUP_WELCOME: {
+          const beforeWelcomeChat = this.database.getChatByGroupId(groupId);
+          const beforeWelcome = {
+            groupStatus: beforeWelcomeChat?.group_status ?? null,
+            keyVersion: beforeWelcomeChat?.key_version ?? 0,
+          };
           await responder.handleGroupWelcome(parsed as any);
           deferredGroupInfoSyncGroups.add(groupId);
           this.groupMessaging.subscribeToGroupTopic(groupId)
+
+          // Join completion: a freshly-activated member may already have
+          // same-epoch messages waiting in the group offline bucket (they were
+          // published while the member was still converging). Kick off the
+          // per-chat coalesced offline catch-up now instead of waiting for the
+          // 5-minute periodic timer. Only on a genuine apply — a duplicate
+          // welcome leaves status/key_version unchanged and is skipped.
+          // checkGroupOfflineMessages still reads only epochs <= the local
+          // key_version, so pre-join history stays unreadable.
+          const afterWelcomeChat = this.database.getChatByGroupId(groupId);
+          if (afterWelcomeChat && shouldTriggerJoinCompletionCatchup(beforeWelcome, {
+            groupStatus: afterWelcomeChat.group_status ?? null,
+            keyVersion: afterWelcomeChat.key_version ?? 0,
+          })) {
+            this.scheduleGroupStateUpdateCatchup(afterWelcomeChat.id, groupId, 'group_welcome_applied');
+          }
           log(`[GROUP] Processed GROUP_WELCOME from ${senderInfo.username}`);
           break;
         }

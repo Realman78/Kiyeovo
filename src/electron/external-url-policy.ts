@@ -8,7 +8,12 @@ export function normalizeExternalUrl(targetUrl: string): string | null {
     }
 
     const normalizedPathname = parsedUrl.pathname.replace(/\/+$/, '') || '/';
-    return `${parsedUrl.origin}${normalizedPathname}`;
+    // Preserve the fragment (#anchor) so links to a specific README section
+    // (e.g. #servers) survive. Fragments are client-side only, never sent to the
+    // server, so this does not widen the allowlist's security surface: an
+    // allowlisted URL without a fragment still matches only a target without a
+    // fragment, and a fragment'd target must match an allowlisted fragment'd URL.
+    return `${parsedUrl.origin}${normalizedPathname}${parsedUrl.hash}`;
   } catch {
     return null;
   }

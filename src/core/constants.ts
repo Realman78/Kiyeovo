@@ -16,6 +16,9 @@ export const FAST_RELAY_MULTIADDRS_SETTING_KEY = 'fast_relay_multiaddrs';
 export const FAST_RELAY_MULTIADDRS_INITIALIZED_SETTING_KEY = 'fast_relay_multiaddrs_initialized';
 export const WEBRTC_ICE_SERVERS_SETTING_KEY = 'webrtc_ice_servers';
 export const FAST_MISSING_ICE_WARNING_ACKNOWLEDGED_SETTING_KEY = 'setup_missing_ice_warning_acknowledged_fast';
+// Persisted "one-time" flag for the predefined-nodes sunset notice: once the
+// user dismisses the shutdown notice it is never shown again.
+export const PREDEFINED_NODES_SUNSET_DISMISSED_SETTING_KEY = 'predefined_nodes_sunset_dismissed';
 
 export type ModeNamespaceKind =
   | 'offline'
@@ -138,7 +141,17 @@ export const HOUR = 60 * MINUTE;
 export const DAY = 24 * HOUR;
 
 export const BUCKET_NUDGE_COOLDOWN_MS = 5 * SECOND;
-export const BUCKET_NUDGE_DIAL_TIMEOUT_MS = 5 * SECOND;
+// Per-stage budget for opening the bucket-nudge stream (both the connection-reuse
+// newStream and the fresh dialProtocol fallback). Mode-aware: 5s is fine over a
+// warm fast-mode connection, but a cold/slow Tor onion circuit routinely needs
+// 10-30s to build — a 5s cap aborts mid-handshake and the nudge's frames can land
+// on the recipient long after the sender gave up (a reset the recipient then reads
+// as a failure). Anonymous mode matches the codebase's other Tor budgets
+// (ANONYMOUS_BOOTSTRAP_ADDRESS_TIMEOUT_MS = 20s, file-pull first-frame anon = 30s).
+// Worst case reuse+dial run serially = 2× this, but the send is fire-and-forget
+// (see sendBucketNudge) so it blocks nothing user-facing.
+export const BUCKET_NUDGE_DIAL_TIMEOUT_FAST_MS = 5 * SECOND;
+export const BUCKET_NUDGE_DIAL_TIMEOUT_ANONYMOUS_MS = 20 * SECOND;
 export const BUCKET_NUDGE_FETCH_DELAY_MS = 4 * SECOND;
 export const DIRECT_OFFLINE_REFETCH_DELAY_MS = 500;
 export const DIRECT_OFFLINE_INBOX_RECOVERY_COOLDOWN_MS = 5 * SECOND;
@@ -171,6 +184,10 @@ export const MDNS_SERVICE_TAG = 'kiyeovo.local';
  * Timing configuration
  */
 export const REREGISTRATION_INTERVAL = 5 * MINUTE;  // 5 minutes
+// After bootstrap connectivity is (re)established, re-publish the username
+// registration once, debounced by this delay so a reconnect + post-retry-verify
+// burst collapses into a single republish (bootstrap-switch discoverability).
+export const BOOTSTRAP_RECONNECT_REPUBLISH_DEBOUNCE_MS = 5 * SECOND; // 5 seconds
 export const PEER_DISCOVERY_INTERVAL = 1 * MINUTE;  // 1 minute
 export const GREETING_DELAY = 1 * SECOND;           // 1 second
 export const NETWORK_CHECK_DELAY = 3 * SECOND;      // 3 seconds
@@ -258,9 +275,8 @@ export const BOOTSTRAP_PEER_ID_FILE = './bootstrap-peer-id.bin';
  * - Tor Browser (9150/9151)
  */
 export const TOR_CONFIG = {
-  // Bundled Tor ports (used when we run our own Tor instance)
-  BUNDLED_SOCKS_PORT: 9550,
-  BUNDLED_CONTROL_PORT: 9551,
+  // Bundled Tor ports live in transport/tor-manager.ts (BUNDLED_TOR_SOCKS_PORT /
+  // BUNDLED_TOR_CONTROL_PORT), the single source of truth used to configure the daemon.
 
   // Default ports (fallback, or for system Tor)
   DEFAULT_SOCKS_HOST: '127.0.0.1',
@@ -314,6 +330,17 @@ export const OFFLINE_MESSAGE_LIMIT = 50; // 50 messages
 export const OFFLINE_MESSAGE_CHECK_INTERVAL = 5 * MINUTE; // 5 minutes
 export const KEY_ROTATION_TIMEOUT = 30 * SECOND; // 30 seconds
 export const PENDING_KEY_EXCHANGE_EXPIRATION = 5 * MINUTE; // 5 minutes
+// Responder-side deadline for the initiator's confirmed/cancelled after the responder sends its
+// key-exchange response. This wait covers a full peer-side round-trip: the initiator reads the
+// response, verifies its signature (which may fall back to a DHT lookup) and replies. It must
+// therefore be on the order of a single inbound-read deadline plus a DHT round-trip, not a few
+// seconds — a too-tight bound drops the accepting side's request while the initiator is still
+// legitimately verifying. Overridable per-install via KEY_EXCHANGE_FOLLOWUP_TIMEOUT_SETTING_KEY.
+export const KEY_EXCHANGE_FOLLOWUP_TIMEOUT_FAST_MS = 30 * SECOND;
+export const KEY_EXCHANGE_FOLLOWUP_TIMEOUT_ANONYMOUS_MS = 45 * SECOND;
+export const KEY_EXCHANGE_FOLLOWUP_TIMEOUT_SETTING_KEY = 'key_exchange_followup_timeout_ms';
+export const KEY_EXCHANGE_FOLLOWUP_TIMEOUT_MIN_MS = 5 * SECOND;
+export const KEY_EXCHANGE_FOLLOWUP_TIMEOUT_MAX_MS = 120 * SECOND;
 export const DATABASE_CLEANUP_INTERVAL = 30 * MINUTE; // 30 minutes
 export const MAX_MESSAGES_PER_STORE = 41; // Hard cap for one offline DHT store payload (incl. ack reserve)
 export const OFFLINE_CONTROL_MESSAGE_RESERVE = 10; // Slots reserved for offline control traffic
@@ -334,7 +361,6 @@ export const PROFILE_SCRYPT_N = 2 ** 17; // slightly less because of less sensit
  * Other
  */
 export const CHUNK_SIZE = 32 * 1024; // 32KB
-export const DOWNLOADS_DIR = 'kiyeovo-downloads';
 export const UPLOADS_DIR = 'kiyeovo-uploads';
 export const UPLOADS_QUOTA_WARN_BYTES = 100 * 1024 * 1024; // 100MB
 export const MAX_FILE_MESSAGE_SIZE = 1 * 1024 * 1024; // 1MB for JSON overhead

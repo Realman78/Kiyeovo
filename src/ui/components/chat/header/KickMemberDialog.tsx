@@ -1,5 +1,5 @@
 import type { FC } from "react";
-import { AlertCircle } from "lucide-react";
+import { AlertCircle, Dot } from "lucide-react";
 import {
   Dialog,
   DialogBody,
@@ -52,10 +52,14 @@ export const KickMemberDialog: FC<KickMemberDialogProps> = ({
                     key={member.peerId}
                     type="button"
                     disabled={isSubmitting}
+                    title={`${member.username} (${member.peerId})`}
                     onClick={() => onSelectPeerId(member.peerId)}
                     className={`cursor-pointer w-full px-3 py-2.5 text-left border-b border-border last:border-b-0 transition-colors ${isSelected ? 'bg-destructive/10 text-destructive' : 'hover:bg-secondary/50'}`}
                   >
-                    {member.username}
+                    <span className="truncate flex align-center items-center">{member.username} <Dot className="shrink-0" />
+                            <span className="text-xs text-muted-foreground truncate">
+                              {member.peerId}
+                            </span></span>
                   </button>
                 );
               })

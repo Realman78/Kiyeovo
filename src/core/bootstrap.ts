@@ -67,6 +67,7 @@ type BootstrapRuntimeConfig = {
   announceAddrs: string[];
   datastorePath: string;
   peerIdFile: string;
+  maxConnections: number;
 };
 
 function readBootstrapNetworkMode(): 'fast' | 'anonymous' {
@@ -197,6 +198,7 @@ function readBootstrapRuntimeConfig(): BootstrapRuntimeConfig {
     announceAddrs,
     datastorePath: readBootstrapDatastorePath(networkMode),
     peerIdFile: readBootstrapPeerIdFile(networkMode),
+    maxConnections: Number(process.env.BOOTSTRAP_MAX_CONNECTIONS) || 1000,
   };
 
   if (runtimeConfig.isAnonymousMode && runtimeConfig.announceAddrs.length === 0) {
@@ -214,6 +216,7 @@ function logBootstrapRuntimeConfig(runtimeConfig: BootstrapRuntimeConfig): void 
   console.log(`[CONFIG][BOOTSTRAP] announceCount=${runtimeConfig.announceAddrs.length}`);
   console.log(`[CONFIG][BOOTSTRAP] datastore=${runtimeConfig.datastorePath}`);
   console.log(`[CONFIG][BOOTSTRAP] peer_id_file=${runtimeConfig.peerIdFile}`);
+  console.log(`[CONFIG][BOOTSTRAP] maxConnections=${runtimeConfig.maxConnections}`);
   console.log(
     `[CONFIG][BOOTSTRAP] tor_defaults_proxy=${runtimeConfig.torConfig.socksHost}:${runtimeConfig.torConfig.socksPort}`
   );
@@ -381,8 +384,20 @@ async function createBootstrapNode(): Promise<BootstrapRuntime> {
       connectionEncrypters: [noise()],
       streamMuxers: [yamux()],
       connectionManager: {
-        maxConnections: 500,
+        // Every Kiyeovo client holds up to 3 long-lived bootstrap connections
+        // (MAX_BOOTSTRAP_NODES_FAST) and runs the DHT in server mode, so a
+        // public bootstrap's connection count scales directly with online
+        // users. 500 across the fleet started pruning around ~1.6k concurrent
+        // users; per-connection memory is tens of KB, so 1000 is cheap even on
+        // a 2 GB box. Env-tunable per deployment like the relay's knobs.
+        maxConnections: runtimeConfig.maxConnections,
         maxPeerAddrsToDial: 10,
+        // Absorb reconnect storms after a bootstrap restart (default 10
+        // concurrent inbound handshakes) and don't rate-limit CGNAT clusters —
+        // mobile carriers put many users behind one source IP (default 5
+        // conns/s/host).
+        maxIncomingPendingConnections: 100,
+        inboundConnectionThreshold: 25,
       },
       connectionMonitor: {
         enabled: true,

@@ -3,6 +3,8 @@
 */tor.exe
 */*.dylib
 */*.dylib.*
+*/*.so
+*/*.so.*
 
 # Keep the directory structure
 !.gitkeep

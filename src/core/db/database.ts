@@ -1311,6 +1311,13 @@ export class ChatDatabase {
         };
     }
 
+    countUsersByUsername(username: string, mode?: NetworkMode): number {
+        const activeMode = this.getActiveNetworkMode(mode);
+        const stmt = this.db.prepare('SELECT COUNT(*) AS count FROM users WHERE username = ? AND network_mode = ?');
+        const row = stmt.get(username, activeMode) as { count: number };
+        return row.count;
+    }
+
     getLastUsername(peerId: string, mode?: NetworkMode): string | null {
         const activeMode = this.getActiveNetworkMode(mode);
         const stmt = this.db.prepare('SELECT username FROM users WHERE peer_id = ? AND network_mode = ? AND username IS NOT NULL');

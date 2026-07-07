@@ -1,0 +1,705 @@
+import { test, expect, type Page } from '@playwright/test';
+import {
+    setupThreePeerWorld,
+    type ThreePeerWorld,
+    chatMessage,
+    sidebarChatEntry,
+    openChat,
+    attach,
+    attachLogs,
+} from './world';
+import { sendContactRequest, sendChatMessage, timedStage } from './onboard';
+
+// Round 4 of e2e/test-roadmap.md: blocking + group member removal, built on
+// the three-peer world (e2e/world.ts) — Alice, Bob, Charlie, with Alice<->Bob
+// and Alice<->Charlie as direct contacts (Bob and Charlie deliberately never
+// become contacts of each other) plus a group containing all three.
+//
+// --- Recon findings that shaped this spec (doc-confirmed vs code-confirmed
+// labeled explicitly; see the final report for the full trail) ---
+//
+// Kiyeovo_desktop_technical_documentation.md's coverage of blocking is thin —
+// it lists "blocked peers" under the access-policy security model (section
+// 13) and documents call-level blocking semantics (connection-gater-adjacent
+// section ~410/446-447: blocking a direct-call peer ends the call and closes
+// libp2p connections; group-call control/pair signals from/to a blocked peer
+// are dropped before any renderer notification). It says nothing about what
+// blocking does to plain 1:1/group TEXT messaging or to contact requests, so
+// that part of this file-level comment is entirely CODE-CONFIRMED by reading
+// src/core directly:
+//
+// - src/core/network/connection-gater.ts denies ALL libp2p connections
+//   to/from a blocked peer at the transport layer: denyDialPeer (outbound),
+//   denyOutboundConnection, and denyInboundEncryptedConnection all return
+//   true for a peer in the blocked_peers table. blockUser's IPC handler
+//   (src/electron/ipc-handlers.ts) also calls
+//   MessageHandler.teardownBlockedPeer(), which best-effort-closes any
+//   *existing* connection to that peer immediately, clears the direct
+//   session/pending key exchange, and ends any active direct call — so a
+//   block takes effect immediately, not just for future connection attempts.
+// - Defense in depth on top of the transport-level deny: every inbound
+//   direct-protocol stream handler in message-handler.ts (chat, bucket-nudge,
+//   call-signal) independently re-checks database.isBlocked(remoteId) and
+//   silently returns/drops if true.
+// - Crucially, this is NOT one-sided: database.ts's
+//   getOfflineReadBucketInfo/getOfflineReadBucketInfoForChats — the queries
+//   that decide which peers' offline DHT buckets get polled for missed
+//   messages — filter out blocked peers at the SQL level
+//   ("cp.peer_id NOT IN (SELECT peer_id FROM blocked_peers ...)"). So a
+//   blocked sender's message doesn't just fail to arrive live: even the
+//   *offline fallback* the recipient would otherwise use to catch up never
+//   looks at that peer's bucket while the block is in effect. The message is
+//   not deleted anywhere (durably stored in the sender's write bucket, same
+//   as any genuine offline send) — it is just never fetched.
+// - From the BLOCKED SENDER's own point of view there is no distinct
+//   "you have been blocked" signal anywhere in the send path: a failed dial
+//   to a peer who blocked you and a dial to a peer who is genuinely offline
+//   hit the exact same code path (sendDirectApplicationMessage's dial
+//   catch -> shouldFallbackOfflineSend -> storeDirectApplicationMessageOffline),
+//   producing the same `messageSentStatus: 'offline'` outcome and the same
+//   "offline" label under the bubble (MessageRow.tsx) that
+//   offline-delivery.spec.ts asserts for a genuinely-offline peer. This
+//   appears to be by design (a peer who blocked you shouldn't be able to
+//   confirm it), not an oversight.
+// - Contact requests: key-exchange.ts's authorizeContactRequest() checks
+//   isBlocked() BEFORE anything else (before the existing-chat check and
+//   before consulting the global contact_mode setting) and returns null —
+//   "silent rejection - no error message" per its own comment — for a NEW
+//   key-exchange attempt from an already-blocked peer. This is distinct from
+//   a live "Reject & Block" of a CURRENTLY PENDING request (InvitationManager
+//   -> rejectContactRequest IPC), which DOES send an explicit
+//   key_exchange_rejected wire message back for that one attempt, before
+//   adding the peer to blocked_peers. It's only a peer's SUBSEQUENT attempt,
+//   made while already blocked, that is silently dropped with no reply at
+//   all — the connection-gater deny means the requester's own dial typically
+//   never even completes the encrypted handshake, so authorizeContactRequest
+//   is defense-in-depth for the rare case of a connection surviving under the
+//   gater's radar.
+// - Group member removal ("kick") IS a real UI feature (ChatHeaderMenu.tsx's
+//   "Remove member" item, gated on isCurrentUserGroupCreator &&
+//   kickableMembersCount > 0; KickMemberDialog.tsx's "Remove Member" flow) —
+//   this reshapes nothing in scenario C, the roadmap's assumption holds.
+//   group-creator.ts's kickMember(): rotates the group key (so the removed
+//   member's old key can no longer decrypt future group traffic even if a
+//   stray gossip message reached them), broadcasts a GROUP_STATE_UPDATE with
+//   the post-kick roster to every REMAINING member (group-responder.ts's
+//   handleGroupStateUpdate persists that shrunk roster into that member's own
+//   chat_participants via database.updateGroupParticipants — so
+//   group-messaging.ts's inbound-message roster check
+//   ("sender_not_participant") will independently reject anything purporting
+//   to be from the removed member even without the key rotation), and sends a
+//   dedicated GROUP_KICK message directly to the removed member.
+//   group-responder.ts's handleGroupKick applies local 'removed' group_status
+//   (chat is KEPT, not deleted — database.ts's applyLocalGroupRemovedState),
+//   and both sides get a system-message chat entry via
+//   appendMembershipSystemMessage: "You were removed from the group" for the
+//   removed member, "<username> was removed from the group" for everyone
+//   else. ChatInput.tsx's groupStatusMessages.ts maps group_status 'removed'
+//   to composer placeholder copy "You were removed from this group." and
+//   disables the composer client-side (groupBlockedReason is truthy whenever
+//   groupStatus !== 'active').
+// - Note: system messages (message_type 'system') do NOT carry
+//   MessageRow.tsx's `data-message-bubble` attribute (that attribute is only
+//   on the non-system branch) — so the membership system-message assertions
+//   below intentionally use a plain getByText, not this file's
+//   [data-message-bubble]-scoped chatMessage() helper.
+// - World-fixture adaptation: the roadmap's scenario A wording assumes Bob
+//   and Charlie can exchange a direct "M_control" message as the
+//   ordering-bound proxy for the negative assertion. world.ts's fixture
+//   deliberately keeps Bob and Charlie as non-contacts (see its file-level
+//   comment), so there is no direct channel between them to use for that.
+//   This spec substitutes the shared GROUP chat as the ordering-bound
+//   channel for scenario A instead (Charlie sends a group message; once Bob
+//   sees it rendered, enough real-DHT/relay processing time has passed that
+//   an already-in-flight blocked message would also have arrived by then).
+//   Scenario C reuses the same three-peer world and needs no such
+//   substitution (Alice and Bob are already direct contacts, used as the
+//   ordering-bound channel for scenario C's negative assertion) — scenario
+//   B likewise uses the already-established Alice<->Bob direct channel.
+// - Group realtime-vs-offline fan-out split (code-confirmed, and the root
+//   cause of this file's one originally-marginal wait): a group text message
+//   rides gossipsub on a topic derived from the group's CURRENT key epoch
+//   (group-messaging.ts's deriveTopic(groupId, keyBytes)). publish() throws
+//   if the sender's pubsub sees zero remote subscribers on that topic
+//   ("PublishError.NoPeersSubscribedToTopic"), and publishWithRetry retries
+//   exactly once, GROUP_PUBLISH_RETRY_DELAY_MS=750ms later — after which the
+//   send DELIBERATELY settles to offline-only delivery (DHT group bucket,
+//   sender row marked 'offline' with the same label direct offline sends
+//   get). Recipients then only pick it up via the periodic offline check
+//   (OFFLINE_MESSAGE_CHECK_INTERVAL = 5 MINUTES) or the group menu's manual
+//   "Check missed messages" action (doc line ~341: "the manual
+//   missed-message action remains a fallback") — there is NO sender-side
+//   nudge on this path (nudgeGroupRefetch only fires for a manual re-send
+//   with rekeyRetryHint, i.e. MessagesContainer's retry of a
+//   'group_rekeying'-failed row). Every join AND kick rotates the group key
+//   (group-creator.ts), so the FIRST send after any membership change
+//   happens seconds after its topic came into existence, before the other
+//   members' subscription announcements have necessarily reached the
+//   sender's pubsub — diagnosed live: a failing run's main-process log
+//   (DEBUG_MODE=true) showed exactly publish attempt=1
+//   NoPeersSubscribedToTopic -> retry 750ms -> attempt=2 fail -> "Falling
+//   back to offline delivery" ~3-6s after the fixture's activation gate
+//   (which waits on composer-enabled, a DB-status signal that says nothing
+//   about gossip mesh formation — Bob's composer has been enabled since key
+//   v1, while the pre-kick send rides key v2 created by Charlie's join
+//   rotation). A bare 30s toBeVisible on the recipient can therefore NEVER
+//   succeed on that (designed!) fallback path — it wasn't a marginal
+//   timeout, it was the wrong wait for that branch, and no timeout was
+//   inflated to fix it. Three distinct designed layers emerged across the
+//   stabilization runs, each observed live at least once:
+//     1. EPOCH: a member who hasn't applied the newest rotation's
+//        GROUP_STATE_UPDATE is stranded on the old epoch — not subscribed
+//        to the new topic AND unable to even scan the new epoch's DHT
+//        bucket (checkGroupOfflineMessages only reads epochs <= the local
+//        key_version), so no wait or recovery can deliver to him until it
+//        lands -> awaitGroupEpochConvergence() gates every first-send-
+//        after-a-rotation on all relevant members' key_version matching.
+//     2. MESH: publish() succeeds with >= ONE remote subscriber, so a
+//        specific recipient can silently miss the realtime copy with no
+//        sender-side indication (partial-mesh miss); with ZERO subscribers
+//        the send settles offline-only and the sender's row says 'offline'.
+//     3. RECOVERY: the offline backup is stored UNCONDITIONALLY on every
+//        group send, so once epochs are converged, the group menu's
+//        "Check missed messages" action deterministically recovers any
+//        mesh miss. sendGroupMessageAwaitingFanout() reads the app's own
+//        verdict off the sender's row (the 'offline' label — rendered
+//        atomically with the bubble, since a transport-owned group row is
+//        only persisted/evented AFTER the publish outcome is known) and
+//        per recipient does the realtime wait, falling back to that
+//        designed recovery.
+//
+// Given three real onboardings + two contact exchanges + one group
+// create/invite/accept/activate round trip per world (group-chat.spec.ts
+// calls this "the slowest suite in e2e/"), this file splits its three
+// scenarios across three tests, each building and tearing down its own
+// world, to keep every test safely under the 6-minute cap and to keep one
+// scenario's failure from losing evidence for the others.
+
+test.setTimeout(6 * 60_000);
+
+// p2pPorts 9151-9153 and local-bootstrap port 19505 — see e2e/config.ts's
+// "PORT RANGES" table (this file's row was added there). All three tests in
+// this file reuse the same values safely: fullyParallel:false means tests
+// within one file never run concurrently with each other, only with tests in
+// OTHER files (which own disjoint ranges) — same pattern as
+// file-transfer.spec.ts's two sequential setupThreePeerWorld() calls.
+const BASE_PORT = 9151;
+const LOCAL_BOOTSTRAP_PORT = 19505;
+
+test('direct blocking stops messages both ways and lifts on unblock @slow', async () => {
+    const testInfo = test.info();
+    const testStart = Date.now();
+    let world: ThreePeerWorld | undefined;
+    let failed = false;
+
+    try {
+        world = await setupThreePeerWorld({ basePort: BASE_PORT, localBootstrapPort: LOCAL_BOOTSTRAP_PORT, label: 'block-direct' });
+        const { pageAlice, pageBob, pageCharlie, usernameAlice, usernameBob, groupName, runSuffix } = world;
+
+        await openChat(pageAlice, usernameBob);
+        await openChat(pageBob, usernameAlice);
+
+        // --- Positive control: baseline direct messaging works right before the block ---
+        const preBlockMessage = `pre-block-${runSuffix}`;
+        await timedStage('block-direct', 'positive_control_pre_block', async () => {
+            await sendChatMessage(pageAlice, preBlockMessage);
+            await expect(chatMessage(pageBob, preBlockMessage)).toBeVisible({ timeout: 30_000 });
+        });
+        await attach(testInfo, pageBob, 'bob-pre-block-control-received');
+
+        // --- Bob blocks Alice via the chat header's "Block user" affordance ---
+        await timedStage('block-direct', 'bob_blocks_alice', async () => {
+            await toggleBlockUser(pageBob);
+            // ChatInput.tsx disables Bob's own composer to a blocked peer and
+            // swaps the placeholder — the clearest same-page confirmation the
+            // block took effect, independent of anything happening on Alice's side.
+            await expect(pageBob.getByPlaceholder('Cannot send messages to blocked users')).toBeVisible({ timeout: 10_000 });
+            await expect(pageBob.getByPlaceholder('Cannot send messages to blocked users')).toBeDisabled();
+        });
+        await attach(testInfo, pageBob, 'bob-blocked-alice-composer-disabled');
+
+        // --- Alice (unaware) sends into the now-blocked chat ---
+        const blockedMessage = `blocked-msg-${runSuffix}`;
+        await timedStage('block-direct', 'alice_sends_while_blocked', async () => {
+            await sendChatMessage(pageAlice, blockedMessage);
+            // Doc/code-confirmed: from the sender's side, being blocked is
+            // indistinguishable from the recipient being offline — the same
+            // "offline" send-state label offline-delivery.spec.ts asserts for
+            // a genuinely offline peer, not a distinct "blocked" indicator.
+            // Generous timeout: protocol-dialer.ts's direct-then-relay dial
+            // fallback sequence (up to ~10s direct + ~10s relay, raced against
+            // sendMessage's own 10s MESSAGE_TIMEOUT) plus the real DHT PUT for
+            // the offline store can occasionally run past 30s against the
+            // real public infra (observed once during authoring).
+            await expect(offlineSendLabel(pageAlice, blockedMessage)).toBeVisible({ timeout: 60_000 });
+        });
+        await attach(testInfo, pageAlice, 'alice-blocked-message-shows-offline');
+
+        // --- Ordering-bound negative assertion: Charlie (unblocked) sends
+        // into the shared GROUP chat (the only channel he shares with Bob —
+        // see the file-level comment on the world-fixture adaptation); once
+        // Bob sees it, an already-in-flight blocked message would also have
+        // long since surfaced if it were ever going to. ---
+        const controlMessage = `charlie-control-${runSuffix}`;
+        await timedStage('block-direct', 'ordering_bound_control_via_group', async () => {
+            await openChat(pageCharlie, groupName);
+            await openChat(pageBob, groupName);
+            // Same epoch gate + fan-out helper as scenario C (see the
+            // file-level fan-out note): Bob must be ON the current key
+            // epoch for ANY designed path to deliver Charlie's message to
+            // him, and the helper then covers the designed offline/partial
+            // realtime-miss fallbacks. The ordering bound holds through
+            // either delivery path — it proves enough wall-clock passed
+            // with functioning infra for the blocked message to have
+            // surfaced if it were ever going to.
+            await awaitGroupEpochConvergence('block-direct', [pageAlice, pageBob, pageCharlie], groupName);
+            await sendGroupMessageAwaitingFanout('block-direct', pageCharlie, [pageBob], controlMessage);
+        });
+
+        await timedStage('block-direct', 'assert_blocked_message_never_arrived', async () => {
+            await openChat(pageBob, usernameAlice);
+            await expect(chatMessage(pageBob, blockedMessage)).toHaveCount(0);
+        });
+        await attach(testInfo, pageBob, 'bob-never-received-blocked-message');
+
+        // --- Bob unblocks Alice; assert the composer reverts and a FRESH
+        // message now flows normally, completing the lifecycle and proving
+        // blocking (not something else) was the cause. ---
+        await timedStage('block-direct', 'bob_unblocks_alice', async () => {
+            await toggleBlockUser(pageBob);
+            await expect(pageBob.getByPlaceholder('Type a message...')).toBeVisible({ timeout: 10_000 });
+            await expect(pageBob.getByPlaceholder('Type a message...')).toBeEnabled();
+        });
+
+        const afterUnblockMessage = `after-unblock-${runSuffix}`;
+        await timedStage('block-direct', 'messaging_resumes_after_unblock', async () => {
+            await sendChatMessage(pageAlice, afterUnblockMessage);
+            await expect(chatMessage(pageBob, afterUnblockMessage)).toBeVisible({ timeout: 30_000 });
+        });
+        await attach(testInfo, pageBob, 'bob-received-message-after-unblock');
+        await attach(testInfo, pageAlice, 'alice-final-after-unblock');
+    } catch (error) {
+        failed = true;
+        throw error;
+    } finally {
+        console.log(`[timing][block-direct] TOTAL test: ${((Date.now() - testStart) / 1000).toFixed(1)}s`);
+        if (failed && world) {
+            await attachLogs(testInfo, world.peerAlice, 'alice-main-process-logs');
+            await attachLogs(testInfo, world.peerBob, 'bob-main-process-logs');
+            await attachLogs(testInfo, world.peerCharlie, 'charlie-main-process-logs');
+        }
+        await world?.teardown();
+    }
+});
+
+test("a blocked peer's contact re-request is silently dropped @slow", async () => {
+    const testInfo = test.info();
+    const testStart = Date.now();
+    let world: ThreePeerWorld | undefined;
+    let failed = false;
+
+    try {
+        world = await setupThreePeerWorld({ basePort: BASE_PORT, localBootstrapPort: LOCAL_BOOTSTRAP_PORT, label: 'block-request' });
+        const { pageBob, pageCharlie, pageAlice, usernameAlice, usernameBob, usernameCharlie, peerIdBob, runSuffix } = world;
+
+        // Bob and Charlie are deliberately non-contacts in this fixture (see
+        // world.ts) — a real fit for "brand new contact request" without
+        // needing a fourth peer.
+        const firstRequestMessage = `charlie-first-request-${runSuffix}`;
+        await timedStage('block-request', 'charlie_first_contact_request', async () => {
+            await sendContactRequest(pageCharlie, peerIdBob, firstRequestMessage);
+            await expect(pageBob.getByText(usernameCharlie, { exact: true })).toBeVisible({ timeout: 20_000 });
+        });
+        await attach(testInfo, pageBob, 'bob-sees-charlies-first-request');
+
+        // --- Bob rejects AND blocks it via the pending request's "Reject & Block" ---
+        await timedStage('block-request', 'bob_rejects_and_blocks', async () => {
+            await pageBob.getByText(usernameCharlie, { exact: true }).first().click();
+            await pageBob.getByRole('button', { name: 'Reject & Block', exact: true }).click();
+            // The durable signal (not the ephemeral toast, which use-toast.tsx
+            // auto-dismisses on a timer and can race under parallel-worker
+            // CPU contention): the pending request disappears from Bob's list.
+            await expect(pageBob.getByText(usernameCharlie, { exact: true })).toHaveCount(0);
+        });
+        await attach(testInfo, pageBob, 'bob-rejected-and-blocked-charlie');
+
+        // --- Charlie (unaware) retries with a brand new request ---
+        const secondRequestMessage = `charlie-second-request-${runSuffix}`;
+        await timedStage('block-request', 'charlie_retries_while_blocked', async () => {
+            await openNewConversationDialog(pageCharlie);
+            await pageCharlie.getByPlaceholder('Enter peer ID or username...').fill(peerIdBob);
+            await pageCharlie.getByPlaceholder('Compose an inital greeting...').fill(secondRequestMessage);
+            await pageCharlie.getByRole('button', { name: 'Send' }).click();
+            // Silently dropped means Charlie's own attempt does NOT complete
+            // like a normal request either (a normal accepted/pending flow
+            // closes this dialog) — bounded wait, not a naked sleep.
+            await expect(pageCharlie.getByRole('heading', { name: 'New Conversation' })).toBeVisible({ timeout: 20_000 });
+        });
+        await attach(testInfo, pageCharlie, 'charlie-second-request-did-not-succeed');
+        // Dialog.tsx renders both a footer "Close" button (inside the dialog's
+        // <form>) AND a decorative top-right "X" close icon with the same
+        // sr-only "Close" accessible name — scope to the form to avoid the
+        // strict-mode ambiguity between the two.
+        await pageCharlie.locator('form').getByRole('button', { name: 'Close', exact: true }).click();
+
+        // --- Ordering-bound negative assertion: Alice (an established direct
+        // contact of Bob's) sends a fresh message; once it renders, Charlie's
+        // second attempt would also have surfaced on Bob's side by now if it
+        // were ever going to. ---
+        const controlMessage = `alice-control-${runSuffix}`;
+        await timedStage('block-request', 'ordering_bound_control_via_alice', async () => {
+            await openChat(pageAlice, usernameBob);
+            await openChat(pageBob, usernameAlice);
+            await sendChatMessage(pageAlice, controlMessage);
+            await expect(chatMessage(pageBob, controlMessage)).toBeVisible({ timeout: 30_000 });
+        });
+
+        await timedStage('block-request', 'assert_second_request_never_surfaced', async () => {
+            await expect(pageBob.getByText(usernameCharlie, { exact: true })).toHaveCount(0);
+        });
+        await attach(testInfo, pageBob, 'bob-second-request-never-surfaced');
+    } catch (error) {
+        failed = true;
+        throw error;
+    } finally {
+        console.log(`[timing][block-request] TOTAL test: ${((Date.now() - testStart) / 1000).toFixed(1)}s`);
+        if (failed && world) {
+            await attachLogs(testInfo, world.peerAlice, 'alice-main-process-logs');
+            await attachLogs(testInfo, world.peerBob, 'bob-main-process-logs');
+            await attachLogs(testInfo, world.peerCharlie, 'charlie-main-process-logs');
+        }
+        await world?.teardown();
+    }
+});
+
+test('the group creator can remove a member; removal cuts off group messaging both ways @slow', async () => {
+    const testInfo = test.info();
+    const testStart = Date.now();
+    let world: ThreePeerWorld | undefined;
+    let failed = false;
+
+    try {
+        world = await setupThreePeerWorld({ basePort: BASE_PORT, localBootstrapPort: LOCAL_BOOTSTRAP_PORT, label: 'block-group' });
+        const { pageAlice, pageBob, pageCharlie, usernameCharlie, groupName, runSuffix } = world;
+
+        await openChat(pageAlice, groupName);
+        await openChat(pageBob, groupName);
+        await openChat(pageCharlie, groupName);
+
+        // --- Positive control: baseline group messaging works right before
+        // the removal. This is the FIRST send on the newest key epoch's
+        // topic (each join rotates the key — Bob may still be applying the
+        // rotation Charlie's join produced), i.e. exactly the window
+        // dissected in the file-level fan-out note: first make sure every
+        // member is ON that epoch at all (without which no designed path
+        // can deliver to them — see awaitGroupEpochConvergence), then send,
+        // with the helper covering the residual realtime-mesh miss. ---
+        const preKickMessage = `pre-kick-${runSuffix}`;
+        await awaitGroupEpochConvergence('block-group', [pageAlice, pageBob, pageCharlie], groupName);
+        await timedStage('block-group', 'positive_control_pre_kick', async () => {
+            await sendGroupMessageAwaitingFanout('block-group', pageAlice, [pageBob, pageCharlie], preKickMessage);
+        });
+        await attach(testInfo, pageCharlie, 'charlie-pre-kick-control-received');
+
+        // --- Alice (creator) removes Charlie via the group header's "Remove member" ---
+        await timedStage('block-group', 'alice_removes_charlie', async () => {
+            await kickGroupMember(pageAlice, usernameCharlie);
+            await expect(systemMessage(pageAlice, `${usernameCharlie} was removed from the group`)).toBeVisible({ timeout: 10_000 });
+        });
+        await attach(testInfo, pageAlice, 'alice-removed-charlie');
+
+        // --- Both remaining side (Bob) and the removed member (Charlie) get
+        // told, via different copy, per group-responder.ts's
+        // appendMembershipSystemMessage ---
+        await timedStage('block-group', 'bob_and_charlie_notified', async () => {
+            await expect(systemMessage(pageBob, `${usernameCharlie} was removed from the group`)).toBeVisible({ timeout: 30_000 });
+            await expect(systemMessage(pageCharlie, 'You were removed from the group')).toBeVisible({ timeout: 30_000 });
+        });
+        await attach(testInfo, pageBob, 'bob-sees-charlie-removed-system-message');
+        await attach(testInfo, pageCharlie, 'charlie-sees-own-removal-system-message');
+
+        // --- Charlie's own UI: composer disabled with the designed copy, and
+        // the chat is KEPT (not deleted) in a 'removed' state, not disappeared ---
+        await timedStage('block-group', 'charlie_composer_disabled', async () => {
+            await expect(pageCharlie.getByPlaceholder('You were removed from this group.')).toBeVisible({ timeout: 10_000 });
+            await expect(pageCharlie.getByPlaceholder('You were removed from this group.')).toBeDisabled();
+            await expect(sidebarChatEntry(pageCharlie, groupName)).toBeVisible();
+        });
+        await attach(testInfo, pageCharlie, 'charlie-composer-disabled-after-removal');
+
+        // --- New group messages stop reaching the removed member; Bob (still
+        // a member) is the positive control proving this isn't just slow
+        // delivery. This send is the first on the key-v3 topic (created by
+        // the kick rotation moments earlier), so the helper again covers the
+        // designed offline fallback. Note the negative assertion on Charlie
+        // stays valid through EITHER delivery path: his exclusion is
+        // structural, not timing-based — he's off the v3 roster (inbound
+        // 'sender_not_participant' enforcement aside, his own app
+        // deactivated the group locally and never fetches its bucket) and
+        // holds no v3 key to decrypt with. Charlie's own composer being
+        // disabled already demonstrates his sends can no longer reach the
+        // group. ---
+        const afterKickMessage = `after-kick-${runSuffix}`;
+        await timedStage('block-group', 'new_messages_skip_removed_member', async () => {
+            // Bob's removal system message (asserted above) already proves he
+            // processed a v3 GROUP_STATE_UPDATE on the non-resync path, but
+            // the resync path applies key_version silently — converge Alice
+            // and Bob on the post-kick epoch explicitly before the first v3
+            // send, for the same reason as the pre-kick gate. (Charlie is
+            // deliberately excluded: his row stays on the pre-kick epoch
+            // forever — that's the removal working.)
+            await awaitGroupEpochConvergence('block-group', [pageAlice, pageBob], groupName);
+            await sendGroupMessageAwaitingFanout('block-group', pageAlice, [pageBob], afterKickMessage);
+            await expect(chatMessage(pageCharlie, afterKickMessage)).toHaveCount(0);
+        });
+        await attach(testInfo, pageBob, 'bob-received-post-removal-message');
+        await attach(testInfo, pageCharlie, 'charlie-did-not-receive-post-removal-message');
+    } catch (error) {
+        failed = true;
+        throw error;
+    } finally {
+        console.log(`[timing][block-group] TOTAL test: ${((Date.now() - testStart) / 1000).toFixed(1)}s`);
+        if (failed && world) {
+            await attachLogs(testInfo, world.peerAlice, 'alice-main-process-logs');
+            await attachLogs(testInfo, world.peerBob, 'bob-main-process-logs');
+            await attachLogs(testInfo, world.peerCharlie, 'charlie-main-process-logs');
+        }
+        await world?.teardown();
+    }
+});
+
+// --- helpers ---
+
+/**
+ * Locator for the small per-message send-state label MessageRow.tsx renders
+ * under a bubble once a background offline send settles
+ * (`message.messageSentStatus === 'offline'` -> literal text "offline" — see
+ * offline-delivery.spec.ts, which established this pattern). Scoped to the
+ * row that also contains the given message's own bubble text, so it can't
+ * accidentally match a stray "offline" elsewhere in the chat.
+ */
+function offlineSendLabel(page: Page, messageText: string) {
+    return page
+        .locator('div.animate-fade-in', { has: chatMessage(page, messageText) })
+        .getByText('offline', { exact: true });
+}
+
+/**
+ * Sends a text message into the group chat currently open on `sender` and
+ * waits for it to render on every `recipients` page (each of which must also
+ * have the group chat open), honoring the app's DESIGNED realtime-vs-offline
+ * fan-out split — see the file-level "Group realtime-vs-offline fan-out
+ * split" note for the full mechanism and the live-debugging trail.
+ *
+ * Two designed miss modes, both observed live while stabilizing scenario C:
+ * - Total miss: publish() saw ZERO remote subscribers, retried once (750ms),
+ *   settled offline-only — the sender's row carries the 'offline' label
+ *   (rendered atomically with the bubble: a transport-owned group row is
+ *   only persisted/evented AFTER the publish outcome is known), and NO
+ *   recipient will ever get a realtime copy.
+ * - Partial miss: publish() succeeded because at least ONE remote subscriber
+ *   was visible (that is its entire success criterion — group-messaging.ts's
+ *   publish() only throws when remoteRecipients.length === 0), but a
+ *   specific recipient whose subscription announcement hadn't reached the
+ *   sender's pubsub yet silently misses the realtime copy with NO
+ *   sender-side indication at all.
+ * Either way the message is durably in the group's DHT bucket — the
+ * offline backup (storeGroupMessage) runs UNCONDITIONALLY on every group
+ * send, independent of publish success — and the app's designed recovery
+ * for a recipient is the same: the periodic 5-minute check or the group
+ * menu's "Check missed messages" action (doc line ~341: "the manual
+ * missed-message action remains a fallback").
+ *
+ * So: sender settle (30s bound — covers a slow DHT PUT on the offline
+ * backup, which the row render waits for), then per recipient: give the
+ * realtime path a 15s window (observed realtime fan-out is 1-5s in this
+ * suite's timing logs — 3x margin; skipped entirely when the sender's own
+ * row already says 'offline', i.e. nobody will get a realtime copy), then
+ * fall back to driving that recipient's "Check missed messages" — up to two
+ * attempts x 15s, since a single fetch can transiently fail against the
+ * real DHT (the app toasts "Failed to fetch offline messages" and a real
+ * user would simply click again). The PUT is known-complete before the
+ * first fetch because the sender's bubble only rendered after it.
+ *
+ * PRECONDITION: callers must first pass awaitGroupEpochConvergence() for
+ * the sender + recipients — a recipient stranded on an older key epoch can
+ * be reached by NEITHER branch (the catch-up fetch only scans epochs <= his
+ * local key_version), which is precisely how stabilization run v6 failed.
+ *
+ * Deliberate scope note: this makes these waits assert "group delivery
+ * works via the app's designed paths", not "realtime gossip specifically
+ * works" — realtime fan-out coverage is group-chat.spec.ts's charter; this
+ * file's group sends are positive controls and ordering bounds for
+ * blocking/removal semantics, which either designed delivery path
+ * satisfies. No timeout was inflated: each bound above maps to one measured
+ * mechanism.
+ */
+async function sendGroupMessageAwaitingFanout(label: string, sender: Page, recipients: Page[], text: string): Promise<void> {
+    await sendChatMessage(sender, text);
+    await expect(chatMessage(sender, text)).toBeVisible({ timeout: 30_000 });
+
+    const wentOffline = await offlineSendLabel(sender, text).isVisible().catch(() => false);
+    if (wentOffline) {
+        console.log(`[timing][${label}] group send fell back to offline delivery (designed zero-subscriber fallback); skipping realtime windows`);
+    }
+
+    for (const recipient of recipients) {
+        if (!wentOffline) {
+            const arrivedRealtime = await chatMessage(recipient, text)
+                .waitFor({ state: 'visible', timeout: 15_000 })
+                .then(() => true, () => false);
+            if (arrivedRealtime) continue;
+            console.log(`[timing][${label}] recipient missed the realtime group fan-out (designed partial-mesh miss); driving "Check missed messages" recovery`);
+        }
+        await expect(async () => {
+            await checkMissedGroupMessages(recipient);
+            await expect(chatMessage(recipient, text)).toBeVisible({ timeout: 15_000 });
+        }).toPass({ timeout: 45_000, intervals: [1_000] });
+    }
+}
+
+/**
+ * Drives the group menu's "Check missed messages" action
+ * (ChatHeaderMenu.tsx 'check-missed' -> ChatHeader.tsx's
+ * handleCheckMissedGroupMessages -> checkGroupOfflineMessagesForChat IPC) on
+ * the group chat currently open on `page`.
+ */
+async function checkMissedGroupMessages(page: Page): Promise<void> {
+    await openChatHeaderMenu(page);
+    await page.getByRole('button', { name: 'Check missed messages', exact: true }).click();
+}
+
+/**
+ * Reads a page's local key_version for the named group chat via the same
+ * `getChats` IPC the chat UI itself loads from (raw DB rows — the
+ * file-transfer.spec.ts precedent). -1 = chat/row not found yet.
+ */
+async function groupKeyVersion(page: Page, groupName: string): Promise<number> {
+    return page.evaluate(async (name) => {
+        const result = await window.kiyeovoAPI.getChats();
+        if (!result.success) return -1;
+        const chat = (result.chats as Array<Record<string, unknown>>).find(
+            (c) => c.type === 'group' && c.name === name,
+        );
+        return chat ? Number(chat.key_version ?? 0) : -1;
+    }, groupName);
+}
+
+/**
+ * Waits until every given page's local chat row for the group reports the
+ * SAME key_version (>= 1). Why this gate exists (observed live, run v6 of
+ * scenario C's stabilization): every join/kick rotates the group key
+ * (group-creator.ts), and a member who hasn't yet applied the corresponding
+ * GROUP_STATE_UPDATE is stranded on the previous epoch — he is neither
+ * subscribed to the new epoch's gossip topic NOR able to see its DHT bucket
+ * ("Check missed messages" only scans epochs <= the chat's local
+ * key_version, group-offline-manager.ts line ~488), so NO wait or designed
+ * recovery can deliver a new-epoch message to him until the state update
+ * lands. The fixture's composer-enabled activation gate does not cover
+ * this: a member's composer has been enabled since his own join epoch.
+ *
+ * Deliberately a DB-level poll (via the UI's own getChats IPC) rather than
+ * a wait on the "<name> joined the group" system message: state updates
+ * applied through the resync path (isResync=true,
+ * group-responder.ts handleGroupStateUpdate) update key_version WITHOUT
+ * appending the membership system message — observed in an earlier passing
+ * run where Bob's timeline showed no join row for Charlie at all.
+ *
+ * 60s bound: the state update rides a direct dial with a nudged
+ * offline-DHT fallback — same delivery class as the fixture's 60s
+ * invite/activation waits.
+ */
+async function awaitGroupEpochConvergence(label: string, pages: Page[], groupName: string): Promise<void> {
+    const start = Date.now();
+    await expect.poll(
+        async () => {
+            const versions = await Promise.all(pages.map((page) => groupKeyVersion(page, groupName)));
+            return versions.every((v) => v >= 1 && v === versions[0])
+                ? 'converged'
+                : `key_versions=[${versions.join(',')}]`;
+        },
+        {
+            message: `group key epochs never converged across all ${pages.length} members`,
+            timeout: 60_000,
+            intervals: [500, 1_000],
+        },
+    ).toBe('converged');
+    console.log(`[timing][${label}] group_epoch_convergence: ${((Date.now() - start) / 1000).toFixed(1)}s`);
+}
+
+/**
+ * Locator for a membership *system message* row (MessageRow.tsx's
+ * isSystemMessage branch — "You/<username> was removed from the group",
+ * "<username> joined the group", etc.). These rows do NOT carry
+ * `data-message-bubble` (that attribute is only on the non-system branch —
+ * see the file-level comment), so this can't reuse chatMessage(); it's scoped
+ * to `div.animate-fade-in` (MessageRow.tsx's per-row wrapper, present on both
+ * system and non-system rows) instead of a bare getByText, which would
+ * strict-mode-collide with the sidebar's ChatPreview last-message snippet
+ * (renders the identical text) and, right after the triggering action, a
+ * toast rendering the same or similar copy.
+ */
+function systemMessage(page: Page, text: string) {
+    return page.locator('div.animate-fade-in').getByText(text, { exact: true });
+}
+
+/**
+ * Opens the currently-active chat's "..." header menu. ChatHeaderMenu.tsx's
+ * trigger button has no accessible name of its own (icon-only) — same
+ * lucide-icon-class targeting trick world.ts/onboard.ts use elsewhere, keyed
+ * on lucide-react's stable `lucide-<kebab-case-name>` class. lucide-react
+ * re-exports `MoreVertical` as an alias of its canonical `EllipsisVertical`
+ * icon (see node_modules/lucide-react/dist/esm/icons/ellipsis-vertical.js),
+ * so the class actually rendered is `lucide-ellipsis-vertical`, not
+ * `lucide-more-vertical` — confirmed by reading createLucideIcon's class-name
+ * generation (kebab-cased from the icon's registered name, "ellipsis-
+ * vertical", not the imported alias). This is the only such trigger in the app.
+ */
+async function openChatHeaderMenu(page: Page): Promise<void> {
+    await page.locator('button:has(svg.lucide-ellipsis-vertical)').first().click();
+}
+
+/**
+ * Toggles Block/Unblock on the currently-open direct chat via the header
+ * menu (ChatHeaderMenu.tsx's single 'toggle-block' item, labeled "Block user"
+ * or "Unblock user" depending on current state). The menu closes itself after
+ * the click (ChatHeader.tsx's handleToggleBlock calls setDropdownOpen(false)),
+ * so callers assert the *effect* (composer placeholder/disabled state)
+ * rather than re-opening the menu to check the label.
+ */
+async function toggleBlockUser(page: Page): Promise<void> {
+    await openChatHeaderMenu(page);
+    const blockButton = page.getByRole('button', { name: 'Block user', exact: true });
+    const unblockButton = page.getByRole('button', { name: 'Unblock user', exact: true });
+    if (await blockButton.isVisible().catch(() => false)) {
+        await blockButton.click();
+    } else {
+        await unblockButton.click();
+    }
+}
+
+/**
+ * Opens the "New Conversation" dialog (reimplemented locally rather than
+ * imported — onboard.ts's equivalent is private to that module, and
+ * group-chat.spec.ts/world.ts already establish the convention of each spec
+ * file owning its own small dialog-opening helpers).
+ */
+async function openNewConversationDialog(page: Page): Promise<void> {
+    await page.locator('button:has(svg.lucide-plus)').first().click();
+    await page.getByRole('button', { name: 'New Conversation', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'New Conversation' })).toBeVisible({ timeout: 10_000 });
+}
+
+/**
+ * Drives the group header's "Remove member" -> KickMemberDialog flow
+ * (ChatHeaderMenu.tsx / KickMemberDialog.tsx) end to end for the given
+ * member's username on the currently-open group chat.
+ */
+async function kickGroupMember(page: Page, memberUsername: string): Promise<void> {
+    await openChatHeaderMenu(page);
+    await page.getByRole('button', { name: 'Remove member', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Remove Member' })).toBeVisible({ timeout: 10_000 });
+    await page.getByRole('button', { name: memberUsername, exact: true }).click();
+    await page.getByRole('button', { name: 'Remove Member', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Remove Member' })).toBeHidden({ timeout: 15_000 });
+}

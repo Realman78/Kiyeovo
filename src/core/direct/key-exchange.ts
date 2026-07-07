@@ -9,6 +9,11 @@ import { EncryptedUserIdentity } from '../identity/encrypted-user-identity.js';
 import { SessionManager } from './session-manager.js';
 import {
   INBOUND_STREAM_READ_TIMEOUT_MS,
+  KEY_EXCHANGE_FOLLOWUP_TIMEOUT_ANONYMOUS_MS,
+  KEY_EXCHANGE_FOLLOWUP_TIMEOUT_FAST_MS,
+  KEY_EXCHANGE_FOLLOWUP_TIMEOUT_MAX_MS,
+  KEY_EXCHANGE_FOLLOWUP_TIMEOUT_MIN_MS,
+  KEY_EXCHANGE_FOLLOWUP_TIMEOUT_SETTING_KEY,
   KEY_EXCHANGE_MAX_FUTURE_SKEW_MS,
   KEY_EXCHANGE_RATE_LIMIT_DEFAULT,
   KEY_ROTATION_TIMEOUT,
@@ -42,6 +47,10 @@ export class KeyExchange {
   private keyExchangeAbortControllers = new Map<string, () => void>();
   private keyExchangeStreams = new Map<string, Stream>();
   private keyExchangeStartedAt = new Map<string, number>();
+  // Recipient identity keys resolved from the DHT at initiation time, kept so the initiator can
+  // verify the incoming key_exchange_response signature locally instead of doing a second (slow)
+  // DHT lookup on the confirm critical path. Only used for genuine first contact (no pinned key).
+  private keyExchangeRecipientKeys = new Map<string, { signingPublicKey: string; offlinePublicKey: string; signature: string }>();
   private pendingKeyExchangeResults = new Map<string, {
     resolve: (user: User | null) => void;
     reject: (error: Error) => void;
@@ -74,7 +83,26 @@ export class KeyExchange {
   }
 
   private getKeyExchangeFollowupTimeoutMs(): number {
-    return this.database.getSessionNetworkMode() === NETWORK_MODES.ANONYMOUS ? 10_000 : 5_000;
+    const modeDefault = this.database.getSessionNetworkMode() === NETWORK_MODES.ANONYMOUS
+      ? KEY_EXCHANGE_FOLLOWUP_TIMEOUT_ANONYMOUS_MS
+      : KEY_EXCHANGE_FOLLOWUP_TIMEOUT_FAST_MS;
+
+    const override = this.database.getSetting(KEY_EXCHANGE_FOLLOWUP_TIMEOUT_SETTING_KEY);
+    if (override === undefined || override === null || override === '') {
+      return modeDefault;
+    }
+    const parsed = Number(override);
+    if (!Number.isFinite(parsed)) {
+      console.warn(
+        `Invalid ${KEY_EXCHANGE_FOLLOWUP_TIMEOUT_SETTING_KEY} value '${override}'. ` +
+        `Using mode default of ${modeDefault}ms`,
+      );
+      return modeDefault;
+    }
+    return Math.min(
+      KEY_EXCHANGE_FOLLOWUP_TIMEOUT_MAX_MS,
+      Math.max(KEY_EXCHANGE_FOLLOWUP_TIMEOUT_MIN_MS, parsed),
+    );
   }
 
   private buildKeyExchangeMessageToVerify(
@@ -406,7 +434,12 @@ export class KeyExchange {
     targetPeerId: PeerId,
     targetUsername: string,
     message: string,
-    options?: { linkIntent?: 'initial' | 'resume'; recipientOfflinePublicKey?: string }
+    options?: {
+      linkIntent?: 'initial' | 'resume';
+      recipientOfflinePublicKey?: string;
+      recipientSigningPublicKey?: string;
+      recipientSignature?: string;
+    }
   ): Promise<User | null> {
     const userIdentity = this.usernameRegistry.getUserIdentity();
     if (!userIdentity) {
@@ -427,6 +460,13 @@ export class KeyExchange {
       targetUsername,
       options?.recipientOfflinePublicKey,
     );
+    // Remember the recipient's identity keys resolved from the DHT so the incoming
+    // key_exchange_response can be verified locally, off the confirm critical path.
+    this.stashRecipientKeysFromInitiation(peerIdStr, {
+      signingPublicKey: options?.recipientSigningPublicKey,
+      offlinePublicKey: recipientOfflinePublicKeyBase64,
+      signature: options?.recipientSignature,
+    });
     const {
       timestamp,
       keyExchangeMessage,
@@ -465,6 +505,7 @@ export class KeyExchange {
       this.keyExchangeAbortControllers.delete(peerIdStr);
       this.keyExchangeStreams.delete(peerIdStr);
       this.keyExchangeStartedAt.delete(peerIdStr);
+      this.keyExchangeRecipientKeys.delete(peerIdStr);
       this.pendingKeyExchangeResults.delete(peerIdStr);
       return user;
     } catch (error: unknown) {
@@ -479,6 +520,7 @@ export class KeyExchange {
       this.keyExchangeAbortControllers.delete(peerIdStr);
       this.keyExchangeStreams.delete(peerIdStr);
       this.keyExchangeStartedAt.delete(peerIdStr);
+      this.keyExchangeRecipientKeys.delete(peerIdStr);
       this.pendingKeyExchangeResults.delete(peerIdStr);
 
       // Re-throw cancellation errors so they can be handled upstream
@@ -554,11 +596,32 @@ export class KeyExchange {
         throw new Error(`Username record peer ID mismatch for ${targetUsername}`);
       }
       recipientOfflinePublicKeyBase64 = registration.offlinePublicKey;
+      // Capture the DHT-verified identity keys so the response signature can be
+      // verified without a second DHT round-trip on the confirm critical path.
+      this.stashRecipientKeysFromInitiation(peerIdStr, {
+        signingPublicKey: registration.signingPublicKey,
+        offlinePublicKey: registration.offlinePublicKey,
+        signature: registration.signature,
+      });
     }
     if (!recipientOfflinePublicKeyBase64) {
       throw new Error(`Missing offline public key for ${targetUsername}`);
     }
     return recipientOfflinePublicKeyBase64;
+  }
+
+  private stashRecipientKeysFromInitiation(
+    peerIdStr: string,
+    keys: { signingPublicKey?: string | undefined; offlinePublicKey?: string | undefined; signature?: string | undefined },
+  ): void {
+    if (!keys.signingPublicKey || !keys.offlinePublicKey) {
+      return;
+    }
+    this.keyExchangeRecipientKeys.set(peerIdStr, {
+      signingPublicKey: keys.signingPublicKey,
+      offlinePublicKey: keys.offlinePublicKey,
+      signature: keys.signature ?? '',
+    });
   }
 
   private createInitiatorKeyExchangeRequest(
@@ -1618,21 +1681,47 @@ export class KeyExchange {
 
       await sendAckIfNeeded();
 
+      // The user accepted; send our response and wait for the initiator's confirmation. A genuine
+      // finalization *timeout* (the initiator never confirmed within the wait) must NOT silently
+      // drop the accepted request — instead re-surface it so the user keeps a retry affordance,
+      // bounded by the original request's decision window.
       // validated in authorizeAndVerifyIncomingInitiator
       // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-      const responderSession = this.createResponderSession(remoteId, message.ephemeralPublicKey!);
+      const initiatorEphemeralPublicKey = message.ephemeralPublicKey!;
+      const decisionDeadline = this.getKeyExchangeDecisionExpiresAt(message.timestamp);
+      let responderSession = this.createResponderSession(remoteId, initiatorEphemeralPublicKey);
 
-      try {
-        await this.sendKeyExchangeResponseAndAwaitConfirmation(
-          remoteId,
-          responderSession.ephemeralPublicKey,
-          myUsername,
-          userIdentity,
-          linkHandling.responseLinkDecision
-        );
-      } catch (error) {
-        this.discardUncommittedSession(responderSession.session);
-        throw error;
+      while (true) {
+        try {
+          await this.sendKeyExchangeResponseAndAwaitConfirmation(
+            remoteId,
+            responderSession.ephemeralPublicKey,
+            myUsername,
+            userIdentity,
+            linkHandling.responseLinkDecision
+          );
+          break;
+        } catch (error) {
+          this.discardUncommittedSession(responderSession.session);
+          if (!this.isKeyExchangeFinalizationTimeout(error) || Date.now() >= decisionDeadline) {
+            throw error;
+          }
+          const retryDecision = await this.awaitContactRequestRetryAfterFinalizationTimeout(
+            remoteId,
+            message,
+            verifiedInitiator.sender.username,
+            verifiedInitiator.initialMessageBody,
+            decisionDeadline,
+          );
+          if (retryDecision === 'rejected') {
+            throw new Error('REJECTION_NEEDED');
+          }
+          if (retryDecision === 'expired') {
+            throw error;
+          }
+          // Re-accepted: derive a fresh responder session and retry the response/confirmation.
+          responderSession = this.createResponderSession(remoteId, initiatorEphemeralPublicKey);
+        }
       }
 
       this.sessionManager.storeSession(remoteId, responderSession.session);
@@ -1674,6 +1763,53 @@ export class KeyExchange {
       generalErrorHandler(error);
       throw error;
     }
+  }
+
+  private isKeyExchangeFinalizationTimeout(error: unknown): boolean {
+    return error instanceof Error && error.message.includes('inbound stream read timed out');
+  }
+
+  // Graceful failure for the accepting side: after a finalization timeout, put the contact request
+  // back in front of the user (re-emit + re-log it) and wait for a fresh decision, so a genuinely
+  // timed-out exchange is retriable instead of silently dropped.
+  private async awaitContactRequestRetryAfterFinalizationTimeout(
+    remoteId: string,
+    message: AuthenticatedEncryptedMessage,
+    username: string,
+    initialMessageBody: string,
+    decisionDeadline: number,
+  ): Promise<'accepted' | 'rejected' | 'expired'> {
+    log(
+      `[KEY-EXCHANGE][FINALIZE][TIMEOUT_RETRY] ts=${new Date().toISOString()} ` +
+      `peer=${remoteId} username=${username}`,
+    );
+
+    const contactAttemptId = this.database.logContactAttempt({
+      sender_peer_id: remoteId,
+      sender_username: username,
+      message: message.content || 'Contact request',
+      message_body: initialMessageBody,
+      timestamp: Date.now(),
+    });
+    this.emitIncomingContactRequest(remoteId, message, initialMessageBody, username);
+
+    let decision: boolean | null;
+    try {
+      decision = await this.waitForContactRequestDecision(
+        remoteId,
+        username,
+        initialMessageBody,
+        Date.now(),
+        decisionDeadline,
+      );
+    } finally {
+      this.database.deleteContactAttempt(contactAttemptId);
+    }
+
+    if (decision === null) {
+      return 'expired';
+    }
+    return decision ? 'accepted' : 'rejected';
   }
 
   private getIncomingKeyExchangeLinkHandling(
@@ -1730,6 +1866,7 @@ export class KeyExchange {
   ): Promise<{
     sender: UserRegistration | User;
     keys: { signingPublicKey: string; offlinePublicKey: string; signature: string };
+    initialMessageBody: string;
   } | null> {
     this.validateKeyExchangeInit(message);
     const initialMessageBody = this.decryptInitialMessageBody(message, userIdentity.offlinePrivateKey);
@@ -1756,7 +1893,7 @@ export class KeyExchange {
       keys.signature
     );
 
-    return { sender, keys };
+    return { sender, keys, initialMessageBody };
   }
 
   private async finalizeAcceptedKeyExchangeInit(
@@ -1882,22 +2019,29 @@ export class KeyExchange {
       }
 
       const confirmedResponderEphemeralPublicKey = await this.assertAcceptedKeyExchangeResponse(message, peerId);
-      const { sharedSecret } = this.createAndStoreInitiatorSessionFromResponse(
+      const { session, sharedSecret } = this.deriveInitiatorSessionFromResponse(
         peerId,
         confirmedResponderEphemeralPublicKey,
       );
-      await this.finalizeAcceptedKeyExchangeResponse(
-        peerId,
-        message.senderUsername,
-        sharedSecret,
-        message.linkDecision === 'reset_required',
-      );
+      // Hand off the confirmation while the responder is still listening on its response stream,
+      // BEFORE committing any local state. If the responder already gave up (its finalization read
+      // timed out and reset the stream) this write fails, and we abort without creating a chat —
+      // both sides then fail symmetrically instead of leaving the initiator with a phantom active
+      // chat the responder never completed.
       await this.sendKeyExchangeConfirmed(
         streamSettlement.stream,
         peerId,
         confirmedResponderEphemeralPublicKey,
         streamSettlement.myUsername,
         streamSettlement.userIdentity,
+      );
+      this.sessionManager.storeSession(peerId, session);
+      this.sessionManager.removePendingKeyExchange(peerId);
+      await this.finalizeAcceptedKeyExchangeResponse(
+        peerId,
+        message.senderUsername,
+        sharedSecret,
+        message.linkDecision === 'reset_required',
       );
       this.resolvePendingKeyExchangeResult(peerId, this.database.getUserByPeerId(peerId));
     } catch (error: unknown) {
@@ -2028,13 +2172,7 @@ export class KeyExchange {
     if (message.linkDecision !== undefined) verifyPayload.linkDecision = message.linkDecision;
     const messageToVerify = this.buildKeyExchangeMessageToVerify(verifyPayload);
 
-    const { valid } = await this.verifySignatureWithFallback(
-      message.signature,
-      messageToVerify,
-      message.senderUsername,
-      peerId
-    );
-
+    const valid = await this.verifyKeyExchangeResponseSignature(message.signature, messageToVerify, message.senderUsername, peerId);
     if (!valid) {
       throw new Error('Key exchange response signature verification failed');
     }
@@ -2042,7 +2180,51 @@ export class KeyExchange {
     return message.ephemeralPublicKey;
   }
 
-  private createAndStoreInitiatorSessionFromResponse(
+  /**
+   * Verify the responder's key_exchange_response signature. On genuine first contact (no pinned
+   * signing key) we verify against the identity keys already resolved from the DHT at initiation
+   * time — this keeps the (slow) DHT lookup off the confirm critical path, which is what the
+   * responder's finalization read is waiting on. The signature is still cryptographically
+   * verified; the stashed key itself came from a DHT registration whose self-signature was already
+   * validated. If a pinned key exists, or the stash is absent/mismatched, we fall back to the
+   * normal DB-pinned + DHT-refresh path (which also performs key-change detection).
+   */
+  private async verifyKeyExchangeResponseSignature(
+    signature: string,
+    messageToVerify: MessageToVerify,
+    username: string,
+    peerId: string,
+  ): Promise<boolean> {
+    const pinnedSigningPublicKey = this.getPinnedSigningPublicKey(this.database.getUserByPeerId(peerId));
+    const stashed = this.keyExchangeRecipientKeys.get(peerId);
+    if (!pinnedSigningPublicKey && stashed?.signingPublicKey) {
+      const valid = EncryptedUserIdentity.verifyKeyExchangeSignature(
+        signature,
+        messageToVerify,
+        stashed.signingPublicKey,
+      );
+      if (valid) {
+        // Persist the verified keys so the subsequent chat finalization pins them, mirroring what
+        // verifySignatureWithFallback would have done after a DHT lookup.
+        await this.ensureUserExistsWithKeys(
+          peerId,
+          username,
+          stashed.signingPublicKey,
+          stashed.offlinePublicKey,
+          stashed.signature,
+        );
+        return true;
+      }
+    }
+
+    const { valid } = await this.verifySignatureWithFallback(signature, messageToVerify, username, peerId);
+    return valid;
+  }
+
+  // Derive (but do not yet store) the initiator session from the responder's ephemeral key. The
+  // caller commits the session only after the confirmation has been handed off, so a failed
+  // hand-off never leaves a stored session with no corresponding chat.
+  private deriveInitiatorSessionFromResponse(
     peerId: string,
     remoteEphemeralPublicKey: string,
   ): { session: ConversationSession; sharedSecret: Uint8Array } {
@@ -2067,9 +2249,6 @@ export class KeyExchange {
       messageCount: 0,
       lastUsed: Date.now()
     };
-
-    this.sessionManager.storeSession(peerId, session);
-    this.sessionManager.removePendingKeyExchange(peerId);
 
     return { session, sharedSecret };
   }

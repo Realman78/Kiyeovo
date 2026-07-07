@@ -17,7 +17,7 @@ import {
   type IceServerType,
   type IceServersResponse,
 } from '../core/index.js';
-import { CHATS_TO_CHECK_FOR_OFFLINE_MESSAGES, DEFAULT_NETWORK_MODE, DOWNLOADS_DIR, FAST_MISSING_ICE_WARNING_ACKNOWLEDGED_SETTING_KEY, FAST_RELAY_MULTIADDRS_SETTING_KEY, FILE_OFFER_RATE_LIMIT, KEY_EXCHANGE_RATE_LIMIT_DEFAULT, MAX_FILE_SIZE, MAX_PENDING_FILES_PER_PEER, MAX_PENDING_FILES_TOTAL, NETWORK_MODE_ONBOARDED_SETTING_KEY, OFFLINE_MESSAGE_LIMIT, SILENT_REJECTION_THRESHOLD_GLOBAL, SILENT_REJECTION_THRESHOLD_PER_PEER, NETWORK_MODES, WEBRTC_ICE_SERVERS_SETTING_KEY, getInitialSetupStatusSettingKey, getTorConfig, isNetworkMode } from '../core/constants.js';
+import { CHATS_TO_CHECK_FOR_OFFLINE_MESSAGES, DEFAULT_NETWORK_MODE, FAST_MISSING_ICE_WARNING_ACKNOWLEDGED_SETTING_KEY, FAST_RELAY_MULTIADDRS_SETTING_KEY, FILE_OFFER_RATE_LIMIT, KEY_EXCHANGE_RATE_LIMIT_DEFAULT, MAX_FILE_SIZE, MAX_PENDING_FILES_PER_PEER, MAX_PENDING_FILES_TOTAL, NETWORK_MODE_ONBOARDED_SETTING_KEY, OFFLINE_MESSAGE_LIMIT, PREDEFINED_NODES_SUNSET_DISMISSED_SETTING_KEY, SILENT_REJECTION_THRESHOLD_GLOBAL, SILENT_REJECTION_THRESHOLD_PER_PEER, NETWORK_MODES, WEBRTC_ICE_SERVERS_SETTING_KEY, getInitialSetupStatusSettingKey, getTorConfig, isNetworkMode } from '../core/constants.js';
 import { validateMessageLength, validateUsername } from '../core/utils/validators.js';
 import { peerIdFromString } from '@libp2p/peer-id';
 import { multiaddr } from '@multiformats/multiaddr';
@@ -46,6 +46,7 @@ import { createTrustedIpcMainHandle, type IpcMainHandleRegistrar } from './trust
 import { mintMediaToken } from './app-protocol.js';
 import { prepareTextUpload } from './text-upload.js';
 import {
+  createDebouncedInvoker,
   resolveCompletedImageMedia,
   resolveOpenFileLocationPath,
   resolveUploadsDirectory,
@@ -56,7 +57,7 @@ import {
   resolveDialogGrantedFileMetadata,
   resolveGrantedDialogPath,
 } from './dialog-path-grants.js';
-import { writeFileWithCopySuffix } from '../core/lib/file-storage.js';
+import { getDefaultDownloadsDirectory, writeFileWithCopySuffix } from '../core/lib/file-storage.js';
 import type { InitialSetupStatus, SaveTextUploadResponse } from '../shared/kiyeovo-api.js';
 
 function requestAppRestart(): void {
@@ -250,10 +251,20 @@ function getConfiguredIceServers(database: ChatDatabase): IceServerConfig[] {
   }
 }
 
-const NODE_LIVENESS_PING_TIMEOUT_MS = 2000;
+const NODE_LIVENESS_PING_TIMEOUT_FAST_MS = 2_000;
+const NODE_LIVENESS_PING_TIMEOUT_ANONYMOUS_MS = 6_000;
+// Debounce window for auto-reconnect after a bootstrap add: consecutive adds
+// coalesce into one retry that fires ~1s after the last add.
+const BOOTSTRAP_ADD_RETRY_DEBOUNCE_MS = 1000;
+
+function getNodeLivenessPingTimeoutMs(mode: NetworkMode): number {
+  return mode === NETWORK_MODES.ANONYMOUS
+    ? NODE_LIVENESS_PING_TIMEOUT_ANONYMOUS_MS
+    : NODE_LIVENESS_PING_TIMEOUT_FAST_MS;
+}
 
 // True only if we have a connection to this peer AND it answers a ping
-async function isPeerReachable(node: ChatNode, peerIdStr: string | null): Promise<boolean> {
+async function isPeerReachable(node: ChatNode, peerIdStr: string | null, pingTimeoutMs: number): Promise<boolean> {
   if (!peerIdStr) {
     return false;
   }
@@ -264,7 +275,7 @@ async function isPeerReachable(node: ChatNode, peerIdStr: string | null): Promis
   try {
     const peerId = peerIdFromString(peerIdStr);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await (node.services as any).ping.ping(peerId, { signal: AbortSignal.timeout(NODE_LIVENESS_PING_TIMEOUT_MS) });
+    await (node.services as any).ping.ping(peerId, { signal: AbortSignal.timeout(pingTimeoutMs) });
     return true;
   } catch {
     return false;
@@ -804,11 +815,10 @@ function setupContactRequestHandlers(
       if (!p2pCore) {
         return { success: false, error: 'P2P core not initialized' };
       }
-      const currentUsername = p2pCore.usernameRegistry.getCurrentUsername();
-      if (!currentUsername) {
-        return { success: false, error: 'Finish registration first, then accept this contact request.' };
-      }
-
+      // Accepting a contact request does not require registration: the
+      // responder answers with its fallback username and locally-derived keys,
+      // and finalization creates a self-owned chat (the self-row is always
+      // present). See UsernameRegistry.ensureSelfUserRow / InvitationManager.
       log(`[IPC] Accepting contact request from peer: ${peerId}`);
       p2pCore.messageHandler.getKeyExchange().acceptPendingContact(peerId);
 
@@ -884,6 +894,39 @@ function setupBootstrapHandlers(
     error,
   });
 
+  // Auto-reconnect after a bootstrap add. Debounced 1s and coalesced so a burst
+  // of adds produces a SINGLE dial against the complete list (not a first dial
+  // against a partial list that visibly fails mid-typing). The target p2pCore is
+  // resolved at fire time — if it was torn down (shutdown / network-mode
+  // relaunch) between the add and the debounce firing, the run is skipped
+  // silently. retryBootstrap() is single-flight: it refuses to run when a
+  // reconnect is already in progress and returns a 'retry_in_progress' result,
+  // which we only log — the periodic health-check reconnect re-reads the full
+  // bootstrap list from the DB, so the freshly added address is never lost.
+  // ('aborted' is distinct: the dial itself timed out mid-flight.)
+  const bootstrapAddRetry = createDebouncedInvoker({
+    delayMs: BOOTSTRAP_ADD_RETRY_DEBOUNCE_MS,
+    resolveTarget: getP2PCore,
+    run: async (p2pCore) => {
+      try {
+        const result = await p2pCore.retryBootstrap();
+        if (result.status === 'retry_in_progress') {
+          log('[IPC] Bootstrap add auto-retry skipped (a reconnect is already in progress); periodic checker will pick up the new address');
+        } else if (result.status === 'aborted') {
+          log('[IPC] Bootstrap add auto-retry aborted (dial timed out mid-flight); periodic checker will pick up the new address');
+        } else {
+          log(`[IPC] Bootstrap add auto-retry complete status=${result.status} connected=${result.connectedCount}`);
+        }
+      } catch (retryError) {
+        // Non-fatal: node is persisted and can be applied via manual retry later.
+        console.warn(`[IPC] Bootstrap add auto-retry failed: ${errStr(retryError)}`);
+      }
+    },
+    onError: (retryError) => {
+      console.warn(`[IPC] Bootstrap add auto-retry failed: ${errStr(retryError)}`);
+    },
+  });
+
   // Get current DHT connection status snapshot
   ipcMain.handle(IPC_CHANNELS.GET_DHT_CONNECTION_STATUS, async () => {
     try {
@@ -927,6 +970,7 @@ function setupBootstrapHandlers(
     if (!p2pCore) {
       return { statuses: [] } satisfies NodesLivenessResponse;
     }
+    const pingTimeoutMs = getNodeLivenessPingTimeoutMs(p2pCore.database.getSessionNetworkMode());
     const statuses = await Promise.all((addresses ?? []).map(async (address) => {
       let peerIdStr: string | null = null;
       try {
@@ -934,7 +978,7 @@ function setupBootstrapHandlers(
       } catch {
         peerIdStr = null;
       }
-      return { address, connected: await isPeerReachable(p2pCore.node, peerIdStr) };
+      return { address, connected: await isPeerReachable(p2pCore.node, peerIdStr, pingTimeoutMs) };
     }));
     return { statuses } satisfies NodesLivenessResponse;
   });
@@ -1157,6 +1201,12 @@ function setupBootstrapHandlers(
       log(`[IPC] Adding bootstrap node: ${normalized}`);
       p2pCore.database.addBootstrapNode(normalized);
       log('[IPC] Bootstrap node added');
+
+      // Best-effort: schedule a debounced reconnect so the new server is dialed
+      // automatically. Fires ~1s after the LAST add (see bootstrapAddRetry). We
+      // return success immediately without awaiting the retry — the DB write is
+      // the source of truth and the retry must never fail the add response.
+      bootstrapAddRetry.schedule();
 
       return { success: true, error: null };
     } catch (error) {
@@ -2532,7 +2582,7 @@ function setupChatSettingsHandlers(
       }
 
       const path = p2pCore.database.getSetting('downloads_directory');
-      const downloadsPath = path || DOWNLOADS_DIR;
+      const downloadsPath = path || getDefaultDownloadsDirectory();
 
       log(`[IPC] Get downloads directory: ${downloadsPath}`);
       return { success: true, path: downloadsPath, error: null };
@@ -2696,6 +2746,47 @@ function setupChatSettingsHandlers(
     },
   );
 
+  ipcMain.handle(IPC_CHANNELS.GET_PREDEFINED_NODES_SUNSET_DISMISSED, async () => {
+    try {
+      const dismissed = withSettingsDatabase(
+        getP2PCore,
+        (db) => db.getSetting(PREDEFINED_NODES_SUNSET_DISMISSED_SETTING_KEY) === 'true',
+      );
+      return { success: true, dismissed, error: null };
+    } catch (error) {
+      console.error('[IPC] Failed to get predefined-nodes sunset dismissed flag:', error);
+      return {
+        success: false,
+        dismissed: false,
+        error: errStr(error, 'Failed to get sunset notice preference'),
+      };
+    }
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.SET_PREDEFINED_NODES_SUNSET_DISMISSED,
+    async (_event, dismissed: boolean) => {
+      try {
+        if (typeof dismissed !== 'boolean') {
+          return { success: false, error: 'Invalid sunset notice preference' };
+        }
+        withSettingsDatabase(getP2PCore, (db) => {
+          db.setSetting(
+            PREDEFINED_NODES_SUNSET_DISMISSED_SETTING_KEY,
+            dismissed ? 'true' : 'false',
+          );
+        });
+        return { success: true, error: null };
+      } catch (error) {
+        console.error('[IPC] Failed to set predefined-nodes sunset dismissed flag:', error);
+        return {
+          success: false,
+          error: errStr(error, 'Failed to save sunset notice preference'),
+        };
+      }
+    },
+  );
+
   ipcMain.handle(IPC_CHANNELS.GET_APP_CONFIG, async () => {
     try {
       const p2pCore = getP2PCore();
@@ -2777,7 +2868,7 @@ function setupGroupHandlers(
     userIdentity: p2pCore.userIdentity,
     myPeerId: p2pCore.userIdentity.id,
     myUsername: username,
-    nudgeGroupRefetch: (peerId, groupId) => p2pCore.messageHandler.nudgePeerGroupRefetch(peerId, groupId),
+    nudgeGroupRefetch: (peerId, groupId, options) => p2pCore.messageHandler.nudgePeerGroupRefetch(peerId, groupId, options),
   });
 
   ipcMain.handle(IPC_CHANNELS.CHECK_GROUP_OFFLINE_MESSAGES, async (_event, chatIds?: number[]) => {
@@ -3070,7 +3161,7 @@ function setupGroupHandlers(
         userIdentity: p2pCore.userIdentity,
         myPeerId: p2pCore.userIdentity.id,
         myUsername: username,
-        nudgeGroupRefetch: (peerId, groupId) => p2pCore.messageHandler.nudgePeerGroupRefetch(peerId, groupId),
+        nudgeGroupRefetch: (peerId, groupId, options) => p2pCore.messageHandler.nudgePeerGroupRefetch(peerId, groupId, options),
       });
 
       await responder.respondToInvite(groupId, accept);
@@ -3420,14 +3511,14 @@ function setupFileTransferHandlers(
 
       log(`[IPC] Sending file ${filePath} to ${peerId}`);
 
-      // Get username from peerId
       const user = p2pCore.database.getUserByPeerId(peerId);
       if (!user) {
         return { success: false, error: 'User not found' };
       }
 
-      // Send the file (this will emit progress events internally)
-      await p2pCore.messageHandler.getFileHandler().sendFile(user.username, filePath, fileId, replyToCid);
+      // Address by peer id, never username — usernames are not unique, so a
+      // duplicate contact name can resolve to the wrong peer.
+      await p2pCore.messageHandler.getFileHandler().sendFile(peerId, filePath, fileId, replyToCid);
 
       return { success: true, error: null };
     } catch (error) {

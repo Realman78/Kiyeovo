@@ -10,6 +10,7 @@ import {
 } from "../../ui/Dialog";
 import { Button } from "../../ui/Button";
 import type { ChatHeaderGroupMember } from "./ChatHeaderDialogTypes";
+import { Dot } from "lucide-react";
 
 type GroupInfoDialogProps = {
   open: boolean;
@@ -107,7 +108,13 @@ export const GroupInfoDialog: FC<GroupInfoDialogProps> = ({
                       .sort((a, b) => a.username.localeCompare(b.username))
                       .map((member) => (
                         <div key={member.peerId} className="px-3 py-2.5 border-b border-border last:border-b-0 text-sm flex items-center justify-between gap-3">
-                          <span className="truncate">{member.username}</span>
+                          <span title={`${member.username} (${member.peerId})`} className="truncate flex align-center items-center">
+                            {member.username}
+                            <Dot className="shrink-0" />
+                            <span className="text-xs text-muted-foreground truncate">
+                              {member.peerId}
+                            </span>
+                          </span>
                           <span className="text-xs text-muted-foreground whitespace-nowrap">
                             {member.status === 'confirmed' ? 'member' : member.status === 'accepted' ? 'awaiting activation' : 'invited'}
                           </span>

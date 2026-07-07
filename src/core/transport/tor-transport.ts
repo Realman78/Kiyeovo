@@ -167,23 +167,6 @@ export interface TorTransportComponents {
   metrics?: Metrics
 }
 
-type BootstrapTarget = { host: string, port: number };
-
-function normalizeBootstrapTargets(
-  bootstrapTargetsOrHost?: string | BootstrapTarget[],
-  bootstrapPort?: number,
-): BootstrapTarget[] {
-  if (Array.isArray(bootstrapTargetsOrHost)) {
-    return bootstrapTargetsOrHost;
-  }
-
-  if (typeof bootstrapTargetsOrHost === 'string' && typeof bootstrapPort === 'number') {
-    return [{ host: bootstrapTargetsOrHost, port: bootstrapPort }];
-  }
-
-  return [];
-}
-
 /**
  * Tor transport wrapper that routes all connections through SOCKS5 proxy
  * This transport wraps the TCP transport and routes all dial operations through Tor
@@ -424,71 +407,25 @@ export class TorTransport implements Transport {
     } catch {
       this.log(
         `Tor SOCKS proxy not accessible at ${this.options.socksProxy.host}:${this.options.socksProxy.port} ` +
-        '(this is OK if Tor is still bootstrapping)'
+        '(is Tor running?)'
       );
       return false;
     }
   }
 
-  private async probeBootstrapTargets(bootstrapTargets: BootstrapTarget[]): Promise<boolean> {
-    for (const target of bootstrapTargets) {
-      try {
-        this.log(`Testing connection to bootstrap node: ${target.host}:${target.port}`);
-        const testConnection = await this.createSocksConnection(target.host, target.port);
-        this.log('Successfully connected to bootstrap node via Tor');
-        testConnection.destroy();
-        return true;
-      } catch {
-        continue;
-      }
-    }
-
-    return false;
-  }
-
-  private async probeFallbackTarget(): Promise<boolean> {
-    try {
-      this.log('Testing connection to check.torproject.org...');
-      const testConnection = await this.createSocksConnection('check.torproject.org', 80);
-      this.log('Successfully connected to check.torproject.org via Tor');
-      testConnection.destroy();
-      return true;
-    } catch (error) {
-      this.log.error('All Tor connectivity tests failed:', error);
-      return false;
-    }
-  }
-
   /**
-   * Validate Tor connectivity using layered approach:
-   * 1. Check local Tor SOCKS proxy reachability (fast, no network traffic)
-   * 2. Test connection to bootstrap node (validates actual path)
-   * 3. Fallback to check.torproject.org (if bootstrap unknown)
+   * Validate Tor connectivity by checking that the local SOCKS proxy accepts
+   * connections. Deliberately generates no Tor network traffic: probing a
+   * remote target (bootstrap node or a clearnet check endpoint) would either
+   * stall startup for minutes on a dead bootstrap or leak a clearnet egress
+   * through an exit circuit on every launch. Actual network reachability is
+   * established (and surfaced to the user) by the bootstrap phase right after
+   * node creation.
    */
-  async validateTorConnectivity(
-    bootstrapTargetsOrHost?: string | BootstrapTarget[],
-    bootstrapPort?: number
-  ): Promise<{ available: boolean }> {
+  async validateTorConnectivity(): Promise<{ available: boolean }> {
     this.log('Validating Tor connectivity...');
-
-    const bootstrapTargets = normalizeBootstrapTargets(bootstrapTargetsOrHost, bootstrapPort);
-
-    await this.probeLocalSocksProxy();
-
-    // Layer 2: Test connection to bootstrap node if provided
-    if (bootstrapTargets.length > 0) {
-      const bootstrapReachable = await this.probeBootstrapTargets(bootstrapTargets);
-      if (bootstrapReachable) {
-        return { available: true };
-      }
-      this.log('All bootstrap connectivity checks failed, trying fallback...');
-    }
-
-    // Layer 3: Fallback to check.torproject.org
-    // Only used when no bootstrap nodes are configured (e.g., development/testing environments)
-    // In production with bootstrap nodes, this fallback will never be reached
-    const fallbackReachable = await this.probeFallbackTarget();
-    return { available: fallbackReachable };
+    const proxyAccessible = await this.probeLocalSocksProxy();
+    return { available: proxyAccessible };
   }
 }
 
@@ -550,9 +487,7 @@ export function createTorTransport(options?: Partial<TorTransportOptions>): TorT
  */
 export async function validateTorConnection(
   options?: Partial<TorTransportOptions>,
-  bootstrapTargetsOrHost?: string | BootstrapTarget[],
-  bootstrapPort?: number
 ): Promise<{ available: boolean }> {
   const transport = createTorTransport(options);
-  return await transport.validateTorConnectivity(bootstrapTargetsOrHost, bootstrapPort);
+  return await transport.validateTorConnectivity();
 }

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   Dialog,
   DialogBody,
@@ -113,13 +113,16 @@ const SendFileDialogContent: React.FC<SendFileDialogContentProps> = ({
   const maxFileSize = useAppSelector((state) => state.appConfig.config.maxFileSize);
   const [selectedFile, setSelectedFile] = useState<SelectedFile | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const submitInFlightRef = useRef(false);
   const activeFile = pastedFile ?? selectedFile;
+  const busy = preparing || submitting;
   const sizeError = activeFile && activeFile.size > maxFileSize
     ? `File exceeds size limit (${formatFileSize(maxFileSize)} max)`
     : null;
 
   const handleBrowse = async () => {
-    if (transferBlocked || preparing) return;
+    if (transferBlocked || busy) return;
     setLocalError(null);
 
     try {
@@ -156,7 +159,9 @@ const SendFileDialogContent: React.FC<SendFileDialogContentProps> = ({
   };
 
   const handleSend = async () => {
-    if (transferBlocked || preparing || !activeFile || sizeError) return;
+    if (submitInFlightRef.current || transferBlocked || busy || !activeFile || sizeError) return;
+    submitInFlightRef.current = true;
+    setSubmitting(true);
     setLocalError(null);
 
     if (!pastedFile) {
@@ -168,6 +173,9 @@ const SendFileDialogContent: React.FC<SendFileDialogContentProps> = ({
         selectedFile!.mediaToken,
       ).catch((error) => {
         console.error('Error sending file:', error);
+      }).finally(() => {
+        submitInFlightRef.current = false;
+        setSubmitting(false);
       });
       return;
     }
@@ -186,23 +194,29 @@ const SendFileDialogContent: React.FC<SendFileDialogContentProps> = ({
       onUploadSaved?.(result.filePath, result.uploadsDirSizeBytes);
 
       closeDialog();
-      void onSend(
-        result.filePath,
-        pastedFile.name,
-        pastedFile.size,
-        result.mediaToken,
-      ).catch((error) => {
-        console.error('Error sending pasted image:', error);
-      });
+      try {
+        await onSend(
+          result.filePath,
+          pastedFile.name,
+          pastedFile.size,
+          result.mediaToken,
+        );
+      } catch (sendError) {
+        console.error('Error sending pasted image:', sendError);
+      }
     } catch (error) {
       console.error('Error preparing pasted image:', error);
       setLocalError('Failed to save pasted image');
     } finally {
+      submitInFlightRef.current = false;
+      setSubmitting(false);
       onPreparingChange(false);
     }
   };
 
   const handleCloseAnimationComplete = () => {
+    submitInFlightRef.current = false;
+    setSubmitting(false);
     setSelectedFile(null);
     setLocalError(null);
     onPreparingChange(false);
@@ -266,7 +280,7 @@ const SendFileDialogContent: React.FC<SendFileDialogContentProps> = ({
                   }}
                   className="ml-2 cursor-pointer text-muted-foreground hover:text-destructive"
                   aria-label="Clear selected file"
-                  disabled={preparing}
+                  disabled={busy}
                 >
                   <X className="h-4 w-4" />
                 </button>
@@ -282,7 +296,7 @@ const SendFileDialogContent: React.FC<SendFileDialogContentProps> = ({
             <Button
               onClick={() => void handleBrowse()}
               variant="outline"
-              disabled={transferBlocked || preparing}
+              disabled={transferBlocked || busy}
             >
               <FileUp className="mr-2 h-4 w-4" />
               Browse Files
@@ -298,18 +312,18 @@ const SendFileDialogContent: React.FC<SendFileDialogContentProps> = ({
         <Button
           onClick={closeDialog}
           variant="outline"
-          disabled={preparing}
+          disabled={busy}
         >
           Close
         </Button>
         <Button
           onClick={() => void handleSend()}
-          disabled={transferBlocked || preparing || !activeFile || !!sizeError}
+          disabled={transferBlocked || busy || !activeFile || !!sizeError}
         >
-          {preparing ? (
+          {busy ? (
             <>
               <Loader2 className="h-4 w-4 animate-spin" />
-              Preparing...
+              {pastedFile && preparing ? 'Preparing...' : 'Sending...'}
             </>
           ) : (
             'Send'

@@ -8,6 +8,8 @@ import { Route } from 'lucide-react';
 import { SetupNodesView } from './SetupNodesView';
 import { store, type RootState } from '../../../state/store';
 import { applyLiveness, bumpSetupGeneration, mergeConfiguredNodes, setSetupNodes } from '../../../state/slices/setupNodesSlice';
+import { PREDEFINED_NODES_OFFERING_LABELS, isOfferingActive } from '../../../../core/predefined-nodes';
+import { PredefinedNodesOfferingLink } from './PredefinedNodesOfferingLink';
 
 const SECTION = 'relay' as const;
 
@@ -42,10 +44,12 @@ export function RelaySetup() {
   const [retrying, setRetrying] = useState(false);
   const [reordering, setReordering] = useState(false);
   const reorderInFlightRef = useRef(false);
+  const livenessInFlightRef = useRef(false);
 
   const refreshNodeLiveness = async (addresses: string[]) => {
-    if (addresses.length === 0) return;
+    if (addresses.length === 0 || livenessInFlightRef.current) return;
 
+    livenessInFlightRef.current = true;
     try {
       const { statuses } = await window.kiyeovoAPI.getNodesLiveness(addresses);
       dispatch(applyLiveness({
@@ -54,6 +58,8 @@ export function RelaySetup() {
       }));
     } catch {
       // Preserve the last-known status when a liveness probe fails.
+    } finally {
+      livenessInFlightRef.current = false;
     }
   };
 
@@ -234,6 +240,10 @@ export function RelaySetup() {
       icon={Route}
       title="Relay servers"
       description="Relay servers help your messages reach people when a direct peer-to-peer connection isn't available."
+      belowDescription={isOfferingActive(Date.now()) ? (
+        // Relay setup only exists in fast mode, so no external-link confirmation needed.
+        <PredefinedNodesOfferingLink label={PREDEFINED_NODES_OFFERING_LABELS.relay} />
+      ) : undefined}
       nodesTitle="Configured servers"
       nodeSingular="relay server"
       emptyTitle="No relay servers configured"

@@ -5,7 +5,6 @@ import { isTrustedAppOrigin, type AppUrlPolicyOptions } from './app-url-policy.j
 
 type SessionSecurityOptions = AppUrlPolicyOptions & {
   getMainWindow: () => BrowserWindow | null;
-  networkMode: NetworkMode;
   selectDisplayMediaSource?: () => Promise<Electron.Video | null>;
 };
 
@@ -90,12 +89,15 @@ function isAllowedDisplayMediaRequest(
   return isTrustedAppOrigin(requestingUrl, options);
 }
 
+// Electron 39 removed setWebRTCIPHandlingPolicy from Session; it only exists
+// on WebContents now, so the policy is applied per-webContents (see the
+// web-contents-created hook in main.ts).
 export function applyWebRTCIPHandlingPolicy(
-  session: Pick<Session, 'setWebRTCIPHandlingPolicy'>,
+  webContents: Pick<WebContents, 'setWebRTCIPHandlingPolicy'>,
   mode: NetworkMode,
 ): void {
   if (mode === 'anonymous') {
-    session.setWebRTCIPHandlingPolicy('disable_non_proxied_udp');
+    webContents.setWebRTCIPHandlingPolicy('disable_non_proxied_udp');
   }
 }
 
@@ -103,8 +105,6 @@ export function applySessionSecurityPolicies(
   session: Session,
   options: SessionSecurityOptions,
 ): void {
-  applyWebRTCIPHandlingPolicy(session, options.networkMode);
-
   session.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
     const requestingUrl = details.requestingUrl || requestingOrigin || webContents?.getURL() || '';
     const allowed = isAllowedRendererPermission(

@@ -15,7 +15,7 @@ interface GroupAckRepublisherDeps {
   onGroupChatActivated: (data: GroupChatActivatedEvent) => void;
   onGroupMembersUpdated: (data: GroupMembersUpdatedEvent) => void;
   onOfflineInboxCapacityChanged?: (chatId: number) => void;
-  nudgeGroupRefetch: (peerId: string, groupId: string) => void;
+  nudgeGroupRefetch: (peerId: string, groupId: string, options?: { allowDialWithoutConnection?: boolean }) => void;
 }
 
 type PendingActionResult = { action: 'republish' | 'skip' | 'remove'; reason?: string };

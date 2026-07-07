@@ -180,7 +180,7 @@ export function PasswordPrompt({
   const isLocked = cooldownRemaining > 0;
   const canSwitchMode = Boolean(networkMode && onSwitchNetworkMode);
   const targetMode = networkMode === NETWORK_MODES.ANONYMOUS ? NETWORK_MODES.FAST : NETWORK_MODES.ANONYMOUS;
-  const targetModeLabel = targetMode === NETWORK_MODES.ANONYMOUS ? 'Anonymous (Tor)' : 'Fast (not anonymous)';
+  const targetModeLabel = targetMode === NETWORK_MODES.ANONYMOUS ? 'Anonymous (Tor)' : 'Fast';
 
   const handleImportBackup = async () => {
     try {

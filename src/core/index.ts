@@ -8,7 +8,10 @@ import {
   getBootstrapRetryTimeoutMs,
 } from './network/node-setup.js';
 import { UsernameRegistry } from './username/username-registry.js';
+import { createUsernameReconnectRepublisher } from './username/username-reconnect-republisher.js';
+import { generalErrorHandler } from './utils/general-error.js';
 import { MessageHandler } from './lib/message-handler.js';
+import { createPeriodicOfflineSweeper } from './lib/periodic-offline-sweeper.js';
 import { GroupCallOrchestrator } from './lib/group-call-orchestrator.js';
 import { CallActivityRegistry } from './lib/call-activity-registry.js';
 import { EncryptedUserIdentity } from './identity/encrypted-user-identity.js';
@@ -16,7 +19,8 @@ import { ChatDatabase } from './db/database.js';
 import { createNetworkHealthMonitor } from './network/network-health.js';
 import { createReconnectController } from './network/reconnect-controller.js';
 import { startFastRelayKeepAlive } from './network/relay-keepalive.js';
-import { DATABASE_CLEANUP_INTERVAL, getNetworkModeConfig, MAX_BOOTSTRAP_NODES_FAST, MAX_BOOTSTRAP_NODES_TOR, POST_RECONNECT_RECENT_ACTIVITY_WINDOW_MS, POST_RECONNECT_RECENT_GROUP_CAP, SECOND } from './constants.js';
+import { DATABASE_CLEANUP_INTERVAL, getNetworkModeConfig, MAX_BOOTSTRAP_NODES_FAST, MAX_BOOTSTRAP_NODES_TOR, OFFLINE_MESSAGE_CHECK_INTERVAL, POST_RECONNECT_RECENT_ACTIVITY_WINDOW_MS, POST_RECONNECT_RECENT_GROUP_CAP, SECOND } from './constants.js';
+import { log } from '../shared/logger.js';
 import type {
   ChatNode,
   ContactRequestEvent,
@@ -406,6 +410,16 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
   const usernameRegistry = new UsernameRegistry(node, database);
   await usernameRegistry.initialize(userIdentity, sendRestoreUsername);
 
+  // When bootstrap connectivity is (re)established, re-publish the username
+  // registration so a user who switched bootstraps becomes discoverable in
+  // seconds instead of waiting for the 5-minute re-registration loop. Debounced
+  // (5s) so a reconnect + post-retry-verify burst collapses into one republish;
+  // it no-ops unless a username is currently registered.
+  const republishUsernameOnReconnect = createUsernameReconnectRepublisher({
+    getRegistry: () => usernameRegistry,
+    onError: (error) => generalErrorHandler(error, 'Failed to re-publish username after bootstrap reconnect'),
+  });
+
   // Initialize message handler
   sendStatus('Initializing message handler...', 'messaging');
 
@@ -546,7 +560,38 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
       POST_RECONNECT_RECENT_GROUP_CAP,
       callChatId !== null ? [callChatId] : undefined,
     );
+    republishUsernameOnReconnect.schedule();
   });
+
+  // Periodic offline backstop: while the app is online, pull direct offline buckets
+  // and run the recency-bounded group offline check every ~5 min (jittered). This
+  // makes the tech doc's periodic-reconciliation guarantee real — event-only healing
+  // (startup/reconnect/wake/manual) otherwise leaves control messages and group
+  // content unread indefinitely for a peer who stays online but disconnected from us.
+  // Runs in the main process so it survives the renderer window being backgrounded.
+  const periodicOfflineSweeper = createPeriodicOfflineSweeper({
+    intervalMs: OFFLINE_MESSAGE_CHECK_INTERVAL,
+    isDhtConnected: () => currentDhtConnected === true,
+    log,
+    runSweep: async () => {
+      const directResult = await messageHandler.checkOfflineMessages();
+      const since = Date.now() - POST_RECONNECT_RECENT_ACTIVITY_WINDOW_MS;
+      const callChatId = groupCallOrchestrator.getActiveCallChatId();
+      await messageHandler.checkRecentlyActiveGroupOfflineMessages(
+        since,
+        POST_RECONNECT_RECENT_GROUP_CAP,
+        callChatId !== null ? [callChatId] : undefined,
+      );
+      const directUnread = Array.from(directResult.unreadFromChats.values())
+        .reduce((sum, count) => sum + count, 0);
+      return {
+        directChecked: directResult.checkedChatIds.length,
+        directUnread,
+        groupSwept: true,
+      };
+    },
+  });
+  periodicOfflineSweeper.start();
 
   groupCallOrchestrator.setDurableHintStorage((groupId: string) => messageHandler.storeGroupCallHint(groupId));
   messageHandler.setGroupCallHintHandler((groupId: string) => {
@@ -580,7 +625,7 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
       if (reconnectController.isReconnectInProgress()) {
         console.log('[Core] Reconnect already in progress, ignoring manual retry');
         return {
-          status: 'aborted',
+          status: 'retry_in_progress',
           connectedAddresses: [],
           connectedPeerIds: [],
           connectedCount: 0,
@@ -609,6 +654,10 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
 
       if (bootstrapRetryResult.connectedCount > 0) {
         emitDhtStatus(null, 'bootstrap_retry_warmup');
+        // Bootstrap connect succeeded: re-publish the username so a bootstrap
+        // switch becomes discoverable without waiting for the 5-minute loop.
+        // Debounced, so this coalesces with the post-retry-verify reconnect path.
+        republishUsernameOnReconnect.schedule();
         // Give fresh bootstrap connections time to complete identify/DHT warm-up before probing them.
         reconnectController.schedulePostRetryVerify(currentNetworkMode, () => {
           void checkDHTStatus('post_retry_verify');
@@ -627,6 +676,8 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
       console.log('[Core] Shutting down...');
       try {
         await relayKeepAlive.stop();
+        periodicOfflineSweeper.stop();
+        republishUsernameOnReconnect.cancel();
         groupCallOrchestrator.cleanup();
         await messageHandler.cleanup();
         reconnectController.clearPostRetryVerifyTimeout();

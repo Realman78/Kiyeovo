@@ -83,6 +83,17 @@ export class UsernameRegistry {
 
   async initialize(userIdentity: EncryptedUserIdentity, onRestoreUsername: (username: string) => void): Promise<void> {
     this.userIdentity = userIdentity;
+    // Invariant: the `users` table always contains a row for the local identity,
+    // registered or not. Chat-creation paths (`createChat`,
+    // `createTrustedDirectContact`) assert `created_by` exists in `users`, and
+    // `created_by` is always our own peer ID for self-initiated chats — so
+    // without a self-row an UNREGISTERED user cannot import a trusted profile
+    // or accept an inbound contact request (both create a self-owned chat).
+    // Previously the self-row was only inserted by `persistRegisteredUser` after
+    // a successful username registration; seed it here at identity-ready time so
+    // those flows work before (or without) registration. Registration later
+    // updates the username in place (see `persistRegisteredUser`).
+    await this.ensureSelfUserRow();
     const autoRegister = this.database.getSetting(this.autoRegisterSettingKey);
 
     if (autoRegister === 'never') {
@@ -292,6 +303,19 @@ export class UsernameRegistry {
     }
   }
 
+  /**
+   * Re-publish the current registration after bootstrap connectivity is
+   * (re)established. No-op unless a username is currently registered — reuses
+   * the periodic re-registration path rather than any new publish machinery, so
+   * failures log via the same generalErrorHandler backstop.
+   */
+  async republishRegistrationAfterReconnect(): Promise<void> {
+    if (!this.currentUsername) {
+      return;
+    }
+    await this.reregisterCurrentUsername();
+  }
+
   private async reregisterCurrentUsername(): Promise<void> {
     try {
       log(`Re-registering username: ${this.currentUsername}`);
@@ -453,15 +477,24 @@ export class UsernameRegistry {
   }
 
   private getPublishFailureError(publish: UsernamePublishResult, label: string): Error | null {
-    if (publish.acceptedCount === 0 && publish.rejectedCount > 0) {
+    // Success requires at least one remote peer to have verifiably stored the
+    // record. A publish whose walk reached zero storing peers used to fall
+    // through to success here, leaving the record only in the local datastore
+    // — unresolvable by anyone else — while the UI reported "registered"
+    // (fast-mode-username-lookup-issue.md, key finding 1).
+    if (publish.acceptedCount > 0) {
+      return null;
+    }
+
+    if (publish.rejectedCount > 0) {
       return new Error(`${label} rejected by DHT validators (${publish.rejectedCount} peer(s) rejected)`);
     }
 
-    if (publish.errorCount > 0 && publish.acceptedCount === 0) {
+    if (publish.errorCount > 0) {
       return new Error(`${label} failed: all ${publish.errorCount} peers unreachable`);
     }
 
-    return null;
+    return new Error(`${label} failed: no reachable DHT peers stored the record`);
   }
 
   private async rollbackPartiallyPublishedUsername(username: string): Promise<void> {
@@ -512,6 +545,39 @@ export class UsernameRegistry {
     }
 
     this.startReregistration();
+  }
+
+  /**
+   * Ensure a minimal self-row exists in `users` for the local identity so that
+   * chat-creation paths asserting `created_by` exists succeed before the user
+   * registers a username. No-ops if a row already exists (so a registered
+   * user's real username is never clobbered on restart). The placeholder
+   * username matches the unregistered-self display fallback used elsewhere
+   * (`getInitiatorUsername`), so no on-wire/display behaviour changes; the row
+   * carries the real identity keys and gets its username upgraded on
+   * registration.
+   */
+  private async ensureSelfUserRow(): Promise<void> {
+    if (!this.userIdentity) {
+      return;
+    }
+    const myPeerId = this.node.peerId.toString();
+    if (this.database.getUserByPeerId(myPeerId, this.networkMode)) {
+      return;
+    }
+    try {
+      await this.database.createUser({
+        peer_id: myPeerId,
+        username: `user_${myPeerId.slice(-8)}`,
+        signing_public_key: Buffer.from(this.userIdentity.signingPublicKey).toString('base64'),
+        offline_public_key: Buffer.from(this.userIdentity.offlinePublicKey).toString('base64'),
+        signature: '',
+        network_mode: this.networkMode,
+      });
+      log('Seeded minimal self-row in users for unregistered identity');
+    } catch (error: unknown) {
+      generalErrorHandler(error, 'Failed to seed self-row in users');
+    }
   }
 
   private async persistRegisteredUser(context: UsernameRegistrationContext): Promise<void> {

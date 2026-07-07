@@ -1,7 +1,12 @@
 import { lstat, realpath, stat } from 'fs/promises';
 import { dirname, isAbsolute, join, relative, resolve as resolvePath } from 'path';
-import { DOWNLOADS_DIR, UPLOADS_DIR } from '../core/constants.js';
+import { UPLOADS_DIR } from '../core/constants.js';
+import { getDefaultDownloadsDirectory } from '../core/lib/file-storage.js';
 import { isImageFile } from '../shared/file-types.js';
+// Re-exported from src/core so callers in both layers share one implementation
+// (src/core must not import from src/electron). The unit tests and existing IPC
+// call sites keep importing it from here unchanged.
+export { createDebouncedInvoker, type DebouncedInvoker } from '../core/utils/debounced-invoker.js';
 
 const INVALID_PORTABLE_FILENAME_CHARACTERS = /[<>:"/\\|?*]/;
 const WINDOWS_RESERVED_BASENAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
@@ -93,7 +98,7 @@ export function resolveUploadsDirectoryFromSetting(
   configuredDownloadsDir: string | null | undefined,
   cwd = process.cwd(),
 ): string {
-  const rawDownloadsDir = configuredDownloadsDir || DOWNLOADS_DIR;
+  const rawDownloadsDir = configuredDownloadsDir || getDefaultDownloadsDirectory();
   const downloadsDir = isAbsolute(rawDownloadsDir)
     ? rawDownloadsDir
     : resolvePath(cwd, rawDownloadsDir);

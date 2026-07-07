@@ -67,6 +67,19 @@ async function createGroupChat(database: ChatDatabase, groupId: string): Promise
   });
 }
 
+test('countUsersByUsername reports duplicate contact names', async (t) => {
+  const database = new ChatDatabase(':memory:');
+  t.after(() => database.close());
+
+  await createUser(database, 'peer_a', 'parin');
+  await createUser(database, 'peer_b', 'parin');
+  await createUser(database, 'peer_c', 'other');
+
+  assert.equal(database.countUsersByUsername('parin'), 2);
+  assert.equal(database.countUsersByUsername('other'), 1);
+  assert.equal(database.countUsersByUsername('missing'), 0);
+});
+
 test('createChat rolls back failed participant inserts and leaves connection reusable', async (t) => {
   const database = new ChatDatabase(':memory:');
   t.after(() => database.close());
@@ -186,6 +199,8 @@ function makeOfflineMessage(input: {
     sender_info_hash: 'sender_hash:' + input.id,
     timestamp: 1_000,
     bucket_key: input.bucketKey,
+    message_type: 'encrypted',
+    expires_at: input.expiresAt,
   };
   if (input.ackOnly === true) {
     signedPayload.ack_only = true;

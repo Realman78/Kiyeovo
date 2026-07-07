@@ -92,7 +92,7 @@ index c75bc4e..2add8e2 100644
      private readonly datastorePrefix;
      constructor(components: PutValueHandlerComponents, init: PutValueHandlerInit);
 diff --git a/node_modules/@libp2p/kad-dht/dist/src/rpc/handlers/put-value.js b/node_modules/@libp2p/kad-dht/dist/src/rpc/handlers/put-value.js
-index 2db17ed..83692bd 100644
+index 2db17ed..9aec0ab 100644
 --- a/node_modules/@libp2p/kad-dht/dist/src/rpc/handlers/put-value.js
 +++ b/node_modules/@libp2p/kad-dht/dist/src/rpc/handlers/put-value.js
 @@ -2,17 +2,22 @@ import { InvalidMessageError } from '@libp2p/interface';
@@ -119,7 +119,7 @@ index 2db17ed..83692bd 100644
      }
      async handle(peerId, msg) {
          const key = msg.key;
-@@ -27,6 +32,30 @@ export class PutValueHandler {
+@@ -27,11 +32,43 @@ export class PutValueHandler {
              await verifyRecord(this.validators, deserializedRecord);
              deserializedRecord.timeReceived = new Date();
              const recordKey = bufferToRecordKey(this.datastorePrefix, deserializedRecord.key);
@@ -150,6 +150,19 @@ index 2db17ed..83692bd 100644
              await this.components.datastore.put(recordKey, deserializedRecord.serialize().subarray());
              this.log('put record for %b into datastore under key %k', key, recordKey);
          }
+         catch (err) {
+             this.log('did not put record for key %b into datastore %o', key, err);
++            // Do NOT echo the record back on failure. kad-dht's PUT_VALUE
++            // client counts an echoed value as an accepted store, so echoing a
++            // record we rejected/failed to persist reports a silent false
++            // success to the publisher (e.g. a username registration the
++            // validator refused still shows "registered", then every lookup
++            // finds nothing with no error). Strip the record so the caller sees
++            // the rejection.
++            return { ...msg, record: undefined };
+         }
+         return msg;
+     }
 diff --git a/node_modules/@libp2p/kad-dht/dist/src/rpc/index.d.ts b/node_modules/@libp2p/kad-dht/dist/src/rpc/index.d.ts
 index 2c4606c..f86b850 100644
 --- a/node_modules/@libp2p/kad-dht/dist/src/rpc/index.d.ts
@@ -203,7 +216,7 @@ index 6d9aded..73ea75d 100644
        metricsPrefix,
        datastorePrefix,
 diff --git a/node_modules/@libp2p/kad-dht/src/rpc/handlers/put-value.ts b/node_modules/@libp2p/kad-dht/src/rpc/handlers/put-value.ts
-index 156e65d..7dacffb 100644
+index 156e65d..d945806 100644
 --- a/node_modules/@libp2p/kad-dht/src/rpc/handlers/put-value.ts
 +++ b/node_modules/@libp2p/kad-dht/src/rpc/handlers/put-value.ts
 @@ -8,10 +8,15 @@ import type { DHTMessageHandler } from '../index.js'
@@ -245,7 +258,7 @@ index 156e65d..7dacffb 100644
      const key = msg.key
      this.log('%p asked us to store value for key %b', peerId, key)
  
-@@ -47,11 +54,33 @@ export class PutValueHandler implements DHTMessageHandler {
+@@ -47,15 +54,44 @@ export class PutValueHandler implements DHTMessageHandler {
  
      try {
        const deserializedRecord = Libp2pRecord.deserialize(msg.record)
@@ -281,6 +294,17 @@ index 156e65d..7dacffb 100644
        await this.components.datastore.put(recordKey, deserializedRecord.serialize().subarray())
        this.log('put record for %b into datastore under key %k', key, recordKey)
      } catch (err: any) {
+       this.log('did not put record for key %b into datastore %o', key, err)
++      // Do NOT echo the record back on failure. kad-dht's PUT_VALUE client
++      // counts an echoed value as an accepted store, so echoing a record we
++      // rejected/failed to persist reports a silent false success to the
++      // publisher (e.g. a username registration the validator refused still
++      // shows "registered", then every lookup finds nothing with no error).
++      // Strip the record so the caller sees the rejection.
++      return { ...msg, record: undefined }
+     }
+ 
+     return msg
 diff --git a/node_modules/@libp2p/kad-dht/src/rpc/index.ts b/node_modules/@libp2p/kad-dht/src/rpc/index.ts
 index a9a1491..7c83c35 100644
 --- a/node_modules/@libp2p/kad-dht/src/rpc/index.ts

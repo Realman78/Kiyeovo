@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import chatReducer, {
   addMessage,
+  addSendingMessage,
+  finalizeSendingMessage,
   removeChat,
   removeMessagesByIds,
   resolveMessageSendOutcome,
@@ -140,6 +142,133 @@ test('addMessage ignores duplicate and older payloads when refreshing chat previ
   assert.equal(chat?.lastMessageTimestamp, 400);
 });
 
+test('addMessage reconciles a matching self event with the optimistic sending row', () => {
+  let state = chatReducer(undefined, setChats([
+    makeChat({ id: 1 }),
+  ]));
+  state = chatReducer(state, addSendingMessage(makeMessage({
+    id: 'local-send-1',
+    chatId: 1,
+    senderPeerId: 'local-peer',
+    senderUsername: 'You',
+    content: 'hello',
+    timestamp: 100,
+    messageSentStatus: null,
+    localSendState: 'sending',
+    currentUserPeerId: 'local-peer',
+  })));
+
+  state = chatReducer(state, addMessage(makeMessage({
+    id: 'persisted-1',
+    chatId: 1,
+    senderPeerId: 'local-peer',
+    senderUsername: 'You',
+    content: 'hello',
+    timestamp: 101,
+    messageSentStatus: 'online',
+    currentUserPeerId: 'local-peer',
+  })));
+
+  assert.deepEqual(state.sendingMessages.map((message) => message.id), []);
+  assert.deepEqual(state.messages.map((message) => message.id), ['persisted-1']);
+  assert.equal(state.messages[0].renderKey, 'local-send-1');
+});
+
+test('addMessage duplicate echo does not absorb a different in-flight row with the same content', () => {
+  let state = chatReducer(undefined, setChats([
+    makeChat({ id: 1 }),
+  ]));
+  // First "ok" already finalized to persisted-1.
+  state = chatReducer(state, addSendingMessage(makeMessage({
+    id: 'local-send-1',
+    chatId: 1,
+    senderPeerId: 'local-peer',
+    senderUsername: 'You',
+    content: 'ok',
+    timestamp: 100,
+    messageSentStatus: null,
+    localSendState: 'sending',
+    currentUserPeerId: 'local-peer',
+  })));
+  state = chatReducer(state, finalizeSendingMessage({
+    localMessageId: 'local-send-1',
+    finalMessage: makeMessage({
+      id: 'persisted-1',
+      chatId: 1,
+      senderPeerId: 'local-peer',
+      senderUsername: 'You',
+      content: 'ok',
+      timestamp: 101,
+      messageSentStatus: 'online',
+      currentUserPeerId: 'local-peer',
+    }),
+  }));
+  // Second identical "ok" is in flight.
+  state = chatReducer(state, addSendingMessage(makeMessage({
+    id: 'local-send-2',
+    chatId: 1,
+    senderPeerId: 'local-peer',
+    senderUsername: 'You',
+    content: 'ok',
+    timestamp: 200,
+    messageSentStatus: null,
+    localSendState: 'sending',
+    currentUserPeerId: 'local-peer',
+  })));
+
+  // Late backend echo for the already-finalized first send.
+  state = withoutConsoleLog(() => chatReducer(state, addMessage(makeMessage({
+    id: 'persisted-1',
+    chatId: 1,
+    senderPeerId: 'local-peer',
+    senderUsername: 'You',
+    content: 'ok',
+    timestamp: 101,
+    messageSentStatus: 'online',
+    currentUserPeerId: 'local-peer',
+  }))));
+
+  assert.deepEqual(state.sendingMessages.map((message) => message.id), ['local-send-2']);
+  assert.deepEqual(state.messages.map((message) => message.id), ['persisted-1']);
+  assert.equal(state.messages[0].renderKey, 'local-send-1');
+});
+
+test('finalizeSendingMessage keeps the optimistic row identity for the persisted row', () => {
+  let state = chatReducer(undefined, setChats([
+    makeChat({ id: 1 }),
+  ]));
+  state = chatReducer(state, addSendingMessage(makeMessage({
+    id: 'local-send-1',
+    chatId: 1,
+    senderPeerId: 'local-peer',
+    senderUsername: 'You',
+    content: 'hello',
+    timestamp: 100,
+    messageSentStatus: null,
+    localSendState: 'sending',
+    currentUserPeerId: 'local-peer',
+  })));
+
+  state = chatReducer(state, finalizeSendingMessage({
+    localMessageId: 'local-send-1',
+    finalMessage: makeMessage({
+      id: 'persisted-1',
+      chatId: 1,
+      senderPeerId: 'local-peer',
+      senderUsername: 'You',
+      content: 'hello',
+      timestamp: 101,
+      messageSentStatus: null,
+      localSendState: 'sending',
+      currentUserPeerId: 'local-peer',
+    }),
+  }));
+
+  assert.deepEqual(state.sendingMessages.map((message) => message.id), []);
+  assert.deepEqual(state.messages.map((message) => message.id), ['persisted-1']);
+  assert.equal(state.messages[0].renderKey, 'local-send-1');
+});
+
 test('removeChat clears reply targets for the removed chat', () => {
   let state = chatReducer(undefined, setChats([
     makeChat({ id: 1 }),
@@ -194,7 +323,7 @@ test('removeMessagesByIds clears deleted reply targets and keeps the newest sett
   state = chatReducer(state, removeMessagesByIds({
     chatId: 1,
     messageIds: ['old'],
-    latestRemaining: { content: 'database older', timestamp: 200 },
+    latestRemaining: { content: 'database older', timestamp: 200, clientMsgId: null },
   }));
 
   assert.equal(state.replyTargetByChatId[1], undefined);

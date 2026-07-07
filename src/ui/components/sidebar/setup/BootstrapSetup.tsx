@@ -9,8 +9,14 @@ import { RadioTower } from 'lucide-react';
 import { SetupNodesView } from './SetupNodesView';
 import { store, type RootState } from '../../../state/store';
 import { applyLiveness, bumpSetupGeneration, mergeConfiguredNodes, setSetupNodes } from '../../../state/slices/setupNodesSlice';
+import {
+  PREDEFINED_NODES_OFFERING_LABELS,
+  isOfferingActive,
+} from '../../../../core/predefined-nodes';
+import { PredefinedNodesOfferingLink } from './PredefinedNodesOfferingLink';
 
 const SECTION = 'bootstrap' as const;
+const BOOTSTRAP_AUTO_RETRY_VISIBLE_MS = 12_000;
 
 function getUnexpectedErrorMessage(error: unknown): string {
   return errStr(error, UNEXPECTED_ERROR);
@@ -41,12 +47,39 @@ export function BootstrapSetup() {
   const [copiedAddress, setCopiedAddress] = useState<string | null>(null);
   const [loading, setLoading] = useState(!loadedOnce);
   const [retrying, setRetrying] = useState(false);
+  const [autoRetrying, setAutoRetrying] = useState(false);
   const [reordering, setReordering] = useState(false);
+  // The offering shows in BOTH modes (the README carries fast AND onion
+  // bootstrap entries). Mode still matters for the click behavior: anonymous
+  // users get a confirmation dialog before an external website opens.
+  const [isFastMode, setIsFastMode] = useState(false);
+  const showOffering = isOfferingActive(Date.now());
   const reorderInFlightRef = useRef(false);
+  const livenessInFlightRef = useRef(false);
+  const autoRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearAutoRetryTimer = () => {
+    if (autoRetryTimerRef.current === null) {
+      return;
+    }
+
+    clearTimeout(autoRetryTimerRef.current);
+    autoRetryTimerRef.current = null;
+  };
+
+  const showAutoRetrying = () => {
+    setAutoRetrying(true);
+    clearAutoRetryTimer();
+    autoRetryTimerRef.current = setTimeout(() => {
+      autoRetryTimerRef.current = null;
+      setAutoRetrying(false);
+    }, BOOTSTRAP_AUTO_RETRY_VISIBLE_MS);
+  };
 
   const refreshNodeLiveness = async (addresses: string[]) => {
-    if (addresses.length === 0) return;
+    if (addresses.length === 0 || livenessInFlightRef.current) return;
 
+    livenessInFlightRef.current = true;
     try {
       const { statuses } = await window.kiyeovoAPI.getNodesLiveness(addresses);
       dispatch(applyLiveness({
@@ -55,6 +88,8 @@ export function BootstrapSetup() {
       }));
     } catch {
       // Preserve the last-known status when a liveness probe fails.
+    } finally {
+      livenessInFlightRef.current = false;
     }
   };
 
@@ -102,6 +137,32 @@ export function BootstrapSetup() {
 
     return () => {
       clearInterval(timerId);
+      clearAutoRetryTimer();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!autoRetrying || !nodes.some((node) => node.connected === true)) {
+      return;
+    }
+
+    clearAutoRetryTimer();
+    setAutoRetrying(false);
+  }, [autoRetrying, nodes]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void window.kiyeovoAPI.getNetworkMode()
+      .then((result) => {
+        if (!cancelled && result.success) {
+          setIsFastMode(result.mode === 'fast');
+        }
+      })
+      .catch(() => {
+        // Leave the offering hidden if the mode can't be resolved.
+      });
+    return () => {
+      cancelled = true;
     };
   }, []);
 
@@ -125,6 +186,9 @@ export function BootstrapSetup() {
         break;
       case 'aborted':
         showError('Bootstrap retry was aborted');
+        break;
+      case 'retry_in_progress':
+        toast.info('A reconnection attempt is already running — give it a moment');
         break;
       default:
         toast.success('Bootstrap retry complete');
@@ -175,6 +239,7 @@ export function BootstrapSetup() {
         await window.kiyeovoAPI.addBootstrapNode(normalizedAddress),
         'Failed to add bootstrap node',
       );
+      showAutoRetrying();
       dispatch(bumpSetupGeneration({ section: SECTION }));
       await refreshNodes();
       setNewAddress('');
@@ -250,6 +315,12 @@ export function BootstrapSetup() {
       icon={RadioTower}
       title="Bootstrap servers"
       description="Bootstrap servers connect you to the network so you can discover people, participate in groups, receive & send offline messages."
+      belowDescription={showOffering ? (
+        <PredefinedNodesOfferingLink
+          label={PREDEFINED_NODES_OFFERING_LABELS.bootstrap}
+          confirmBeforeOpen={!isFastMode}
+        />
+      ) : undefined}
       nodesTitle="Configured servers"
       nodeSingular="bootstrap server"
       emptyTitle="No bootstrap servers configured"
@@ -265,9 +336,10 @@ export function BootstrapSetup() {
       error={error}
       copiedAddress={copiedAddress}
       newAddress={newAddress}
-      retrying={retrying}
+      retrying={retrying || autoRetrying}
+      retryingLabel={autoRetrying && !retrying ? 'Connecting…' : undefined}
       reordering={reordering}
-      retryDisabled={retrying || loading || nodes.length === 0}
+      retryDisabled={retrying || autoRetrying || loading || nodes.length === 0}
       onNewAddressChange={setNewAddress}
       onAdd={handleAdd}
       onRetry={handleRetry}

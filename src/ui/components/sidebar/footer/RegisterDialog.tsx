@@ -40,6 +40,10 @@ const RegisterDialog = ({
   const [rememberMe, setRememberMe] = useState(false);
   const peerId = useSelector((state: RootState) => state.user.peerId);
   const isConnected = useSelector((state: RootState) => state.user.connected);
+  const dhtReady = isConnected === true;
+  const dhtWarmingUp = isConnected === null;
+  const dhtOffline = isConnected === false;
+  const formDisabled = dhtOffline || Boolean(isRegistering);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -156,14 +160,14 @@ const RegisterDialog = ({
                   onChange={handleChange}
                   icon={<AtSign className="w-4 h-4" />}
                   autoFocus
-                  disabled={!isConnected || isRegistering}
+                  disabled={formDisabled}
                   spellCheck={false}
                   className="pr-10"
                 />
                 <button
                   type="button"
                   onClick={handleGenerateUsername}
-                  disabled={!isConnected || isRegistering}
+                  disabled={formDisabled}
                   className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded hover:bg-secondary/80 text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   title="Generate random username"
                 >
@@ -175,7 +179,7 @@ const RegisterDialog = ({
                   type="checkbox"
                   checked={rememberMe}
                   onChange={(e) => setRememberMe(e.target.checked)}
-                  disabled={!isConnected || isRegistering}
+                  disabled={formDisabled}
                   className="mt-0.5 h-4 w-4 cursor-pointer rounded border-border bg-input text-primary transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                 />
                 <span className="text-xs text-muted-foreground group-hover:text-foreground transition-colors leading-relaxed">
@@ -188,7 +192,13 @@ const RegisterDialog = ({
                   <span>{displayError}</span>
                 </div>
               )}
-              {!isConnected && (
+              {dhtWarmingUp && (
+                <div className="flex items-center gap-2 mt-2 text-muted-foreground text-sm">
+                  <Info className="w-4 h-4" />
+                  <span>Connecting to the network. Registration will unlock automatically.</span>
+                </div>
+              )}
+              {dhtOffline && (
                 <div className="flex items-center gap-2 mt-2 text-destructive text-sm">
                   <AlertCircle className="w-4 h-4" />
                   <span>Connect to the network to register</span>
@@ -230,7 +240,7 @@ const RegisterDialog = ({
             >
               Close
             </Button>
-            <Button type="submit" disabled={isRegistering || !isConnected || !username || !!validateUsername(username, peerId)}>
+            <Button type="submit" disabled={isRegistering || !dhtReady || !username || !!validateUsername(username, peerId)}>
               {isRegistering ? 'Registering...' : 'Register'}
             </Button>
           </DialogFooter>

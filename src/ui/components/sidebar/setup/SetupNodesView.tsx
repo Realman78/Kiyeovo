@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import {
   Check,
   ChevronDown,
@@ -25,6 +25,9 @@ type SetupNodesViewProps = {
   icon: LucideIcon;
   title: string;
   description: string;
+  // Optional extra content rendered directly below the description paragraph
+  // (e.g. the predefined-nodes offering link on the Bootstrap surface).
+  belowDescription?: ReactNode;
   nodesTitle: string;
   nodeSingular: string;
   emptyTitle: string;
@@ -41,6 +44,7 @@ type SetupNodesViewProps = {
   copiedAddress: string | null;
   newAddress: string;
   retrying: boolean;
+  retryingLabel?: string;
   reordering?: boolean;
   addDisabled?: boolean;
   retryDisabled?: boolean;
@@ -102,6 +106,7 @@ export function SetupNodesView({
   icon: Icon,
   title,
   description,
+  belowDescription,
   nodesTitle,
   nodeSingular,
   emptyTitle,
@@ -118,6 +123,7 @@ export function SetupNodesView({
   copiedAddress,
   newAddress,
   retrying,
+  retryingLabel = 'Retrying…',
   reordering = false,
   addDisabled = false,
   retryDisabled = false,
@@ -171,6 +177,7 @@ export function SetupNodesView({
             <h1 className="text-2xl font-semibold tracking-tight text-foreground">{title}</h1>
           </div>
           <p className="mt-0.5 text-md text-muted-foreground text-left">{description}</p>
+          {belowDescription}
         </header>
 
         {!!error && (
@@ -237,12 +244,12 @@ export function SetupNodesView({
                       </span>
 
                       <div className="min-w-0 flex-1 flex flex-col items-start">
-                        <div className={`truncate text-sm ${summary.isRaw ? 'font-mono' : 'font-medium'} text-foreground`}>
+                        <div title={node.address} className={`truncate max-w-full text-sm ${summary.isRaw ? 'font-mono' : 'font-medium'} text-foreground`}>
                           {summary.primary}
                         </div>
-                        <div className="mt-0.5 truncate font-mono text-xs text-muted-foreground" title={node.address}>
-                          <span className="lg:hidden">{summary.peerId ?? node.address}</span>
-                          <span className="hidden lg:inline">{node.address}</span>
+                        <div className="mt-0.5 truncate font-mono text-xs text-muted-foreground w-full text-left" title={node.address}>
+                          <span className="lg:hidden max-w-[50%]">{summary.peerId ?? node.address}</span>
+                          <span className="hidden lg:inline max-w-[50%]">{node.address}</span>
                         </div>
                       </div>
 
@@ -381,7 +388,7 @@ export function SetupNodesView({
             {retrying ? (
               <>
                 <Loader2 className="animate-spin" />
-                Retrying…
+                {retryingLabel}
               </>
             ) : (
               <>
