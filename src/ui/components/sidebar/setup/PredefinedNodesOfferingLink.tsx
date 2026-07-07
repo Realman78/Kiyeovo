@@ -50,7 +50,7 @@ export const PredefinedNodesOfferingLink = ({
           event.preventDefault();
           setConfirmOpen(true);
         } : undefined}
-        className="mt-1 inline-flex items-center gap-1.5 text-md text-primary hover:underline text-left"
+        className="mt-1 inline-flex items-center gap-1.5 text-sm text-primary hover:underline text-left"
       >
         {label}
         <ExternalLink className="h-3.5 w-3.5 shrink-0" />
