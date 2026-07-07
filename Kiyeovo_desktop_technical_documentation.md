@@ -550,7 +550,7 @@ Operational notes:
 - identity persists at `RELAY_PEER_ID_FILE` (default `./relay-peer-id.bin`)
 - the process prints its Peer ID on startup; client-facing relay entries are formed as `<announce_addr>/p2p/<peerId>`
 - the relay Peer ID private key is persisted with owner-only permissions; startup aborts instead of replacing an existing key that cannot be loaded
-- optional tuning env vars include `RELAY_MAX_RESERVATIONS`, `RELAY_RESERVATION_TTL_MS`, `RELAY_DEFAULT_DURATION_LIMIT_MS`, and `RELAY_DEFAULT_DATA_LIMIT_BYTES`
+- optional tuning env vars include `RELAY_MAX_RESERVATIONS`, `RELAY_RESERVATION_TTL_MS`, `RELAY_DEFAULT_DURATION_LIMIT_MS`, and `RELAY_DEFAULT_DATA_LIMIT_BYTES`. Launch-scale code defaults (env wins): 512 reservations (the circuit-relay-v2 library default of 15 would cap dialable NAT-restricted peers per relay at 15), 30 min duration limit, 64 MB data limit (library default 128 KB would kill relayed file transfers). The bootstrap's connection cap is likewise env-tunable via `BOOTSTRAP_MAX_CONNECTIONS` (default 1000; every client holds up to 3 long-lived bootstrap connections, so the cap scales directly with concurrent users). Both server roles also raise `maxIncomingPendingConnections` (100) and `inboundConnectionThreshold` (25/s per source IP) to absorb restart reconnect storms and CGNAT clusters
 - in deployment mode (see 11.6) a missing or invalid announce address aborts startup, and a corrupt identity file aborts instead of rotating the Peer ID
 - there is no relay layer in anonymous mode
 

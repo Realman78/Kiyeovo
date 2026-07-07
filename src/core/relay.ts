@@ -74,10 +74,23 @@ async function createRelayNode() {
   const listenAddress = process.env.RELAY_LISTEN_ADDRESS?.trim() || DEFAULT_RELAY_LISTEN_ADDRESS;
   const announceAddrs = parseAnnounceAddrs();
 
-  const maxReservations = parseOptionalPositiveInt(process.env.RELAY_MAX_RESERVATIONS);
+  // Launch-scale defaults (env overrides win). The circuit-relay-v2 library
+  // defaults are sized for incidental relaying between full p2p nodes, not for
+  // a public relay serving NAT-restricted chat clients:
+  // - maxReservations: library default is 15 — i.e. only 15 NATed peers per
+  //   relay could hold a slot to be dialable at all. 512 slots are nearly free
+  //   (a record + keepalive each).
+  // - defaultDataLimit: library default is 128 KB, which kills any relayed
+  //   file transfer (the last-resort path when DCUtR hole-punching fails on
+  //   both sides). 64 MB covers realistic transfers without opening the relay
+  //   to unbounded bulk abuse.
+  // - defaultDurationLimit: was 5 min here (library: 2 min); long-lived idle
+  //   chat connections get cut and re-established each expiry, so 30 min
+  //   trades a little relay accounting for far less churn.
+  const maxReservations = parseOptionalPositiveInt(process.env.RELAY_MAX_RESERVATIONS) ?? 512;
   const reservationTtl = parseOptionalPositiveInt(process.env.RELAY_RESERVATION_TTL_MS);
-  const defaultDurationLimit = parseOptionalPositiveInt(process.env.RELAY_DEFAULT_DURATION_LIMIT_MS || String(5 * 60 * 1000));
-  const defaultDataLimit = parseOptionalPositiveInt(process.env.RELAY_DEFAULT_DATA_LIMIT_BYTES);
+  const defaultDurationLimit = parseOptionalPositiveInt(process.env.RELAY_DEFAULT_DURATION_LIMIT_MS) ?? 30 * 60 * 1000;
+  const defaultDataLimit = parseOptionalPositiveInt(process.env.RELAY_DEFAULT_DATA_LIMIT_BYTES) ?? 64 * 1024 * 1024;
 
   const runtimeFile = getRuntimeMetadataPath();
 
@@ -113,6 +126,11 @@ async function createRelayNode() {
     connectionManager: {
       maxConnections: 1000,
       maxPeerAddrsToDial: 20,
+      // Absorb reconnect storms after a relay restart (default 10 concurrent
+      // inbound handshakes) and don't rate-limit CGNAT clusters — mobile
+      // carriers put many users behind one source IP (default 5 conns/s/host).
+      maxIncomingPendingConnections: 100,
+      inboundConnectionThreshold: 25,
     },
     services: {
       identify: identify({
