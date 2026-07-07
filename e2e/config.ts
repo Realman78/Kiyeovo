@@ -106,6 +106,7 @@ export const USE_LOCAL_BOOTSTRAP = process.env.KIYEOVO_E2E_LOCAL_BOOTSTRAP === '
  * | blocking.spec.ts            | 9151-9153       | 19505 (only when USE_LOCAL_BOOTSTRAP=1) |
  * | group-join-catchup.spec.ts  | 9161-9163       | 19506 (only when USE_LOCAL_BOOTSTRAP=1) |
  * | calls.spec.ts               | 9171-9172       | 19507 (only when USE_LOCAL_BOOTSTRAP=1) |
+ * | username-lookup.spec.ts     | 9181-9189       | 20411-20419 (explicit — scenarios D/E always spin up their own local bootstraps regardless of USE_LOCAL_BOOTSTRAP, to control DHT-record liveness precisely; only 20411-20413 currently used, room left in the block) |
  *
  * Adding a new spec file: pick an unused p2pPort block (leave a gap of at
  * least 10 for headroom) and, if it calls startBootstrapNode() with no

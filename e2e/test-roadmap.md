@@ -138,6 +138,38 @@ Status legend: [ ] queued · [~] in progress · [x] done
   `KIYEOVO_E2E_TURN(_USERNAME|_CREDENTIAL)`, loaded via `config.ts`'s new dotenv wiring (falls
   back to STUN-only, no TURN assertions, if absent). Group calls deliberately OUT of scope this
   round (own follow-up).
+- [x] **7. Username lookup** — done (`username-lookup.spec.ts`, 5 tests, all green in a 1.6-min
+  single-worker run): exercises `UsernameRegistry.lookup()` through the real "New Conversation"
+  UI (the only renderer surface that resolves a typed username — no dedicated search/lookup
+  dialog exists). Happy path has B target A by USERNAME (not peer ID, unlike two-peer.spec.ts,
+  so this is genuinely new DHT-resolution coverage) and code-confirms the resulting chat's
+  `other_peer_id` matches A's real peer ID. Nonexistent-username lookup surfaces a
+  code-confirmed "not found" inline error (traced through message-handler.ts's error-wrapping;
+  along the way found the literal `errorText.includes("username not found")` branch at
+  message-handler.ts:~2597 is effectively DEAD code — the thrown text says "User … not found",
+  so the user-visible copy comes from the outer `Failed to send message:` re-wrap; cosmetic,
+  not a functional bug) with no hang. Duplicate registration is rejected first-writer-wins
+  ("Username already taken"), enforced both at the app level
+  (`ensureUsernameAvailableForRegistration`) and independently at the DHT-validator level
+  (`usernameRegistrationValidateUpdate`'s owner-mismatch check) — real defense in depth.
+  Publish failure (7fd7838) and republish-on-reconnect (85db62b) use local throwaway
+  bootstraps only. Publish-failure DEVIATION (code-confirmed): RegisterDialog's
+  `formDisabled = dhtOffline || isRegistering` gate disables the whole form within seconds of
+  a dead bootstrap, so "kill then register" can never reach the DHT-put path — the test
+  clicks Register while connected and kills the bootstrap immediately after, failing the
+  in-flight PUT; notable finding that "zero peers accepted" (7fd7838) and "network known
+  down" are two distinct, non-overlapping failure surfaces. Republish scenario RESHAPED
+  (code-confirmed + empirically forced): regular peers run kad-dht `clientMode: false`
+  (node-factory.ts:306) so records replicate onto ordinary peers and wiping the one
+  bootstrap's datastore does NOT purge the record — instead two never-federated local
+  bootstrap segments are used; C onboards in segment 2 (can't see A by construction), A adds
+  segment 2's bootstrap via the real Setup UI, the debounced reconnect republisher
+  (src/core/index.ts:628, 5s debounce) fires, and C's lookup then succeeds — faithful to the
+  feature's stated purpose (doc line ~161: switched-bootstrap users become discoverable in
+  seconds). Second finding, undocumented in the tech doc: the INITIATING side must itself be
+  registered before SidebarHeader's `handleShowNewConversationDialog` (~line 251) will even
+  open the New Conversation dialog (unregistered click = toast only), i.e. unregistered users
+  can't look anyone up at all — flagged for a doc update / product decision.
 - [ ] **6. Tor / anonymous mode (LAST — per Marin)** — Marin has pending work here, also
   related to bootstraps; do not start without his go-ahead. Whole second network stack,
   needs Tor binaries (scripts/download-tor.sh).
