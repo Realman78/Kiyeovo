@@ -16,6 +16,7 @@ import {
 import type { ChatDatabase, OfflineMessageCategory } from '../db/database.js';
 import { QueryEvent } from '@libp2p/kad-dht';
 import { log } from '../../shared/logger.js';
+import { isStructurallyStorableOfflineMessage } from './offline-message-storable.js';
 
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
@@ -114,7 +115,10 @@ export class OfflineMessageManager {
                 const userCapacityLimit = Math.max(0, MAX_MESSAGES_PER_STORE - OFFLINE_CONTROL_MESSAGE_RESERVE - OFFLINE_ACK_RESERVE);
                 const local = database.getOfflineSentMessages(bucketKey);
 
-                const messages: OfflineMessage[] = OfflineMessageManager.filterExpiredMessages(local.messages);
+                const messages: OfflineMessage[] = OfflineMessageManager.pruneUnstorableMessages(
+                    OfflineMessageManager.filterExpiredMessages(local.messages),
+                    bucketKey,
+                );
                 let version = local.version;
                 // User cap counts only user messages (the ack-only entry has its own
                 // reserved slot); the hard cap counts everything in the payload.
@@ -176,9 +180,11 @@ export class OfflineMessageManager {
     ): Promise<void> {
         return OfflineMessageManager.withBucketMutationLock(bucketKey, async () => {
             const local = database.getOfflineSentMessages(bucketKey);
-            // Drop expired + any existing ACK (supersede), keep real messages.
-            const kept = OfflineMessageManager.filterExpiredMessages(local.messages)
-                .filter(m => m.signed_payload?.ack_only !== true);
+            // Drop expired, structurally-unstorable, + any existing ACK (supersede), keep real messages.
+            const kept = OfflineMessageManager.pruneUnstorableMessages(
+                OfflineMessageManager.filterExpiredMessages(local.messages),
+                bucketKey,
+            ).filter(m => m.signed_payload?.ack_only !== true);
             const messages = [...kept, ackMessage];
             if (messages.length > MAX_MESSAGES_PER_STORE) {
                 throw new Error(`Offline store full even for ACK (${messages.length}/${MAX_MESSAGES_PER_STORE})`);
@@ -302,6 +308,26 @@ export class OfflineMessageManager {
             const { bucket_key, ...clean } = msg;
             return clean;
         });
+    }
+
+    /**
+     * Drops messages that the DHT store validator would reject on structural
+     * grounds (see isStructurallyStorableOfflineMessage) before the bucket is
+     * re-signed and written, so one undeliverable-on-write entry can't wedge the
+     * whole bucket. Such a message was never going to be accepted by the store
+     * anyway, so dropping it strictly unblocks delivery of everything else.
+     * Logs the count.
+     */
+    private static pruneUnstorableMessages(messages: OfflineMessage[], bucketKey: string): OfflineMessage[] {
+        const kept = messages.filter(msg => isStructurallyStorableOfflineMessage(msg));
+        const dropped = messages.length - kept.length;
+        if (dropped > 0) {
+            log(
+                `[OFFLINE][WRITE][PRUNE] bucket=*${bucketKey.slice(-12)} droppedUnstorable=${dropped} ` +
+                `kept=${kept.length} reason=structural_validator_mismatch`,
+            );
+        }
+        return kept;
     }
 
     /**
