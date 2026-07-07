@@ -28,6 +28,21 @@ export interface StartBootstrapNodeOptions {
      * a previously-stopped node with the same Peer ID/datastore, instead of
      * minting a fresh throwaway identity. */
     scratchDir?: string;
+    /**
+     * Extra env vars merged in on top of the fixed BOOTSTRAP_LISTEN_ADDRESS/
+     * BOOTSTRAP_DATASTORE_PATH/BOOTSTRAP_PEER_ID_FILE trio below. Added for
+     * round 6 (e2e/tor.ts's startOnionFrontedBootstrap): src/core/bootstrap.ts
+     * reads BOOTSTRAP_NETWORK_MODE ('fast'|'anonymous', default 'fast') and
+     * BOOTSTRAP_ANNOUNCE_ADDRS to run as a genuine anonymous-mode DHT server —
+     * without this, a plain startBootstrapNode() call always speaks the
+     * fast-mode DHT protocol namespace (`/kiyeovo-fast/1.0.0/dht`), which an
+     * anonymous-mode client (`/kiyeovo/1.0.0/dht`) cannot negotiate at all
+     * (NETWORK_MODE_CONFIG, src/core/constants.ts:66-67 — the two modes use
+     * entirely different protocol string prefixes, not just different
+     * validators). Every other caller omits this and keeps the pre-existing
+     * fast-mode-only behavior.
+     */
+    env?: Record<string, string>;
 }
 
 async function stopChild(child: ChildProcessWithoutNullStreams): Promise<void> {
@@ -54,7 +69,11 @@ async function stopChild(child: ChildProcessWithoutNullStreams): Promise<void> {
  * discovery wired into the app's libp2p node (see src/core/network/node-factory.ts).
  */
 export async function startBootstrapNode(options: number | StartBootstrapNodeOptions = {}): Promise<BootstrapNode> {
-    const { port = 19501, scratchDir: reusedScratchDir } = typeof options === 'number' ? { port: options } : options;
+    const {
+        port = 19501,
+        scratchDir: reusedScratchDir,
+        env: extraEnv,
+    } = typeof options === 'number' ? { port: options } : options;
     const scratchDir = reusedScratchDir ?? await mkdtemp(path.join(tmpdir(), 'kiyeovo-e2e-bootstrap-'));
 
     const child: ChildProcessWithoutNullStreams = spawn(
@@ -67,6 +86,7 @@ export async function startBootstrapNode(options: number | StartBootstrapNodeOpt
                 BOOTSTRAP_LISTEN_ADDRESS: `/ip4/127.0.0.1/tcp/${port}`,
                 BOOTSTRAP_DATASTORE_PATH: path.join(scratchDir, 'datastore'),
                 BOOTSTRAP_PEER_ID_FILE: path.join(scratchDir, 'peer-id.bin'),
+                ...(extraEnv ?? {}),
             },
             stdio: ['ignore', 'pipe', 'pipe'],
         },

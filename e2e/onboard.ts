@@ -96,13 +96,48 @@ export async function onboard(
  * add/retry cycles, asserting failure UX) instead of going through the whole
  * of onboard() in one non-interruptible call.
  */
-export async function beginIdentityCreation(page: Page, password: string): Promise<void> {
+export async function beginIdentityCreation(
+    page: Page,
+    password: string,
+    options?: {
+        /**
+         * Network mode to pick on the "Choose Network Mode" screen. Defaults to
+         * 'fast' (every pre-existing caller). Round 6 (tor-mode.spec.ts) passes
+         * 'anonymous' to drive the bundled Tor daemon up instead.
+         *
+         * Anonymous mode needs a much larger identity-creation timeout:
+         * initializeP2PAfterWindow (src/electron/main.ts) awaits
+         * `torManager.start()` — the full Tor bootstrap + hidden-service
+         * descriptor publish, observed 10-70s per instance solo on this box,
+         * BEFORE the password-creation prompt is ever requested, so the "NEW
+         * IDENTITY" heading simply does not exist yet for that whole window
+         * (code-confirmed: the passwordPrompt callback lives inside the
+         * p2pCore.initialize() call that happens strictly after the Tor
+         * branch). Observed slower (~120s, once past 120s in one run) when
+         * TWO app instances' own Tor daemons plus this suite's fronting Tor
+         * daemon all cold-bootstrap concurrently (tor-mode.spec.ts's T2) —
+         * three simultaneous consensus/descriptor fetches appear to contend
+         * for CPU/bandwidth on this single-box setup. 180s covers the
+         * observed worst case with headroom. Fast mode skips the Tor branch
+         * entirely (early `sendInitStatus('Fast mode selected...')`), so its
+         * identity screen appears almost immediately — the pre-existing 30s
+         * default is left untouched for it.
+         */
+        mode?: 'fast' | 'anonymous';
+    },
+): Promise<void> {
+    const mode = options?.mode ?? 'fast';
+
     // --- 1. Network mode ---
     await expect(page.getByText('Choose Network Mode')).toBeVisible({ timeout: 30_000 });
-    await page.getByRole('button', { name: 'Fast', exact: true }).click();
+    if (mode === 'anonymous') {
+        await page.getByRole('button', { name: 'Anonymous (Tor)', exact: true }).click();
+    } else {
+        await page.getByRole('button', { name: 'Fast', exact: true }).click();
+    }
 
     // --- 2. Identity creation ---
-    await expect(page.getByText('NEW IDENTITY')).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText('NEW IDENTITY')).toBeVisible({ timeout: mode === 'anonymous' ? 180_000 : 30_000 });
     await page.getByPlaceholder('Enter password...').fill(password);
     await page.getByPlaceholder('Confirm password...').fill(password);
     await page.getByRole('button', { name: 'Create Identity' }).click();
@@ -429,7 +464,23 @@ export async function sendContactRequest(
     page: Page,
     peerIdOrUsername: string,
     message: string,
+    options?: {
+        /**
+         * Overrides for the two timeouts below. Added for round 6
+         * (tor-mode.spec.ts): a peer-to-peer onion rendezvous (two hidden
+         * services dialing each other directly, not just a DHT lookup) is the
+         * slowest kind of Tor connection — routinely 30-90s for descriptor
+         * fetch + introduction + rendezvous circuits — well past the
+         * fast-mode-tuned defaults below. Every other caller omits this and
+         * keeps the pre-existing values.
+         */
+        perAttemptTimeoutMs?: number;
+        totalTimeoutMs?: number;
+    },
 ): Promise<void> {
+    const perAttemptTimeoutMs = options?.perAttemptTimeoutMs ?? 45_000;
+    const totalTimeoutMs = options?.totalTimeoutMs ?? 100_000;
+
     await openNewConversationDialog(page);
     await expect(page.getByRole('heading', { name: 'New Conversation' })).toBeVisible({ timeout: 10_000 });
     await page.getByPlaceholder('Enter peer ID or username...').fill(peerIdOrUsername);
@@ -443,8 +494,8 @@ export async function sendContactRequest(
     // message) while the first attempt is still in flight.
     await expect(async () => {
         await page.getByRole('button', { name: 'Send' }).click();
-        await expect(page.getByRole('heading', { name: 'New Conversation' })).toBeHidden({ timeout: 45_000 });
-    }).toPass({ timeout: 100_000, intervals: [5_000, 10_000] });
+        await expect(page.getByRole('heading', { name: 'New Conversation' })).toBeHidden({ timeout: perAttemptTimeoutMs });
+    }).toPass({ timeout: totalTimeoutMs, intervals: [5_000, 10_000] });
 }
 
 /**

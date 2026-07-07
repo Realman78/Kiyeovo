@@ -107,6 +107,7 @@ export const USE_LOCAL_BOOTSTRAP = process.env.KIYEOVO_E2E_LOCAL_BOOTSTRAP === '
  * | group-join-catchup.spec.ts  | 9161-9163       | 19506 (only when USE_LOCAL_BOOTSTRAP=1) |
  * | calls.spec.ts               | 9171-9172       | 19507 (only when USE_LOCAL_BOOTSTRAP=1) |
  * | username-lookup.spec.ts     | 9181-9189       | 20411-20419 (explicit — scenarios D/E always spin up their own local bootstraps regardless of USE_LOCAL_BOOTSTRAP, to control DHT-record liveness precisely; only 20411-20413 currently used, room left in the block) |
+ * | tor-mode.spec.ts            | 9191-9199 (anonymous-mode libp2p listen ports) | 20421-20429 (onion-fronted local bootstrap TCP ports — see e2e/tor.ts's startOnionFrontedBootstrap; only 20421-20422 currently used) — ALSO owns its own bundled-Tor-daemon SocksPort/ControlPort pairs, a range no other spec file touches: 9561/9562 (instance A) and 9563/9564 (instance B), plus the fronting tor itself (SocksPort 0 — binds nothing) |
  *
  * Adding a new spec file: pick an unused p2pPort block (leave a gap of at
  * least 10 for headroom) and, if it calls startBootstrapNode() with no

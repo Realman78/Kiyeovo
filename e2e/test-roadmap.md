@@ -170,9 +170,42 @@ Status legend: [ ] queued · [~] in progress · [x] done
   registered before SidebarHeader's `handleShowNewConversationDialog` (~line 251) will even
   open the New Conversation dialog (unregistered click = toast only), i.e. unregistered users
   can't look anyone up at all — flagged for a doc update / product decision.
-- [ ] **6. Tor / anonymous mode (LAST — per Marin)** — Marin has pending work here, also
-  related to bootstraps; do not start without his go-ahead. Whole second network stack,
-  needs Tor binaries (scripts/download-tor.sh).
+- [x] **6. Tor / anonymous mode** — done. Marin gave the go-ahead the night of 2026-07-06/07
+  once the bundled tor binary (resources/tor/linux-x64/tor, needs libevent-2.1.so.7 alongside
+  it and LD_LIBRARY_PATH pointed there — no RUNPATH) was confirmed reaching real Tor network
+  connectivity from this box. `tor-mode.spec.ts` (2 tests, both green in the builder's ~4-min
+  combined run AND an independent orchestrator verification run at 2.1 min total —
+  T1 49.6s / T2 1.3m, contact-request-by-username over onion circuits in 5.9s): T1 single-instance anonymous onboarding — tor daemon starts, the wizard is
+  code-confirmed Bootstrap+Register ONLY (ANONYMOUS_STEPS, InitialSetupWizard.tsx — no Relay,
+  no Calls/ICE, asserted directly via step-nav button absence), and username registration
+  succeeds over a real onion-fronted local bootstrap. T2 two-instance messaging over Tor: both
+  peers onboard anonymously in parallel, B looks A up by USERNAME over the Tor DHT, contact
+  request + accept + message both ways, and the call button is asserted ABSENT in the direct
+  chat header (`ChatHeader.tsx`: `canShowCallButtons = !isGroup && networkMode === 'fast'`).
+  **Major finding, code-confirmed (not just slow):** the "onion-fronted local bootstrap" test
+  harness design (front a plain `bootstrap-node.ts`/`src/core/bootstrap.ts` process with a
+  real Tor hidden service) needs the underlying bootstrap PROCESS itself started with
+  `BOOTSTRAP_NETWORK_MODE=anonymous` + `BOOTSTRAP_ANNOUNCE_ADDRS=/onion3/<host>:9000` — a
+  plain/default bootstrap speaks the FAST-mode DHT protocol (`/kiyeovo-fast/1.0.0/dht`, vs.
+  anonymous's `/kiyeovo/1.0.0/dht`, `NETWORK_MODE_CONFIG` in `src/core/constants.ts:66-67`),
+  which cannot negotiate with an anonymous-mode client at all — the plain libp2p connect (no
+  protocol needed) succeeds and the wizard reports "connected", but every DHT operation
+  (username registration) then fails with "all N peers unreachable" (raw `QUERY_ERROR`, a
+  protocol mismatch, not a rejection or a timeout). `e2e/tor.ts`'s `startOnionFrontedBootstrap`
+  now starts the fronting Tor FIRST (the onion hostname needs no backend listening yet) then
+  starts the bootstrap process in genuine anonymous mode, self-announcing the onion host. Also
+  found: Register is the LAST step in `ANONYMOUS_STEPS` (unlike fast mode, where ICE always
+  follows it), so its own continue button reads "Finish setup"/"Finish without registering",
+  never "Continue" — onboard.ts's fast-mode-shaped `completeRegisterStep` hardcodes "Continue"
+  and would hang; a dedicated `completeAnonymousRegisterStep` handles both labels. T3
+  (returning-user relaunch over Tor) deliberately deferred — see the spec's file-level comment
+  for the budget reasoning. TIMEOUT EXCEPTION granted for this round only: `test.setTimeout`
+  raised to 12 minutes (Tor daemon bootstrap + hidden-service descriptor publish, cold onion
+  dials, and peer-to-peer onion rendezvous are all genuinely slower than any other round's
+  infra). New harness pieces: `e2e/tor.ts` (onion-fronted bootstrap, anonymous env-building
+  helpers, anonymous-mode onboarding/wizard helpers), `bootstrap-node.ts` gained an optional
+  `env` passthrough, `onboard.ts`'s `beginIdentityCreation`/`sendContactRequest` gained optional
+  mode/timeout params (both backward compatible, every other caller unaffected).
 
 Standing rules for every round: Sonnet implements, orchestrator reviews diff + screenshots and
 commits; agents read `Kiyeovo_desktop_technical_documentation.md` (grep the subsystem) and
