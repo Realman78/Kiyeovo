@@ -1,0 +1,7 @@
+[
+  { "node": "example-region", "kind": "bootstrap", "value": "/ip4/1.2.3.4/tcp/9000/p2p/12D3KooWExampleBootstrapPeerIdReplaceMe000000000000000" },
+  { "node": "example-region", "kind": "relay", "value": "/ip4/1.2.3.4/tcp/4002/p2p/12D3KooWExampleRelayPeerIdReplaceMe0000000000000000000" },
+  { "node": "example-region", "kind": "stun", "value": "stun:1.2.3.4:3478" },
+  { "node": "example-region", "kind": "turn", "value": "turn:1.2.3.4:3478", "username": "kiyeovo", "credential": "REPLACE_OR_USE_TURN_PASS_ENV" },
+  { "node": "example-region", "kind": "onion-bootstrap", "value": "/onion3/exampleonionhostreplaceme000000000000000000000000000:9000/p2p/12D3KooWExampleOnionBootstrapReplaceMe0000000000000" }
+]
