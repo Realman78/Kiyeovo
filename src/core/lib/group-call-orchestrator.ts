@@ -715,10 +715,6 @@ export class GroupCallOrchestrator {
     }
 
     const timestamp = signal.timestamp ?? Date.now();
-    // TEMP_LOG
-    log(
-      `[GROUP-CALL][PAIR][SEND][START] type=${signal.type} to=${signal.toPeerId.slice(-8)} call=${signal.callId.slice(0, 8)} ts=${timestamp}`,
-    );
     const sent = signal.type === 'CALL_OFFER'
       ? await this.trySendPairSignal({
         ...signal,
@@ -751,14 +747,10 @@ export class GroupCallOrchestrator {
       return;
     }
     if (this.pendingDurableHintGroups.has(groupId)) {
-      // TEMP_LOG
-      log(`[GROUP-CALL][HINT][SKIP] group=${groupId.slice(0, 8)} reason=in_flight`);
       return;
     }
     const recentResolvedAt = this.recentDurableHintResults.get(groupId);
     if (recentResolvedAt && recentResolvedAt >= Date.now() - DISCOVERY_CACHE_TTL_MS) {
-      // TEMP_LOG
-      log(`[GROUP-CALL][HINT][SKIP] group=${groupId.slice(0, 8)} reason=recent_result`);
       return;
     }
 
@@ -814,10 +806,6 @@ export class GroupCallOrchestrator {
     if (!isGroupCallPairSignalMessage(signal)) {
       return false;
     }
-    // TEMP_LOG
-    log(
-      `[GROUP-CALL][PAIR][IN][RAW] type=${signal.type} from=${remotePeerId.slice(-8)} to=${signal.toPeerId.slice(-8)} group=${signal.groupId.slice(0, 8)} call=${signal.callId.slice(0, 8)} ts=${signal.timestamp}`,
-    );
     if (!this.verifyAndRecordIncomingSignal(remotePeerId, signal)) {
       // TEMP_LOG
       log(
@@ -1190,19 +1178,11 @@ export class GroupCallOrchestrator {
       && cached
       && cached.resolvedAt >= Date.now() - DISCOVERY_CACHE_TTL_MS
     ) {
-      // TEMP_LOG
-      log(
-        `[GROUP-CALL][QUERY][CACHE_HIT] group=${chat.group_id?.slice(0, 8)} result=${describeQueryResolution(cached.result)}`,
-      );
       return cached.result;
     }
 
     const existing = this.pendingQueriesByGroupId.get(chat.group_id!);
     if (!options?.bypassCache && existing) {
-      // TEMP_LOG
-      log(
-        `[GROUP-CALL][QUERY][REUSE_IN_FLIGHT] group=${chat.group_id?.slice(0, 8)}`,
-      );
       return existing;
     }
 

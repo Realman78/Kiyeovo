@@ -78,11 +78,6 @@ export class OfflineInboxCapacityService {
       }
 
       regularPending = this.deps.database.countActivePendingOfflineSendsByBucket(bucketKey);
-
-      // TEMP_LOG: trace the exact direct counts the capacity panel is reading.
-      console.log(
-        `[TEMP_LOG][OFFLINE][CAPACITY][SNAPSHOT] chatId=${chat.id} peer=${peerId?.slice(-8) ?? 'unknown'} bucket=*${bucketKey.slice(-12)} regularStored=${regularStored} controlStored=${controlStored} ackStored=${ackStored} regularPending=${regularPending}`
-      );
     }
 
     const mainUsed = regularStored + regularPending;
