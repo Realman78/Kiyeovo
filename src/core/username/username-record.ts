@@ -14,6 +14,7 @@ type UsernameRecordPayload = {
   offlinePublicKey: string;
   timestamp: number;
   kind?: UsernameRecordKind;
+  multiaddrs?: string[];
 };
 
 const TEXT_ENCODER = new TextEncoder();
@@ -35,7 +36,12 @@ export function isUsernameRegistrationRecord(value: unknown): value is UserRegis
   const kindValid = kind == null || kind === 'active' || kind === 'released';
   const username = candidate.username;
 
-  return typeof candidate.peerID === 'string'
+  const multiaddrs = candidate.multiaddrs;
+  const multiaddrsValid = multiaddrs === undefined
+    || (Array.isArray(multiaddrs) && multiaddrs.every((m) => typeof m === 'string' && m.length > 0));
+
+  return multiaddrsValid
+    && typeof candidate.peerID === 'string'
     && candidate.peerID.length > 0
     && isNetworkMode(candidate.networkMode)
     && typeof username === 'string'
@@ -67,6 +73,12 @@ export function canonicalUsernameRegistrationPayload(
   };
   if (registration.kind != null) {
     payload.kind = registration.kind;
+  }
+  // Sort so the signed bytes are independent of getMultiaddrs() ordering, and
+  // omit entirely when empty so records without addresses canonicalize exactly
+  // as they did before this field existed (old signatures/records stay valid).
+  if (registration.multiaddrs != null && registration.multiaddrs.length > 0) {
+    payload.multiaddrs = [...registration.multiaddrs].sort();
   }
   return payload;
 }

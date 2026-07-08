@@ -3,6 +3,8 @@ import type { ChatNode, NetworkMode, UserRegistration } from '../types.js';
 import {
   ERRORS,
   NETWORK_MODES,
+  REGISTRATION_ADDRESS_CHECK_INTERVAL,
+  REGISTRATION_ADDRESS_STABLE_ROUNDS,
   REREGISTRATION_INTERVAL,
   USERNAME_MAX_FUTURE_SKEW_MS,
   USERNAME_MAX_LENGTH,
@@ -10,6 +12,8 @@ import {
   USERNAME_REGEX,
   getNetworkModeRuntime,
 } from '../constants.js';
+import { peerIdFromString } from '@libp2p/peer-id';
+import { multiaddr, type Multiaddr } from '@multiformats/multiaddr';
 import { EncryptedUserIdentity } from '../identity/encrypted-user-identity.js';
 import { errStr, generalErrorHandler } from '../utils/general-error.js';
 import { hashUsingSha256 } from '../utils/crypto.js';
@@ -64,6 +68,12 @@ export class UsernameRegistry {
   private currentUsername: string | null = null;
   private userIdentity: EncryptedUserIdentity | null = null;
   public reregistrationInterval: NodeJS.Timeout | null = null;
+  // Address-drift watcher: re-publish the record when our own dial addresses
+  // change (e.g. relay handoff), so a looker-up always gets a reachable address.
+  public addressCheckInterval: NodeJS.Timeout | null = null;
+  private lastPublishedAddrs: string[] = [];
+  private pendingAddrCandidate: string[] | null = null;
+  private pendingAddrRounds = 0;
   private database: ChatDatabase;
   private readonly networkMode: NetworkMode;
   private readonly usernameDhtPrefix: string;
@@ -237,6 +247,12 @@ export class UsernameRegistry {
     const currentTime = Date.now();
     const result = await this.readRegistrationForKey(key, keyLabel, currentTime, extraValidation);
     if (result) {
+      // Feed the record's addresses into the peerStore so the existing
+      // dial(peerId) path can reach this peer via its own relay — no shared
+      // relay needed, no dialer changes. Awaited so the addresses are stored
+      // before the caller dials (otherwise an immediate dial races the merge
+      // and hits the original NO_RESERVATION fallback).
+      await this.applyRecordAddressesToPeerStore(result);
       log(`[USERNAME][LOOKUP][SLOW] key=${keyLabel} result=hit`);
       return result;
     }
@@ -254,10 +270,9 @@ export class UsernameRegistry {
   }
 
   cleanup(): void {
-    if (this.reregistrationInterval) {
-      clearInterval(this.reregistrationInterval);
-      this.reregistrationInterval = null;
-    }
+    // Clears the periodic republish AND the address-drift watcher (+ resets its
+    // pending state) so neither timer survives a shutdown/restart.
+    this.stopReregistration();
   }
 
   private readStoredUsernameState(autoRegister: string | null = this.database.getSetting(this.autoRegisterSettingKey)): StoredUsernameState {
@@ -341,7 +356,8 @@ export class UsernameRegistry {
     
     this.reregistrationInterval = setInterval(() => {
       void this.reregisterCurrentUsername();
-    }, REREGISTRATION_INTERVAL);    
+    }, REREGISTRATION_INTERVAL);
+    this.startAddressChangeWatcher();
   }
 
   private stopReregistration(): void {
@@ -349,6 +365,98 @@ export class UsernameRegistry {
       clearInterval(this.reregistrationInterval);
       this.reregistrationInterval = null;
     }
+    this.stopAddressChangeWatcher();
+  }
+
+  /**
+   * Our own publishable dial addresses (sorted, deduped): relay circuit
+   * addresses in fast mode, the onion address in anonymous mode. These are what
+   * we embed in the record so peers can reach us without a shared relay.
+   */
+  private getPublishableAddresses(): string[] {
+    const all = (this.node.getMultiaddrs?.() ?? []).map((ma) => ma.toString());
+    const filtered = this.isFastMode
+      ? all.filter((addr) => addr.includes('/p2p-circuit'))
+      : all.filter((addr) => addr.includes('/onion3/'));
+    return [...new Set(filtered)].sort();
+  }
+
+  /** Merge a looked-up record's addresses into the peerStore so dial(peerId) can use them. */
+  private async applyRecordAddressesToPeerStore(record: UserRegistration): Promise<void> {
+    if (!record.multiaddrs || record.multiaddrs.length === 0) return;
+    if (record.peerID === this.node.peerId.toString()) return; // never our own
+    try {
+      const peerId = peerIdFromString(record.peerID);
+      const multiaddrs = record.multiaddrs
+        .map((addr) => { try { return multiaddr(addr); } catch { return null; } })
+        .filter((ma): ma is Multiaddr => ma !== null);
+      if (multiaddrs.length > 0) {
+        await this.node.peerStore.merge(peerId, { multiaddrs });
+      }
+    } catch { /* invalid peer id / addresses / merge failure — ignore, dial will fall back */ }
+  }
+
+  private startAddressChangeWatcher(): void {
+    if (this.addressCheckInterval) return;
+    this.addressCheckInterval = setInterval(() => {
+      this.checkPublishedAddressDrift();
+    }, REGISTRATION_ADDRESS_CHECK_INTERVAL);
+  }
+
+  private stopAddressChangeWatcher(): void {
+    if (this.addressCheckInterval) {
+      clearInterval(this.addressCheckInterval);
+      this.addressCheckInterval = null;
+    }
+    this.pendingAddrCandidate = null;
+    this.pendingAddrRounds = 0;
+  }
+
+  /**
+   * Re-publish the record if our dial addresses have drifted from what we last
+   * published — but only after the new set holds for REGISTRATION_ADDRESS_STABLE_ROUNDS
+   * consecutive polls (avoids publishing a transient/empty set mid relay-handoff),
+   * and never blindly: requires an active registration, DHT connectivity, no
+   * in-flight publish, and a non-empty changed set.
+   */
+  private checkPublishedAddressDrift(): void {
+    if (!this.currentUsername) return;
+    if (this.registerInFlight) return; // don't stack on an in-flight publish
+    if (!this.hasConnectedPeersForRegistration()) return;
+
+    const current = this.getPublishableAddresses();
+    // Never overwrite a good record with zero addresses (e.g. during a relay gap).
+    if (current.length === 0) { this.resetPendingAddrChange(); return; }
+    // No drift.
+    if (UsernameRegistry.addressListsEqual(current, this.lastPublishedAddrs)) {
+      this.resetPendingAddrChange();
+      return;
+    }
+    // Drift: require the same new set across consecutive polls before acting.
+    if (this.pendingAddrCandidate && UsernameRegistry.addressListsEqual(current, this.pendingAddrCandidate)) {
+      this.pendingAddrRounds++;
+    } else {
+      this.pendingAddrCandidate = current;
+      this.pendingAddrRounds = 1;
+    }
+    if (this.pendingAddrRounds < REGISTRATION_ADDRESS_STABLE_ROUNDS) return;
+
+    this.resetPendingAddrChange();
+    log(`[USERNAME][ADDR-DRIFT] republishing '${this.currentUsername}' — dial addresses changed`);
+    void this.reregisterCurrentUsername();
+  }
+
+  private resetPendingAddrChange(): void {
+    this.pendingAddrCandidate = null;
+    this.pendingAddrRounds = 0;
+  }
+
+  private static addressListsEqual(a: string[], b: string[]): boolean {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== b[i]) return false;
+    }
+    return true;
   }
 
   private proceedWithRegistration(username: string, isRenewal: boolean): boolean {
@@ -615,6 +723,16 @@ export class UsernameRegistry {
     }
     const identity = this.userIdentity;
 
+    // Only active registrations advertise dial addresses. A released/tombstone
+    // record needs no addresses, and omitting them stops publishing a reachable
+    // relay/onion address for a username the user just gave up.
+    const publishAddrs = kind === 'active' ? this.getPublishableAddresses() : [];
+    // Remember what we're about to publish so the drift watcher compares against
+    // the record contents, not against whatever getMultiaddrs() returns moment to
+    // moment. (Set here rather than after publish; a failed publish just means
+    // the periodic republish/next attempt recomputes — see checkPublishedAddressDrift.)
+    this.lastPublishedAddrs = publishAddrs;
+
     const registrationData: Omit<UserRegistration, 'signature' | 'peerBinding'> = {
       peerID: this.node.peerId.toString(),
       networkMode: this.networkMode,
@@ -623,6 +741,7 @@ export class UsernameRegistry {
       signingPublicKey: Buffer.from(identity.signingPublicKey).toString('base64'),
       offlinePublicKey: Buffer.from(identity.offlinePublicKey).toString('base64'),
       timestamp: Date.now(),
+      ...(publishAddrs.length > 0 ? { multiaddrs: publishAddrs } : {}),
     };
 
     const signature = signUsernameRegistrationPayload(registrationData, (payload) =>

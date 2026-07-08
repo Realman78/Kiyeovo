@@ -184,6 +184,11 @@ export const MDNS_SERVICE_TAG = 'kiyeovo.local';
  * Timing configuration
  */
 export const REREGISTRATION_INTERVAL = 5 * MINUTE;  // 5 minutes
+// Poll our own publishable addresses this often; re-register once a *changed*
+// set has held for REGISTRATION_ADDRESS_STABLE_ROUNDS consecutive polls (so a
+// transient relay-handoff blip doesn't publish a half-formed/empty address set).
+export const REGISTRATION_ADDRESS_CHECK_INTERVAL = 5 * SECOND;
+export const REGISTRATION_ADDRESS_STABLE_ROUNDS = 2;
 // After bootstrap connectivity is (re)established, re-publish the username
 // registration once, debounced by this delay so a reconnect + post-retry-verify
 // burst collapses into a single republish (bootstrap-switch discoverability).

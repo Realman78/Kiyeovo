@@ -678,6 +678,7 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
         await relayKeepAlive.stop();
         periodicOfflineSweeper.stop();
         republishUsernameOnReconnect.cancel();
+        usernameRegistry.cleanup();
         groupCallOrchestrator.cleanup();
         await messageHandler.cleanup();
         reconnectController.clearPostRetryVerifyTimeout();

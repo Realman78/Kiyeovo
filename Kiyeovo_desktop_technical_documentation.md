@@ -461,8 +461,9 @@ Primary categories:
 
 1. Username registry
    - by-name and by-peer mapping
-   - records contain `{ peerID, networkMode, username, signingPublicKey, offlinePublicKey, timestamp, kind, signature, peerBinding }`
+   - records contain `{ peerID, networkMode, username, signingPublicKey, offlinePublicKey, timestamp, kind, multiaddrs?, signature, peerBinding }`
    - `networkMode` is required, included in the canonical payload, and must match the mode-specific username DHT namespace of the key; this prevents replaying a valid registration between fast and anonymous namespaces
+   - `multiaddrs` is an optional list of the publisher's publicly-dialable addresses (fast mode → `/p2p-circuit` relay address(es); anonymous mode → `/onion3` address), included only for `active` records; on lookup a peer merges these into its libp2p peerStore so `dial(peerId)` reaches the target via the target's own relay/onion without requiring a shared relay. The field is part of the canonical payload (so it is covered by the signature and tamper-proof); it is sorted and omitted entirely when empty, so records published before this field existed canonicalize and verify unchanged
    - `signature` is the application Ed25519 signature over the canonical payload, and `peerBinding` is a second Ed25519 signature using the libp2p private key for `peerID` over `kiyeovo-username-peer-binding:v1:` plus the same canonical payload; both signature fields are excluded from the canonical payload
    - validators, selectors, update validation, and local lookup paths reject records with missing or invalid signatures, missing or invalid peer binding, DHT key-slot or network-mode mismatches, stale timestamps, future timestamps, or usernames outside the shared 3–32 character alphanumeric/underscore policy
    - username DHT validators reject record values above `8 KiB` before JSON parsing
