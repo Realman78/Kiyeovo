@@ -111,15 +111,89 @@ If your machine is not low-end, consider increasing `IDENTITY_SCRYPT_N` and `PRO
 
 ## Servers
 
-Release TODO: replace the placeholders in
-[src/core/predefined-nodes.ts](./src/core/predefined-nodes.ts) with the real
-project-hosted bootstrap, relay, STUN, TURN, and anonymous onion bootstrap
-addresses before publishing 1.0.0 installers. Those setup links point users to
-this section, so list the final server values and shutdown policy here before
-release.
+Kiyeovo runs a small fleet of trusted bootstrap / relay / STUN / TURN servers so
+you can start without self-hosting. Add the ones nearest you in the app's Setup
+pages (Bootstrap, Relay, STUN/TURN). The fast-mode bootstraps are **interconnected** —
+they form one network, so you only need **2–3**; a user on any of them can find a
+user on any other.
 
-Until those values are final, use trusted community servers or self-host with the
-infrastructure bundle below.
+> ⚠️ **Shutdown: these servers shut down on 2026-07-25.** After that the
+> app shows a one-time notice. This does **not** affect your identity, contacts, or messages — only which servers you route through.
+
+### Fast mode
+
+**Bootstrap servers** — Setup → Bootstrap (add 2–3 near you):
+
+```text
+/ip4/167.172.115.233/tcp/9000/p2p/12D3KooWKDrpSzWYyCaJ4gfNGY5XUjUYN9tVZe8t9biMMY9HxU8K   # San Francisco
+/ip4/137.184.147.152/tcp/9000/p2p/12D3KooWHX1n6qVE93GbGzDN7dXjVa5Qi1L2WxZAENtma8YPJtsq   # New York
+/ip4/134.122.41.208/tcp/9000/p2p/12D3KooWRUpuugGb7Wqwc6vaMQWJV8piHptQYi9p91s1dgE7ebQi    # Toronto
+/ip4/178.156.221.255/tcp/9000/p2p/12D3KooW9vbJN4SWN1y2GcdwPNS9kFxboQ8P3f6AtnUNeMhuvB5M   # Ashburn, US
+/ip4/5.78.127.191/tcp/9000/p2p/12D3KooWChq5t2QFvkS4nDx6Uf5QmCaSycYvMggSbQF6x2pXsM1e      # Oregon, US
+/ip4/178.104.248.235/tcp/9000/p2p/12D3KooWM2gccLekXRBhtQFCLYQH3ceTDpDcxBp5uNPwMScETr74   # Nuremberg, DE
+/ip4/157.180.85.63/tcp/9000/p2p/12D3KooWJhPVL3tXi7zUNx95z1dTE92zsCzLLW9TS3qjrFPfcDdd     # Helsinki, FI
+/ip4/157.245.149.195/tcp/9000/p2p/12D3KooWB1zQDckFKLGsDJY111prwCQpReo4pFK46C85WKQgP9sp   # Singapore
+/ip4/170.64.154.208/tcp/9000/p2p/12D3KooWSoxfnJX2oMvY7y42jDLnnnCBHSku9BBhRUDnYaWqgiWp    # Sydney
+```
+
+**Relay servers** — Setup → Relay:
+
+```text
+/ip4/167.172.115.233/tcp/4002/p2p/12D3KooWDfn9gv6mQsb8CBCmXRPLbBzDaZrcZD8HiQ4a3rgNp4MM   # San Francisco
+/ip4/137.184.147.152/tcp/4002/p2p/12D3KooWRbB1XRS9UFaEeconX5nQUStZGPnEhtgjkzP5RLBkYnBD   # New York
+/ip4/134.122.41.208/tcp/4002/p2p/12D3KooWEhCb4tfS3G78Xg5xuYqirHkvGnDgbA8PcQk4izki5eZc    # Toronto
+/ip4/178.156.221.255/tcp/4002/p2p/12D3KooWByZTmAn7uqrY6e4Lv3XW7eTHY9yxPr4KdxoUK41p1ViB   # Ashburn, US
+/ip4/5.78.127.191/tcp/4002/p2p/12D3KooWF9p5aoVpC9qYj3EiytwAHgxXs41iJvo5h7gSTfmZnRzW      # Oregon, US
+/ip4/178.104.248.235/tcp/4002/p2p/12D3KooWEKo9h8Rux6gRwoi9t7m1n2RnfoSAHGa2WZYw4LrTXSwH   # Nuremberg, DE
+/ip4/157.180.85.63/tcp/4002/p2p/12D3KooWKdiNwZgvyMFoaLwBGhLKKgjQFUkGXMyuaNqKeFmfzmRV     # Helsinki, FI
+/ip4/157.245.149.195/tcp/4002/p2p/12D3KooWK9aN5VwYnMCfeyBiXpLT28zwjK3Jp5sDkcNvuxY7ZgWE   # Singapore
+/ip4/170.64.154.208/tcp/4002/p2p/12D3KooWFpR8u5L1R4FUtBDGpBq5icAo8aXta697faKQBHC1QGXE    # Sydney
+```
+
+**STUN / TURN** — Setup → STUN/TURN (only needed for audio/video calls).
+
+STUN (no credentials) — available on every node:
+
+```text
+stun:167.172.115.233:3478   # San Francisco      stun:178.104.248.235:3478  # Nuremberg, DE
+stun:137.184.147.152:3478   # New York           stun:5.78.127.191:3478     # Oregon, US
+stun:134.122.41.208:3478    # Toronto            stun:157.180.85.63:3478    # Helsinki, FI
+stun:170.64.154.208:3478    # Sydney             stun:157.245.149.195:3478  # Singapore
+stun:178.156.221.255:3478   # Ashburn, US
+```
+
+TURN (relays call media when a direct connection can't be made) — username and
+password required. Add the one(s) nearest you:
+
+| Region | TURN URL | Username | Password |
+|--------|----------|----------|----------|
+| San Francisco | `turn:167.172.115.233:3478` | `kiyeovo` | `tsAfclgbgNPSw6k3SmI0BVCzWezzcQLU` |
+| New York | `turn:137.184.147.152:3478` | `kiyeovo` | `rbD1luoutb0ONhsXSnNESaVaCVOxbIFd` |
+| Nuremberg, DE | `turn:178.104.248.235:3478` | `kiyeovo` | `p35a3OimZ8TLQreoVBiK7OExEPgqUC8y` |
+| Singapore | `turn:157.245.149.195:3478` | `kiyeovo` | `bNagZ3o45G39KxSd3kpjNZCR16p7Q3WE` |
+| Sydney | `turn:170.64.154.208:3478` | `kiyeovo` | `nAiNBxxe55ScPz381Vjla6eLjJIi1qqG` |
+
+### Anonymous mode (Tor)
+
+Onion bootstraps — Setup → Bootstrap (in anonymous mode). Unlike the fast-mode
+bootstraps, these are **NOT interconnected** — each is its own separate network.
+Two anonymous users find each other only if they share a bootstrap, so **add all
+of them** (or at least the same set as the person you want to reach):
+
+```text
+/onion3/26ls5ncglwcndci23ibeaz2nynivobs6armqonsnwag3gh5sn24rgmid:9000/p2p/12D3KooWApMAqAEWpWenYfXRZwWMUH8arQYjACu7xNhASBWm2st5   # San Francisco
+/onion3/zsv6t577obbz45yzhvio7crbrbeyslpsa6musmkbifa6iecq55itvfyd:9000/p2p/12D3KooWPgCTLYrNyP5GkHsUjREQcUQMRxCko3hzn7NWZH8ZhxUs   # New York
+/onion3/mlumqaf7yqvvewtwfjbzptubbhkforgnukpvrfmanuwt5fu5jpqcijid:9000/p2p/12D3KooWRx8PC5PFA8kkQ6fdyDyRmXibC7oVnrTEhqcb91j8VAB4   # Toronto
+/onion3/syuig6dmiwkqcztfyfb4fmh5367yj6uv2yirnbculpkb3ru4ieb7dcyd:9000/p2p/12D3KooWPUsNXPWapAQUsUdiWpphk1crywH3WRECDxEGLpB8ZeFR   # Ashburn, US
+/onion3/7sfi5ad4lyyr6vt353j4qlpd3cibesj6ngrqp5nie5odyl32mohngdad:9000/p2p/12D3KooWP3U59XyYP9gJc9Fzq5HS9CvyCgHBk7to8bw3cwZkBDFJ   # Oregon, US
+/onion3/i6pnryrcixfivzbsz46isf3xvklnvtozdlxa66p2aicklgevh5yoz7ad:9000/p2p/12D3KooWD4q8PbvDUGTq6cJT4FtrcHKosEvH5uR54XZzKXnDZ173   # Nuremberg, DE
+/onion3/zlsr3koqqpiupr54dysziv6zszhmv5tvlebdngumykmjmrkipywl6gid:9000/p2p/12D3KooWRL1uwgPRggu6g1ejGAvKCn92RTUfYBkhJSqvc3gANJem   # Helsinki, FI
+/onion3/f3h7acpkqvaz7gyzvahp3jwzw4hadmrwme74k6x2udj4uddhoplas2id:9000/p2p/12D3KooWBec9kfy3Kj1Zw69WrCy8eer8hXhfyPgsqdAQPTNdWuHU   # Singapore
+/onion3/flhf3mdjvs6zh3lqtrt2vd5gkag2ep6s572eg3dhgh3thisynn3le7ad:9000/p2p/12D3KooWDzpe3uinXk7eiCMH1yRD35Za8PxBeaUYMfkVa2jekq1E   # Sydney
+```
+
+Prefer not to rely on these? Self-host your own with the infrastructure bundle
+below.
 
 ## Bootstrap and relay setup
 
