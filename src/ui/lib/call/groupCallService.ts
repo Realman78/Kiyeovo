@@ -551,14 +551,6 @@ class GroupCallService {
         `[GROUP-CALL][PC][TRACK] peer=${peerId.slice(-8)} kind=${event.track.kind} id=${event.track.id} streams=${event.streams.length} readyState=${event.track.readyState}`,
       );
       // TEMP_LOG
-      event.track.onmute = () => {
-        log(`[GROUP-CALL][PC][TRACK_MUTE] peer=${peerId.slice(-8)} kind=${event.track.kind} id=${event.track.id} readyState=${event.track.readyState}`);
-      };
-      // TEMP_LOG
-      event.track.onunmute = () => {
-        log(`[GROUP-CALL][PC][TRACK_UNMUTE] peer=${peerId.slice(-8)} kind=${event.track.kind} id=${event.track.id} readyState=${event.track.readyState}`);
-      };
-      // TEMP_LOG
       event.track.onended = () => {
         log(`[GROUP-CALL][PC][TRACK_ENDED] peer=${peerId.slice(-8)} kind=${event.track.kind} id=${event.track.id} readyState=${event.track.readyState}`);
       };

@@ -172,6 +172,11 @@ export interface UserRegistration {
   kind?: 'active' | 'released'
   signingPublicKey: string  // Ed25519 for signature verification
   offlinePublicKey: string // RSA for offline message encryption
+  // Publishable dial addresses so a looker-up can reach this peer without a
+  // shared relay: fast mode → /p2p-circuit relay address(es); anonymous mode →
+  // /onion3 address. Part of the signed payload (tamper-proof). Optional for
+  // back-compat with records published before this field existed.
+  multiaddrs?: string[]
   signature: string
   peerBinding: string // Ed25519 signature from the libp2p peer identity key
 }

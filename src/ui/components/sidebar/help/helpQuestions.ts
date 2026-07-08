@@ -68,7 +68,7 @@ export const HELP_QUESTIONS: HelpQuestion[] = [
     answer: [
       'Anonymous mode is Kiyeovo running over Tor. It shrinks what ordinary network observers and clearnet infrastructure can learn about where you\'re connecting from.',
       'Be careful. Your username, the things you tell people, your timing patterns, whatever you share in chat - all of that can still point back at you. Tor hides the pipe, not your behavior.',
-      'To switch: Settings, then the network-mode switch, then restart when asked. You\'ll also need anonymous-mode bootstrap infrastructure (an onion bootstrap address) and a working Tor setup on the client (this should already be done if you installed the app. TODO check when doing app delivery).',
+      'To switch: Settings, then the network-mode switch, then restart when asked. You\'ll also need an anonymous-mode (onion) bootstrap address - the installed app already bundles the Tor setup it needs on the client side.',
     ],
     icon: EyeOff,
   },
@@ -216,7 +216,7 @@ export const HELP_QUESTIONS: HelpQuestion[] = [
     answer: [
       'Groups run on the same peer-to-peer foundation as direct chats, just with more moving parts. Live messages travel over a shared group channel everyone\'s subscribed to, while membership and control updates get delivered more carefully behind the scenes - with acknowledgements and retries so nobody silently falls out of sync.',
       'Every membership change - someone joins, leaves, or gets kicked - rotates the group\'s encryption key. New members can read from the point they joined; they don\'t get a magic backlog of everything said before they showed up.',
-      'TODO update: One limit to know up front: there\'s no file sharing in groups. Files are direct, one-to-one transfers only. And in a group, an over-long text message stays an error instead of converting to a file the way it does in a 1:1 chat.',
+      'Groups support file sharing, just like direct chats. One small difference in behavior: in a 1:1 chat, an over-long text message offers to convert itself into a .txt file automatically - in a group it doesn\'t, so you\'ll be asked to trim it down (you can always attach a file yourself).',
     ],
     icon: Users,
   },
@@ -241,7 +241,7 @@ export const HELP_QUESTIONS: HelpQuestion[] = [
     answer: [
       'Messages are capped at 2,048 characters. It keeps chat feeling like chat instead of turning the message channel into a document pipe.',
       'Paste something huge into a direct chat and Kiyeovo offers a graceful exit: ship it as a .txt file instead. The offer can arrive while the other person is offline; downloading waits until both of you are online.',
-      'Groups don\'t get that escape hatch - there\'s no group file transfer - so an over-long group message just asks you to trim it down.',
+      'Groups don\'t get that automatic escape hatch - an over-long group message just asks you to trim it down. (Group file sharing does work; it just isn\'t offered as an auto-conversion, so attach the file yourself if you need to.)',
       'Why even have a limit? Well, imagine what the DHT and network would look like if one-million-character messages were allowed.',
     ],
     icon: FileText,
@@ -261,12 +261,12 @@ export const HELP_QUESTIONS: HelpQuestion[] = [
   {
     id: 'offline-files',
     category: 'Files',
-    question: 'Why is there no offline file sharing?',
-    summary: 'Messages are tiny. Files would turn the offline drop-box into a hosting service.',
+    question: 'Can I send a file to someone who is offline?',
+    summary: 'The file offer can wait for them, but the actual transfer needs you both online - the drop-box holds tiny messages, not your files.',
     answer: [
-      'Holding a short text message for a few hours is cheap. Holding your 200 MB video is not.',
-      'Could we stash files for offline pickup? Sure. Could the DHT just become a file-hosting platform - babysitting 4K clips nobody fetches, deciding when to delete them, fending off people who\'d fill the space with junk? Also yes. Hard pass.',
-      'So there needs to be a compromise. Text can wait for you; files can\'t. Both devices have to be online for a transfer - which keeps the offline layer small, fast, and tough to abuse.',
+      'Partly, yes. The file offer itself can be delivered offline: it rides the same drop-box as text, so the recipient sees "wants to send you a file" when they next come online.',
+      'The actual transfer only happens while you\'re both online. Holding a short text message for a few hours is cheap; parking your 200 MB video in the DHT is not - it would turn the offline drop-box into a file-hosting service, babysitting clips nobody fetches and inviting abuse. Hard pass.',
+      'So the compromise: the offer waits, the transfer doesn\'t. Once you\'re both online, the download goes ahead. That keeps the offline layer small, fast, and tough to abuse.',
     ],
     icon: FileX2,
   },
@@ -344,7 +344,7 @@ export const HELP_QUESTIONS: HelpQuestion[] = [
       'Run your own bootstrap node and your app has an entry point into the network that you control.',
       'In fast mode, add a relay node to improve reachability for peers that can\'t connect directly.',
       'For calls, stand up STUN/TURN (coturn is the usual pick) and add the servers in Setup.',
-      'TODO add tutorial shoutout; Self-hosting buys you control and costs you responsibility: uptime, firewall rules, updates, and protecting whatever your server logs.',
+      'The project README has a step-by-step guide (see "Bootstrap and relay setup") - the released kiyeovo-infra bundle spins up bootstrap, relay, and optional STUN/TURN with Docker. Self-hosting buys you control and costs you responsibility: uptime, firewall rules, updates, and protecting whatever your server logs.',
     ],
     icon: ArchiveRestore,
   },

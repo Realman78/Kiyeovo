@@ -28,6 +28,8 @@ import '../ui/state/slices/chatSlice.test.js';
 import '../ui/state/slices/setupNodesSlice.test.js';
 import './db/database.persistence.test.js';
 import './username/username-dht-validator.test.js';
+import './username/username-record.test.js';
+import './utils/dht-address-mapper.test.js';
 import './username/username-reconnect-republisher.test.js';
 import './direct/offline-message-validator.test.js';
 import './direct/offline-message-storable.test.js';
