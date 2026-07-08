@@ -142,7 +142,7 @@ Download and unpack the `kiyeovo-infra-<version>.tar.gz` asset from the Kiyeovo
 GitHub release:
 
 ```bash
-VERSION=1.0.0
+VERSION=1.0.1
 wget "https://github.com/Realman78/Kiyeovo/releases/download/v${VERSION}/kiyeovo-infra-${VERSION}.tar.gz"
 wget "https://github.com/Realman78/Kiyeovo/releases/download/v${VERSION}/kiyeovo-infra-${VERSION}.tar.gz.sha256"
 sha256sum -c "kiyeovo-infra-${VERSION}.tar.gz.sha256"
@@ -164,6 +164,18 @@ published image:
 ```text
 ghcr.io/realman78/kiyeovo-infra-node:<version>
 ```
+
+Connect multiple bootstraps into a single network so a user who connects to any one can find users on the others. Pass every other
+bootstrap's multiaddr (from its `fast addresses` output, including the
+`/p2p/<id>`) to `init`:
+
+```bash
+./kiyeovo-infra fast init --bootstrap-peers "/ip4/A.B.C.D/tcp/9000/p2p/12D3Koo...,/ip4/E.F.G.H/tcp/9000/p2p/12D3Koo..."
+```
+
+You can hand the *same* full list to every node — each skips its own entry.
+Without this, each bootstrap is an isolated DHT and users on different
+bootstraps can't discover each other. (Fast mode only; the anonymous onion bootstrap is inbound-only and isn't connected to others.)
 
 To run anonymous mode too:
 

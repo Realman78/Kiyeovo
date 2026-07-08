@@ -13,7 +13,7 @@ name: kiyeovo-infra
 
 services:
   tor:
-    image: ghcr.io/realman78/kiyeovo-tor:1.0.0
+    image: ghcr.io/realman78/kiyeovo-tor:1.0.1
     build:
       # Absolute repo root injected by kiyeovo-infra (falls back to `..` for a raw
       # `docker compose` run from infrastructure/).
@@ -39,7 +39,7 @@ services:
         max-file: "3"
 
   bootstrap:
-    image: ghcr.io/realman78/kiyeovo-infra-node:1.0.0
+    image: ghcr.io/realman78/kiyeovo-infra-node:1.0.1
     build:
       # Absolute repo root injected by kiyeovo-infra (falls back to `..` for a raw
       # `docker compose` run from infrastructure/).
@@ -50,7 +50,7 @@ services:
     restart: unless-stopped
     environment:
       KIYEOVO_DEPLOY_MODE: "1"
-      KIYEOVO_SERVER_VERSION: "1.0.0"
+      KIYEOVO_SERVER_VERSION: "1.0.1"
       BOOTSTRAP_NETWORK_MODE: anonymous
       # Tor reaches this listener over the private network, so bind 0.0.0.0
       # (not the 127.0.0.1 default — Tor is a separate container).

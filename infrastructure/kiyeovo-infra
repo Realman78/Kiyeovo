@@ -282,6 +282,9 @@ Fast mode options:
   --public-address <ip|dns>   public IPv4 or DNS name clients will dial (required)
   --bootstrap-port <port>     bootstrap TCP port (default 9000)
   --relay-port <port>         relay TCP port (default 4002)
+  --bootstrap-peers <list>    comma-separated multiaddrs of sibling bootstraps to
+                              federate with (each needs /p2p/<id>; blank = standalone).
+                              Same full list can be given to every node.
 
 Fast mode TURN (optional, for calls):
   --with-turn                 enable a coturn TURN server
@@ -361,7 +364,7 @@ turn_credential() {
 
 cmd_init() {
   local mode="$ACTIVE_MODE" public_address="" bootstrap_port="" relay_port=""
-  local interactive=1 force=0
+  local interactive=1 force=0 bootstrap_peers=""
   local with_turn=0 no_turn=0 turn_user="" turn_password="" turn_external_ip=""
 
   while [ "$#" -gt 0 ]; do
@@ -370,6 +373,7 @@ cmd_init() {
       --public-address)   public_address="${2:-}"; shift 2 ;;
       --bootstrap-port)   bootstrap_port="${2:-}"; shift 2 ;;
       --relay-port)       relay_port="${2:-}"; shift 2 ;;
+      --bootstrap-peers)  bootstrap_peers="${2:-}"; shift 2 ;;
       --with-turn)        with_turn=1; shift ;;
       --no-turn)          no_turn=1; shift ;;
       --turn-user)        turn_user="${2:-}"; shift 2 ;;
@@ -384,6 +388,9 @@ cmd_init() {
 
   # Mode comes from the positional token (resolved before dispatch); $mode is set.
   [ "$with_turn" -eq 0 ] || [ "$no_turn" -eq 0 ] || die "init: --with-turn and --no-turn cannot be used together"
+  # Federation is fast-mode only: the anonymous onion bootstrap is inbound-only
+  # (no outbound Tor path) and cannot dial peers.
+  [ -z "$bootstrap_peers" ] || [ "$mode" = "fast" ] || die "init: --bootstrap-peers is only valid for fast mode"
 
   # Overwrite guard (per instance).
   if [ -f "$ENV_FILE" ] && [ "$force" -eq 0 ]; then
@@ -451,6 +458,29 @@ EOF
   bootstrap_announce="$(build_multiaddr "$public_address" "$bootstrap_port")"
   relay_announce="$(build_multiaddr "$public_address" "$relay_port")"
 
+  # ----- optional federation with sibling bootstraps -----
+  # Comma-separated multiaddrs this node dials on start so their DHTs merge into
+  # one keyspace. The same full list can be given to every node (a node ignores
+  # its own entry). Get the values from each server's `fast addresses` output.
+  if [ -z "$bootstrap_peers" ] && [ "$interactive" -eq 1 ]; then
+    printf 'Federate with other bootstrap servers? Comma-separated multiaddrs (blank = standalone): '
+    read -r bootstrap_peers
+  fi
+  # Strip spaces, then require each entry to carry a /p2p/<id> so the dialer can
+  # authenticate the remote. Fail fast here rather than let the server drop them.
+  bootstrap_peers="$(printf '%s' "$bootstrap_peers" | tr -d '[:space:]')"
+  if [ -n "$bootstrap_peers" ]; then
+    local _oldifs="$IFS"; IFS=','
+    local _peer
+    for _peer in $bootstrap_peers; do
+      case "$_peer" in
+        */p2p/*) : ;;
+        *) IFS="$_oldifs"; die "init: bootstrap peer '$_peer' must include a /p2p/<peer-id> component" ;;
+      esac
+    done
+    IFS="$_oldifs"
+  fi
+
   # ----- optional TURN (coturn) for calls -----
   # Validate/prompt everything before writing .env or secrets, so a failed TURN
   # configuration cannot leave behind a partial Fast instance.
@@ -502,6 +532,7 @@ BOOTSTRAP_ANNOUNCE_ADDRS=$bootstrap_announce
 RELAY_ANNOUNCE_ADDRS=$relay_announce
 BOOTSTRAP_PORT=$bootstrap_port
 RELAY_PORT=$relay_port
+BOOTSTRAP_PEERS=$bootstrap_peers
 EOF
 
   if [ "$want_turn" -eq 1 ]; then

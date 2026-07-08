@@ -534,6 +534,7 @@ Current behavior:
 - startup mode comes from `BOOTSTRAP_NETWORK_MODE=fast|anonymous`
 - announce addresses come from `BOOTSTRAP_ANNOUNCE_ADDRS` as a comma-separated list
 - identity persists at `BOOTSTRAP_PEER_ID_FILE` (default `./bootstrap-peer-id.bin`, `-anonymous` suffixed in anonymous mode)
+- **federation** (fast mode only): `BOOTSTRAP_PEERS` is an optional comma-separated list of sibling bootstrap multiaddrs (each including `/p2p/<id>`) that this node dials on startup via `@libp2p/bootstrap` peer discovery. This merges the dialed nodes' kad-dht routing tables into one keyspace, so a record (e.g. a username) published through any federated bootstrap is findable through any other — without it, each bootstrap is an isolated DHT island. The same full list may be set on every node (a node ignores an entry matching its own Peer ID). Because `@libp2p/bootstrap` only dials once at startup, a periodic reconnect loop (`FEDERATION_RECONNECT_INTERVAL_MS`, 30s) re-dials any federation peer that stays dropped — it waits for two consecutive missed checks (`FEDERATION_RECONNECT_MISS_THRESHOLD`, ~60s) before re-dialing so a brief blip that recovers on its own isn't chased, while a genuine outage still self-heals. Ignored in anonymous mode: the onion bootstrap is inbound-only (no outbound Tor path) and cannot dial peers, so onion bootstraps are not federated — anonymous users converge on a single shared onion bootstrap instead
 
 Operational notes:
 - bootstrap announce addresses are raw announce multiaddrs, not client-facing `/p2p/...` addresses
@@ -730,7 +731,7 @@ Runtime metadata output (`src/core/server/runtime-metadata.ts`):
     "peerId": "12D3KooW...",
     "announceAddrs": ["/ip4/203.0.113.10/tcp/9000"],
     "clientAddrs": ["/ip4/203.0.113.10/tcp/9000/p2p/12D3KooW..."],
-    "version": "1.0.0",
+    "version": "1.0.1",
     "startedAt": "2026-06-27T12:00:00Z"
   }
   ```

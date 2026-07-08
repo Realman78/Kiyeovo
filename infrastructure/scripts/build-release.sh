@@ -7,7 +7,7 @@
 # Usage:
 #   infrastructure/scripts/build-release.sh [VERSION] [--bundle-only] [--no-build]
 #
-#   VERSION        image tag + bundle version (default: 1.0.0)
+#   VERSION        image tag + bundle version (default: 1.0.1)
 #   --bundle-only  skip image builds; just assemble the bundle + checksums
 #   --no-build     alias for --bundle-only
 #
@@ -16,7 +16,9 @@
 #   TOR_IMAGE         default ghcr.io/realman78/kiyeovo-tor
 set -euo pipefail
 
-VERSION="1.0.0"
+# Default tracks the version the committed compose files pin, so a bare
+# `build-release.sh` can't emit a bundle that's stale relative to them.
+VERSION="1.0.1"
 BUILD_IMAGES=1
 for arg in "$@"; do
   case "$arg" in

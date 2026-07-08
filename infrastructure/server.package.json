@@ -1,6 +1,6 @@
 {
   "name": "kiyeovo-infra-node",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Infra-node dependency manifest for the Kiyeovo bootstrap/relay image. Generated from the root package — keep in sync (see infrastructure/scripts/check-server-deps.mjs).",
   "type": "module",
@@ -11,6 +11,7 @@
     "@chainsafe/libp2p-gossipsub": "14.1.2",
     "@chainsafe/libp2p-noise": "16.1.5",
     "@chainsafe/libp2p-yamux": "7.0.4",
+    "@libp2p/bootstrap": "11.0.47",
     "@libp2p/circuit-relay-v2": "3.2.24",
     "@libp2p/crypto": "5.1.13",
     "@libp2p/identify": "3.0.39",

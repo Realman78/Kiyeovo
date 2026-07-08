@@ -3,6 +3,7 @@ import { tcp } from '@libp2p/tcp';
 import { noise } from '@chainsafe/libp2p-noise';
 import { yamux } from '@chainsafe/libp2p-yamux';
 import { kadDHT, passthroughMapper } from '@libp2p/kad-dht';
+import { bootstrap as bootstrapDiscovery } from '@libp2p/bootstrap';
 import { identify } from '@libp2p/identify';
 import { ping } from '@libp2p/ping';
 import { gossipsub } from '@chainsafe/libp2p-gossipsub';
@@ -55,6 +56,7 @@ type BootstrapRuntime = {
   datastore: LevelDatastore;
   datastorePath: string;
   runtimeFile: string | undefined;
+  federationReconnectTimer: NodeJS.Timeout | undefined;
 };
 
 type BootstrapRuntimeConfig = {
@@ -68,6 +70,7 @@ type BootstrapRuntimeConfig = {
   datastorePath: string;
   peerIdFile: string;
   maxConnections: number;
+  bootstrapPeers: string[];
 };
 
 function readBootstrapNetworkMode(): 'fast' | 'anonymous' {
@@ -184,6 +187,45 @@ function readBootstrapPeerIdFile(networkMode: 'fast' | 'anonymous'): string {
     : BOOTSTRAP_PEER_ID_FILE;
 }
 
+// Federation: other bootstrap servers this node dials on startup so their
+// kad-dht routing tables merge into one keyspace (a username PUT via any node
+// is then findable via any node). @libp2p/bootstrap peerDiscovery does the
+// initial dial; startFederationReconnect keeps the links up thereafter. The
+// same full list can be injected on every node: createBootstrapNode filters
+// out this node's own entry before use, so self is never dialed.
+//
+// Fast mode only. The anonymous onion bootstrap is inbound-only (no outbound
+// Tor path), so it cannot dial peers; BOOTSTRAP_PEERS is ignored there.
+function readBootstrapPeers(isAnonymousMode: boolean): string[] {
+  if (isAnonymousMode) {
+    console.warn(
+      '[CONFIG][BOOTSTRAP] BOOTSTRAP_PEERS is set but ignored in anonymous mode ' +
+        '(onion bootstrap is inbound-only and cannot dial peers)'
+    );
+    return [];
+  }
+
+  const raw = process.env.BOOTSTRAP_PEERS
+    ?.split(',')
+    .map((address) => address.trim())
+    .filter(Boolean) ?? [];
+
+  if (raw.length === 0) return [];
+
+  const validPeers = raw.filter((address) => {
+    try {
+      // A federation peer must carry a peer id (/p2p/<id>) so the dialer can
+      // authenticate the remote against its expected identity.
+      return multiaddr(address).getPeerId() !== null;
+    } catch {
+      console.warn(`[CONFIG][BOOTSTRAP] ignoring invalid BOOTSTRAP_PEERS entry "${address}"`);
+      return false;
+    }
+  });
+
+  return validPeers;
+}
+
 function readBootstrapRuntimeConfig(): BootstrapRuntimeConfig {
   const networkMode = readBootstrapNetworkMode();
   const isAnonymousMode = networkMode === NETWORK_MODES.ANONYMOUS;
@@ -199,6 +241,7 @@ function readBootstrapRuntimeConfig(): BootstrapRuntimeConfig {
     datastorePath: readBootstrapDatastorePath(networkMode),
     peerIdFile: readBootstrapPeerIdFile(networkMode),
     maxConnections: Number(process.env.BOOTSTRAP_MAX_CONNECTIONS) || 1000,
+    bootstrapPeers: readBootstrapPeers(isAnonymousMode),
   };
 
   if (runtimeConfig.isAnonymousMode && runtimeConfig.announceAddrs.length === 0) {
@@ -214,6 +257,7 @@ function logBootstrapRuntimeConfig(runtimeConfig: BootstrapRuntimeConfig): void 
   console.log(`[CONFIG][BOOTSTRAP] dhtProtocol=${runtimeConfig.modeConfig.dhtProtocol}`);
   console.log(`[CONFIG][BOOTSTRAP] listen=${runtimeConfig.listenAddr}`);
   console.log(`[CONFIG][BOOTSTRAP] announceCount=${runtimeConfig.announceAddrs.length}`);
+  console.log(`[CONFIG][BOOTSTRAP] federationPeers=${runtimeConfig.bootstrapPeers.length}`);
   console.log(`[CONFIG][BOOTSTRAP] datastore=${runtimeConfig.datastorePath}`);
   console.log(`[CONFIG][BOOTSTRAP] peer_id_file=${runtimeConfig.peerIdFile}`);
   console.log(`[CONFIG][BOOTSTRAP] maxConnections=${runtimeConfig.maxConnections}`);
@@ -287,6 +331,48 @@ function createBootstrapServices(runtimeConfig: BootstrapRuntimeConfig) {
   };
 }
 
+// @libp2p/bootstrap dials each configured peer once at startup but never
+// re-dials a link that later drops (its discovery is a one-shot timer). This
+// safeguard periodically re-dials any federation peer that has stayed
+// disconnected, so the mesh self-heals after an outage or a sibling restart
+// without waiting for THIS node to restart. `peers` is already self-filtered.
+const FEDERATION_RECONNECT_INTERVAL_MS = 30_000;
+// Only re-dial after a peer has been seen disconnected on this many consecutive
+// checks (~60s), so a brief blip that recovers on its own doesn't trigger a
+// redundant dial. A genuine outage still heals: once past the threshold we
+// re-dial every interval until the connection is back.
+const FEDERATION_RECONNECT_MISS_THRESHOLD = 2;
+
+function startFederationReconnect(node: ChatNode, peers: string[]): NodeJS.Timeout {
+  const consecutiveMisses = new Map<string, number>();
+  const reconnectMissing = (): void => {
+    const connected = new Set(node.getConnections().map((connection) => connection.remotePeer.toString()));
+    for (const addr of peers) {
+      let peerIdStr: string | null = null;
+      try {
+        peerIdStr = multiaddr(addr).getPeerId();
+      } catch {
+        continue;
+      }
+      if (peerIdStr === null) continue;
+      if (connected.has(peerIdStr)) {
+        consecutiveMisses.delete(peerIdStr);
+        continue;
+      }
+      const misses = (consecutiveMisses.get(peerIdStr) ?? 0) + 1;
+      consecutiveMisses.set(peerIdStr, misses);
+      if (misses < FEDERATION_RECONNECT_MISS_THRESHOLD) continue;
+      node.dial(multiaddr(addr)).catch((error: unknown) => {
+        console.warn(`[BOOTSTRAP][federation] reconnect dial to ${addr} failed: ${errStr(error)}`);
+      });
+    }
+  };
+  const timer = setInterval(reconnectMissing, FEDERATION_RECONNECT_INTERVAL_MS);
+  // Don't hold the event loop open solely for this timer.
+  timer.unref?.();
+  return timer;
+}
+
 function registerBootstrapLifecycleLogging(bootstrap: ChatNode, datastorePath: string): void {
   console.log(`Bootstrap Peer ID: ${bootstrap.peerId.toString()}`);
   console.log(`[CONFIG][BOOTSTRAP] datastore_opened=${datastorePath}`);
@@ -308,13 +394,17 @@ function registerBootstrapLifecycleLogging(bootstrap: ChatNode, datastorePath: s
   console.log('Bootstrap node ready for connections...');
 }
 
-function registerBootstrapShutdownHandlers({ node, datastore, runtimeFile }: BootstrapRuntime): void {
+function registerBootstrapShutdownHandlers({ node, datastore, runtimeFile, federationReconnectTimer }: BootstrapRuntime): void {
   let shuttingDown = false;
   const shutdown = async (signal: 'SIGINT' | 'SIGTERM'): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
 
     console.log(`\nShutting down bootstrap node (${signal})...`);
+
+    if (federationReconnectTimer) {
+      clearInterval(federationReconnectTimer);
+    }
 
     // Remove runtime metadata first so the CLI immediately stops treating this
     // node as healthy while it winds down.
@@ -362,8 +452,20 @@ async function createBootstrapNode(): Promise<BootstrapRuntime> {
     await removeRuntimeMetadataFile(runtimeFile, { required: isDeploymentMode() });
   }
 
-  const { privateKey } = await PeerIdManager.loadOrCreate(runtimeConfig.peerIdFile, {
+  const { peerId, privateKey } = await PeerIdManager.loadOrCreate(runtimeConfig.peerIdFile, {
     failClosed: isDeploymentMode(),
+  });
+
+  // Federation peers minus this node's own entry. The same full list is
+  // deployed to every node, so each must drop itself — a self-dial is rejected
+  // by libp2p and would otherwise log an error on every reconnect tick.
+  const selfPeerId = peerId.toString();
+  const federationPeers = runtimeConfig.bootstrapPeers.filter((addr) => {
+    try {
+      return multiaddr(addr).getPeerId() !== selfPeerId;
+    } catch {
+      return false;
+    }
   });
 
   await mkdir(runtimeConfig.datastorePath, { recursive: true });
@@ -383,6 +485,13 @@ async function createBootstrapNode(): Promise<BootstrapRuntime> {
       transports: [tcp()],
       connectionEncrypters: [noise()],
       streamMuxers: [yamux()],
+      // Federate with sibling bootstraps when configured (fast mode only): the
+      // bootstrap module performs the initial dial + tags them; the periodic
+      // startFederationReconnect (after start) heals any dropped link. Self is
+      // already filtered out of federationPeers above.
+      ...(federationPeers.length > 0
+        ? { peerDiscovery: [bootstrapDiscovery({ list: federationPeers })] }
+        : {}),
       connectionManager: {
         // Every Kiyeovo client holds up to 3 long-lived bootstrap connections
         // (MAX_BOOTSTRAP_NODES_FAST) and runs the DHT in server mode, so a
@@ -430,11 +539,16 @@ async function createBootstrapNode(): Promise<BootstrapRuntime> {
       await writeRuntimeMetadata(runtimeFile, metadata, { required: isDeploymentMode() });
     }
 
+    const federationReconnectTimer = federationPeers.length > 0
+      ? startFederationReconnect(bootstrap as ChatNode, federationPeers)
+      : undefined;
+
     return {
       node: bootstrap as ChatNode,
       datastore,
       datastorePath: runtimeConfig.datastorePath,
       runtimeFile,
+      federationReconnectTimer,
     };
   } catch (error: unknown) {
     try {
