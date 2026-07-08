@@ -116,7 +116,7 @@ export const PREDEFINED_NODES_OFFERING_LABELS = {
 // anonymous users may not want to open an external website.
 export const PREDEFINED_NODES_EXTERNAL_CONFIRM_TITLE = 'Open external website?';
 export const PREDEFINED_NODES_EXTERNAL_CONFIRM_BODY =
-  'This opens the Kiyeovo README on github.com in your regular browser, outside the app and outside Tor.';
+  'This opens the Kiyeovo README on github.com in your regular browser, outside the app and outside Tor. You can open the link youself: https://github.com/Realman78/Kiyeovo/blob/main/README.md#servers';
 export const PREDEFINED_NODES_EXTERNAL_CONFIRM_OPEN_LABEL = 'Open in browser';
 export const PREDEFINED_NODES_EXTERNAL_CONFIRM_CANCEL_LABEL = 'Cancel';
 
