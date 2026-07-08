@@ -1,16 +1,18 @@
 # Kiyeovo
 
-> Beta notice: this is the beta version of Kiyeovo. Expect rough edges, missing polish, and behavior changes before the first full release on 7th of July 2026
+> Kiyeovo 1.0 is here. It's a single-developer project, so if something breaks or a platform isn't supported, [report it](https://github.com/Realman78/Kiyeovo/issues). If you find security issues, please send them to doroxhr@gmail.com 
 > Tested on: Linux (Debian, Ubuntu, Lubuntu, EndeavourOS) and macOS.
+>
+> **Download:** grab an installer from the [Releases page](https://github.com/Realman78/Kiyeovo/releases) or kiyeovo.marindedic.com.
 
 Kiyeovo is a decentralized peer-to-peer communication app. It supports many features you would find in modern messaging applications, yet still stays fully decentralized & respects your privacy. No e-mail or any KYC data needed.
 
 - realtime end-to-end encrypted messages
 - messages securely peristed when the other side is not online
-- group chats
+- group chats, group calls, and screen sharing
 - `fast` mode is for normal day-to-day use: lower latency, relays, audio/video calling
 - `anonymous` mode is for Tor-routed messaging. Better anonymity, but slower and no call support
-- encrypted file transfer
+- encrypted file transfer (1:1 and group), with offline delivery of messages and file offers
 - trusted profile import/export
 - identity backup
 - no central account or message server; use trusted bootstrap/relay servers or self-host with the [guide](#bootstrap-and-relay-setup)
@@ -20,33 +22,76 @@ For technical readers, contributors, and coding agents, start with [Kiyeovo_desk
 <img width="1532" height="832" alt="image" src="https://github.com/user-attachments/assets/e25008f2-3c78-4886-992f-0fb50a765944" />
 
 
-## Beta status
+## Status
 
-The purpose of this beta release is to gain feedback on the core app functionality and feel. Keep in mind, this is a single-developer effort so I physically cannot test on every platform. If you find any issues, please report them - they will be solved ASAP.
+This is a single-developer project, so I can't test every platform and network setup. If you hit a problem, please [open an issue](https://github.com/Realman78/Kiyeovo/issues) or if you find security issues, please send them to doroxhr@gmail.com — fixes go out as fast as I can manage.
 
-At the time of updating this README document (30th of June), all of the expected "bigger" features have already been added since the beta release.
-Some of the most notable added features:
+Some of the more notable things in 1.0: screen sharing in calls, group calls, group file sharing, offline file sharing, Electron security hardening, and a large UX pass (home-screen redesign, first-time onboarding, and the everyday messaging niceties) aimed at making a fairly technical app approachable for non-technical users.
 
-- Screen sharing in calls
-- Group calls
-- Group file sharing
-- Offline file sharing
-- Electron security hardening
-- Huge UX improvements such as: home screen redesign, first-time user onboard, typical messaging features
-- Lot of effort poured into making this "technical" app be simple enough for less-technical users
-- etc.
+## Installing / Troubleshooting
 
-What's left:
+Most people should just grab an installer from the [Releases page](https://github.com/Realman78/Kiyeovo/releases) or kiyeovo.marindedic.com. The notes below cover platform quirks you may hit with the released **1.0.0** installers. These are documented workarounds for OS-level packaging/security behavior, not app bugs. If you run into something not covered here, please [open an issue](https://github.com/Realman78/Kiyeovo/issues).
 
-- Self hosting infrastcture CLI tool - makes self hosting setup much easier *(coming 1st of July)*
-- Testing & polishing *(30th of June - 6th of July)*
-- Platform specific installers which will be available on kiyeovo.marindedic.com - final step *(coming 7th of July - relase)*
+### Linux
+
+Two Linux artifacts are published: `Kiyeovo-1.0.0.AppImage` and `Kiyeovo_1.0.0_amd64.deb`. On Debian/Ubuntu/Lubuntu the **.deb is the smoother path** — prefer it if you're unsure.
+
+**AppImage aborts with a `chrome-sandbox` SUID error.** Launching the AppImage may fail with `The SUID sandbox helper binary was found, but is not configured correctly`. Chromium's sandbox needs unprivileged user namespaces, which some distros and VMs disable. Options, in order of preference:
+
+- Install the **.deb** instead (see below).
+- Run with the sandbox disabled:
+
+```bash
+./Kiyeovo-1.0.0.AppImage --no-sandbox
+```
+
+- Or enable unprivileged user namespaces on your system (distro-specific).
+
+**AppImage won't run without FUSE.** On newer Ubuntu/Debian the AppImage needs `libfuse2`:
+
+```bash
+sudo apt install libfuse2
+```
+
+Or run it without FUSE (extracts to a temp dir and runs):
+
+```bash
+./Kiyeovo-1.0.0.AppImage --appimage-extract-and-run
+```
+
+**Installing the .deb.** Install it with apt (this also pulls any dependencies):
+
+```bash
+sudo apt install ./Kiyeovo_1.0.0_amd64.deb
+```
+
+Or with dpkg, then fix up dependencies:
+
+```bash
+sudo dpkg -i ./Kiyeovo_1.0.0_amd64.deb
+sudo apt -f install
+```
+
+Note: **double-clicking the .deb file to "run" it shows an error — that's expected.** A .deb is a package to be *installed*, not launched directly. After installing, start **Kiyeovo from your applications menu** (it appears under the *Internet* category).
+
+### macOS
+
+The published macOS artifacts are `Kiyeovo-1.0.0-arm64.dmg` (Apple Silicon) and `Kiyeovo-1.0.0-x64.dmg` (Intel); matching `.zip` builds are also available.
+
+**First launch is blocked by Gatekeeper.** The 1.0 build is not notarized, so macOS refuses the first launch with *"Kiyeovo can't be opened because Apple cannot check it for malicious software."* You only need to clear this once. Either:
+
+- **Right-click (or Control-click) `Kiyeovo.app` → Open → Open** in the dialog, or
+- remove the quarantine attribute from a terminal:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Kiyeovo.app
+```
 
 ## Quick start from source
 
-> Before publishing 1.0.0 installers, replace the predefined server placeholders in [src/core/predefined-nodes.ts](./src/core/predefined-nodes.ts) and list the final values in [Servers](#servers). Until then, use self-hosted infrastructure from [Bootstrap and relay setup](#bootstrap-and-relay-setup).
+Most people should just grab an installer (see [Download](#kiyeovo) above). Build from source only if you want to hack on it or run unreleased changes.
 
-> There is also an **outdated** tutorial [here](https://marindedic.com/p2p-messenger/) (will be updated on 1st of July), but you can just follow the steps below
+> There is also a walkthrough [here](https://marindedic.com/p2p-messenger/) that may lag behind the app — the steps below are authoritative.
 
 Requirements for running:
 
@@ -429,7 +474,7 @@ The desktop app is built with Electron, React, and libp2p.
 
 ## How this differs from similar solutions (roughly)
 
-> This comparison reflects the current beta version. The final version differences may differ.
+> This comparison is a rough, best-effort snapshot and may drift as all these projects evolve.
 
 - Briar: Briar runs everything over Tor and also supports syncing via Bluetooth, Wi-Fi or memory cards. Kiyeovo instead has two separate, and completely isolated, network modes -> Fast (clearnet) and Anonymous (Tor) - you can choose between performance (and additional features) and anonymity
 - Session: Session uses its own network of nodes to send and store messages. Kiyeovo uses pure libp2p and stores offline messages in the DHT - simpler, but not guaranteed "always-on".

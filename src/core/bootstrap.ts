@@ -8,6 +8,7 @@ import { identify } from '@libp2p/identify';
 import { ping } from '@libp2p/ping';
 import { gossipsub } from '@chainsafe/libp2p-gossipsub';
 import { multiaddr } from '@multiformats/multiaddr';
+import { peerIdFromString } from '@libp2p/peer-id';
 import { LevelDatastore } from 'datastore-level';
 import { mkdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
@@ -345,8 +346,17 @@ const FEDERATION_RECONNECT_MISS_THRESHOLD = 2;
 
 function startFederationReconnect(node: ChatNode, peers: string[]): NodeJS.Timeout {
   const consecutiveMisses = new Map<string, number>();
-  const reconnectMissing = (): void => {
+  const maintainFederation = (): void => {
     const connected = new Set(node.getConnections().map((connection) => connection.remotePeer.toString()));
+    // kad-dht only admits a peer to the routing table on peer:connect (via its
+    // topology). A sibling can be evicted from the routing table while its TCP
+    // connection stays up (connectionMonitor keeps the socket alive and we set
+    // abortConnectionOnPingFailure:false), so peer:connect never re-fires and
+    // the peer is never re-added — federation silently degrades even though
+    // getConnections() still lists it. Re-assert routing-table membership for
+    // every connected sibling each tick so an eviction self-heals.
+    const routingTable = ((node.services as Record<string, unknown>).dht as
+      { routingTable?: { add?: (peerId: PeerId) => Promise<void> } } | undefined)?.routingTable;
     for (const addr of peers) {
       let peerIdStr: string | null = null;
       try {
@@ -357,6 +367,11 @@ function startFederationReconnect(node: ChatNode, peers: string[]): NodeJS.Timeo
       if (peerIdStr === null) continue;
       if (connected.has(peerIdStr)) {
         consecutiveMisses.delete(peerIdStr);
+        // add() is idempotent (no-op when already present) and ping-gated (skips
+        // an unresponsive peer), so re-adding a live sibling every tick is safe.
+        if (routingTable?.add) {
+          void Promise.resolve(routingTable.add(peerIdFromString(peerIdStr))).catch(() => {});
+        }
         continue;
       }
       const misses = (consecutiveMisses.get(peerIdStr) ?? 0) + 1;
@@ -367,7 +382,7 @@ function startFederationReconnect(node: ChatNode, peers: string[]): NodeJS.Timeo
       });
     }
   };
-  const timer = setInterval(reconnectMissing, FEDERATION_RECONNECT_INTERVAL_MS);
+  const timer = setInterval(maintainFederation, FEDERATION_RECONNECT_INTERVAL_MS);
   // Don't hold the event loop open solely for this timer.
   timer.unref?.();
   return timer;
