@@ -2,7 +2,7 @@ import { createLibp2p } from 'libp2p';
 import { tcp } from '@libp2p/tcp';
 import { noise } from '@chainsafe/libp2p-noise';
 import { yamux } from '@chainsafe/libp2p-yamux';
-import { kadDHT, passthroughMapper } from '@libp2p/kad-dht';
+import { kadDHT } from '@libp2p/kad-dht';
 import { bootstrap as bootstrapDiscovery } from '@libp2p/bootstrap';
 import { identify } from '@libp2p/identify';
 import { ping } from '@libp2p/ping';
@@ -41,6 +41,7 @@ import {
   type ServiceRuntimeMetadata,
 } from './server/runtime-metadata.js';
 import { filterOnionAddressesMapper } from './utils/miscellaneous.js';
+import { filterToDirectPublicAddressesMapper } from './utils/dht-address-mapper.js';
 import { offlineMessageSelector, offlineMessageValidateUpdate, offlineMessageValidator } from './direct/offline-message-validator.js';
 import { groupOfflineMessageValidator, groupInfoLatestValidator, groupInfoVersionedValidator, groupOfflineMessageSelector, groupInfoLatestSelector, groupInfoVersionedSelector, groupOfflineValidateUpdate, groupInfoLatestValidateUpdate, groupInfoVersionedValidateUpdate } from './group/dht/group-dht-validator.js';
 import {
@@ -301,7 +302,7 @@ function createBootstrapServices(runtimeConfig: BootstrapRuntimeConfig) {
     }),
     dht: kadDHT({
       protocol: runtimeConfig.modeConfig.dhtProtocol,
-      peerInfoMapper: runtimeConfig.isAnonymousMode ? filterOnionAddressesMapper : passthroughMapper,
+      peerInfoMapper: runtimeConfig.isAnonymousMode ? filterOnionAddressesMapper : filterToDirectPublicAddressesMapper,
       clientMode: false,
       kBucketSize: K_BUCKET_SIZE,
       prefixLength: PREFIX_LENGTH,

@@ -1,9 +1,8 @@
 # Kiyeovo
 
-> Kiyeovo 1.0 is here. It's a single-developer project, so if something breaks or a platform isn't supported, [report it](https://github.com/Realman78/Kiyeovo/issues). If you find security issues, please send them to doroxhr@gmail.com 
-> Tested on: Linux (Debian, Ubuntu, Lubuntu, EndeavourOS) and macOS.
+> Kiyeovo 1.0 is here. It's a single-developer project, so if something breaks or a platform isn't supported, [report it](https://github.com/Realman78/Kiyeovo/issues). For security reports, email doroxhr [at] gmail [dot] com.
 >
-> **Download:** grab an installer from the [Releases page](https://github.com/Realman78/Kiyeovo/releases) or kiyeovo.marindedic.com.
+> Tested on: Linux (Debian, Ubuntu, Lubuntu, EndeavourOS) and macOS.
 
 Kiyeovo is a decentralized peer-to-peer communication app. It supports many features you would find in modern messaging applications, yet still stays fully decentralized & respects your privacy. No e-mail or any KYC data needed.
 
@@ -19,26 +18,55 @@ Kiyeovo is a decentralized peer-to-peer communication app. It supports many feat
 
 For technical readers, contributors, and coding agents, start with [Kiyeovo_desktop_technical_documentation.md](./Kiyeovo_desktop_technical_documentation.md). That is the source-of-truth architecture overview.
 
-<img width="1532" height="832" alt="image" src="https://github.com/user-attachments/assets/e25008f2-3c78-4886-992f-0fb50a765944" />
-
-
 ## Status
 
-This is a single-developer project, so I can't test every platform and network setup. If you hit a problem, please [open an issue](https://github.com/Realman78/Kiyeovo/issues) or if you find security issues, please send them to doroxhr@gmail.com — fixes go out as fast as I can manage.
+This is a single-developer project, so I can't test every platform and network setup. If you hit a problem, please [open an issue](https://github.com/Realman78/Kiyeovo/issues) or if you find security issues, please send them to doroxhr [at] gmail [dot] com — fixes go out as fast as I can manage.
 
 Some of the more notable things in 1.0: screen sharing in calls, group calls, group file sharing, offline file sharing, Electron security hardening, and a large UX pass (home-screen redesign, first-time onboarding, and the everyday messaging niceties) aimed at making a fairly technical app approachable for non-technical users.
 
-## Installing / Troubleshooting
 
-Most people should just grab an installer from the [Releases page](https://github.com/Realman78/Kiyeovo/releases) or kiyeovo.marindedic.com. The notes below cover platform quirks you may hit with the released **1.0.0** installers. These are documented workarounds for OS-level packaging/security behavior, not app bugs. If you run into something not covered here, please [open an issue](https://github.com/Realman78/Kiyeovo/issues).
+
+## Installation
+
+Most people should just grab an installer from the [Releases page](https://github.com/Realman78/Kiyeovo/releases). If you run into issues, take a look at the [notes below](#install-notes) that cover platform quirks you may hit with the released **1.0.0** installers. These are documented workarounds for OS-level packaging/security behavior, not app bugs. If you run into something not covered here, please [open an issue](https://github.com/Realman78/Kiyeovo/issues).
 
 ### Linux
 
-Two Linux artifacts are published: `Kiyeovo-1.0.0.AppImage` and `Kiyeovo_1.0.0_amd64.deb`. On Debian/Ubuntu/Lubuntu the **.deb is the smoother path** — prefer it if you're unsure.
+Two Linux artifacts are published: `Kiyeovo_1.0.0_amd64.deb` and  `Kiyeovo-1.0.0.AppImage`.
 
-**AppImage aborts with a `chrome-sandbox` SUID error.** Launching the AppImage may fail with `The SUID sandbox helper binary was found, but is not configured correctly`. Chromium's sandbox needs unprivileged user namespaces, which some distros and VMs disable. Options, in order of preference:
+**Installing the .deb.** Install it with apt (this also pulls any dependencies):
 
-- Install the **.deb** instead (see below).
+```bash
+sudo apt install ./Kiyeovo_1.0.0_amd64.deb
+```
+
+After that, the app should be installed and ready for use.
+
+**Installing the AppImage**
+
+```bash
+chmod +x Kiyeovo-1.0.0.AppImage
+./Kiyeovo-1.0.0.AppImage
+```
+
+
+
+### macOS
+
+Download the build for your Mac:
+
+- Apple Silicon: `Kiyeovo-1.0.0-arm64.dmg`
+- Intel: `Kiyeovo-1.0.0-x64.dmg`
+
+Open the DMG and drag Kiyeovo into Applications.
+
+### General installation notes
+
+**AppImage**
+
+**AppImage aborts with a** `chrome-sandbox` **SUID error.**  Options, in order of preference:
+
+- Install the **.deb** instead (see above).
 - Run with the sandbox disabled:
 
 ```bash
@@ -59,43 +87,24 @@ Or run it without FUSE (extracts to a temp dir and runs):
 ./Kiyeovo-1.0.0.AppImage --appimage-extract-and-run
 ```
 
-**Installing the .deb.** Install it with apt (this also pulls any dependencies):
-
-```bash
-sudo apt install ./Kiyeovo_1.0.0_amd64.deb
-```
-
-Or with dpkg, then fix up dependencies:
-
-```bash
-sudo dpkg -i ./Kiyeovo_1.0.0_amd64.deb
-sudo apt -f install
-```
-
-Note: **double-clicking the .deb file to "run" it shows an error — that's expected.** A .deb is a package to be *installed*, not launched directly. After installing, start **Kiyeovo from your applications menu** (it appears under the *Internet* category).
-
-### macOS
+**macOS**
 
 The published macOS artifacts are `Kiyeovo-1.0.0-arm64.dmg` (Apple Silicon) and `Kiyeovo-1.0.0-x64.dmg` (Intel); matching `.zip` builds are also available.
 
-**First launch is blocked by Gatekeeper.** The 1.0 build is not notarized, so macOS refuses the first launch with *"Kiyeovo can't be opened because Apple cannot check it for malicious software."* You only need to clear this once. Either:
+**First launch is blocked by macOS.** The 1.0 build is not notarized, so macOS may refuse the first launch with *"Kiyeovo can't be opened because Apple cannot check it for malicious software."* You only need to do this once: Depending on the macOS version, either: 
 
-- **Right-click (or Control-click) `Kiyeovo.app` → Open → Open** in the dialog, or
-- remove the quarantine attribute from a terminal:
+1. right-click or Control-click `Kiyeovo.app`, choose **Open**, then confirm **Open** in the dialog.
+2. Enable the app in the Privacy & Security settings tab
 
-```bash
-xattr -dr com.apple.quarantine /Applications/Kiyeovo.app
-```
+
 
 ## Quick start from source
 
-Most people should just grab an installer (see [Download](#kiyeovo) above). Build from source only if you want to hack on it or run unreleased changes.
-
-> There is also a walkthrough [here](https://marindedic.com/p2p-messenger/) that may lag behind the app — the steps below are authoritative.
+Most people should just grab an installer (see [Download](#kiyeovo) above). If you want to build from source:
 
 Requirements for running:
 
-- Node.js 20+
+- Node.js 20+; Node.js < 26.x
 - npm
 
 Clone the repo:
@@ -104,6 +113,8 @@ Clone the repo:
 git clone https://github.com/Realman78/Kiyeovo.git
 cd Kiyeovo
 ```
+
+
 
 ### Local non-dev run
 
@@ -114,16 +125,12 @@ npm run start:local
 
 `npm run setup` installs dependencies and sets up Tor. If you only plan to use fast mode, `npm install` is enough.
 
-### Local development / testing 
+### Local development / testing
 
 ```bash
 npm run setup
 DEBUG_MODE=true npm run dev
 ```
-
-> You can omit `DEBUG_MODE=true` if you don't plan on reporting any bugs
-
-Technical detail: local and development runs now use Electron renderer sandboxing.
 
 #### Linux sandbox helper for development
 
@@ -150,10 +157,6 @@ ls -l node_modules/electron/dist/chrome-sandbox
 
 The output should start with something like `-rwsr-xr-x 1 root root`. You may need to repeat this after deleting or reinstalling `node_modules`. This should not be automated in `postinstall`; production Linux installs should handle sandbox setup through proper distro/package installer behavior.
 
-### Scrypt note (optional)
-
-If your machine is not low-end, consider increasing `IDENTITY_SCRYPT_N` and `PROFILE_SCRYPT_N` in [src/core/constants.ts](./src/core/constants.ts) for stronger protection against local brute-force password attacks, but at the cost of slower unlock/import.
-
 ## Servers
 
 Kiyeovo runs a small fleet of trusted bootstrap / relay / STUN / TURN servers so
@@ -164,6 +167,8 @@ user on any other.
 
 > ⚠️ **Shutdown: these servers shut down on 2026-07-25.** After that the
 > app shows a one-time notice. This does **not** affect your identity, contacts, or messages — only which servers you route through.
+
+
 
 ### Fast mode
 
@@ -210,20 +215,21 @@ stun:178.156.221.255:3478   # Ashburn, US
 TURN (relays call media when a direct connection can't be made) — username and
 password required. Add the one(s) nearest you:
 
-| Region | TURN URL | Username | Password |
-|--------|----------|----------|----------|
+
+| Region        | TURN URL                    | Username  | Password                           |
+| ------------- | --------------------------- | --------- | ---------------------------------- |
 | San Francisco | `turn:167.172.115.233:3478` | `kiyeovo` | `tsAfclgbgNPSw6k3SmI0BVCzWezzcQLU` |
-| New York | `turn:137.184.147.152:3478` | `kiyeovo` | `rbD1luoutb0ONhsXSnNESaVaCVOxbIFd` |
+| New York      | `turn:137.184.147.152:3478` | `kiyeovo` | `rbD1luoutb0ONhsXSnNESaVaCVOxbIFd` |
 | Nuremberg, DE | `turn:178.104.248.235:3478` | `kiyeovo` | `p35a3OimZ8TLQreoVBiK7OExEPgqUC8y` |
-| Singapore | `turn:157.245.149.195:3478` | `kiyeovo` | `bNagZ3o45G39KxSd3kpjNZCR16p7Q3WE` |
-| Sydney | `turn:170.64.154.208:3478` | `kiyeovo` | `nAiNBxxe55ScPz381Vjla6eLjJIi1qqG` |
+| Singapore     | `turn:157.245.149.195:3478` | `kiyeovo` | `bNagZ3o45G39KxSd3kpjNZCR16p7Q3WE` |
+| Sydney        | `turn:170.64.154.208:3478`  | `kiyeovo` | `nAiNBxxe55ScPz381Vjla6eLjJIi1qqG` |
+
+
+
 
 ### Anonymous mode (Tor)
 
-Onion bootstraps — Setup → Bootstrap (in anonymous mode). Unlike the fast-mode
-bootstraps, these are **NOT interconnected** — each is its own separate network.
-Two anonymous users find each other only if they share a bootstrap, so **add all
-of them** (or at least the same set as the person you want to reach):
+Onion bootstraps — Setup → Bootstrap (in anonymous mode). Unlike the fast-mode bootstraps, these are **NOT interconnected** — each is its own separate network. Two anonymous users find each other only if they share a bootstrap, so **add all of them** (or at least the same set as the person you want to reach):
 
 ```text
 /onion3/26ls5ncglwcndci23ibeaz2nynivobs6armqonsnwag3gh5sn24rgmid:9000/p2p/12D3KooWApMAqAEWpWenYfXRZwWMUH8arQYjACu7xNhASBWm2st5   # San Francisco
@@ -237,21 +243,13 @@ of them** (or at least the same set as the person you want to reach):
 /onion3/flhf3mdjvs6zh3lqtrt2vd5gkag2ep6s572eg3dhgh3thisynn3le7ad:9000/p2p/12D3KooWDzpe3uinXk7eiCMH1yRD35Za8PxBeaUYMfkVa2jekq1E   # Sydney
 ```
 
-Prefer not to rely on these? Self-host your own with the infrastructure bundle
-below.
+Prefer not to rely on these? Self-host your own with the infrastructure bundle below.
 
 ## Bootstrap and relay setup
 
-The recommended way to self-host is the **released `kiyeovo-infra` bundle**. It
-runs the bootstrap, relay, optional Tor onion (anonymous mode), and optional
-coturn TURN server as pinned Docker containers, owns their lifecycle
-(start/stop/restart/auto-restart) through Docker Compose, and prints the exact
-addresses to paste into Kiyeovo's Setup pages.
+The recommended way to self-host is the **released** `kiyeovo-infra` **bundle**. It runs the bootstrap, relay, optional Tor onion (anonymous mode), and optional coturn TURN server as pinned Docker containers, owns their lifecycle (start/stop/restart/auto-restart) through Docker Compose, and prints the exact addresses to paste into Kiyeovo's Setup pages.
 
-Most users should not clone this repository or build Kiyeovo from source just to
-self-host. The desktop app will be distributed separately (for Linux, as an
-AppImage), and the infrastructure bundle pulls versioned public images from
-GHCR.
+Most users should not clone this repository or build Kiyeovo from source just to self-host. The desktop app will be distributed separately (for Linux, as an AppImage), and the infrastructure bundle pulls versioned public images from GHCR.
 
 ### Recommended: release bundle (Docker)
 
@@ -355,7 +353,7 @@ The steps below run the servers by hand and are the alternative to the CLI above
 ROLE=bootstrap npm install
 ```
 
-2. Start a bootstrap node:
+1. Start a bootstrap node:
 
 ```bash
 BOOTSTRAP_NETWORK_MODE=fast \
@@ -365,26 +363,27 @@ npm run bootstrap
 
 The fast bootstrap listener defaults to `0.0.0.0:9000`. If you need a different local port, set `BOOTSTRAP_LISTEN_ADDRESS`.
 
-3. Start a relay node (if you already ran `ROLE=bootstrap npm install`):
+1. Start a relay node (if you already ran `ROLE=bootstrap npm install`):
 
 ```bash
 RELAY_ANNOUNCE_ADDRS=/ip4/YOUR_PUBLIC_IP/tcp/4002 \
 npm run relay
 ```
 
-4. Make sure your firewall rules allow TCP on:
+1. Make sure your firewall rules allow TCP on:
 
 ```text
 9000  # bootstrap
 4002  # relay
 ```
 
-5. You should be all set now. To register the servers in Kiyeovo, open the **Setup** tab in the left sidebar rail, then add each multiaddress with **Add server** — the bootstrap address under **Bootstrap servers** and the relay address under **Relay servers**:
+1. You should be all set now. To register the servers in Kiyeovo, open the **Setup** tab in the left sidebar rail, then add each multiaddress with **Add server** — the bootstrap address under **Bootstrap servers** and the relay address under **Relay servers**:
 
 ```text
 /ip4/YOUR_PUBLIC_IP/tcp/9000/p2p/<BOOTSTRAP_PEER_ID>
 /ip4/YOUR_PUBLIC_IP/tcp/4002/p2p/<RELAY_PEER_ID>
 ```
+
 
 
 #### Anonymous mode
@@ -395,7 +394,7 @@ npm run relay
 ROLE=bootstrap npm run setup
 ```
 
-2. Install and start a Tor daemon on the host. Example on linux:
+1. Install and start a Tor daemon on the host. Example on linux:
 
 ```
 apt update
@@ -405,7 +404,7 @@ systemctl enable tor # if you want to enable it on startup
 systemctl status tor # verify it's running
 ```
 
-3. Configure a hidden service that forwards the public onion port to the local bootstrap listener. Example on linux - add the below config to `/etc/tor/torrc`:
+1. Configure a hidden service that forwards the public onion port to the local bootstrap listener. Example on linux - add the below config to `/etc/tor/torrc`:
 
 ```conf
 HiddenServiceDir /var/lib/tor/kiyeovo-bootstrap/ # you will find your onion hostname here later
@@ -416,7 +415,7 @@ After changes, restart the tor service: `systemctl restart tor`
 
 Find your onion host: `cat /var/lib/tor/kiyeovo-bootstrap/hostname`
 
-4. Start a bootstrap node in anonymous mode:
+1. Start a bootstrap node in anonymous mode:
 
 ```bash
 BOOTSTRAP_NETWORK_MODE=anonymous \
@@ -427,7 +426,7 @@ npm run bootstrap
 
 If you host both fast and anonymous bootstrap nodes on the same machine, keep fast mode on `0.0.0.0:9000` and anonymous mode on local `127.0.0.1:9001`.
 
-5. The setup is done. To register the server in Kiyeovo, open the **Setup** tab in the left sidebar rail, go to **Bootstrap servers**, and add the address with **Add server**:
+1. The setup is done. To register the server in Kiyeovo, open the **Setup** tab in the left sidebar rail, go to **Bootstrap servers**, and add the address with **Add server**:
 
 ```text
 /onion3/YOUR_ONION_HOST:9000/p2p/<BOOTSTRAP_PEER_ID>
@@ -442,9 +441,10 @@ Calls are currently fast-mode direct 1:1 calls.
 If you want to self-host calls, a simple path is outlined below. Keep in mind, depending on your and the other party's router setting, you might not even need the TURN server.
 
 1. Set up a TURN server such as coturn. Example on linux:
-    - install coturn with `apt install coturn`
+  - install coturn with `apt install coturn`
     - run `sed -i 's/^#TURNSERVER_ENABLED=.*/TURNSERVER_ENABLED=1/' /etc/default/coturn`
     - add the configuration below to `/etc/turnserver.conf`:
+
 ```
 listening-port=3478
 fingerprint
@@ -457,14 +457,12 @@ max-port=49200
 no-cli
 ```
 
-2. Set up firewall (if firewall is enabled)
-    - ALLOW TCP and UDP on port 3478
+1. Set up firewall (if firewall is enabled)
+  - ALLOW TCP and UDP on port 3478
     - ALLOW UDP on port range 49160:49200.
     - From before: if you are running bootstrap and relay, ALLOW TCP on ports 9000 (bootstrap) and 4002 (relay)
-
-3. Run `systemctl enable --now coturn`
-
-4. The servers should be running now. To register them in Kiyeovo, open the **Setup** tab in the left sidebar rail and go to **STUN/TURN servers**, then add each entry with **Add server**.
+2. Run `systemctl enable --now coturn`
+3. The servers should be running now. To register them in Kiyeovo, open the **Setup** tab in the left sidebar rail and go to **STUN/TURN servers**, then add each entry with **Add server**.
 
 You can add multiple ICE servers. Kiyeovo supports `stun`, `turn`, and `turns` entries.
 
@@ -480,3 +478,4 @@ The desktop app is built with Electron, React, and libp2p.
 - Session: Session uses its own network of nodes to send and store messages. Kiyeovo uses pure libp2p and stores offline messages in the DHT - simpler, but not guaranteed "always-on".
 - Tox: Tox runs as one global P2P network. Kiyeovo splits things into two separate networks depending on the mode.
 - Ricochet: Ricochet is simple Tor-based messaging. Kiyeovo is more full-featured, with groups, offline messages, file transfer, and calls (in fast mode).
+
