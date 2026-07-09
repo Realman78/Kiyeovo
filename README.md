@@ -7,11 +7,12 @@
 Kiyeovo is a decentralized peer-to-peer communication app. It supports many features you would find in modern messaging applications, yet still stays fully decentralized & respects your privacy. No e-mail or any KYC data needed.
 
 - realtime end-to-end encrypted messages
+- Direct & group video and audio calls with screen sharing options
 - messages securely peristed when the other side is not online
-- group chats, group calls, and screen sharing
+- group chats, group calls
 - `fast` mode is for normal day-to-day use: lower latency, relays, audio/video calling
 - `anonymous` mode is for Tor-routed messaging. Better anonymity, but slower and no call support
-- encrypted file transfer (1:1 and group), with offline delivery of messages and file offers
+- encrypted file transfers
 - trusted profile import/export
 - identity backup
 - no central account or message server; use trusted bootstrap/relay servers or self-host with the [guide](#bootstrap-and-relay-setup)
@@ -20,15 +21,12 @@ For technical readers, contributors, and coding agents, start with [Kiyeovo_desk
 
 ## Status
 
-This is a single-developer project, so I can't test every platform and network setup. If you hit a problem, please [open an issue](https://github.com/Realman78/Kiyeovo/issues) or if you find security issues, please send them to doroxhr [at] gmail [dot] com — fixes go out as fast as I can manage.
-
-Some of the more notable things in 1.0: screen sharing in calls, group calls, group file sharing, offline file sharing, Electron security hardening, and a large UX pass (home-screen redesign, first-time onboarding, and the everyday messaging niceties) aimed at making a fairly technical app approachable for non-technical users.
-
+This is a single-developer project, so I can't test every platform and network setup. If you hit a problem, please [open an issue](https://github.com/Realman78/Kiyeovo/issues) or if you find security issues, please send them to doroxhr [at] gmail [dot] com.
 
 
 ## Installation
 
-Most people should just grab an installer from the [Releases page](https://github.com/Realman78/Kiyeovo/releases). If you run into issues, take a look at the [notes below](#install-notes) that cover platform quirks you may hit with the released **1.0.0** installers. These are documented workarounds for OS-level packaging/security behavior, not app bugs. If you run into something not covered here, please [open an issue](https://github.com/Realman78/Kiyeovo/issues).
+Most people should just grab the appropriate installer from the [Releases page](https://github.com/Realman78/Kiyeovo/releases). If you run into issues, take a look at the [notes below](#install-notes) that cover platform quirks you may hit with the released **1.0.0** installers. These are documented workarounds for OS-level packaging/security behavior, not app bugs. If you run into something not covered here, please [open an issue](https://github.com/Realman78/Kiyeovo/issues).
 
 ### Linux
 
@@ -477,5 +475,5 @@ The desktop app is built with Electron, React, and libp2p.
 - Briar: Briar runs everything over Tor and also supports syncing via Bluetooth, Wi-Fi or memory cards. Kiyeovo instead has two separate, and completely isolated, network modes -> Fast (clearnet) and Anonymous (Tor) - you can choose between performance (and additional features) and anonymity
 - Session: Session uses its own network of nodes to send and store messages. Kiyeovo uses pure libp2p and stores offline messages in the DHT - simpler, but not guaranteed "always-on".
 - Tox: Tox runs as one global P2P network. Kiyeovo splits things into two separate networks depending on the mode.
-- Ricochet: Ricochet is simple Tor-based messaging. Kiyeovo is more full-featured, with groups, offline messages, file transfer, and calls (in fast mode).
+- Ricochet: Ricochet is simple Tor-based messaging. Kiyeovo also has Tor-based messaging, but also has a ton more features and capabilites.
 
