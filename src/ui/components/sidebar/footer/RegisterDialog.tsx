@@ -56,6 +56,10 @@ const RegisterDialog = ({
   };
 
   const validationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  // Set when the field is populated from a prefill (initial/last-used) rather
+  // than user typing, so we select the text once and only once.
+  const shouldSelectPrefill = useRef(false);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newValue = e.target.value;
@@ -81,9 +85,12 @@ const RegisterDialog = ({
       const initial = initialUsername || "";
       setUsername(initial);
       setValidationError("");
-      if (!initial) {
+      if (initial) {
+        shouldSelectPrefill.current = true;
+      } else {
         void window.kiyeovoAPI.getLastUsername().then((result) => {
           if (result.username) {
+            shouldSelectPrefill.current = true;
             setUsername(result.username);
           }
         });
@@ -96,6 +103,17 @@ const RegisterDialog = ({
       setValidationError("");
     }
   }, [open, isRegistering, initialUsername]);
+
+  // Select a prefilled username (from initialUsername or the last-used name) so
+  // the user can immediately type over it instead of clearing it first. Runs
+  // only on prefill (flag), not on every keystroke.
+  useEffect(() => {
+    if (shouldSelectPrefill.current && username && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+      shouldSelectPrefill.current = false;
+    }
+  }, [username]);
 
   useEffect(() => {
     if (open) {
@@ -155,6 +173,7 @@ const RegisterDialog = ({
               </label>
               <div className="relative">
                 <Input
+                  ref={inputRef}
                   placeholder="Enter username..."
                   value={username}
                   onChange={handleChange}
