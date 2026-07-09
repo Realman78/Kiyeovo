@@ -8,7 +8,7 @@ Kiyeovo is a decentralized peer-to-peer communication app. It supports many feat
 
 - realtime end-to-end encrypted messages
 - Direct & group video and audio calls with screen sharing options
-- messages securely peristed when the other side is not online
+- messages securely persisted when the other side is not online
 - group chats, group calls
 - `fast` mode is for normal day-to-day use: lower latency, relays, audio/video calling
 - `anonymous` mode is for Tor-routed messaging. Better anonymity, but slower and no call support
@@ -19,18 +19,13 @@ Kiyeovo is a decentralized peer-to-peer communication app. It supports many feat
 
 For technical readers, contributors, and coding agents, start with [Kiyeovo_desktop_technical_documentation.md](./Kiyeovo_desktop_technical_documentation.md). That is the source-of-truth architecture overview.
 
-## Status
-
-This is a single-developer project, so I can't test every platform and network setup. If you hit a problem, please [open an issue](https://github.com/Realman78/Kiyeovo/issues) or if you find security issues, please send them to doroxhr [at] gmail [dot] com.
-
-
 ## Installation
 
-Most people should just grab the appropriate installer from the [Releases page](https://github.com/Realman78/Kiyeovo/releases). If you run into issues, take a look at the [notes below](#install-notes) that cover platform quirks you may hit with the released **1.0.0** installers. These are documented workarounds for OS-level packaging/security behavior, not app bugs. If you run into something not covered here, please [open an issue](https://github.com/Realman78/Kiyeovo/issues).
+Most people should just grab the appropriate installer from the [Releases page](https://github.com/Realman78/Kiyeovo/releases). If you run into issues, take a look at the [notes below](#general-installation-notes) that cover platform quirks you may hit with the released **1.0.0** installers. These are documented workarounds for OS-level packaging/security behavior, not app bugs. If you run into something not covered here, please [open an issue](https://github.com/Realman78/Kiyeovo/issues).
 
 ### Linux
 
-Two Linux artifacts are published: `Kiyeovo_1.0.0_amd64.deb` and  `Kiyeovo-1.0.0.AppImage`.
+Two Linux artifacts are published: `Kiyeovo_1.0.0_amd64.deb` and `Kiyeovo-1.0.0.AppImage`.
 
 **Installing the .deb.** Install it with apt (this also pulls any dependencies):
 
@@ -87,8 +82,6 @@ Or run it without FUSE (extracts to a temp dir and runs):
 
 **macOS**
 
-The published macOS artifacts are `Kiyeovo-1.0.0-arm64.dmg` (Apple Silicon) and `Kiyeovo-1.0.0-x64.dmg` (Intel); matching `.zip` builds are also available.
-
 **First launch is blocked by macOS.** The 1.0 build is not notarized, so macOS may refuse the first launch with *"Kiyeovo can't be opened because Apple cannot check it for malicious software."* You only need to do this once: Depending on the macOS version, either: 
 
 1. right-click or Control-click `Kiyeovo.app`, choose **Open**, then confirm **Open** in the dialog.
@@ -98,7 +91,7 @@ The published macOS artifacts are `Kiyeovo-1.0.0-arm64.dmg` (Apple Silicon) and 
 
 ## Quick start from source
 
-Most people should just grab an installer (see [Download](#kiyeovo) above). If you want to build from source:
+Most people should just grab an installer (see [Installation](#installation) above). If you want to build from source:
 
 Requirements for running:
 
@@ -163,7 +156,7 @@ pages (Bootstrap, Relay, STUN/TURN). The fast-mode bootstraps are **interconnect
 they form one network, so you only need **2–3**; a user on any of them can find a
 user on any other.
 
-> ⚠️ **Shutdown: these servers shut down on 2026-07-25.** After that the
+> ⚠️ **Shutdown: these servers shut down on 2026-07-26.** After that the
 > app shows a one-time notice. This does **not** affect your identity, contacts, or messages — only which servers you route through.
 
 
@@ -247,7 +240,7 @@ Prefer not to rely on these? Self-host your own with the infrastructure bundle b
 
 The recommended way to self-host is the **released** `kiyeovo-infra` **bundle**. It runs the bootstrap, relay, optional Tor onion (anonymous mode), and optional coturn TURN server as pinned Docker containers, owns their lifecycle (start/stop/restart/auto-restart) through Docker Compose, and prints the exact addresses to paste into Kiyeovo's Setup pages.
 
-Most users should not clone this repository or build Kiyeovo from source just to self-host. The desktop app will be distributed separately (for Linux, as an AppImage), and the infrastructure bundle pulls versioned public images from GHCR.
+Most users should not clone this repository or build Kiyeovo from source just to self-host. The desktop app is distributed separately as installers on the [Releases page](https://github.com/Realman78/Kiyeovo/releases) (Linux `.deb`/AppImage, macOS `.dmg`), and the infrastructure bundle pulls versioned public images from GHCR.
 
 ### Recommended: release bundle (Docker)
 
@@ -434,7 +427,7 @@ The relay is not needed in anonymous mode.
 
 #### (Optional) STUN/TURN for calls in Fast mode
 
-Calls are currently fast-mode direct 1:1 calls.
+Calls are fast-mode only (both 1:1 and group).
 
 If you want to self-host calls, a simple path is outlined below. Keep in mind, depending on your and the other party's router setting, you might not even need the TURN server.
 
