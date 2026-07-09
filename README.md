@@ -17,6 +17,19 @@ Kiyeovo is a decentralized peer-to-peer communication app. It supports many feat
 - identity backup
 - no central account or message server; use trusted bootstrap/relay servers or self-host with the [guide](#bootstrap-and-relay-setup)
 
+
+
+<img width="1531" height="829" alt="image" src="https://github.com/user-attachments/assets/2942b2e0-a215-40da-8709-a502b5ad911f" />
+
+*Figure: Conversation*
+
+<img width="1530" height="824" alt="Screen sharing demo" src="https://github.com/user-attachments/assets/5916ad1b-b17f-49fb-9601-ac7a0923bba7" />
+
+*Figure: Screen sharing*
+
+
+
+
 For technical readers, contributors, and coding agents, start with [Kiyeovo_desktop_technical_documentation.md](./Kiyeovo_desktop_technical_documentation.md). That is the source-of-truth architecture overview.
 
 ## Installation
