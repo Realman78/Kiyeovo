@@ -379,6 +379,16 @@ export const MAX_PENDING_FILES_PER_PEER = 5; // Max unanswered file offers per p
 export const MAX_PENDING_FILES_TOTAL = 10; // Max unanswered file offers globally
 export const MAX_ACTIVE_FILE_OFFERS_PER_CHAT = 5; // Sender cap: live served-file offers per chat (in-RAM registry)
 
+// Voice notes ride the existing file-transfer path (file_offer + pull), tagged with additive
+// `kind`/`durationMs` metadata. These bound the sender-side recording UI and are re-validated
+// on receipt — the wire-level check is deliberately looser (see message-envelope.ts) so a
+// malformed/oversized duration degrades the offer to a plain file instead of being dropped.
+export const VOICE_NOTE_MAX_DURATION_MS = 60_000; // 60 second hard cap enforced by the recorder UI
+export const VOICE_NOTE_DURATION_WIRE_SLACK_MS = 5_000; // recorder/stop timing jitter allowance
+export const VOICE_NOTE_MAX_DURATION_MS_WIRE = VOICE_NOTE_MAX_DURATION_MS + VOICE_NOTE_DURATION_WIRE_SLACK_MS;
+export const MAX_VOICE_NOTE_FILE_SIZE = 2 * 1024 * 1024; // 2MB cap for recorded voice notes specifically
+export const FILE_KIND_VOICE_NOTE = 'voice_note';
+
 // Pull-transfer (1d) operational bounds.
 export const MAX_CONCURRENT_FILE_SERVES = 15; // Global concurrent serve leases (bound to 10MB MAX_FILE_SIZE → ~150MB RAM)
 export const MAX_CONCURRENT_FILE_SERVES_PER_PEER = 5; // …and per peer; matches MAX_ACTIVE_FILE_OFFERS_PER_CHAT so a peer can pull all their offers at once without a gratuitous busy

@@ -168,8 +168,13 @@ export function registerMediaProtocolHandler(): void {
         return new Response('Not Found', { status: 404 });
       }
 
+      // Capability tokens are only ever minted by vetted main-process resolvers (completed
+      // image messages, selected/pasted images, and completed voice-note audio — see
+      // resolveCompletedImageMedia / resolveCompletedVoiceNoteMedia in ipc-handler-helpers.ts),
+      // so widening the accepted content-type class to audio/* here doesn't broaden what a
+      // renderer can reach — it only affects what this already-capability-gated stream serves.
       const contentType = mime.lookup(currentCanonicalPath);
-      if (!contentType || !contentType.startsWith('image/')) {
+      if (!contentType || !(contentType.startsWith('image/') || contentType.startsWith('audio/'))) {
         return new Response('Unsupported Media Type', { status: 415 });
       }
 

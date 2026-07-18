@@ -81,6 +81,85 @@ test('validates typed envelope identifiers and payload bounds', () => {
   })), { ok: false, reason: 'invalid_envelope' });
 });
 
+function baseFileOfferPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    type: 'file_offer',
+    offerId: 'offer_1',
+    fileId: 'file_1',
+    filename: 'clip.webm',
+    mimeType: 'audio/webm',
+    size: 1024,
+    checksum: 'a'.repeat(64),
+    totalChunks: 1,
+    timestamp: 1_750_000_000_000,
+    signature: 'sig',
+    ...overrides,
+  };
+}
+
+test('accepts a file_offer whose optional voiceNote metadata is well-formed', () => {
+  const result = decodeEnvelope(JSON.stringify({
+    v: MESSAGE_ENVELOPE_VERSION,
+    cid: 'file_1',
+    kind: 'file_offer',
+    payload: baseFileOfferPayload({ voiceNote: { durationMs: 12_000 } }),
+  }));
+  assert.equal(result.ok, true);
+  if (result.ok && result.message.kind === 'file_offer') {
+    assert.deepEqual(result.message.payload.voiceNote, { durationMs: 12_000 });
+  }
+});
+
+// The wire-shape check is deliberately loose: an out-of-range (or absurd) durationMs must NOT
+// invalidate the whole offer here — FileHandler re-validates the value and decides separately
+// whether to honor it as a voice note or silently fall back to a plain file. Only the *shape*
+// (an object with a finite, non-negative number) is enforced at this layer.
+test('tolerates an out-of-range voiceNote duration at the envelope layer (business cap is enforced elsewhere)', () => {
+  const result = decodeEnvelope(JSON.stringify({
+    v: MESSAGE_ENVELOPE_VERSION,
+    cid: 'file_1',
+    kind: 'file_offer',
+    payload: baseFileOfferPayload({ voiceNote: { durationMs: 999_999_999 } }),
+  }));
+  assert.equal(result.ok, true);
+});
+
+test('rejects a file_offer whose voiceNote metadata has the wrong shape', () => {
+  assert.deepEqual(decodeEnvelope(JSON.stringify({
+    v: MESSAGE_ENVELOPE_VERSION,
+    cid: 'file_1',
+    kind: 'file_offer',
+    payload: baseFileOfferPayload({ voiceNote: { durationMs: 'twelve seconds' } }),
+  })), { ok: false, reason: 'invalid_envelope' });
+
+  assert.deepEqual(decodeEnvelope(JSON.stringify({
+    v: MESSAGE_ENVELOPE_VERSION,
+    cid: 'file_1',
+    kind: 'file_offer',
+    payload: baseFileOfferPayload({ voiceNote: 'not-an-object' }),
+  })), { ok: false, reason: 'invalid_envelope' });
+
+  assert.deepEqual(decodeEnvelope(JSON.stringify({
+    v: MESSAGE_ENVELOPE_VERSION,
+    cid: 'file_1',
+    kind: 'file_offer',
+    payload: baseFileOfferPayload({ voiceNote: { durationMs: -1 } }),
+  })), { ok: false, reason: 'invalid_envelope' });
+});
+
+test('a plain file_offer with no voiceNote field still validates (old-client compatibility)', () => {
+  const result = decodeEnvelope(JSON.stringify({
+    v: MESSAGE_ENVELOPE_VERSION,
+    cid: 'file_1',
+    kind: 'file_offer',
+    payload: baseFileOfferPayload(),
+  }));
+  assert.equal(result.ok, true);
+  if (result.ok && result.message.kind === 'file_offer') {
+    assert.equal(result.message.payload.voiceNote, undefined);
+  }
+});
+
 test('dispatches by kind and leaves recognized-but-unregistered kinds unhandled', async () => {
   const encoded = encodeApplicationEnvelope({
     cid: 'control_1',

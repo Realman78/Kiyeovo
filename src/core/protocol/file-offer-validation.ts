@@ -30,6 +30,7 @@ export function createFileOfferSignaturePayload(
     checksum: offer.checksum,
     totalChunks: offer.totalChunks,
     ...(offer.replyToCid ? { replyToCid: offer.replyToCid } : {}),
+    ...(offer.voiceNote ? { voiceNote: offer.voiceNote } : {}),
     timestamp: offer.timestamp,
   };
 }

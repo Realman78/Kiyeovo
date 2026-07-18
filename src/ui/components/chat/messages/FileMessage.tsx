@@ -1,6 +1,6 @@
 import React, { useEffect, useState, type ReactNode } from 'react';
 import { Button } from '../../ui/Button';
-import { FolderOpen, X } from 'lucide-react';
+import { FolderOpen, Mic, X } from 'lucide-react';
 import { useDispatch, useSelector } from 'react-redux';
 import type { RootState } from '../../../state/store';
 import type { FileTransferStatus } from '../../../../core/types';
@@ -8,7 +8,8 @@ import { isImageFile } from '../../../../shared/file-types';
 import { setPendingFileStatus, updateFileTransferStatus } from '../../../state/slices/chatSlice';
 import { highlightText } from '../../../utils/highlightText';
 import { ImagePreviewDialog } from './ImagePreviewDialog';
-import { shouldRenderInlineImage } from './fileMessageUtils';
+import { shouldRenderInlineImage, shouldRenderInlineVoiceNote } from './fileMessageUtils';
+import { InlineVoiceNoteMessage } from './VoiceNoteMessage';
 
 interface FileMessageProps {
   fileId: string;
@@ -24,6 +25,16 @@ interface FileMessageProps {
   fileGroupDownloadTotal?: number;
   fileGroupDownloadCompleted?: number;
   isFromCurrentUser: boolean;
+  isVoiceNote?: boolean;
+  voiceDurationMs?: number;
+}
+
+function formatVoiceNoteDuration(ms: number | undefined): string {
+  if (ms === undefined || !Number.isFinite(ms) || ms < 0) return '--:--';
+  const totalSeconds = Math.round(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
 }
 
 interface InlineImageMessageProps {
@@ -152,7 +163,9 @@ export const FileMessage: React.FC<FileMessageProps> = ({
   transferError,
   fileGroupDownloadTotal,
   fileGroupDownloadCompleted,
-  isFromCurrentUser
+  isFromCurrentUser,
+  isVoiceNote,
+  voiceDurationMs,
 }) => {
   const dispatch = useDispatch();
   const messages = useSelector((state: RootState) => state.chat.messages);
@@ -383,6 +396,14 @@ export const FileMessage: React.FC<FileMessageProps> = ({
     if (transferError?.toLowerCase().includes('offer cancelled')) {
       return 'Offer cancelled';
     }
+    // File transfer delivers the offer even while the sender is offline, but the bytes only
+    // come across once both sides are online — surface that honestly instead of a bare
+    // "Sender offline", especially for voice notes where there's no filename to fall back on.
+    if (transferError?.toLowerCase().includes('sender offline')) {
+      return isVoiceNote
+        ? 'Voice message will be available when the sender is back online'
+        : 'File will be available when the sender is back online';
+    }
     return transferError;
   };
 
@@ -503,7 +524,46 @@ export const FileMessage: React.FC<FileMessageProps> = ({
     </div>
   );
 
+  const voiceCard = (
+    <div className="flex flex-col gap-2 w-[250px]">
+      <div className="flex items-center justify-between gap-3">
+        <div className={`text-2xl ${isFromCurrentUser ? 'bg-background/50' : ''} rounded-md p-1`}>
+          <Mic className="h-5 w-5" />
+        </div>
+        <div className="flex-1 min-w-0 text-left">
+          <p className="text-sm font-medium truncate">Voice message</p>
+          <p className="text-xs opacity-70">{formatVoiceNoteDuration(voiceDurationMs)}</p>
+        </div>
+        {transferStatus === 'completed' && !!filePath ? (
+          <Button
+            onClick={handleOpenFile}
+            variant="outline"
+            size="icon"
+          >
+            <FolderOpen className="w-4 h-4" />
+          </Button>
+        ) : <div />}
+      </div>
+      {transferStatusContent}
+    </div>
+  );
+
   const hasSenderPreview = isImageFile(fileName) && isFromCurrentUser && !!previewMediaToken;
+  const hasSenderVoicePreview = isVoiceNote && isFromCurrentUser && !!previewMediaToken;
+
+  if (isVoiceNote) {
+    if (shouldRenderInlineVoiceNote({ isVoiceNote, isFromCurrentUser, previewMediaToken, transferStatus, filePath })) {
+      return (
+        <InlineVoiceNoteMessage
+          key={`${fileId}:${previewMediaToken ?? filePath}`}
+          fileId={fileId}
+          initialMediaToken={hasSenderVoicePreview ? previewMediaToken : undefined}
+          fallback={voiceCard}
+        />
+      );
+    }
+    return voiceCard;
+  }
 
   if (shouldRenderInlineImage({ fileName, isFromCurrentUser, previewMediaToken, transferStatus, filePath })) {
     return (

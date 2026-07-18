@@ -19,6 +19,15 @@ export interface TextApplicationPayload {
   reply_to?: string;
 }
 
+// Additive, optional voice-note metadata carried on a file_offer. Old clients that don't know
+// this field simply never send it, so a plain file offer is unaffected. `durationMs` is
+// display-only — receivers must re-validate it (see FILE_KIND_VOICE_NOTE handling in
+// FileHandler) before trusting it for anything beyond a UI label, and treat an out-of-range
+// value as "not a voice note" (plain file fallback) rather than rejecting the whole offer.
+export interface FileOfferVoiceNoteMetadata {
+  durationMs: number;
+}
+
 export interface FileOfferApplicationPayload {
   type: 'file_offer';
   offerId: string;
@@ -29,6 +38,7 @@ export interface FileOfferApplicationPayload {
   checksum: string;
   totalChunks: number;
   replyToCid?: string;
+  voiceNote?: FileOfferVoiceNoteMetadata;
   timestamp: number;
   signature: string;
 }
@@ -223,6 +233,17 @@ function isTextPayload(value: unknown): value is TextApplicationPayload {
     && (value.reply_to === undefined || isValidCid(value.reply_to));
 }
 
+// Deliberately loose: only shape/type safety, not the business-level 60s cap. A malformed or
+// oversized durationMs must NOT invalidate the entire offer — FileHandler decides separately
+// whether to honor it as a voice note or silently fall back to a plain file (see
+// FILE_KIND_VOICE_NOTE handling), so the offer is never dropped just because of this field.
+function isPlausibleVoiceNoteMetadata(value: unknown): value is { durationMs: number } {
+  return isRecord(value)
+    && typeof value.durationMs === 'number'
+    && Number.isFinite(value.durationMs)
+    && value.durationMs >= 0;
+}
+
 function isFileOfferPayload(value: unknown): value is FileOfferApplicationPayload {
   return isRecord(value)
     && value.type === 'file_offer'
@@ -234,6 +255,7 @@ function isFileOfferPayload(value: unknown): value is FileOfferApplicationPayloa
     && isBoundedString(value.checksum, MAX_CHECKSUM_LENGTH)
     && isNonNegativeSafeInteger(value.totalChunks)
     && (value.replyToCid === undefined || isValidCid(value.replyToCid))
+    && (value.voiceNote === undefined || isPlausibleVoiceNoteMetadata(value.voiceNote))
     && typeof value.timestamp === 'number'
     && Number.isFinite(value.timestamp)
     && value.timestamp > 0

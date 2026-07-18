@@ -16,6 +16,7 @@ import type { ChatNode } from '../types.js';
 import type { PendingFileOfferDeferredEvent } from '../types.js';
 import type { MessageHandler } from './message-handler.js';
 import type { InboundApplicationMessageContext } from '../protocol/application-message.js';
+import { VOICE_NOTE_MAX_DURATION_MS_WIRE } from '../constants.js';
 
 const LOCAL_PEER = 'local_peer';
 const RECIPIENT_PEER = 'recipient_peer';
@@ -317,16 +318,18 @@ function offerContext(input: {
   fileId: string;
   chatId: number;
   route?: InboundApplicationMessageContext['route'];
+  voiceNote?: { durationMs: number };
 }): InboundApplicationMessageContext {
   const unsignedOffer = {
     type: 'file_offer' as const,
     offerId: input.offerId,
     fileId: input.fileId,
-    filename: 'incoming.txt',
-    mimeType: 'text/plain',
+    filename: input.voiceNote ? 'incoming.webm' : 'incoming.txt',
+    mimeType: input.voiceNote ? 'audio/webm' : 'text/plain',
     size: 5,
     checksum: 'a'.repeat(64),
     totalChunks: 1,
+    ...(input.voiceNote ? { voiceNote: input.voiceNote } : {}),
     timestamp: Date.now(),
   };
   const signature = Buffer.from(
@@ -366,6 +369,74 @@ test('sendFile reserves a serving slot and a terminal NACK frees it through the 
   assert.equal(handled, true);
   assert.equal(fileHandler.hasActiveOffer(offerId), false);
   assert.equal(database.getFileMessageById('file_1')?.transfer_status, 'rejected');
+});
+
+test('sendFile with a voice-note duration signs it into the offer and persists file_kind/file_duration_ms', async (t) => {
+  const { database, fileHandler, sentApplicationMessages } = await createHarness(t);
+  const filePath = join(tmpdir(), `kiyeovo-test-${randomUUID()}.webm`);
+  await writeFile(filePath, 'fake opus bytes');
+  t.after(() => rm(filePath, { force: true }));
+
+  await fileHandler.sendFile(RECIPIENT_PEER, filePath, 'voice_file_1', undefined, 12_000);
+
+  const row = database.getFileMessageById('voice_file_1');
+  assert.equal(row?.file_kind, 'voice_note');
+  assert.equal(row?.file_duration_ms, 12_000);
+  const sentOffer = sentApplicationMessages.find((m) => m.cid === 'voice_file_1');
+  assert.deepEqual((sentOffer?.payload as { voiceNote?: { durationMs: number } }).voiceNote, { durationMs: 12_000 });
+});
+
+test('sendFile rejects a nonsensical voice-note duration and reserves no offer', async (t) => {
+  const { database, fileHandler } = await createHarness(t);
+  const filePath = join(tmpdir(), `kiyeovo-test-${randomUUID()}.webm`);
+  await writeFile(filePath, 'fake opus bytes');
+  t.after(() => rm(filePath, { force: true }));
+
+  await assert.rejects(
+    fileHandler.sendFile(RECIPIENT_PEER, filePath, 'voice_file_bad', undefined, VOICE_NOTE_MAX_DURATION_MS_WIRE + 1),
+    /Invalid voice note duration/,
+  );
+  assert.equal(database.getFileMessageById('voice_file_bad'), null);
+});
+
+test('an inbound offer with a plausible voiceNote is persisted and emitted as a voice note', async (t) => {
+  const { database, fileHandler, chatId, pendingFileEvents } = await createHarness(t);
+
+  const handled = await fileHandler.handleApplicationMessage(offerContext({
+    offerId: 'incoming_offer_voice',
+    fileId: 'incoming_voice_file',
+    chatId,
+    voiceNote: { durationMs: 9_000 },
+  }));
+
+  assert.equal(handled, true);
+  const row = database.getFileMessageById('incoming_voice_file');
+  assert.equal(row?.file_kind, 'voice_note');
+  assert.equal(row?.file_duration_ms, 9_000);
+  const event = pendingFileEvents.find((e) => e.fileId === 'incoming_voice_file') as
+    { isVoiceNote?: boolean; voiceDurationMs?: number } | undefined;
+  assert.equal(event?.isVoiceNote, true);
+  assert.equal(event?.voiceDurationMs, 9_000);
+});
+
+test('an inbound offer with an out-of-range voiceNote degrades to a plain file instead of being dropped', async (t) => {
+  const { database, fileHandler, chatId, pendingFileEvents } = await createHarness(t);
+
+  const handled = await fileHandler.handleApplicationMessage(offerContext({
+    offerId: 'incoming_offer_bad_voice',
+    fileId: 'incoming_bad_voice_file',
+    chatId,
+    voiceNote: { durationMs: VOICE_NOTE_MAX_DURATION_MS_WIRE + 60_000 },
+  }));
+
+  assert.equal(handled, true);
+  const row = database.getFileMessageById('incoming_bad_voice_file');
+  assert.ok(row, 'offer must still be persisted as a plain file, not dropped');
+  assert.equal(row?.file_kind, null);
+  assert.equal(row?.file_duration_ms, null);
+  const event = pendingFileEvents.find((e) => e.fileId === 'incoming_bad_voice_file') as
+    { isVoiceNote?: boolean } | undefined;
+  assert.equal(event?.isVoiceNote, undefined);
 });
 
 test('a duplicate/late NACK after the slot is freed is a no-op', async (t) => {

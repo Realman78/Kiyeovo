@@ -182,6 +182,8 @@ export const IPC_CHANNELS = {
   COPY_IMAGE_TO_CLIPBOARD: 'media:copyImageToClipboard',
   SAVE_UPLOAD: 'file:saveUpload',
   SAVE_TEXT_UPLOAD: 'file:saveTextUpload',
+  SAVE_VOICE_NOTE_UPLOAD: 'file:saveVoiceNoteUpload',
+  REGISTER_VOICE_NOTE_MEDIA: 'media:registerVoiceNote',
   SEND_FILE_REQUEST: 'file:send',
   SEND_GROUP_FILE_REQUEST: 'file:sendGroup',
   ACCEPT_FILE: 'file:accept',
