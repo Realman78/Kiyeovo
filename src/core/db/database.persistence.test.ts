@@ -760,7 +760,14 @@ test('encrypted database backup hides plaintext, rejects invalid passwords and t
 
   const backupText = await readFile(backupPath, 'utf8');
   assert.equal(backupText.includes(secretContent), false);
-  assert.equal((await stat(backupPath)).mode & 0o777, 0o600);
+  // POSIX owner/group/other permission bits are not a concept Windows'
+  // filesystem enforces: fs.chmod there can only toggle the read-only
+  // attribute, so a 0o600-owned file still reports as group/other readable
+  // (mode 0o666) rather than 0o600. Only assert the strict mode on
+  // platforms that actually honor it.
+  if (process.platform !== 'win32') {
+    assert.equal((await stat(backupPath)).mode & 0o777, 0o600);
+  }
 
   target = new ChatDatabase(targetPath);
   const targetChatId = await createDirectChat(target, 'target_peer', 'target');
