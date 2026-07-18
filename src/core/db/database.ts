@@ -1320,8 +1320,17 @@ export class ChatDatabase {
 
     getLastUsername(peerId: string, mode?: NetworkMode): string | null {
         const activeMode = this.getActiveNetworkMode(mode);
-        const stmt = this.db.prepare('SELECT username FROM users WHERE peer_id = ? AND network_mode = ? AND username IS NOT NULL');
-        const row = stmt.get(peerId, activeMode) as { username: string } | undefined;
+        // Exclude the unregistered placeholder self-row username
+        // (UsernameRegistry.ensureSelfUserRow seeds `user_<last8 of peerId>` as a
+        // display fallback for unregistered identities). Callers of this method —
+        // the register-dialog prefill and auto-register — want the last
+        // *registered* username, and the placeholder isn't one; without this
+        // filter it leaks into the register field and makes an unregistered
+        // identity look already-named. (Signature can't discriminate: registration
+        // upgrades the row via updateUsername, which leaves signature = ''.)
+        const placeholder = `user_${peerId.slice(-8)}`;
+        const stmt = this.db.prepare('SELECT username FROM users WHERE peer_id = ? AND network_mode = ? AND username IS NOT NULL AND username != ?');
+        const row = stmt.get(peerId, activeMode, placeholder) as { username: string } | undefined;
         return row?.username ?? null;
     }
 
