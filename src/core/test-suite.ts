@@ -19,6 +19,7 @@ import './db/database.trusted-import.test.js';
 import './identity/encrypted-user-identity.test.js';
 import './identity/profile-manager.test.js';
 import '../electron/dialog-path-grants.test.js';
+import '../electron/media-capability-registry.test.js';
 import '../electron/ipc-handler-helpers.test.js';
 import '../electron/text-upload.test.js';
 import '../electron/voice-note-upload.test.js';

@@ -35,8 +35,17 @@ function pickSupportedMimeType(): string | null {
  * capture, a live elapsed timer, and a hard auto-stop at maxDurationMs. Callers get back raw
  * bytes + a measured duration; everything about uploading/sending those bytes lives outside
  * this hook (see ChatInput's onRecorded handling), keeping the recorder itself transport-agnostic.
+ *
+ * `onAutoStop`, if provided, is invoked with the finished recording (or null if it came back
+ * empty) when the hard 60s cap fires — mirroring what a caller gets back from `stopAndFinish()`
+ * on a manual stop. Hitting the cap must still hand the caller a sendable recording, not silently
+ * discard it. The callback is read from a ref on every fire, so callers can pass a fresh closure
+ * on every render without needing to memoize it.
  */
-export function useVoiceRecorder(maxDurationMs: number = VOICE_NOTE_MAX_DURATION_MS): UseVoiceRecorderResult {
+export function useVoiceRecorder(
+  maxDurationMs: number = VOICE_NOTE_MAX_DURATION_MS,
+  onAutoStop?: (result: VoiceRecorderResult | null) => void,
+): UseVoiceRecorderResult {
   const [state, setState] = useState<VoiceRecorderState>('idle');
   const [elapsedMs, setElapsedMs] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -49,6 +58,20 @@ export function useVoiceRecorder(maxDurationMs: number = VOICE_NOTE_MAX_DURATION
   const autoStopTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingStopResolveRef = useRef<((result: VoiceRecorderResult | null) => void) | null>(null);
   const discardRef = useRef(false);
+  const onAutoStopRef = useRef(onAutoStop);
+  // Refs must not be written during render (React flags this) — keep the ref in sync via an
+  // effect that runs after every render instead, well before any 60s auto-stop timer could fire.
+  useEffect(() => {
+    onAutoStopRef.current = onAutoStop;
+  });
+
+  // `isRequestingRef` blocks a second concurrent getUserMedia call (e.g. a double-clicked mic
+  // button) while the first permission prompt is still open — at that point mediaRecorderRef is
+  // still null, so a guard on it alone wouldn't catch the double-start. `generationRef` is bumped
+  // by cancel() and on unmount so an in-flight request can tell, once its await resolves, that it
+  // was superseded and must release the mic instead of becoming the active recorder.
+  const isRequestingRef = useRef(false);
+  const generationRef = useRef(0);
 
   const clearTimers = useCallback(() => {
     if (timerIntervalRef.current !== null) {
@@ -73,26 +96,51 @@ export function useVoiceRecorder(maxDurationMs: number = VOICE_NOTE_MAX_DURATION
     chunksRef.current = [];
     pendingStopResolveRef.current = null;
     discardRef.current = false;
+    isRequestingRef.current = false;
     setElapsedMs(0);
     setState('idle');
   }, [clearTimers, releaseStream]);
 
   // Release the mic the moment the component unmounts mid-recording — never leave the OS mic
-  // indicator active or a stream dangling because the composer/chat was closed.
+  // indicator active or a stream dangling because the composer/chat was closed. Also supersede
+  // any in-flight getUserMedia request: if permission is granted after unmount, start() must
+  // notice and stop the returned stream's tracks instead of adopting it.
   useEffect(() => () => {
+    generationRef.current += 1;
     clearTimers();
     releaseStream();
   }, [clearTimers, releaseStream]);
 
+  const finishRecording = useCallback((): Promise<VoiceRecorderResult | null> => {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state === 'inactive') {
+      return Promise.resolve(null);
+    }
+    setState('finalizing');
+    return new Promise((resolve) => {
+      pendingStopResolveRef.current = resolve;
+      try {
+        recorder.stop();
+      } catch {
+        pendingStopResolveRef.current = null;
+        resetToIdle();
+        resolve(null);
+      }
+    });
+  }, [resetToIdle]);
+
   const start = useCallback(async (): Promise<void> => {
-    if (mediaRecorderRef.current) {
+    if (mediaRecorderRef.current || isRequestingRef.current) {
       return;
     }
+    isRequestingRef.current = true;
+    const requestGeneration = ++generationRef.current;
     setError(null);
 
     const mimeType = pickSupportedMimeType();
     if (!mimeType) {
       setError('Voice messages are not supported on this device');
+      isRequestingRef.current = false;
       return;
     }
 
@@ -102,7 +150,19 @@ export function useVoiceRecorder(maxDurationMs: number = VOICE_NOTE_MAX_DURATION
     } catch {
       // Covers permission denial, no device present, and device-in-use — MediaDevices doesn't
       // distinguish these in a renderer-safe way, so give one clear, actionable message.
-      setError('Microphone access was denied or unavailable');
+      isRequestingRef.current = false;
+      if (requestGeneration === generationRef.current) {
+        setError('Microphone access was denied or unavailable');
+      }
+      return;
+    }
+
+    // The permission prompt can outlive interest in its result — the recording may have been
+    // cancelled, or the component unmounted, while it was open. Don't adopt the stream in that
+    // case; stop it immediately so the OS mic indicator doesn't stay lit for nothing.
+    if (requestGeneration !== generationRef.current) {
+      stream.getTracks().forEach((track) => track.stop());
+      isRequestingRef.current = false;
       return;
     }
 
@@ -112,6 +172,7 @@ export function useVoiceRecorder(maxDurationMs: number = VOICE_NOTE_MAX_DURATION
     } catch {
       stream.getTracks().forEach((track) => track.stop());
       setError('Voice messages are not supported on this device');
+      isRequestingRef.current = false;
       return;
     }
 
@@ -150,22 +211,29 @@ export function useVoiceRecorder(maxDurationMs: number = VOICE_NOTE_MAX_DURATION
     startTimeRef.current = Date.now();
     setElapsedMs(0);
     setState('recording');
+    isRequestingRef.current = false;
     recorder.start();
 
     timerIntervalRef.current = setInterval(() => {
       setElapsedMs(Date.now() - startTimeRef.current);
     }, 200);
     autoStopTimeoutRef.current = setTimeout(() => {
-      // Hard cap: auto-finalize and send exactly like a manual stop, not a cancel.
+      // Hard cap: auto-finalize through the exact same completion path as a manual stop (not a
+      // cancel/discard), and hand the result to the caller via onAutoStop — hitting the cap must
+      // still produce a sendable recording, not silently drop it.
       const activeRecorder = mediaRecorderRef.current;
       if (activeRecorder && activeRecorder.state === 'recording') {
-        setState('finalizing');
-        activeRecorder.stop();
+        void finishRecording().then((result) => {
+          onAutoStopRef.current?.(result);
+        });
       }
     }, maxDurationMs);
-  }, [maxDurationMs, resetToIdle]);
+  }, [maxDurationMs, resetToIdle, finishRecording]);
 
   const cancel = useCallback(() => {
+    // Supersede any in-flight getUserMedia request so a permission grant that lands after the
+    // user cancelled doesn't quietly turn into a live, unreleased mic stream.
+    generationRef.current += 1;
     const recorder = mediaRecorderRef.current;
     if (!recorder) {
       resetToIdle();
@@ -180,23 +248,7 @@ export function useVoiceRecorder(maxDurationMs: number = VOICE_NOTE_MAX_DURATION
     }
   }, [resetToIdle]);
 
-  const stopAndFinish = useCallback((): Promise<VoiceRecorderResult | null> => {
-    const recorder = mediaRecorderRef.current;
-    if (!recorder || recorder.state === 'inactive') {
-      return Promise.resolve(null);
-    }
-    setState('finalizing');
-    return new Promise((resolve) => {
-      pendingStopResolveRef.current = resolve;
-      try {
-        recorder.stop();
-      } catch {
-        pendingStopResolveRef.current = null;
-        resetToIdle();
-        resolve(null);
-      }
-    });
-  }, [resetToIdle]);
+  const stopAndFinish = useCallback((): Promise<VoiceRecorderResult | null> => finishRecording(), [finishRecording]);
 
   return { state, elapsedMs, maxDurationMs, error, start, cancel, stopAndFinish };
 }

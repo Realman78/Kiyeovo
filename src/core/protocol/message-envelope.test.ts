@@ -143,8 +143,25 @@ test('rejects a file_offer whose voiceNote metadata has the wrong shape', () => 
     v: MESSAGE_ENVELOPE_VERSION,
     cid: 'file_1',
     kind: 'file_offer',
-    payload: baseFileOfferPayload({ voiceNote: { durationMs: -1 } }),
+    payload: baseFileOfferPayload({ voiceNote: { durationMs: Number.POSITIVE_INFINITY } }),
   })), { ok: false, reason: 'invalid_envelope' });
+});
+
+// Degrade-don't-drop: a negative durationMs is nonsensical as a voice-note length, but the
+// envelope layer must not use that as grounds to drop the whole signed offer. Only the *shape*
+// (a finite number) is enforced here; FileHandler is the layer that treats an out-of-range value
+// as "not a voice note" and persists the offer as a plain file instead.
+test('tolerates a negative voiceNote duration at the envelope layer (degrade-not-drop is enforced by FileHandler)', () => {
+  const result = decodeEnvelope(JSON.stringify({
+    v: MESSAGE_ENVELOPE_VERSION,
+    cid: 'file_1',
+    kind: 'file_offer',
+    payload: baseFileOfferPayload({ voiceNote: { durationMs: -1 } }),
+  }));
+  assert.equal(result.ok, true);
+  if (result.ok && result.message.kind === 'file_offer') {
+    assert.deepEqual(result.message.payload.voiceNote, { durationMs: -1 });
+  }
 });
 
 test('a plain file_offer with no voiceNote field still validates (old-client compatibility)', () => {

@@ -83,6 +83,38 @@ function validateOutgoingVoiceNoteDuration(durationMs: number | undefined): numb
   return durationMs;
 }
 
+// `mime.lookup` (used by #loadFileMetadata below to fill in an outgoing offer's `mimeType`) maps
+// a `.webm` filename to `video/webm`, not `audio/webm` — so a legitimate voice-note offer sent by
+// this app's own sender carries mimeType 'video/webm'. Accept both variants here; anything else
+// is not the supported recorded format.
+const SUPPORTED_VOICE_NOTE_MIME_TYPES = new Set(['audio/webm', 'video/webm']);
+
+/**
+ * Receiver-side gate for whether an incoming, already-signature-verified file_offer should be
+ * treated as a voice note. The wire-shape check in message-envelope.ts is deliberately loose (it
+ * only checks that voiceNote.durationMs is a finite number), so a signed offer for report.pdf —
+ * or a 10MB file — with an in-range voiceNote.durationMs must NOT be accepted as a voice note
+ * here. Every one of these has to hold, or the offer degrades to a plain file instead of being
+ * dropped: an in-range integer duration, a declared size within the voice-note byte cap, and a
+ * filename/mimeType that actually look like the recorded webm format.
+ */
+function resolveIncomingVoiceNoteDurationMs(offer: FileOfferApplicationPayload): number | undefined {
+  const { voiceNote } = offer;
+  if (
+    !voiceNote
+    || !Number.isInteger(voiceNote.durationMs)
+    || voiceNote.durationMs <= 0
+    || voiceNote.durationMs > VOICE_NOTE_MAX_DURATION_MS_WIRE
+    || offer.size <= 0
+    || offer.size > MAX_VOICE_NOTE_FILE_SIZE
+    || !offer.filename.toLowerCase().endsWith('.webm')
+    || !SUPPORTED_VOICE_NOTE_MIME_TYPES.has(offer.mimeType)
+  ) {
+    return undefined;
+  }
+  return voiceNote.durationMs;
+}
+
 interface FileMetadata {
   buffer: Buffer
   filename: string
@@ -1678,15 +1710,11 @@ export class FileHandler {
       return true;
     }
 
-    // Voice-note metadata is display-only and re-validated here: an offer with no voiceNote,
-    // or one whose durationMs falls outside the sane wire range, degrades to a plain file rather
-    // than being dropped — the wire-shape check in message-envelope.ts is deliberately loose.
-    const voiceNoteDurationMs =
-      offer.voiceNote
-      && offer.voiceNote.durationMs > 0
-      && offer.voiceNote.durationMs <= VOICE_NOTE_MAX_DURATION_MS_WIRE
-        ? Math.round(offer.voiceNote.durationMs)
-        : undefined;
+    // Voice-note metadata is display-only and re-validated here: an offer with no voiceNote, one
+    // whose durationMs/size falls outside the sane ranges, or one whose filename/mimeType don't
+    // look like the supported recorded webm format, degrades to a plain file rather than being
+    // dropped — the wire-shape check in message-envelope.ts is deliberately loose.
+    const voiceNoteDurationMs = resolveIncomingVoiceNoteDurationMs(offer);
 
     const { inserted } = await this.database.tryCreateMessage({
       id: offer.fileId,

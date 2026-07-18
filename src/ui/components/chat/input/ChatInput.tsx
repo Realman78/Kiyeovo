@@ -16,7 +16,7 @@ import EmojiPicker, { EmojiStyle, Theme, type EmojiClickData } from "emoji-picke
 import { useConnectivityGuidance } from "../../../hooks/useConnectivityGuidance";
 import { ACCEPTED_IMAGE_MIME } from "../../../../shared/file-types";
 import { UPLOADS_QUOTA_WARN_BYTES } from "../../../../core/constants";
-import { useVoiceRecorder } from "../../../hooks/useVoiceRecorder";
+import { useVoiceRecorder, type VoiceRecorderResult } from "../../../hooks/useVoiceRecorder";
 
 type PendingSendJob =
     | { type: 'direct'; chatId: number; peerId: string; content: string; localMessageId: string; replyToCid?: string }
@@ -228,30 +228,14 @@ export const ChatInput: FC<ChatInputProps> = ({
         };
     };
 
-    const voiceRecorder = useVoiceRecorder();
     const voiceRecordTargetRef = useRef<FileDialogSource | null>(null);
 
-    useEffect(() => {
-        if (voiceRecorder.error) {
-            toast.error(voiceRecorder.error);
-        }
-    }, [voiceRecorder.error, toast]);
-
-    const handleMicClick = async () => {
-        if (isDisabled || hasActiveFileTransfer || voiceRecorder.state !== 'idle') return;
-        voiceRecordTargetRef.current = createCurrentFileDialogSource();
-        await voiceRecorder.start();
-    };
-
-    const handleCancelRecording = () => {
-        voiceRecordTargetRef.current = null;
-        voiceRecorder.cancel();
-    };
-
-    const handleStopAndSendRecording = async () => {
+    // Shared completion path for a finished recording, used both by the manual stop-and-send
+    // button and by the recorder hook's 60s hard-cap auto-stop (see the onAutoStop argument
+    // below) — hitting the cap must send exactly like a manual stop, not silently drop the note.
+    const finishRecordingAndSend = async (result: VoiceRecorderResult | null) => {
         const recordedTarget = voiceRecordTargetRef.current;
         voiceRecordTargetRef.current = null;
-        const result = await voiceRecorder.stopAndFinish();
         if (!result) return;
 
         const { bytes, durationMs } = result;
@@ -288,6 +272,30 @@ export const ChatInput: FC<ChatInputProps> = ({
             console.error('Error sending voice message:', error);
             toast.error(errStr(error, 'Failed to send voice message'));
         }
+    };
+
+    const voiceRecorder = useVoiceRecorder(undefined, finishRecordingAndSend);
+
+    useEffect(() => {
+        if (voiceRecorder.error) {
+            toast.error(voiceRecorder.error);
+        }
+    }, [voiceRecorder.error, toast]);
+
+    const handleMicClick = async () => {
+        if (isDisabled || hasActiveFileTransfer || voiceRecorder.state !== 'idle') return;
+        voiceRecordTargetRef.current = createCurrentFileDialogSource();
+        await voiceRecorder.start();
+    };
+
+    const handleCancelRecording = () => {
+        voiceRecordTargetRef.current = null;
+        voiceRecorder.cancel();
+    };
+
+    const handleStopAndSendRecording = async () => {
+        const result = await voiceRecorder.stopAndFinish();
+        await finishRecordingAndSend(result);
     };
 
     const clearReplyTargetIfUnchanged = (chatId: number, target?: ReplyTarget): boolean => {

@@ -1452,7 +1452,7 @@ function setupFileDialogHandlers(ipcMain: IpcMainHandleRegistrar): void {
           const canonicalPath = await realpath(filePath);
           const fileStats = await stat(canonicalPath);
           if (fileStats.isFile()) {
-            mediaToken = mintMediaToken(canonicalPath);
+            mediaToken = mintMediaToken(canonicalPath, 'image');
           }
         } catch (error) {
           console.warn('[IPC] Failed to create selected-image media capability:', error);
@@ -1541,7 +1541,7 @@ function setupMediaHandlers(
 
       return {
         success: true,
-        token: mintMediaToken(canonicalPath),
+        token: mintMediaToken(canonicalPath, 'image'),
         error: null,
       };
     } catch (error) {
@@ -1569,7 +1569,7 @@ function setupMediaHandlers(
 
       return {
         success: true,
-        token: mintMediaToken(canonicalPath),
+        token: mintMediaToken(canonicalPath, 'voice-note'),
         error: null,
       };
     } catch (error) {
@@ -1696,7 +1696,7 @@ function setupUploadHandlers(
       return {
         success: true,
         filePath: savedFilePath,
-        mediaToken: mintMediaToken(canonicalPath),
+        mediaToken: mintMediaToken(canonicalPath, 'image'),
         uploadsDirSizeBytes,
         error: null,
       };
@@ -1841,7 +1841,7 @@ function setupUploadHandlers(
         filePath: savedFilePath,
         fileName: finalFileName,
         fileSize: savedFileStats.size,
-        mediaToken: mintMediaToken(canonicalPath),
+        mediaToken: mintMediaToken(canonicalPath, 'voice-note'),
         uploadsDirSizeBytes,
         error: null,
       };

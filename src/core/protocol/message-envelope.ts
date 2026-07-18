@@ -233,15 +233,14 @@ function isTextPayload(value: unknown): value is TextApplicationPayload {
     && (value.reply_to === undefined || isValidCid(value.reply_to));
 }
 
-// Deliberately loose: only shape/type safety, not the business-level 60s cap. A malformed or
-// oversized durationMs must NOT invalidate the entire offer — FileHandler decides separately
+// Deliberately loose: only shape/type safety, not the business-level 60s cap (and not even sign
+// or range). A malformed, negative, or oversized durationMs must NOT invalidate the entire offer — FileHandler decides separately
 // whether to honor it as a voice note or silently fall back to a plain file (see
 // FILE_KIND_VOICE_NOTE handling), so the offer is never dropped just because of this field.
 function isPlausibleVoiceNoteMetadata(value: unknown): value is { durationMs: number } {
   return isRecord(value)
     && typeof value.durationMs === 'number'
-    && Number.isFinite(value.durationMs)
-    && value.durationMs >= 0;
+    && Number.isFinite(value.durationMs);
 }
 
 function isFileOfferPayload(value: unknown): value is FileOfferApplicationPayload {
