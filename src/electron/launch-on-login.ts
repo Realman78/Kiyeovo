@@ -24,7 +24,11 @@ function usesNativeLoginItemApi(): boolean {
 
 export function getLaunchOnLoginEnabled(): boolean {
   if (usesNativeLoginItemApi()) {
-    return app.getLoginItemSettings().openAtLogin;
+    // Windows requires querying with the SAME args the login item was
+    // registered with, or openAtLogin is reported false even when the
+    // entry exists (Electron matches the full command line).
+    const options = process.platform === 'win32' ? { args: [HIDDEN_LAUNCH_ARG] } : {};
+    return app.getLoginItemSettings(options).openAtLogin;
   }
   if (process.platform === 'linux') {
     return isLinuxAutostartEnabled();
@@ -37,7 +41,10 @@ export function setLaunchOnLoginEnabled(enabled: boolean): void {
     app.setLoginItemSettings({
       openAtLogin: enabled,
       openAsHidden: enabled, // macOS only; ignored elsewhere.
-      args: enabled ? [HIDDEN_LAUNCH_ARG] : [],
+      // Keep args identical for register AND remove - on Windows the args
+      // are part of the registry entry's identity, so removing with
+      // different args would leave the original entry behind.
+      args: [HIDDEN_LAUNCH_ARG],
     });
     return;
   }

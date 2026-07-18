@@ -296,9 +296,16 @@ function createMainWindow(options: { startHidden?: boolean } = {}) {
   applyWindowSecurityPolicies(win, { appEntryUrl, isDevelopment });
   setupTextContextMenu(win);
 
-  // Restore maximized state or maximize on first run
+  // Restore maximized state or maximize on first run. When starting hidden
+  // (login item), defer maximizing until the window is first shown -
+  // Electron's maximize() also SHOWS a hidden window, which would defeat
+  // the hidden start entirely.
   if (savedBounds?.isMaximized || !savedBounds) {
-    win.maximize();
+    if (options.startHidden) {
+      win.once('show', () => win.maximize());
+    } else {
+      win.maximize();
+    }
   }
 
   // Save bounds when window is resized or moved
@@ -367,6 +374,14 @@ function createMainWindow(options: { startHidden?: boolean } = {}) {
 function showAndFocusMainWindow(): void {
   if (!mainWindow || mainWindow.isDestroyed()) {
     mainWindow = createMainWindow();
+    // A recreated window needs the same init wiring the original got in
+    // initializeApp - without it, a window recreated from the tray before
+    // initialization completed (e.g. macOS: closed during the password
+    // prompt) would sit on the loading screen forever. Both wired handlers
+    // are safe post-init: startP2PInitialization() is guarded by
+    // hasStartedInitialization/isCoreInitialized, and the password replay
+    // only sends when a request is actually pending.
+    wireWindowInitHandlers(mainWindow);
     return;
   }
   if (mainWindow.isMinimized()) {
@@ -376,6 +391,35 @@ function showAndFocusMainWindow(): void {
     mainWindow.show();
   }
   mainWindow.focus();
+}
+
+/**
+ * Wires the load-time initialization handlers onto a window. Applied to the
+ * original window in initializeApp and to any window recreated from the tray
+ * (showAndFocusMainWindow). Safe to apply more than once across windows:
+ * startP2PInitialization() is idempotent (hasStartedInitialization /
+ * isCoreInitialized guards) and the password replay only fires when a
+ * request is pending.
+ */
+function wireWindowInitHandlers(win: BrowserWindow): void {
+  win.webContents.once('did-finish-load', () => {
+    if (isCoreInitialized || hasStartedInitialization) {
+      return;
+    }
+    requiresNetworkModeSelection = detectRequiresNetworkModeSelection();
+    if (requiresNetworkModeSelection) {
+      log('[Electron] Window loaded, waiting for network mode selection before initialization...');
+      sendInitStatus('Select Fast or Anonymous mode to continue', 'database');
+      return;
+    }
+    log('[Electron] Window loaded, starting P2P initialization...');
+    startP2PInitialization();
+  });
+  win.webContents.on('did-finish-load', () => {
+    if (pendingPasswordRequest && !win.isDestroyed()) {
+      win.webContents.send(IPC_CHANNELS.PASSWORD_REQUEST, pendingPasswordRequest);
+    }
+  });
 }
 
 function sendInitStatus(message: string, stage: InitStatus['stage']) {
@@ -981,30 +1025,20 @@ async function initializeApp() {
 
     // Create window first. When launched via "start on login" as a hidden
     // login item, the window is created (so unlock/init proceeds normally)
-    // but not shown - the app just sits in the tray.
-    const startHidden = isStartedHidden();
+    // but not shown - the app just sits in the tray. Hidden start REQUIRES
+    // a live tray: if tray creation failed there would be no affordance to
+    // ever reopen the window, so fall back to a visible start.
+    const startHidden = appTray !== null && isStartedHidden();
     if (startHidden) {
       log('[Electron] Starting hidden in the tray (login item)');
+    } else if (isStartedHidden()) {
+      log('[Electron] Hidden start requested but tray unavailable - starting visible');
     }
     mainWindow = createMainWindow({ startHidden });
     log('[Electron] Main window created');
 
     // Wait for the window to be ready
-    mainWindow.webContents.once('did-finish-load', () => {
-      requiresNetworkModeSelection = detectRequiresNetworkModeSelection();
-      if (requiresNetworkModeSelection) {
-        log('[Electron] Window loaded, waiting for network mode selection before initialization...');
-        sendInitStatus('Select Fast or Anonymous mode to continue', 'database');
-        return;
-      }
-      log('[Electron] Window loaded, starting P2P initialization...');
-      startP2PInitialization();
-    });
-    mainWindow.webContents.on('did-finish-load', () => {
-      if (pendingPasswordRequest && mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send(IPC_CHANNELS.PASSWORD_REQUEST, pendingPasswordRequest);
-      }
-    });
+    wireWindowInitHandlers(mainWindow);
 
   } catch (error) {
     console.error('[Electron] Failed to initialize application:', error);

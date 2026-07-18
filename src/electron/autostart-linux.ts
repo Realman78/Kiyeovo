@@ -10,8 +10,11 @@ function escapeExecArg(value: string): string {
   // Per the Desktop Entry Specification, Exec values are first split on
   // whitespace, then each field passes through the "quoted" escaping rules.
   // Wrapping in double quotes and escaping the characters that are special
-  // inside a quoted field ("\`$) keeps paths with spaces intact.
-  return `"${value.replace(/([\\"$`])/g, '\\$1')}"`;
+  // inside a quoted field ("\`$) keeps paths with spaces intact. `%` must
+  // additionally be doubled (%% is the literal percent) or it would start a
+  // field code like %f and corrupt the Exec line - a path like
+  // `/opt/100%free/Kiyeovo.AppImage` would otherwise break login startup.
+  return `"${value.replace(/([\\"$`])/g, '\\$1').replace(/%/g, '%%')}"`;
 }
 
 /**

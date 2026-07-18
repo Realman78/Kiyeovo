@@ -32,6 +32,12 @@ test('generateDesktopEntryContent escapes paths containing spaces and quote-sens
   assert.match(content, /^Exec="\/opt\/My \\"Apps\\"\/Kiyeovo \\\$HOME\/kiyeovo" --hidden$/m);
 });
 
+test('generateDesktopEntryContent doubles percent signs so they cannot start Exec field codes', () => {
+  const content = generateDesktopEntryContent('/opt/100%free/Kiyeovo.AppImage');
+
+  assert.match(content, /^Exec="\/opt\/100%%free\/Kiyeovo\.AppImage" --hidden$/m);
+});
+
 test('getAutostartFilePath / getAutostartDirPath point at ~/.config/autostart/kiyeovo.desktop', () => {
   assert.equal(getAutostartDirPath('/home/alice'), '/home/alice/.config/autostart');
   assert.equal(getAutostartFilePath('/home/alice'), '/home/alice/.config/autostart/kiyeovo.desktop');
