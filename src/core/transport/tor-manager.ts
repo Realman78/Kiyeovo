@@ -31,13 +31,19 @@ export interface TorManagerConfig {
 }
 
 /**
- * Normalize a filesystem path for embedding in torrc. Tor accepts forward
- * slashes on Windows, so converting `path.sep`-joined Windows paths avoids
- * any risk of a trailing/embedded backslash being read as an escape by
- * Tor's config parser. Paths containing whitespace are quoted, matching
- * Tor's config-file quoting rules. On POSIX this is a no-op.
+ * Normalize a filesystem path for embedding in torrc — win32 only. Tor
+ * accepts forward slashes on Windows, so converting `path.sep`-joined
+ * Windows paths avoids any risk of a trailing/embedded backslash being read
+ * as an escape by Tor's config parser; after that conversion no backslash
+ * can remain, so quoting whitespace-containing paths is safe (Tor treats
+ * backslashes inside QUOTED values as escape sequences and rejects invalid
+ * ones — verified against the bundled tor binary). On POSIX the path is
+ * returned unchanged: unquoted torrc values take the rest of the line
+ * verbatim (spaces and literal backslashes both parse correctly), so any
+ * transformation here could only introduce regressions.
  */
 function normalizeTorrcPath(dirPath: string): string {
+  if (process.platform !== 'win32') return dirPath;
   const normalized = dirPath.split(path.sep).join('/');
   return normalized.includes(' ') ? `"${normalized}"` : normalized;
 }

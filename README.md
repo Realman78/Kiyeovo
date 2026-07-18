@@ -68,7 +68,7 @@ Open the DMG and drag Kiyeovo into Applications.
 
 ### Windows
 
-Download `Kiyeovo Setup 1.0.0.exe` (installer, per-user, no administrator rights required) or the portable `Kiyeovo 1.0.0.exe` (no install, just run) from the Releases page, then run it.
+Download `Kiyeovo Setup 1.0.0.exe` (installer; installs per-user by default, never asks for administrator rights) or the portable `Kiyeovo 1.0.0.exe` (no install, just run) from the Releases page, then run it.
 
 ### General installation notes
 
