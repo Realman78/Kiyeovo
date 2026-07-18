@@ -66,6 +66,10 @@ Download the build for your Mac:
 
 Open the DMG and drag Kiyeovo into Applications.
 
+### Windows
+
+Download `Kiyeovo Setup 1.0.0.exe` (installer, per-user, no administrator rights required) or the portable `Kiyeovo 1.0.0.exe` (no install, just run) from the Releases page, then run it.
+
 ### General installation notes
 
 **AppImage**
@@ -99,6 +103,10 @@ Or run it without FUSE (extracts to a temp dir and runs):
 
 1. right-click or Control-click `Kiyeovo.app`, choose **Open**, then confirm **Open** in the dialog.
 2. Enable the app in the Privacy & Security settings tab
+
+**Windows**
+
+**First launch is blocked by SmartScreen.** The 1.0 build is not code-signed, so Windows Defender SmartScreen may show *"Windows protected your PC."* You only need to do this once: click **More info**, then **Run anyway**.
 
 
 

@@ -54,6 +54,17 @@ detect_platform() {
                     ;;
             esac
             ;;
+        CYGWIN*|MINGW*|MSYS*)
+            case "$arch" in
+                x86_64)
+                    echo "win32-x64"
+                    ;;
+                *)
+                    echo -e "${RED}Unsupported Windows architecture: $arch${NC}"
+                    exit 1
+                    ;;
+            esac
+            ;;
         *)
             echo -e "${RED}Unsupported operating system: $os${NC}"
             exit 1
