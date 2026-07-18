@@ -51,6 +51,9 @@ import { applyWindowSecurityPolicies } from './window-security.js';
 import { applySessionSecurityPolicies, applyWebRTCIPHandlingPolicy } from './session-security.js';
 import { setupDisplayMediaPicker } from './display-media-picker.js';
 import { DEV_SERVER_URL } from './constants.js';
+import { createAppTray, showTrayBackgroundNoticeOnce, type AppTray } from './tray.js';
+import { getCloseToTrayEnabled, getMinimizeToTrayEnabled } from './tray-settings.js';
+import { isStartedHidden } from './launch-on-login.js';
 import {
   getPackagedAppEntryUrl,
   registerAppProtocolHandler,
@@ -89,6 +92,10 @@ let mainWindow: BrowserWindow | null = null;
 let p2pCore: P2PCore | null = null;
 let wakeRecoverySeq = 0;
 let torManager: TorManager | null = null;
+let appTray: AppTray | null = null;
+// Set at the very top of 'before-quit' so a real quit (tray Quit, Cmd+Q, app
+// updates) always bypasses close-to-tray/minimize-to-tray interception.
+let isQuitting = false;
 let lastInitStatus: InitStatus | null = null;
 let initError: string | null = null;
 let isCoreInitialized = false;
@@ -107,12 +114,7 @@ if (!gotTheLock) {
 } else {
   // Focus existing window when second instance is attempted
   app.on('second-instance', () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) {
-        mainWindow.restore();
-      }
-      mainWindow.focus();
-    }
+    showAndFocusMainWindow();
   });
 }
 
@@ -232,7 +234,7 @@ function getWindowBrandingForMode(mode: NetworkMode): { title: string; icon: str
   };
 }
 
-function createMainWindow() {
+function createMainWindow(options: { startHidden?: boolean } = {}) {
   const savedBounds = loadWindowBounds();
   const startupNetworkMode = readPersistedNetworkMode();
   const branding = getWindowBrandingForMode(startupNetworkMode);
@@ -252,6 +254,9 @@ function createMainWindow() {
     autoHideMenuBar: true,
     title: branding.title,
     icon: branding.icon,
+    // Launched-on-login "hidden" start: create the window (so the app is
+    // fully ready behind the scenes) without showing it.
+    show: !options.startHidden,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -296,10 +301,48 @@ function createMainWindow() {
     win.maximize();
   }
 
-  // Save bounds when window is resized, moved, or closed
+  // Save bounds when window is resized or moved
   win.on('resize', () => saveWindowBounds(win));
   win.on('move', () => saveWindowBounds(win));
-  win.on('close', () => saveWindowBounds(win));
+
+  // Close-to-tray (Windows/Linux only; macOS keeps its native
+  // window-all-closed-doesn't-quit behavior). Only takes effect when the
+  // tray icon actually exists - if tray creation failed, closing must
+  // always quit so the app can never end up running invisibly with no way
+  // back in.
+  win.on('close', (event) => {
+    saveWindowBounds(win);
+
+    if (
+      isQuitting
+      || process.platform === 'darwin'
+      || !appTray
+      || !getCloseToTrayEnabled(() => p2pCore)
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    win.hide();
+    showTrayBackgroundNoticeOnce(() => p2pCore);
+  });
+
+  // Minimize-to-tray (opt-in, Windows/Linux only). The 'minimize' event
+  // isn't cancelable, so instead of preventing it we just hide right after -
+  // the window briefly shows minimized in the taskbar before disappearing,
+  // which is the standard Electron minimize-to-tray pattern.
+  win.on('minimize', () => {
+    if (
+      isQuitting
+      || process.platform === 'darwin'
+      || !appTray
+      || !getMinimizeToTrayEnabled(() => p2pCore)
+    ) {
+      return;
+    }
+
+    win.hide();
+  });
 
   // Load UI
   if (isDevelopment) {
@@ -314,6 +357,25 @@ function createMainWindow() {
   });
 
   return win;
+}
+
+/**
+ * Shows and focuses the main window, creating it if it doesn't exist yet.
+ * Used by the tray's "Open Kiyeovo" menu item / left-click, and by the
+ * second-instance handler.
+ */
+function showAndFocusMainWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    mainWindow = createMainWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+  if (!mainWindow.isVisible()) {
+    mainWindow.show();
+  }
+  mainWindow.focus();
 }
 
 function sendInitStatus(message: string, stage: InitStatus['stage']) {
@@ -906,8 +968,25 @@ async function initializeApp() {
       }
     });
 
-    // Create window first
-    mainWindow = createMainWindow();
+    // System tray: Open Kiyeovo / Quit. Wrapped internally so a failure
+    // (unsupported platform/DE) never prevents startup - it just disables
+    // close/minimize-to-tray via the `appTray` null check.
+    appTray = createAppTray({
+      onOpen: () => showAndFocusMainWindow(),
+      onQuit: () => {
+        isQuitting = true;
+        app.quit();
+      },
+    });
+
+    // Create window first. When launched via "start on login" as a hidden
+    // login item, the window is created (so unlock/init proceeds normally)
+    // but not shown - the app just sits in the tray.
+    const startHidden = isStartedHidden();
+    if (startHidden) {
+      log('[Electron] Starting hidden in the tray (login item)');
+    }
+    mainWindow = createMainWindow({ startHidden });
     log('[Electron] Main window created');
 
     // Wait for the window to be ready
@@ -952,6 +1031,12 @@ app.on('activate', () => {
 
 // Graceful shutdown
 app.on('before-quit', async (event) => {
+  // Must be set before anything else: a real quit (tray "Quit", Cmd+Q, an
+  // app update relaunch, ...) always fires this event first, and the
+  // window's close-to-tray/minimize-to-tray handlers check this flag to
+  // let the window actually close instead of hiding to the tray.
+  isQuitting = true;
+
   if (p2pCore || torManager) {
     event.preventDefault();
 

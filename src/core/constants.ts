@@ -20,6 +20,16 @@ export const FAST_MISSING_ICE_WARNING_ACKNOWLEDGED_SETTING_KEY = 'setup_missing_
 // user dismisses the shutdown notice it is never shown again.
 export const PREDEFINED_NODES_SUNSET_DISMISSED_SETTING_KEY = 'predefined_nodes_sunset_dismissed';
 
+/*
+ * System tray behavior settings (Windows/Linux). Read/written pre-login via
+ * withSettingsDatabase() since they must be available before the identity is
+ * unlocked (e.g. hiding to tray from the lock/password screen).
+ */
+export const CLOSE_TO_TRAY_SETTING_KEY = 'close_to_tray_enabled';
+export const MINIMIZE_TO_TRAY_SETTING_KEY = 'minimize_to_tray_enabled';
+// One-time "still running in the tray" OS notification, shown at most once ever.
+export const TRAY_BACKGROUND_NOTICE_SHOWN_SETTING_KEY = 'tray_background_notice_shown';
+
 export type ModeNamespaceKind =
   | 'offline'
   | 'username'
