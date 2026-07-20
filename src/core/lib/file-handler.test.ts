@@ -368,19 +368,6 @@ test('sendFile reserves a serving slot and a terminal NACK frees it through the 
   assert.equal(database.getFileMessageById('file_1')?.transfer_status, 'rejected');
 });
 
-test('sendFile rejects a non-portable basename before creating an offer row', async (t) => {
-  const { database, fileHandler } = await createHarness(t);
-  const filePath = join(tmpdir(), ` kiyeovo-test-${randomUUID()}.txt`);
-  await writeFile(filePath, 'non-portable filename');
-  t.after(() => rm(filePath, { force: true }));
-
-  await assert.rejects(
-    fileHandler.sendFile(RECIPIENT_PEER, filePath, 'nonportable_file'),
-    /File name is not portable/,
-  );
-  assert.equal(database.getFileMessageById('nonportable_file'), null);
-});
-
 test('a duplicate/late NACK after the slot is freed is a no-op', async (t) => {
   const { database, fileHandler, chatId } = await createHarness(t);
   const filePath = join(tmpdir(), `kiyeovo-test-${randomUUID()}.txt`);

@@ -1,5 +1,5 @@
+import { basename } from 'path';
 import { CHUNK_SIZE } from '../constants.js';
-import { validatePortableFileName } from '../utils/portable-filename.js';
 import type { FileOfferApplicationPayload } from './message-envelope.js';
 
 export const FILE_OFFER_MAX_FUTURE_SKEW_MS = 60_000;
@@ -46,7 +46,12 @@ export function validateIncomingFileOffer(input: {
   if (offer.fileId !== envelopeCid) {
     return { ok: false, reason: 'cid_mismatch' };
   }
-  if (!validatePortableFileName(offer.filename).ok) {
+  if (
+    basename(offer.filename) !== offer.filename
+    || offer.filename.includes('\\')
+    || offer.filename === '.'
+    || offer.filename === '..'
+  ) {
     return { ok: false, reason: 'invalid_filename' };
   }
   if (offer.size <= 0 || offer.size > maxFileSize) {

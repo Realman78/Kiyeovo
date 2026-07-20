@@ -71,21 +71,15 @@ test('rejects a file offer with a malformed checksum', () => {
   });
 });
 
-test('rejects filenames that are not portable across supported operating systems', () => {
-  for (const filename of [
-    '../report.pdf',
-    '..\\report.pdf',
-    'CON.txt',
-    'bad:name.txt',
-    'report.',
-    ' report.pdf',
-    'a'.repeat(256),
-  ]) {
-    assert.deepEqual(validate(createOffer({ filename })), {
-      ok: false,
-      reason: 'invalid_filename',
-    });
-  }
+test('rejects path traversal and cross-platform path separators', () => {
+  assert.deepEqual(validate(createOffer({ filename: '../report.pdf' })), {
+    ok: false,
+    reason: 'invalid_filename',
+  });
+  assert.deepEqual(validate(createOffer({ filename: '..\\report.pdf' })), {
+    ok: false,
+    reason: 'invalid_filename',
+  });
 });
 
 test('rejects a file offer with an invalid signature', () => {

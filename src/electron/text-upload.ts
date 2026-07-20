@@ -1,4 +1,6 @@
-import { validatePortableFileName, type PortableFileNameFailure } from '../core/utils/portable-filename.js';
+const INVALID_PORTABLE_FILENAME_CHARACTERS = /[<>:"/\\|?*]/;
+const WINDOWS_RESERVED_BASENAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+const MAX_PORTABLE_FILENAME_BYTES = 255;
 
 export type PreparedTextUpload =
   | {
@@ -14,21 +16,39 @@ export type PreparedTextUpload =
       error: string;
     };
 
-function portableFileNameError(reason: PortableFileNameFailure): string {
-  switch (reason) {
-    case 'required': return 'Text upload filename is required';
-    case 'path': return 'Text upload filename must not contain a path';
-    case 'unsupported_characters': return 'Text upload filename contains unsupported characters';
-    case 'reserved': return 'Text upload filename is reserved by the operating system';
-    case 'too_long': return 'Text upload filename is too long';
-    case 'invalid': return 'Text upload filename is invalid';
+function containsUnsupportedFileNameCharacter(value: string): boolean {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0);
+    if (
+      INVALID_PORTABLE_FILENAME_CHARACTERS.test(character)
+      || codePoint === undefined
+      || codePoint <= 0x1F
+      || codePoint === 0x7F
+    ) {
+      return true;
+    }
   }
+  return false;
 }
 
 function validateTextFileName(value: unknown): { fileName: string } | { error: string } {
-  const validation = validatePortableFileName(value, { trimOuterWhitespace: true });
-  if (!validation.ok) return { error: portableFileNameError(validation.reason) };
-  const candidate = validation.fileName;
+  if (typeof value !== 'string' || !value.trim()) {
+    return { error: 'Text upload filename is required' };
+  }
+
+  const candidate = value.trim();
+  if (
+    candidate === '.'
+    || candidate === '..'
+    || candidate.includes('/')
+    || candidate.includes('\\')
+  ) {
+    return { error: 'Text upload filename must not contain a path' };
+  }
+
+  if (containsUnsupportedFileNameCharacter(candidate)) {
+    return { error: 'Text upload filename contains unsupported characters' };
+  }
 
   if (!candidate.toLowerCase().endsWith('.txt')) {
     return { error: 'Text upload filename must end in .txt' };
@@ -39,7 +59,19 @@ function validateTextFileName(value: unknown): { fileName: string } | { error: s
     return { error: 'Text upload filename is invalid' };
   }
 
+  const firstDotIndex = stem.indexOf('.');
+  const windowsBasename = firstDotIndex === -1
+    ? stem
+    : stem.slice(0, firstDotIndex);
+  if (WINDOWS_RESERVED_BASENAME.test(windowsBasename)) {
+    return { error: 'Text upload filename is reserved by the operating system' };
+  }
+
   const normalizedFileName = `${stem}.txt`;
+  if (Buffer.byteLength(normalizedFileName, 'utf8') > MAX_PORTABLE_FILENAME_BYTES) {
+    return { error: 'Text upload filename is too long' };
+  }
+
   return { fileName: normalizedFileName };
 }
 
