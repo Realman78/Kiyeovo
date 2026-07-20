@@ -42,6 +42,23 @@ function Stop-KiyeovoProcesses {
     }
 }
 
+function Wait-FileRemoved {
+    param(
+        [string]$FilePath,
+        [int]$TimeoutSeconds = 15
+    )
+
+    # taskkill returning and Get-Process reporting no matches does not guarantee
+    # the OS has finished releasing the file handle (or that AV has finished
+    # scanning it) before the uninstaller tries to delete it. Poll briefly
+    # instead of failing on the first check.
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Test-Path -LiteralPath $FilePath -PathType Leaf) -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 1
+    }
+    return -not (Test-Path -LiteralPath $FilePath -PathType Leaf)
+}
+
 function Assert-ApplicationStarts {
     param(
         [string]$Description,
@@ -160,6 +177,10 @@ try {
 
     Assert-ApplicationStarts -Description "Installed application" -ExecutablePath $installedExecutable.FullName
 
+    # Give the OS a moment to fully release the just-killed process's file
+    # handles before the uninstaller tries to delete them.
+    Start-Sleep -Seconds 3
+
     $uninstallers = @(
         Get-ChildItem -LiteralPath $installDir -File -Filter "Uninstall*.exe"
     )
@@ -174,7 +195,7 @@ try {
     if ($uninstaller.ExitCode -ne 0) {
         throw "NSIS uninstaller failed with exit code $($uninstaller.ExitCode)"
     }
-    if (Test-Path -LiteralPath $installedExecutable.FullName -PathType Leaf) {
+    if (-not (Wait-FileRemoved -FilePath $installedExecutable.FullName)) {
         throw "NSIS uninstaller left the installed application executable behind"
     }
 }
