@@ -95,24 +95,41 @@ jobs:
       - name: Run unit tests
         run: npm run test:unit
 
-      - name: Require Windows signing credentials for tagged releases
+      - name: Check Windows signing credentials for tagged releases
+        id: signing-check
         if: startsWith(github.ref, 'refs/tags/kiyeovo-')
         shell: pwsh
         env:
           WIN_CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
           WIN_CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
         run: |
+          # Maintainer decision: missing signing credentials must not block a
+          # tagged release. Warn loudly and publish unsigned artifacts instead
+          # of throwing; signing activates automatically once the secrets are
+          # configured (see the credential pass-through on the next step).
+          $missing = @()
           if ([string]::IsNullOrWhiteSpace($env:WIN_CSC_LINK)) {
-            throw "Missing WINDOWS_CSC_LINK repository secret; refusing to publish unsigned Windows executables."
+            $missing += "WINDOWS_CSC_LINK"
           }
           if ([string]::IsNullOrWhiteSpace($env:WIN_CSC_KEY_PASSWORD)) {
-            throw "Missing WINDOWS_CSC_KEY_PASSWORD repository secret; refusing to publish unsigned Windows executables."
+            $missing += "WINDOWS_CSC_KEY_PASSWORD"
+          }
+          if ($missing.Count -gt 0) {
+            $message = "Missing $($missing -join ', ') repository secret(s); this tagged release will publish UNSIGNED Windows executables."
+            Write-Host "::warning::$message"
+            Write-Warning $message
+            "has-credentials=false" >> $env:GITHUB_OUTPUT
+          } else {
+            "has-credentials=true" >> $env:GITHUB_OUTPUT
           }
 
       - name: Build Windows installers
         env:
           # Keep credentials out of manual non-tag builds. electron-builder
           # accepts raw base64 PFX/P12 content or a protected certificate URL.
+          # Passing these through unconditionally on tagged builds means
+          # signing activates automatically once the secrets exist, with no
+          # further workflow changes needed.
           WIN_CSC_LINK: ${{ startsWith(github.ref, 'refs/tags/kiyeovo-') && secrets.WINDOWS_CSC_LINK || '' }}
           WIN_CSC_KEY_PASSWORD: ${{ startsWith(github.ref, 'refs/tags/kiyeovo-') && secrets.WINDOWS_CSC_KEY_PASSWORD || '' }}
         run: npx electron-builder --win --x64 --publish never
@@ -120,7 +137,7 @@ jobs:
       - name: Smoke-test Windows packages and signatures
         shell: pwsh
         run: |
-          if ($env:GITHUB_REF -like "refs/tags/kiyeovo-*") {
+          if ("${{ steps.signing-check.outputs.has-credentials }}" -eq "true") {
             ./scripts/windows-package-smoke.ps1 -DistDir dist -RequireSignedArtifacts
           } else {
             ./scripts/windows-package-smoke.ps1 -DistDir dist

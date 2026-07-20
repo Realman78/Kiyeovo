@@ -129,13 +129,13 @@ cd Kiyeovo
 
 ### Windows release signing
 
-The `kiyeovo-*` tagged-release workflow refuses to publish unsigned Windows executables. Release maintainers must:
+The `kiyeovo-*` tagged-release workflow warns (rather than fails) when Windows signing secrets are missing, and still publishes unsigned Windows executables in that case. To enable signing, release maintainers should:
 
 1. Obtain a trusted RSA Authenticode code-signing certificate exported as a password-protected PFX/P12.
 2. Store its base64 content in the `WINDOWS_CSC_LINK` GitHub Actions repository secret.
 3. Store its password in `WINDOWS_CSC_KEY_PASSWORD`.
 
-Electron Builder receives those values as `WIN_CSC_LINK`/`WIN_CSC_KEY_PASSWORD`. CI then verifies the signatures, silently installs and uninstalls the NSIS package, launches the installed and portable applications, and runs the bundled `tor.exe --version` before uploading release artifacts. A normal branch/PR build performs the same package smoke tests without signing secrets.
+Electron Builder receives those values as `WIN_CSC_LINK`/`WIN_CSC_KEY_PASSWORD` and signing activates automatically once both secrets exist. CI then verifies the signatures, silently installs and uninstalls the NSIS package, launches the installed and portable applications, and runs the bundled `tor.exe --version` before uploading release artifacts. A normal branch/PR build performs the same package smoke tests without signing secrets.
 
 
 

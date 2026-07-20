@@ -370,7 +370,7 @@ Protections:
 - rate limits (per peer + global)
 - max pending offers (per peer + global)
 - malformed, unauthorized, duplicate, over-limit, and rate-limited offers are dropped without creating a row
-- one shared portable-filename policy at send, inbound-offer, upload, and final-write boundaries: no traversal/separators, Windows DOS device names, control/Win32-invalid characters, trailing dot/space, or UTF-8 basename above 255 bytes; plus file-size guards
+- path traversal and file-size guards; wire-protocol filename rules are unchanged so legal POSIX filenames still transfer between non-Windows peers and offers from existing 1.0 clients are never dropped. Portable-filename sanitization (no Windows DOS device names, control/Win32-invalid characters, trailing dot/space, UTF-8 basename above 255 bytes) happens at the receiver's disk-write boundary instead of on the wire; that save-time sanitizer lands via the `feature/voice-notes` branch
 - backend remains authoritative even if UI pre-checks exist
 
 Local image delivery foundation:
@@ -958,7 +958,7 @@ The Windows package includes `resources/tor/win32-x64` as an extra resource. `To
 
 Windows CI runs on pushes to `main`/the Windows feature branch, on pull requests, and manually. It performs a clean install, downloads verified Tor, builds/transpiles, runs unit tests, creates both Windows targets, silently installs and uninstalls NSIS, launches the installed and portable apps, and executes the installed Tor binary. This is a package/startup smoke test, not a full network/Tor-bootstrap E2E test.
 
-Tagged `kiyeovo-*` releases additionally fail closed unless `WINDOWS_CSC_LINK` and `WINDOWS_CSC_KEY_PASSWORD` repository secrets provide a trusted RSA Authenticode PFX/P12. Electron Builder signs with SHA-256, and the smoke script requires valid signatures on the setup, portable app, installed app, and bundled Tor executable before artifacts can reach the draft release. Manual non-tag builds remain unsigned so pull-request code never receives signing credentials.
+Tagged `kiyeovo-*` releases warn (a `::warning::` annotation plus a log message) rather than fail when `WINDOWS_CSC_LINK` and `WINDOWS_CSC_KEY_PASSWORD` repository secrets are missing, and still publish unsigned Windows executables. When both secrets are present, Electron Builder signs with SHA-256, and the smoke script requires valid signatures on the setup, portable app, installed app, and bundled Tor executable before artifacts reach the draft release. Manual non-tag builds remain unsigned so pull-request code never receives signing credentials.
 
 ---
 
