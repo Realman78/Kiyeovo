@@ -58,6 +58,18 @@ test('isWindowsReservedBasename covers every reserved device name, case-insensit
   }
 });
 
+test('isWindowsReservedBasename covers the superscript COM/LPT device names', () => {
+  const reserved = ['COM¹', 'com¹', 'COM²', 'COM³', 'LPT¹', 'lpt¹', 'LPT²', 'LPT³'];
+  for (const name of reserved) {
+    assert.equal(isWindowsReservedBasename(name), true, name);
+  }
+  // Superscript digits only exist for 1-3 in this context (there's no reserved COM⁴/LPT⁵, etc.),
+  // and the superscript form must be an exact basename match, not merely a prefix/suffix.
+  for (const name of ['COM⁴', 'COM¹0', 'X COM¹', 'CONSOLE¹']) {
+    assert.equal(isWindowsReservedBasename(name), false, name);
+  }
+});
+
 test('exceedsMaxPortableFilenameBytes uses a UTF-8 byte budget, not code-unit length', () => {
   assert.equal(exceedsMaxPortableFilenameBytes('a'.repeat(MAX_PORTABLE_FILENAME_BYTES)), false);
   assert.equal(exceedsMaxPortableFilenameBytes('a'.repeat(MAX_PORTABLE_FILENAME_BYTES + 1)), true);
@@ -86,6 +98,8 @@ test('checkPortableFileName rejects unsupported characters, a trailing dot, rese
   // leading/trailing-whitespace tolerance voice-note-upload's original validator had) — it never
   // reaches the trailing-dot-or-space check. hasTrailingDotOrSpace is exercised directly above.
   assert.deepEqual(checkPortableFileName('CON.txt'), { ok: false, reason: 'reserved' });
+  assert.deepEqual(checkPortableFileName('COM¹.txt'), { ok: false, reason: 'reserved' });
+  assert.deepEqual(checkPortableFileName('LPT³.txt'), { ok: false, reason: 'reserved' });
   assert.deepEqual(
     checkPortableFileName(`${'a'.repeat(MAX_PORTABLE_FILENAME_BYTES)}.txt`),
     { ok: false, reason: 'too_long' },
@@ -136,6 +150,9 @@ test('sanitizePortableFileName prefixes reserved DOS device basenames, preservin
     ['lpt9.tar.gz', '_lpt9.tar.gz'],
     ['PRN', '_PRN'],
     ['AUX.docx', '_AUX.docx'],
+    ['COM¹.txt', '_COM¹.txt'],
+    ['lpt².tar.gz', '_lpt².tar.gz'],
+    ['COM³', '_COM³'],
   ];
   for (const [input, expected] of cases) {
     assert.equal(sanitizePortableFileName(input), expected, input);
@@ -169,6 +186,13 @@ test('sanitizePortableFileName truncates an overlong name to the byte budget, pr
   assert.ok(sanitized.length < longName.length);
 });
 
+// Byte-budget truncation of "CONX" + this extension leaves a stem budget of exactly 3 bytes,
+// which chops the trailing "X" off "CONX" and lands on the reserved basename "CON" — a case a
+// single, non-iterating sanitize pass never re-checks. See the byte-budget arithmetic:
+// extension is `.` + `a` + 125 * `é` = 1 + 1 + 250 = 252 bytes, leaving a 255 - 252 = 3-byte stem
+// budget, i.e. exactly "CON".
+const RESERVED_NAME_CREATED_BY_TRUNCATION_EXTENSION = `.a${'é'.repeat(125)}`;
+
 test('sanitizePortableFileName is idempotent', () => {
   const inputs = [
     'report.pdf',
@@ -181,10 +205,30 @@ test('sanitizePortableFileName is idempotent', () => {
     `${'a'.repeat(300)}.txt`,
     'foo.CON.txt',
     '\x00\x01\x02',
+    // Byte-budget truncation can itself create a reserved basename that was never checked.
+    `CONX${RESERVED_NAME_CREATED_BY_TRUNCATION_EXTENSION}`,
+    // Superscript COM/LPT device names.
+    'COM¹.txt',
+    'LPT²X.txt',
+    `COM³${'é'.repeat(150)}`,
   ];
   for (const input of inputs) {
     const once = sanitizePortableFileName(input);
     const twice = sanitizePortableFileName(once);
     assert.equal(twice, once, `not idempotent for ${JSON.stringify(input)}`);
   }
+});
+
+test('sanitizePortableFileName re-checks reserved-basename and byte-budget after truncation', () => {
+  // The raw stem "CONX" isn't reserved, but truncating away the trailing "X" (to make room for a
+  // byte-budget-consuming multibyte extension) leaves exactly "CON" — which must be re-detected
+  // and re-prefixed, not returned as-is.
+  const input = `CONX${RESERVED_NAME_CREATED_BY_TRUNCATION_EXTENSION}`;
+  const sanitized = sanitizePortableFileName(input);
+
+  assert.equal(exceedsMaxPortableFilenameBytes(sanitized), false);
+  const extensionIndex = sanitized.lastIndexOf('.');
+  const stem = extensionIndex > 0 ? sanitized.slice(0, extensionIndex) : sanitized;
+  assert.equal(isWindowsReservedBasename(windowsBasenameOf(stem)), false, sanitized);
+  assert.equal(sanitizePortableFileName(sanitized), sanitized, 'must already be a fixed point');
 });

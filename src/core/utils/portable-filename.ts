@@ -18,9 +18,14 @@
 // characters `<>:"/\|?*`, ASCII control characters (and DEL), the DOS
 // device basenames CON/PRN/AUX/NUL/COM1-9/LPT1-9 (case-insensitively, with
 // any extension), and a trailing dot or space on a path component.
+//
+// Windows also treats COM/LPT followed by a superscript 1/2/3 (U+00B9, U+00B2,
+// U+00B3 — the only digits with a legacy superscript codepoint) as reserved,
+// the same as the plain-ASCII COM1-3/LPT1-3: see Microsoft's file-naming
+// documentation ("Naming Files, Paths, and Namespaces").
 
 export const INVALID_PORTABLE_FILENAME_CHARACTERS = /[<>:"/\\|?*]/;
-export const WINDOWS_RESERVED_BASENAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+export const WINDOWS_RESERVED_BASENAME = /^(con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])$/i;
 export const MAX_PORTABLE_FILENAME_BYTES = 255;
 
 const FALLBACK_FILE_NAME = '_file';
@@ -110,7 +115,14 @@ export function checkPortableFileName(value: string): PortableFileNameCheckResul
   return { ok: true };
 }
 
-function truncateStringToByteBudget(value: string, maxBytes: number): string {
+/**
+ * Truncates `value` to at most `maxBytes` UTF-8 bytes, cutting only on whole
+ * code points (never splitting a multibyte character). Exported so callers
+ * that build their own byte-budgeted names on top of an already-sanitized
+ * stem (e.g. file-storage.ts's collision-suffix generation) can reuse the
+ * exact same truncation rule instead of duplicating it.
+ */
+export function truncateStringToByteBudget(value: string, maxBytes: number): string {
   if (maxBytes <= 0) {
     return '';
   }
@@ -188,21 +200,46 @@ export function sanitizePortableFileName(name: string): string {
     return FALLBACK_FILE_NAME;
   }
 
+  // Re-run the reserved-basename / byte-budget / trailing-dot passes until
+  // the result stabilizes. A single pass is not enough: byte-budget
+  // truncation of a long-enough stem can *create* a new reserved basename
+  // that was never checked (e.g. "CONX." + a long multibyte tail truncates
+  // down to a "CON" stem), and prefixing a reserved basename with `_` can in
+  // turn push the name back over the byte budget. Each pass either adds the
+  // fixed one-byte `_` prefix — which truncation can never strip, since it
+  // always keeps the leftmost bytes — or strictly shortens the name, so this
+  // converges in only a couple of passes for any real input; the iteration
+  // cap is defense-in-depth against a pathological case oscillating forever.
+  for (let pass = 0; pass < MAX_SANITIZE_PORTABILITY_PASSES; pass += 1) {
+    const next = applyPortabilityPass(candidate);
+    if (next === candidate) {
+      break;
+    }
+    candidate = next;
+  }
+
+  return candidate || FALLBACK_FILE_NAME;
+}
+
+const MAX_SANITIZE_PORTABILITY_PASSES = 8;
+
+function applyPortabilityPass(candidate: string): string {
   const extensionIndex = candidate.lastIndexOf('.');
   const stem = extensionIndex > 0 ? candidate.slice(0, extensionIndex) : candidate;
   const extension = extensionIndex > 0 ? candidate.slice(extensionIndex) : '';
 
+  let next = candidate;
   if (isWindowsReservedBasename(windowsBasenameOf(stem))) {
-    candidate = `_${stem}${extension}`;
+    next = `_${stem}${extension}`;
   }
 
-  if (exceedsMaxPortableFilenameBytes(candidate)) {
-    candidate = truncateToByteLimit(candidate, MAX_PORTABLE_FILENAME_BYTES);
+  if (exceedsMaxPortableFilenameBytes(next)) {
+    next = truncateToByteLimit(next, MAX_PORTABLE_FILENAME_BYTES);
   }
 
   // Truncation (or, in principle, the reserved-name prefix) could have
   // reintroduced a trailing dot/space, or emptied the name.
-  candidate = candidate.replace(/[. ]+$/, '');
+  next = next.replace(/[. ]+$/, '');
 
-  return candidate || FALLBACK_FILE_NAME;
+  return next || FALLBACK_FILE_NAME;
 }

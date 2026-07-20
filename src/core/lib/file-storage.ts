@@ -2,7 +2,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, extname, isAbsolute, join, resolve } from 'node:path';
 import { formatCopyTimestamp } from '../utils/miscellaneous.js';
-import { sanitizePortableFileName } from '../utils/portable-filename.js';
+import { MAX_PORTABLE_FILENAME_BYTES, sanitizePortableFileName, truncateStringToByteBudget } from '../utils/portable-filename.js';
 
 const MAX_FILENAME_ALLOCATION_ATTEMPTS = 1000;
 
@@ -29,6 +29,23 @@ export function safeDownloadBasename(fileName: string): string {
 }
 
 /**
+ * Builds a `_copy_<timestamp>` collision candidate, byte-budgeting the stem so
+ * `stem + suffix + extension` never exceeds the portable filename limit. A name that already
+ * sits near the 255-byte ceiling (post-sanitization, or a locally-generated upload name close to
+ * the cap) can save successfully on the first attempt but push a later collision candidate over
+ * the limit once the suffix is appended, turning what should be a `_copy_...` retry into an
+ * ENAMETOOLONG failure. Truncating the stem here — not the suffix or extension — keeps the
+ * timestamp/attempt-count disambiguator and the file's extension intact.
+ */
+function buildCopySuffixedName(nameWithoutExtension: string, extension: string, attempt: number): string {
+  const suffix = `_copy_${formatCopyTimestamp(new Date())}${attempt > 1 ? `_${attempt - 1}` : ''}`;
+  const reservedBytes = Buffer.byteLength(suffix, 'utf8') + Buffer.byteLength(extension, 'utf8');
+  const stemBudget = Math.max(0, MAX_PORTABLE_FILENAME_BYTES - reservedBytes);
+  const truncatedStem = truncateStringToByteBudget(nameWithoutExtension, stemBudget);
+  return `${truncatedStem}${suffix}${extension}`;
+}
+
+/**
  * Collision-safe local write: create the destination with O_EXCL (`flag:'wx'`) and add the same
  * `_copy_<timestamp>` suffix the upload path already uses. The DB row is updated only after this
  * resolves, so a failed/crashed write never exposes a partial path through persisted state.
@@ -47,7 +64,7 @@ export async function writeFileWithCopySuffix(
   for (let attempt = 0; attempt < MAX_FILENAME_ALLOCATION_ATTEMPTS; attempt += 1) {
     const candidateName = attempt === 0
       ? safeName
-      : `${nameWithoutExtension}_copy_${formatCopyTimestamp(new Date())}${attempt > 1 ? `_${attempt - 1}` : ''}${extension}`;
+      : buildCopySuffixedName(nameWithoutExtension, extension, attempt);
     const candidatePath = join(directoryPath, candidateName);
 
     try {
