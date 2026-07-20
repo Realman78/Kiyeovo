@@ -118,6 +118,7 @@ Requirements for running:
 
 - Node.js 20+; Node.js < 26.x
 - npm
+- On Windows: a `bash` shell (Git Bash, bundled with [Git for Windows](https://git-scm.com/download/win), or WSL) — `npm run setup`/`npm run download:tor` and the other setup scripts under `scripts/` are bash scripts
 
 Clone the repo:
 
