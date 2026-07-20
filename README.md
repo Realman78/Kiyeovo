@@ -2,7 +2,7 @@
 
 > Kiyeovo 1.0 is here. It's a single-developer project, so if something breaks or a platform isn't supported, [report it](https://github.com/Realman78/Kiyeovo/issues). For security reports, email doroxhr [at] gmail [dot] com.
 >
-> Tested on: Linux (Debian, Ubuntu, Lubuntu, EndeavourOS) and macOS.
+> Tested on: Linux (Debian, Ubuntu, Lubuntu, EndeavourOS) and macOS. Windows x64 builds are continuously build/install/startup-smoke-tested on a GitHub-hosted Windows runner.
 
 Kiyeovo is a decentralized peer-to-peer communication app. It supports many features you would find in modern messaging applications, yet still stays fully decentralized & respects your privacy. No e-mail or any KYC data needed.
 
@@ -68,7 +68,7 @@ Open the DMG and drag Kiyeovo into Applications.
 
 ### Windows
 
-Download `Kiyeovo Setup 1.0.0.exe` (installer; installs per-user by default, never asks for administrator rights) or the portable `Kiyeovo 1.0.0.exe` (no install, just run) from the Releases page, then run it.
+Download `Kiyeovo Setup 1.0.0.exe` (x64 installer; installs per-user by default, never asks for administrator rights) or the portable `Kiyeovo 1.0.0.exe` (x64, no install, just run) from the Releases page, then run it.
 
 ### General installation notes
 
@@ -106,7 +106,7 @@ Or run it without FUSE (extracts to a temp dir and runs):
 
 **Windows**
 
-**First launch is blocked by SmartScreen.** The 1.0 build is not code-signed, so Windows Defender SmartScreen may show *"Windows protected your PC."* You only need to do this once: click **More info**, then **Run anyway**.
+Official tagged Windows releases are Authenticode-signed. A newly signed release can still show a Windows Defender SmartScreen warning until its publisher/file reputation is established. Verify that the publisher and download source are the expected Kiyeovo release before continuing. Locally produced or manually dispatched development builds are intentionally unsigned and may be blocked by SmartScreen or Windows 11 Smart App Control.
 
 
 
@@ -116,7 +116,7 @@ Most people should just grab an installer (see [Installation](#installation) abo
 
 Requirements for running:
 
-- Node.js 20+; Node.js < 26.x
+- Node.js `^20.17.0` or `>=22.9.0 <26` (Node.js 24 is used in CI)
 - npm
 - On Windows: a `bash` shell (Git Bash, bundled with [Git for Windows](https://git-scm.com/download/win), or WSL) — `npm run setup`/`npm run download:tor` and the other setup scripts under `scripts/` are bash scripts
 
@@ -126,6 +126,16 @@ Clone the repo:
 git clone https://github.com/Realman78/Kiyeovo.git
 cd Kiyeovo
 ```
+
+### Windows release signing
+
+The `kiyeovo-*` tagged-release workflow refuses to publish unsigned Windows executables. Release maintainers must:
+
+1. Obtain a trusted RSA Authenticode code-signing certificate exported as a password-protected PFX/P12.
+2. Store its base64 content in the `WINDOWS_CSC_LINK` GitHub Actions repository secret.
+3. Store its password in `WINDOWS_CSC_KEY_PASSWORD`.
+
+Electron Builder receives those values as `WIN_CSC_LINK`/`WIN_CSC_KEY_PASSWORD`. CI then verifies the signatures, silently installs and uninstalls the NSIS package, launches the installed and portable applications, and runs the bundled `tor.exe --version` before uploading release artifacts. A normal branch/PR build performs the same package smoke tests without signing secrets.
 
 
 
@@ -491,4 +501,3 @@ The desktop app is built with Electron, React, and libp2p.
 - Session: Session uses its own network of nodes to send and store messages. Kiyeovo uses pure libp2p and stores offline messages in the DHT - simpler, but not guaranteed "always-on".
 - Tox: Tox runs as one global P2P network. Kiyeovo splits things into two separate networks depending on the mode.
 - Ricochet: Ricochet is simple Tor-based messaging. Kiyeovo also has Tor-based messaging, but also has a ton more features and capabilites.
-

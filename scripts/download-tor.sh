@@ -24,18 +24,34 @@ TOR_VERSION="15.0.18"
 # bumped - a stale pin will hard-fail the download below rather than
 # silently accepting a mismatched archive.
 #
-# TODO: this hash table only protects against a corrupted/tampered
+# TODO: these hash pins only protect against a corrupted/tampered
 # download after the hashes were pinned; it doesn't protect against a
 # compromise at pinning time the way verifying the upstream PGP (.asc)
 # signature would. Switch to .asc signature verification (against the
 # Tor Browser developers' signing keys) when there's time to wire up gpg
 # in CI; that's the better long-term answer.
-declare -A TOR_SHA256=(
-    [linux-x64]="5a8f19f5f119b5fa2a8fd799a3a532e3236ad36164241800d6302e32f0e1c2a9"
-    [darwin-x64]="95243f76bcf05d6179d017c3f3e4ece7b53cc58dff1ba617b03a2fe2c8298b5b"
-    [darwin-arm64]="c99cf6f69740a443c7fffaf598ceb0952b3914041507c8afe11bed84a3333eb1"
-    [win32-x64]="6ac067402c7b4a3dc37887ed3754b3914b67fdc220c966190683e9ccf91abf0f"
-)
+# Keep this as a case statement rather than a Bash associative array: macOS
+# runners and stock macOS installations still ship Bash 3.2, while `declare -A`
+# requires Bash 4 and would break every macOS Tor/release build.
+expected_sha256_for() {
+    case "$1" in
+        linux-x64)
+            echo "5a8f19f5f119b5fa2a8fd799a3a532e3236ad36164241800d6302e32f0e1c2a9"
+            ;;
+        darwin-x64)
+            echo "95243f76bcf05d6179d017c3f3e4ece7b53cc58dff1ba617b03a2fe2c8298b5b"
+            ;;
+        darwin-arm64)
+            echo "c99cf6f69740a443c7fffaf598ceb0952b3914041507c8afe11bed84a3333eb1"
+            ;;
+        win32-x64)
+            echo "6ac067402c7b4a3dc37887ed3754b3914b67fdc220c966190683e9ccf91abf0f"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
 
 # Colors for output
 RED='\033[0;31m'
@@ -162,10 +178,11 @@ download_tor() {
     # else with it. This is a hard failure: an unexpected hash could mean a
     # tampered/corrupted download, or a stale pin left over from a version
     # bump - either way we must not extract or install the archive.
-    local expected_sha256="${TOR_SHA256[$platform]:-}"
+    local expected_sha256=""
+    expected_sha256=$(expected_sha256_for "$platform" || true)
     if [[ -z "$expected_sha256" ]]; then
         echo -e "${RED}No pinned SHA-256 checksum for platform '$platform' at TOR_VERSION=${TOR_VERSION}.${NC}"
-        echo -e "${RED}Refusing to install an unverified Tor archive. Pin a checksum in TOR_SHA256 first.${NC}"
+        echo -e "${RED}Refusing to install an unverified Tor archive. Pin it in expected_sha256_for first.${NC}"
         rm -rf "$temp_dir"
         exit 1
     fi
@@ -178,7 +195,7 @@ download_tor() {
         echo -e "${RED}  expected: $expected_sha256${NC}"
         echo -e "${RED}  actual:   $actual_sha256${NC}"
         echo -e "${RED}Refusing to install this archive - it does not match the pinned checksum.${NC}"
-        echo -e "${RED}This could mean a corrupted/tampered download, or that TOR_VERSION was bumped without re-pinning TOR_SHA256.${NC}"
+        echo -e "${RED}This could mean a corrupted/tampered download, or that TOR_VERSION was bumped without re-pinning expected_sha256_for.${NC}"
         rm -rf "$temp_dir"
         exit 1
     fi

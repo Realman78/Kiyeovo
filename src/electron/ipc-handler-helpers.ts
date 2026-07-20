@@ -2,15 +2,12 @@ import { lstat, realpath, stat } from 'fs/promises';
 import { dirname, isAbsolute, join, relative, resolve as resolvePath } from 'path';
 import { UPLOADS_DIR } from '../core/constants.js';
 import { getDefaultDownloadsDirectory } from '../core/lib/file-storage.js';
+import { validatePortableFileName, type PortableFileNameFailure } from '../core/utils/portable-filename.js';
 import { isImageFile } from '../shared/file-types.js';
 // Re-exported from src/core so callers in both layers share one implementation
 // (src/core must not import from src/electron). The unit tests and existing IPC
 // call sites keep importing it from here unchanged.
 export { createDebouncedInvoker, type DebouncedInvoker } from '../core/utils/debounced-invoker.js';
-
-const INVALID_PORTABLE_FILENAME_CHARACTERS = /[<>:"/\\|?*]/;
-const WINDOWS_RESERVED_BASENAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
-const MAX_PORTABLE_FILENAME_BYTES = 255;
 
 type FileStats = {
   isDirectory(): boolean;
@@ -38,38 +35,21 @@ export type SettingsDatabase = {
 
 const defaultFileSystemOps: FileSystemOps = { lstat, realpath, stat };
 
-function containsUnsupportedFileNameCharacter(value: string): boolean {
-  for (const character of value) {
-    const codePoint = character.codePointAt(0);
-    if (
-      INVALID_PORTABLE_FILENAME_CHARACTERS.test(character)
-      || codePoint === undefined
-      || codePoint <= 0x1F
-      || codePoint === 0x7F
-    ) {
-      return true;
-    }
+function uploadFileNameError(reason: PortableFileNameFailure): string {
+  switch (reason) {
+    case 'required': return 'Upload filename is required';
+    case 'path': return 'Upload filename must not contain a path';
+    case 'unsupported_characters': return 'Upload filename contains unsupported characters';
+    case 'reserved': return 'Upload filename is reserved by the operating system';
+    case 'too_long': return 'Upload filename is too long';
+    case 'invalid': return 'Upload filename is invalid';
   }
-  return false;
 }
 
 export function validateUploadImageFileName(value: unknown): { success: true; fileName: string } | { success: false; error: string } {
-  if (typeof value !== 'string' || !value.trim()) {
-    return { success: false, error: 'Upload filename is required' };
-  }
-
-  const candidate = value.trim();
-  if (candidate === '.' || candidate === '..' || candidate.includes('/') || candidate.includes('\\')) {
-    return { success: false, error: 'Upload filename must not contain a path' };
-  }
-
-  if (containsUnsupportedFileNameCharacter(candidate)) {
-    return { success: false, error: 'Upload filename contains unsupported characters' };
-  }
-
-  if (Buffer.byteLength(candidate, 'utf8') > MAX_PORTABLE_FILENAME_BYTES) {
-    return { success: false, error: 'Upload filename is too long' };
-  }
+  const validation = validatePortableFileName(value, { trimOuterWhitespace: true });
+  if (!validation.ok) return { success: false, error: uploadFileNameError(validation.reason) };
+  const candidate = validation.fileName;
 
   const extensionSeparatorIndex = candidate.lastIndexOf('.');
   const stem = extensionSeparatorIndex === -1
@@ -77,14 +57,6 @@ export function validateUploadImageFileName(value: unknown): { success: true; fi
     : candidate.slice(0, extensionSeparatorIndex);
   if (!stem || stem.endsWith('.') || stem.endsWith(' ')) {
     return { success: false, error: 'Upload filename is invalid' };
-  }
-
-  const firstDotIndex = stem.indexOf('.');
-  const windowsBasename = firstDotIndex === -1
-    ? stem
-    : stem.slice(0, firstDotIndex);
-  if (WINDOWS_RESERVED_BASENAME.test(windowsBasename)) {
-    return { success: false, error: 'Upload filename is reserved by the operating system' };
   }
 
   if (!isImageFile(candidate)) {

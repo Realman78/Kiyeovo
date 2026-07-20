@@ -26,6 +26,7 @@ import { resolveConfiguredDownloadsDirectory, writeFileWithCopySuffix } from "./
 import { StreamHandler } from "../transport/stream-handler.js";
 import { dialProtocolWithRelayFallback } from "../transport/protocol-dialer.js";
 import { errStr, generalErrorHandler } from "../utils/general-error.js";
+import { validatePortableFileName } from "../utils/portable-filename.js";
 import { EncryptedUserIdentity } from "../identity/encrypted-user-identity.js";
 import { isDebugModeEnabled, log } from "../../shared/logger.js";
 import {
@@ -1145,8 +1146,11 @@ export class FileHandler {
   }
 
   async #loadFileMetadata(filePath: string): Promise<FileMetadata> {
-    const buffer = await readFile(filePath);
     const filename = basename(filePath);
+    if (!validatePortableFileName(filename).ok) {
+      throw new Error('File name is not portable across supported operating systems');
+    }
+    const buffer = await readFile(filePath);
     const checksum = blake3(buffer).toString('hex');
     const totalChunks = Math.ceil(buffer.length / CHUNK_SIZE);
     const mimeType = mime.lookup(filename) || 'application/octet-stream';

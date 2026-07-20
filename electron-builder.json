@@ -52,6 +52,9 @@
     "win": {
         "target": ["nsis", "portable"],
         "icon": "resources/icons/app-icon.ico",
+        "signtoolOptions": {
+            "signingHashAlgorithms": ["sha256"]
+        },
         "extraResources": [
             {
                 "from": "resources/tor/win32-x64",

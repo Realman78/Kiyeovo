@@ -6,6 +6,9 @@
   "description": "Desktop client for a decentralized p2p messenger",
   "author": "Marin Dedic <marin.dedic1308@gmail.com>",
   "main": "dist-electron/electron/main.js",
+  "engines": {
+    "node": "^20.17.0 || >=22.9.0 <26"
+  },
   "scripts": {
     "dev": "npm-run-all --parallel dev:ui dev:electron",
     "dev:ui": "vite",

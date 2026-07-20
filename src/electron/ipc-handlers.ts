@@ -59,6 +59,7 @@ import {
 } from './dialog-path-grants.js';
 import { getDefaultDownloadsDirectory, writeFileWithCopySuffix } from '../core/lib/file-storage.js';
 import type { InitialSetupStatus, SaveTextUploadResponse } from '../shared/kiyeovo-api.js';
+import { isScreenShareSupported } from './screen-share-support.js';
 
 function requestAppRestart(): void {
   scheduleAppRelaunch();
@@ -122,10 +123,6 @@ const INITIAL_SETUP_STATUSES: InitialSetupStatus[] = [
   'skipped',
 ];
 const SCREEN_SHARE_UNSUPPORTED_MESSAGE = 'Screen sharing is not supported yet';
-
-function isScreenShareSupported(): boolean {
-  return process.platform === 'darwin' || process.platform === 'linux';
-}
 
 function isIceServerType(value: string): value is IceServerType {
   return ICE_SERVER_TYPES.includes(value as IceServerType);

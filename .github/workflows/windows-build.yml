@@ -3,7 +3,9 @@ name: Windows Build
 on:
   push:
     branches:
+      - main
       - feature/windows-support
+  pull_request:
   workflow_dispatch:
 
 jobs:
@@ -36,6 +38,10 @@ jobs:
 
       - name: Build Windows installers
         run: npx electron-builder --win --x64 --publish never
+
+      - name: Smoke-test installer, portable app, and bundled Tor
+        shell: pwsh
+        run: ./scripts/windows-package-smoke.ps1 -DistDir dist
 
       - uses: actions/upload-artifact@v4
         with:

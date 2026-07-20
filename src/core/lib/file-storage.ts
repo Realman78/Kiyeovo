@@ -2,6 +2,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, extname, isAbsolute, join, resolve } from 'node:path';
 import { formatCopyTimestamp } from '../utils/miscellaneous.js';
+import { validatePortableFileName } from '../utils/portable-filename.js';
 
 const MAX_FILENAME_ALLOCATION_ATTEMPTS = 1000;
 
@@ -19,12 +20,11 @@ export function resolveConfiguredDownloadsDirectory(configuredPath: string | nul
 }
 
 export function safeDownloadBasename(fileName: string): string {
-  const trimmed = fileName.trim();
-  const base = basename(trimmed);
-  if (!base || base === '.' || base === '..' || base !== trimmed || base.includes('/') || base.includes('\\')) {
+  const validation = validatePortableFileName(fileName);
+  if (!validation.ok) {
     throw new Error('Invalid download filename');
   }
-  return base;
+  return validation.fileName;
 }
 
 /**

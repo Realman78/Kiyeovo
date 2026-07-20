@@ -92,8 +92,39 @@ jobs:
 
       - run: npm run transpile:electron
 
+      - name: Run unit tests
+        run: npm run test:unit
+
+      - name: Require Windows signing credentials for tagged releases
+        if: startsWith(github.ref, 'refs/tags/kiyeovo-')
+        shell: pwsh
+        env:
+          WIN_CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WIN_CSC_LINK)) {
+            throw "Missing WINDOWS_CSC_LINK repository secret; refusing to publish unsigned Windows executables."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WIN_CSC_KEY_PASSWORD)) {
+            throw "Missing WINDOWS_CSC_KEY_PASSWORD repository secret; refusing to publish unsigned Windows executables."
+          }
+
       - name: Build Windows installers
+        env:
+          # Keep credentials out of manual non-tag builds. electron-builder
+          # accepts raw base64 PFX/P12 content or a protected certificate URL.
+          WIN_CSC_LINK: ${{ startsWith(github.ref, 'refs/tags/kiyeovo-') && secrets.WINDOWS_CSC_LINK || '' }}
+          WIN_CSC_KEY_PASSWORD: ${{ startsWith(github.ref, 'refs/tags/kiyeovo-') && secrets.WINDOWS_CSC_KEY_PASSWORD || '' }}
         run: npx electron-builder --win --x64 --publish never
+
+      - name: Smoke-test Windows packages and signatures
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like "refs/tags/kiyeovo-*") {
+            ./scripts/windows-package-smoke.ps1 -DistDir dist -RequireSignedArtifacts
+          } else {
+            ./scripts/windows-package-smoke.ps1 -DistDir dist
+          }
 
       - uses: actions/upload-artifact@v4
         with:
