@@ -34,23 +34,7 @@ jobs:
       - name: Run unit tests
         run: npm run test:unit
 
-      - name: Set up MSVC toolchain
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
       - name: Build Windows installers
-        env:
-          # electron-builder invokes @electron/rebuild, which falls back to a
-          # from-source node-gyp build for native modules with no prebuilt
-          # binary for this Electron ABI (e.g. classic-level). node-gyp's own
-          # Visual Studio auto-detection (find-visualstudio.js) can fail to
-          # locate the runner's VS Build Tools even though they're installed,
-          # so ilammy/msvc-dev-cmd above sets up the VC environment directly
-          # and this pins the MSVS version node-gyp should target as a
-          # belt-and-braces fallback.
-          GYP_MSVS_VERSION: "2022"
-          npm_config_msvs_version: "2022"
         run: npx electron-builder --win --x64 --publish never
 
       - uses: actions/upload-artifact@v4

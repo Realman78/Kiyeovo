@@ -106,6 +106,7 @@
     "vite": "^7.2.4"
   },
   "overrides": {
-    "@libp2p/interface": "2.11.0"
+    "@libp2p/interface": "2.11.0",
+    "node-gyp": "^12.4.0"
   }
 }
