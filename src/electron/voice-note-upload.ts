@@ -1,11 +1,19 @@
 import { VOICE_NOTE_MAX_DURATION_MS_WIRE } from '../core/constants.js';
+import {
+  containsUnsupportedFileNameCharacter,
+  exceedsMaxPortableFilenameBytes,
+  isWindowsReservedBasename,
+  windowsBasenameOf,
+} from '../core/utils/portable-filename.js';
 
 // Mirrors text-upload.ts's precedent for renderer-generated content: the renderer never writes
 // to disk directly (sandboxed), so recorded audio bytes cross this vetted IPC boundary and are
 // written to the app's managed uploads location before feeding the existing send-file flow.
-const INVALID_PORTABLE_FILENAME_CHARACTERS = /[<>:"/\\|?*]/;
-const WINDOWS_RESERVED_BASENAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
-const MAX_PORTABLE_FILENAME_BYTES = 255;
+//
+// This validator intentionally *rejects* rather than sanitizes: the app itself generates this
+// filename (voice-note-XXXXXXXX-XXXXXX.webm), so any violation of the shared portable-filename
+// rules (src/core/utils/portable-filename.ts) indicates a bug or tampering, not a legitimate
+// peer-offered name that needs rewriting to be savable elsewhere.
 
 export type PreparedVoiceNoteUpload =
   | {
@@ -22,21 +30,6 @@ export type PreparedVoiceNoteUpload =
       durationMs: null;
       error: string;
     };
-
-function containsUnsupportedFileNameCharacter(value: string): boolean {
-  for (const character of value) {
-    const codePoint = character.codePointAt(0);
-    if (
-      INVALID_PORTABLE_FILENAME_CHARACTERS.test(character)
-      || codePoint === undefined
-      || codePoint <= 0x1F
-      || codePoint === 0x7F
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
 
 function validateVoiceNoteFileName(value: unknown): { fileName: string } | { error: string } {
   if (typeof value !== 'string' || !value.trim()) {
@@ -66,16 +59,12 @@ function validateVoiceNoteFileName(value: unknown): { fileName: string } | { err
     return { error: 'Voice note filename is invalid' };
   }
 
-  const firstDotIndex = stem.indexOf('.');
-  const windowsBasename = firstDotIndex === -1
-    ? stem
-    : stem.slice(0, firstDotIndex);
-  if (WINDOWS_RESERVED_BASENAME.test(windowsBasename)) {
+  if (isWindowsReservedBasename(windowsBasenameOf(stem))) {
     return { error: 'Voice note filename is reserved by the operating system' };
   }
 
   const normalizedFileName = `${stem}.webm`;
-  if (Buffer.byteLength(normalizedFileName, 'utf8') > MAX_PORTABLE_FILENAME_BYTES) {
+  if (exceedsMaxPortableFilenameBytes(normalizedFileName)) {
     return { error: 'Voice note filename is too long' };
   }
 

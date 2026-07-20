@@ -2,6 +2,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, extname, isAbsolute, join, resolve } from 'node:path';
 import { formatCopyTimestamp } from '../utils/miscellaneous.js';
+import { sanitizePortableFileName } from '../utils/portable-filename.js';
 
 const MAX_FILENAME_ALLOCATION_ATTEMPTS = 1000;
 
@@ -62,4 +63,23 @@ export async function writeFileWithCopySuffix(
   }
 
   throw new Error('Unable to allocate a unique filename');
+}
+
+/**
+ * Receiver-side entry point for incoming file-transfer offers. A peer's offer already passed
+ * validateIncomingFileOffer's hard traversal/separator rejection (src/core/protocol/
+ * file-offer-validation.ts) — that check stays strict and is not weakened here. But a
+ * Linux/macOS sender can legally offer a name Windows cannot create on disk (a reserved device
+ * basename like `CON.txt`, a forbidden character like `:`, a trailing dot/space). Rather than
+ * reject the offer or touch the signed wire payload, we sanitize only the name handed to the
+ * filesystem write: sanitizePortableFileName deterministically rewrites it into something every
+ * supported OS can save. The offer's original filename keeps being used as-is for the DB
+ * `file_name` column / chat UI display; only this on-disk name changes.
+ */
+export async function writeIncomingFileWithCopySuffix(
+  directoryPath: string,
+  offeredFileName: string,
+  bytes: Buffer,
+): Promise<string> {
+  return writeFileWithCopySuffix(directoryPath, sanitizePortableFileName(offeredFileName), bytes);
 }

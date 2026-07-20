@@ -23,7 +23,7 @@ import { ServedFileRegistry, type ServedFileMeta } from "./served-file-registry.
 import { LeasePool, type Lease } from "./lease-pool.js";
 import { FrameStreamReader } from "./frame-stream.js";
 import { ChunkReassembler, createFileChunks, encodePullFrame } from "./file-transfer.js";
-import { resolveConfiguredDownloadsDirectory, writeFileWithCopySuffix } from "./file-storage.js";
+import { resolveConfiguredDownloadsDirectory, writeIncomingFileWithCopySuffix } from "./file-storage.js";
 import { StreamHandler } from "../transport/stream-handler.js";
 import { dialProtocolWithRelayFallback } from "../transport/protocol-dialer.js";
 import { errStr, generalErrorHandler } from "../utils/general-error.js";
@@ -1074,7 +1074,7 @@ export class FileHandler {
       let savedPath: string;
       try {
         const downloadsDir = resolveConfiguredDownloadsDirectory(this.database.getSetting('downloads_directory'));
-        savedPath = await writeFileWithCopySuffix(downloadsDir, claim.fileName, finalized.buffer);
+        savedPath = await writeIncomingFileWithCopySuffix(downloadsDir, claim.fileName, finalized.buffer);
       } catch (error: unknown) {
         await this.#sendPullConfirm(settleConfirm, sinkDone, { type: 'file_transfer_confirm', offerId: claim.offerId, success: false, reason: 'disk' });
         outcomeApplied = true;
