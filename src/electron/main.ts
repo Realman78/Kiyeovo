@@ -106,6 +106,14 @@ let currentWebRtcPolicyMode: NetworkMode = DEFAULT_NETWORK_MODE;
 
 registerProtocolSchemes();
 
+// Windows attributes toast notifications (e.g. the close-to-tray notice) by
+// AppUserModelID, not by notification title - without this they show
+// "electron.app.Electron" as the header. Must match electron-builder.json's
+// appId, which the NSIS installer stamps on the Start-menu shortcut.
+if (process.platform === 'win32') {
+  app.setAppUserModelId('com.marin-dedic.kiyeovo');
+}
+
 // Enforce single instance
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
