@@ -8,7 +8,10 @@ function run(command, args = []) {
     const executable = isWindows ? `${command}.cmd` : command;
     const child = spawn(executable, args, {
       stdio: 'inherit',
-      shell: false,
+      // Node >=18.20/20.12 refuses to spawn .cmd/.bat shims without a shell
+      // (CVE-2024-27980 hardening) and throws EINVAL, so on Windows the npm
+      // .cmd shims must go through the shell. POSIX keeps shell:false.
+      shell: isWindows,
     });
 
     child.on('error', reject);

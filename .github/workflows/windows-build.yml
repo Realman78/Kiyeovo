@@ -1,0 +1,57 @@
+name: Windows Build
+
+on:
+  push:
+    branches:
+      - main
+      - feature/windows-support
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - run: npm ci
+
+      - name: Download bundled Tor (win32-x64)
+        shell: bash
+        run: bash scripts/download-tor.sh win32-x64
+
+      - run: npm run build
+
+      - run: npm run transpile:electron
+
+      - name: Run unit tests
+        run: npm run test:unit
+
+      - name: Build Windows installers
+        run: npx electron-builder --win --x64 --publish never
+
+      - name: Smoke-test installer, portable app, and bundled Tor
+        shell: pwsh
+        run: ./scripts/windows-package-smoke.ps1 -DistDir dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-dist
+          path: dist/*.exe
+          if-no-files-found: error
+
+      - name: Upload auto-update metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-dist-metadata
+          path: dist/latest.yml
+          if-no-files-found: warn
