@@ -41,6 +41,9 @@ export interface ChatMessage {
   transferError?: string;
   fileGroupDownloadTotal?: number;
   fileGroupDownloadCompleted?: number;
+  // Voice note: additive file-offer sub-kind. Duration is display-only (never authoritative).
+  isVoiceNote?: boolean;
+  voiceDurationMs?: number;
   localSendState?: 'queued' | 'sending' | 'failed';
   // 'offline_backup' = delivered online, only the DHT backup failed (retry re-stores, not re-sends)
   failedReason?: 'group_rekeying' | 'other' | 'offline_backup';

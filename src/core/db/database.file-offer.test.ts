@@ -217,6 +217,58 @@ test('cancels an active outgoing offer exactly once and resolves the target peer
   }), null);
 });
 
+test('persists and round-trips voice-note file_kind/file_duration_ms metadata', async (t) => {
+  const { database, chatId } = await createOutgoingOfferDatabase();
+  t.after(() => database.close());
+  await database.createMessage({
+    id: 'voice_note_1',
+    client_msg_id: 'voice_note_1',
+    chat_id: chatId,
+    sender_peer_id: 'local_peer',
+    content: 'voice-note-20260101-000000.webm (5000 bytes)',
+    message_type: 'file',
+    file_name: 'voice-note-20260101-000000.webm',
+    file_size: 5000,
+    file_path: '/tmp/voice-note-20260101-000000.webm',
+    file_offer_id: 'offer_voice_1',
+    file_kind: 'voice_note',
+    file_duration_ms: 12_000,
+    transfer_status: 'completed',
+    transfer_progress: 100,
+    timestamp: new Date(),
+  });
+
+  const row = database.getFileMessageById('voice_note_1');
+  assert.equal(row?.file_kind, 'voice_note');
+  assert.equal(row?.file_duration_ms, 12_000);
+
+  const media = database.getCompletedFileMediaById('voice_note_1');
+  assert.equal(media?.fileKind, 'voice_note');
+});
+
+test('a plain file offer persists null file_kind/file_duration_ms', async (t) => {
+  const { database, chatId } = await createOutgoingOfferDatabase();
+  t.after(() => database.close());
+  await database.createMessage({
+    id: 'plain_file_1',
+    client_msg_id: 'plain_file_1',
+    chat_id: chatId,
+    sender_peer_id: 'local_peer',
+    content: 'report.pdf (10 bytes)',
+    message_type: 'file',
+    file_name: 'report.pdf',
+    file_size: 10,
+    file_offer_id: 'offer_plain_1',
+    transfer_status: 'awaiting_acceptance',
+    transfer_progress: 0,
+    timestamp: new Date(),
+  });
+
+  const row = database.getFileMessageById('plain_file_1');
+  assert.equal(row?.file_kind, null);
+  assert.equal(row?.file_duration_ms, null);
+});
+
 test('cancels an active outgoing group offer with aggregate status', async (t) => {
   const { database, chatId, groupId } = await createOutgoingGroupOfferDatabase();
   t.after(() => database.close());

@@ -17,7 +17,7 @@ import {
   type IceServerType,
   type IceServersResponse,
 } from '../core/index.js';
-import { CHATS_TO_CHECK_FOR_OFFLINE_MESSAGES, DEFAULT_NETWORK_MODE, FAST_MISSING_ICE_WARNING_ACKNOWLEDGED_SETTING_KEY, FAST_RELAY_MULTIADDRS_SETTING_KEY, FILE_OFFER_RATE_LIMIT, KEY_EXCHANGE_RATE_LIMIT_DEFAULT, MAX_FILE_SIZE, MAX_PENDING_FILES_PER_PEER, MAX_PENDING_FILES_TOTAL, NETWORK_MODE_ONBOARDED_SETTING_KEY, OFFLINE_MESSAGE_LIMIT, PREDEFINED_NODES_SUNSET_DISMISSED_SETTING_KEY, SILENT_REJECTION_THRESHOLD_GLOBAL, SILENT_REJECTION_THRESHOLD_PER_PEER, NETWORK_MODES, WEBRTC_ICE_SERVERS_SETTING_KEY, getInitialSetupStatusSettingKey, getTorConfig, isNetworkMode } from '../core/constants.js';
+import { CHATS_TO_CHECK_FOR_OFFLINE_MESSAGES, DEFAULT_NETWORK_MODE, FAST_MISSING_ICE_WARNING_ACKNOWLEDGED_SETTING_KEY, FAST_RELAY_MULTIADDRS_SETTING_KEY, FILE_OFFER_RATE_LIMIT, KEY_EXCHANGE_RATE_LIMIT_DEFAULT, MAX_FILE_SIZE, MAX_PENDING_FILES_PER_PEER, MAX_PENDING_FILES_TOTAL, MAX_VOICE_NOTE_FILE_SIZE, NETWORK_MODE_ONBOARDED_SETTING_KEY, OFFLINE_MESSAGE_LIMIT, PREDEFINED_NODES_SUNSET_DISMISSED_SETTING_KEY, SILENT_REJECTION_THRESHOLD_GLOBAL, SILENT_REJECTION_THRESHOLD_PER_PEER, NETWORK_MODES, WEBRTC_ICE_SERVERS_SETTING_KEY, getInitialSetupStatusSettingKey, getTorConfig, isNetworkMode } from '../core/constants.js';
 import { validateMessageLength, validateUsername } from '../core/utils/validators.js';
 import { peerIdFromString } from '@libp2p/peer-id';
 import { multiaddr } from '@multiformats/multiaddr';
@@ -45,9 +45,11 @@ import { scheduleAppRelaunch } from './relaunch.js';
 import { createTrustedIpcMainHandle, type IpcMainHandleRegistrar } from './trusted-ipc.js';
 import { mintMediaToken } from './app-protocol.js';
 import { prepareTextUpload } from './text-upload.js';
+import { prepareVoiceNoteUpload } from './voice-note-upload.js';
 import {
   createDebouncedInvoker,
   resolveCompletedImageMedia,
+  resolveCompletedVoiceNoteMedia,
   resolveOpenFileLocationPath,
   resolveUploadsDirectory,
   validateUploadImageFileName,
@@ -58,7 +60,7 @@ import {
   resolveGrantedDialogPath,
 } from './dialog-path-grants.js';
 import { getDefaultDownloadsDirectory, writeFileWithCopySuffix } from '../core/lib/file-storage.js';
-import type { InitialSetupStatus, SaveTextUploadResponse } from '../shared/kiyeovo-api.js';
+import type { InitialSetupStatus, SaveTextUploadResponse, SaveVoiceNoteUploadResponse } from '../shared/kiyeovo-api.js';
 import { withSettingsDatabase } from './settings-db.js';
 import {
   getCloseToTrayEnabled,
@@ -1440,7 +1442,7 @@ function setupFileDialogHandlers(ipcMain: IpcMainHandleRegistrar): void {
           const canonicalPath = await realpath(filePath);
           const fileStats = await stat(canonicalPath);
           if (fileStats.isFile()) {
-            mediaToken = mintMediaToken(canonicalPath);
+            mediaToken = mintMediaToken(canonicalPath, 'image');
           }
         } catch (error) {
           console.warn('[IPC] Failed to create selected-image media capability:', error);
@@ -1529,7 +1531,7 @@ function setupMediaHandlers(
 
       return {
         success: true,
-        token: mintMediaToken(canonicalPath),
+        token: mintMediaToken(canonicalPath, 'image'),
         error: null,
       };
     } catch (error) {
@@ -1538,6 +1540,34 @@ function setupMediaHandlers(
         success: false,
         token: null,
         error: errStr(error, 'Failed to register message media'),
+      };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.REGISTER_VOICE_NOTE_MEDIA, async (_event, messageId: string) => {
+    try {
+      if (typeof messageId !== 'string' || !messageId.trim()) {
+        return { success: false, token: null, error: 'Invalid message ID' };
+      }
+
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return { success: false, token: null, error: 'P2P core not initialized' };
+      }
+
+      const { canonicalPath } = await resolveCompletedVoiceNoteMedia(p2pCore.database, messageId);
+
+      return {
+        success: true,
+        token: mintMediaToken(canonicalPath, 'voice-note'),
+        error: null,
+      };
+    } catch (error) {
+      console.error('[IPC] Failed to register voice note media:', error);
+      return {
+        success: false,
+        token: null,
+        error: errStr(error, 'Failed to register voice note media'),
       };
     }
   });
@@ -1656,7 +1686,7 @@ function setupUploadHandlers(
       return {
         success: true,
         filePath: savedFilePath,
-        mediaToken: mintMediaToken(canonicalPath),
+        mediaToken: mintMediaToken(canonicalPath, 'image'),
         uploadsDirSizeBytes,
         error: null,
       };
@@ -1743,6 +1773,82 @@ function setupUploadHandlers(
       }
       console.error('[IPC] Failed to save generated text upload:', error);
       return textUploadFailure(errStr(error, 'Failed to save generated text'));
+    }
+  });
+
+  const voiceNoteUploadFailure = (error: string): SaveVoiceNoteUploadResponse => ({
+    success: false,
+    filePath: null,
+    fileName: null,
+    fileSize: 0,
+    mediaToken: null,
+    uploadsDirSizeBytes: 0,
+    error,
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SAVE_VOICE_NOTE_UPLOAD, async (
+    _event,
+    bytes: unknown,
+    fileName: unknown,
+    durationMs: unknown,
+  ): Promise<SaveVoiceNoteUploadResponse> => {
+    let savedFilePath: string | null = null;
+
+    try {
+      const p2pCore = getP2PCore();
+      if (!p2pCore) {
+        return voiceNoteUploadFailure('P2P core not initialized');
+      }
+
+      if (p2pCore.networkMode !== NETWORK_MODES.FAST) {
+        return voiceNoteUploadFailure('Voice messages are available only in Fast mode');
+      }
+
+      // Voice notes get their own (smaller) cap in addition to the general file-size setting —
+      // whichever is stricter wins, so lowering the general limit still constrains voice notes.
+      const maxFileSize = Math.min(getConfiguredMaxFileSize(p2pCore.database), MAX_VOICE_NOTE_FILE_SIZE);
+      const prepared = prepareVoiceNoteUpload(bytes, fileName, durationMs, maxFileSize);
+      if (!prepared.success) {
+        return voiceNoteUploadFailure(prepared.error);
+      }
+
+      const uploadsDir = resolveUploadsDirectory(p2pCore.database);
+      await mkdir(uploadsDir, { recursive: true });
+      savedFilePath = await writeUploadAtomically(
+        uploadsDir,
+        prepared.fileName,
+        prepared.bytes,
+      );
+
+      const uploadsDirSizeBytes = await getFlatDirectorySize(uploadsDir);
+      const canonicalPath = await realpath(savedFilePath);
+      const savedFileStats = await stat(canonicalPath);
+      if (!savedFileStats.isFile()) {
+        throw new Error('Saved voice note upload is not a regular file');
+      }
+
+      const finalFileName = basename(savedFilePath);
+      log(`[IPC] Saved voice note upload: ${finalFileName} (${savedFileStats.size} bytes, ${prepared.durationMs}ms)`);
+
+      return {
+        success: true,
+        filePath: savedFilePath,
+        fileName: finalFileName,
+        fileSize: savedFileStats.size,
+        mediaToken: mintMediaToken(canonicalPath, 'voice-note'),
+        uploadsDirSizeBytes,
+        error: null,
+      };
+    } catch (error) {
+      if (savedFilePath) {
+        try {
+          await rm(savedFilePath, { force: true });
+        } catch (cleanupError) {
+          console.error('[IPC] Failed to remove incomplete voice note upload:', cleanupError);
+        }
+      }
+      console.error('[IPC] Failed to save voice note upload:', error);
+      return voiceNoteUploadFailure(errStr(error, 'Failed to save voice note'));
     }
   });
 }
@@ -3548,8 +3654,21 @@ function setupFileTransferHandlers(
     }
   };
 
+  // Untrusted renderer input: only pass a well-formed number through. FileHandler independently
+  // re-validates range/integer-ness (see validateOutgoingVoiceNoteDuration) — this just keeps a
+  // malformed value (string, NaN, object, ...) from crossing the boundary with the wrong type.
+  const asVoiceNoteDurationMs = (value: unknown): number | undefined =>
+    typeof value === 'number' ? value : undefined;
+
   // Send file
-  ipcMain.handle(IPC_CHANNELS.SEND_FILE_REQUEST, async (_event, peerId: string, filePath: string, fileId?: string, replyToCid?: string) => {
+  ipcMain.handle(IPC_CHANNELS.SEND_FILE_REQUEST, async (
+    _event,
+    peerId: string,
+    filePath: string,
+    fileId?: string,
+    replyToCid?: string,
+    voiceNoteDurationMs?: unknown,
+  ) => {
     try {
       const p2pCore = getP2PCore();
       if (!p2pCore) {
@@ -3565,7 +3684,13 @@ function setupFileTransferHandlers(
 
       // Address by peer id, never username — usernames are not unique, so a
       // duplicate contact name can resolve to the wrong peer.
-      await p2pCore.messageHandler.getFileHandler().sendFile(peerId, filePath, fileId, replyToCid);
+      await p2pCore.messageHandler.getFileHandler().sendFile(
+        peerId,
+        filePath,
+        fileId,
+        replyToCid,
+        asVoiceNoteDurationMs(voiceNoteDurationMs),
+      );
 
       return { success: true, error: null };
     } catch (error) {
@@ -3575,7 +3700,14 @@ function setupFileTransferHandlers(
   });
 
   // Send file to a group chat
-  ipcMain.handle(IPC_CHANNELS.SEND_GROUP_FILE_REQUEST, async (_event, chatId: number, filePath: string, fileId?: string, replyToCid?: string) => {
+  ipcMain.handle(IPC_CHANNELS.SEND_GROUP_FILE_REQUEST, async (
+    _event,
+    chatId: number,
+    filePath: string,
+    fileId?: string,
+    replyToCid?: string,
+    voiceNoteDurationMs?: unknown,
+  ) => {
     try {
       const p2pCore = getP2PCore();
       if (!p2pCore) {
@@ -3587,7 +3719,13 @@ function setupFileTransferHandlers(
 
       log(`[IPC] Sending file ${filePath} to group chat ${chatId}`);
 
-      await p2pCore.messageHandler.getFileHandler().sendGroupFile(chatId, filePath, fileId, replyToCid);
+      await p2pCore.messageHandler.getFileHandler().sendGroupFile(
+        chatId,
+        filePath,
+        fileId,
+        replyToCid,
+        asVoiceNoteDurationMs(voiceNoteDurationMs),
+      );
 
       return { success: true, error: null };
     } catch (error) {

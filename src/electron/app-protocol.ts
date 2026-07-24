@@ -1,7 +1,6 @@
 import { protocol } from 'electron';
 import fs from 'fs';
 import path from 'path';
-import { randomUUID } from 'crypto';
 import { Readable } from 'stream';
 import { fileURLToPath } from 'url';
 import mime from 'mime-types';
@@ -11,7 +10,13 @@ import {
   MEDIA_PROTOCOL_HOST,
   MEDIA_PROTOCOL_SCHEME,
 } from './constants.js';
+import {
+  resolveMediaCapability,
+  resolveServedContentType,
+  revokeMediaToken,
+} from './media-capability-registry.js';
 export { getPackagedAppEntryUrl } from './app-entry-url.js';
+export { mintMediaToken, type MediaCapabilityKind } from './media-capability-registry.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -20,8 +25,6 @@ const DIST_UI_DIR = path.join(__dirname, '..', '..', 'dist-ui');
 let protocolSchemesRegistered = false;
 let appProtocolHandlerRegistered = false;
 let mediaProtocolHandlerRegistered = false;
-const mediaPathByToken = new Map<string, string>();
-const mediaTokenByPath = new Map<string, string>();
 
 export function registerProtocolSchemes(): void {
   if (protocolSchemesRegistered) {
@@ -48,29 +51,6 @@ export function registerProtocolSchemes(): void {
   ]);
 
   protocolSchemesRegistered = true;
-}
-
-export function mintMediaToken(canonicalPath: string): string {
-  if (!path.isAbsolute(canonicalPath)) {
-    throw new Error('Media capability path must be absolute');
-  }
-
-  const existingToken = mediaTokenByPath.get(canonicalPath);
-  if (existingToken) {
-    return existingToken;
-  }
-
-  const token = randomUUID();
-  mediaPathByToken.set(token, canonicalPath);
-  mediaTokenByPath.set(canonicalPath, token);
-  return token;
-}
-
-function revokeMediaToken(token: string, canonicalPath: string): void {
-  mediaPathByToken.delete(token);
-  if (mediaTokenByPath.get(canonicalPath) === token) {
-    mediaTokenByPath.delete(canonicalPath);
-  }
 }
 
 function resolveAppAssetPath(requestUrl: URL): string | null {
@@ -144,10 +124,11 @@ export function registerMediaProtocolHandler(): void {
         return new Response('Not Found', { status: 404 });
       }
 
-      const canonicalPath = mediaPathByToken.get(token);
-      if (!canonicalPath) {
+      const capability = resolveMediaCapability(token);
+      if (!capability) {
         return new Response('Not Found', { status: 404 });
       }
+      const { canonicalPath, kind } = capability;
 
       let currentCanonicalPath: string;
       try {
@@ -168,8 +149,11 @@ export function registerMediaProtocolHandler(): void {
         return new Response('Not Found', { status: 404 });
       }
 
-      const contentType = mime.lookup(currentCanonicalPath);
-      if (!contentType || !contentType.startsWith('image/')) {
+      // Content type is bound to the capability's kind (see resolveServedContentType), not
+      // inferred from the filename here — `mime-types` maps a `.webm` extension to `video/webm`,
+      // which would otherwise fail this gate for every voice note.
+      const contentType = resolveServedContentType(kind, currentCanonicalPath);
+      if (!contentType) {
         return new Response('Unsupported Media Type', { status: 415 });
       }
 

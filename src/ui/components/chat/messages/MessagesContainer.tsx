@@ -12,6 +12,7 @@ import { INITIAL_MESSAGES_LIMIT, LOAD_MORE_MESSAGES_LIMIT } from "../../../const
 import { useToast } from "../../ui/use-toast";
 import { useOfflineSendWarning } from "../../../hooks/useOfflineSendWarning";
 import type { Message } from "../../../../core/db/database";
+import { FILE_KIND_VOICE_NOTE } from "../../../../core/constants";
 import { errStr } from '../../../../core/utils/general-error';
 import { useConnectivityGuidance } from "../../../hooks/useConnectivityGuidance";
 import { ChevronDown } from "lucide-react";
@@ -91,6 +92,8 @@ function mapDbMessage(msg: Message & { sender_username?: string }): ChatMessage 
     transferError: msg.transfer_error,
     fileGroupDownloadTotal: msg.file_group_download_total ?? undefined,
     fileGroupDownloadCompleted: msg.file_group_download_completed ?? undefined,
+    isVoiceNote: msg.file_kind === FILE_KIND_VOICE_NOTE || undefined,
+    voiceDurationMs: msg.file_duration_ms ?? undefined,
     // Restore outbound send lifecycle (incl. the retry cooldown, so a
     // group-rekey block survives a restart instead of becoming immediately
     // retryable).

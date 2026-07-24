@@ -715,6 +715,10 @@ export interface PendingFileReceivedEvent {
   senderId: string;
   senderUsername: string;
   replyToClientId?: string;
+  // Set only when the sender's offer carried a plausible voice-note duration (already
+  // re-validated server-side against VOICE_NOTE_MAX_DURATION_MS_WIRE) — display-only.
+  isVoiceNote?: boolean;
+  voiceDurationMs?: number;
 }
 
 export interface PendingFileOfferDeferredEvent {

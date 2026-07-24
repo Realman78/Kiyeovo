@@ -16,13 +16,14 @@ import {
   FILE_PULL_AUTH_TIMEOUT_FAST, FILE_PULL_AUTH_TIMEOUT_ANON, FILE_PULL_CONFIRM_TIMEOUT,
   CHUNK_RECEIVE_TIMEOUT, CHUNK_IDLE_TIMEOUT, NETWORK_MODES, getNetworkModeRuntime,
   MAX_INBOUND_STREAMS_FILE_TRANSFER,
+  FILE_KIND_VOICE_NOTE, VOICE_NOTE_MAX_DURATION_MS_WIRE, MAX_VOICE_NOTE_FILE_SIZE,
 } from "../constants.js";
 import { MessageHandler } from "./message-handler.js";
 import { ServedFileRegistry, type ServedFileMeta } from "./served-file-registry.js";
 import { LeasePool, type Lease } from "./lease-pool.js";
 import { FrameStreamReader } from "./frame-stream.js";
 import { ChunkReassembler, createFileChunks, encodePullFrame } from "./file-transfer.js";
-import { resolveConfiguredDownloadsDirectory, writeFileWithCopySuffix } from "./file-storage.js";
+import { resolveConfiguredDownloadsDirectory, writeIncomingFileWithCopySuffix } from "./file-storage.js";
 import { StreamHandler } from "../transport/stream-handler.js";
 import { dialProtocolWithRelayFallback } from "../transport/protocol-dialer.js";
 import { errStr, generalErrorHandler } from "../utils/general-error.js";
@@ -61,6 +62,63 @@ import {
   type FileTransferConfirmReason,
   type FilePullRejectReason,
 } from "../protocol/file-pull-protocol.js";
+
+/**
+ * Sender-side voice-note duration validation. This is a local caller (IPC), not an untrusted
+ * peer, but we still refuse to mint an offer around a nonsensical duration — the value ends up
+ * signed into the offer payload and shown to the recipient (see FILE_KIND_VOICE_NOTE).
+ */
+function validateOutgoingVoiceNoteDuration(durationMs: number | undefined): number | undefined {
+  if (durationMs === undefined) {
+    return undefined;
+  }
+  if (
+    !Number.isFinite(durationMs)
+    || !Number.isInteger(durationMs)
+    || durationMs <= 0
+    || durationMs > VOICE_NOTE_MAX_DURATION_MS_WIRE
+  ) {
+    throw new Error('Invalid voice note duration');
+  }
+  return durationMs;
+}
+
+// `mime.lookup` (used by #loadFileMetadata below to fill in an outgoing offer's `mimeType`) maps
+// a `.webm` filename to `video/webm`, not `audio/webm` — so a legitimate voice-note offer sent by
+// this app's own sender carries mimeType 'video/webm'. Accept both variants here; anything else
+// is not the supported recorded format.
+const SUPPORTED_VOICE_NOTE_MIME_TYPES = new Set(['audio/webm', 'video/webm']);
+
+/**
+ * Receiver-side gate for whether an incoming, already-signature-verified file_offer should be
+ * treated as a voice note. The envelope layer imposes NO shape on voiceNote (a malformed value
+ * must never drop the signed offer, and it must reach signature reconstruction verbatim), so the
+ * full shape check lives here — a wrong-typed voiceNote, like an out-of-range one, degrades the
+ * offer to a plain file. And a signed offer for report.pdf — or a 10MB file — with an in-range
+ * voiceNote.durationMs must NOT be accepted as a voice note either. Every one of these has to
+ * hold, or the offer degrades to a plain file instead of being dropped: an in-range integer
+ * duration, a declared size within the voice-note byte cap, and a filename/mimeType that
+ * actually look like the recorded webm format.
+ */
+function resolveIncomingVoiceNoteDurationMs(offer: FileOfferApplicationPayload): number | undefined {
+  const { voiceNote } = offer;
+  const durationMs = typeof voiceNote === 'object' && voiceNote !== null
+    ? (voiceNote as { durationMs?: unknown }).durationMs
+    : undefined;
+  if (
+    typeof durationMs !== 'number'
+    || !Number.isInteger(durationMs)
+    || durationMs <= 0
+    || durationMs > VOICE_NOTE_MAX_DURATION_MS_WIRE
+    || offer.size <= 0
+    || offer.size > MAX_VOICE_NOTE_FILE_SIZE
+    || !offer.filename.toLowerCase().endsWith('.webm')
+    || !SUPPORTED_VOICE_NOTE_MIME_TYPES.has(offer.mimeType)
+  ) {
+    return undefined;
+  }
+  return durationMs;
+}
 
 interface FileMetadata {
   buffer: Buffer
@@ -1021,7 +1079,7 @@ export class FileHandler {
       let savedPath: string;
       try {
         const downloadsDir = resolveConfiguredDownloadsDirectory(this.database.getSetting('downloads_directory'));
-        savedPath = await writeFileWithCopySuffix(downloadsDir, claim.fileName, finalized.buffer);
+        savedPath = await writeIncomingFileWithCopySuffix(downloadsDir, claim.fileName, finalized.buffer);
       } catch (error: unknown) {
         await this.#sendPullConfirm(settleConfirm, sinkDone, { type: 'file_transfer_confirm', offerId: claim.offerId, success: false, reason: 'disk' });
         outcomeApplied = true;
@@ -1166,6 +1224,7 @@ export class FileHandler {
     fileId: string;
     metadata: FileMetadata;
     replyToCid?: string;
+    voiceNoteDurationMs?: number;
   }): FileOfferApplicationPayload {
     const unsignedOffer: Omit<FileOfferApplicationPayload, 'signature'> = {
       type: 'file_offer',
@@ -1177,6 +1236,7 @@ export class FileHandler {
       checksum: input.metadata.checksum,
       totalChunks: input.metadata.totalChunks,
       ...(input.replyToCid ? { replyToCid: input.replyToCid } : {}),
+      ...(input.voiceNoteDurationMs !== undefined ? { voiceNote: { durationMs: input.voiceNoteDurationMs } } : {}),
       timestamp: Date.now(),
     };
     const identity = this.messageHandler.getUserIdentity();
@@ -1655,6 +1715,12 @@ export class FileHandler {
       return true;
     }
 
+    // Voice-note metadata is display-only and re-validated here: an offer with no voiceNote, one
+    // whose durationMs/size falls outside the sane ranges, or one whose filename/mimeType don't
+    // look like the supported recorded webm format, degrades to a plain file rather than being
+    // dropped — the wire-shape check in message-envelope.ts is deliberately loose.
+    const voiceNoteDurationMs = resolveIncomingVoiceNoteDurationMs(offer);
+
     const { inserted } = await this.database.tryCreateMessage({
       id: offer.fileId,
       client_msg_id: offer.fileId,
@@ -1669,6 +1735,7 @@ export class FileHandler {
       file_checksum: offer.checksum,
       file_total_chunks: offer.totalChunks,
       file_protocol_version: MESSAGE_ENVELOPE_VERSION,
+      ...(voiceNoteDurationMs !== undefined ? { file_kind: FILE_KIND_VOICE_NOTE, file_duration_ms: voiceNoteDurationMs } : {}),
       transfer_status: 'incoming_pending_user',
       transfer_progress: 0,
       timestamp: new Date(context.timestamp),
@@ -1689,6 +1756,7 @@ export class FileHandler {
       senderId: context.senderPeerId,
       senderUsername: sender.username,
       ...(offer.replyToCid ? { replyToClientId: offer.replyToCid } : {}),
+      ...(voiceNoteDurationMs !== undefined ? { isVoiceNote: true, voiceDurationMs: voiceNoteDurationMs } : {}),
     });
     this.tempOfferDiag(
       'persisted_and_emitted',
@@ -1698,7 +1766,13 @@ export class FileHandler {
     return true;
   }
 
-  async sendGroupFile(chatId: number, filePath: string, providedFileId?: string, replyToCidInput?: string): Promise<void> {
+  async sendGroupFile(
+    chatId: number,
+    filePath: string,
+    providedFileId?: string,
+    replyToCidInput?: string,
+    voiceNoteDurationMsInput?: number,
+  ): Promise<void> {
     const chat = this.database.getChats([chatId])[0];
     if (!chat || chat.type !== 'group' || !chat.group_id) {
       throw new Error('Group chat not found');
@@ -1709,6 +1783,7 @@ export class FileHandler {
     if (providedFileId !== undefined && !isValidCid(providedFileId)) {
       throw new Error('Invalid file message id');
     }
+    const voiceNoteDurationMs = validateOutgoingVoiceNoteDuration(voiceNoteDurationMsInput);
 
     const localPeerId = this.node.peerId.toString();
     const authorizedPullers = new Map<string, string>();
@@ -1750,12 +1825,16 @@ export class FileHandler {
       if (metadata.size <= 0 || metadata.size > maxFileSize) {
         throw new Error('File changed while preparing the offer');
       }
+      if (voiceNoteDurationMs !== undefined && metadata.size > MAX_VOICE_NOTE_FILE_SIZE) {
+        throw new Error(`Voice note too large (${metadata.size} bytes, max ${MAX_VOICE_NOTE_FILE_SIZE} bytes)`);
+      }
       const replyToCid = isValidCid(replyToCidInput) ? replyToCidInput : undefined;
       const offer = this.#createApplicationFileOffer({
         offerId,
         fileId,
         metadata,
         ...(replyToCid ? { replyToCid } : {}),
+        ...(voiceNoteDurationMs !== undefined ? { voiceNoteDurationMs } : {}),
       });
 
       // Snapshot the offer-time group roster's app signing keys. Later membership changes must
@@ -1786,6 +1865,7 @@ export class FileHandler {
         file_protocol_version: MESSAGE_ENVELOPE_VERSION,
         file_group_download_total: authorizedPullers.size,
         file_group_download_completed: 0,
+        ...(voiceNoteDurationMs !== undefined ? { file_kind: FILE_KIND_VOICE_NOTE, file_duration_ms: voiceNoteDurationMs } : {}),
         transfer_status: 'awaiting_acceptance',
         transfer_progress: 0,
         timestamp: new Date(),
@@ -1824,7 +1904,13 @@ export class FileHandler {
     }
   }
 
-  async sendFile(targetPeerId: string, filePath: string, providedFileId?: string, replyToCidInput?: string): Promise<void> {
+  async sendFile(
+    targetPeerId: string,
+    filePath: string,
+    providedFileId?: string,
+    replyToCidInput?: string,
+    voiceNoteDurationMsInput?: number,
+  ): Promise<void> {
     // Peer-id lookup only: usernames are not unique, so resolving by name can
     // silently address a different contact with the same username.
     const user = this.database.getUserByPeerId(targetPeerId);
@@ -1838,6 +1924,7 @@ export class FileHandler {
     if (providedFileId !== undefined && !isValidCid(providedFileId)) {
       throw new Error('Invalid file message id');
     }
+    const voiceNoteDurationMs = validateOutgoingVoiceNoteDuration(voiceNoteDurationMsInput);
     const fileId = providedFileId ?? randomUUID();
     const offerId = randomUUID();
 
@@ -1863,12 +1950,16 @@ export class FileHandler {
       if (metadata.size <= 0 || metadata.size > maxFileSize) {
         throw new Error('File changed while preparing the offer');
       }
+      if (voiceNoteDurationMs !== undefined && metadata.size > MAX_VOICE_NOTE_FILE_SIZE) {
+        throw new Error(`Voice note too large (${metadata.size} bytes, max ${MAX_VOICE_NOTE_FILE_SIZE} bytes)`);
+      }
       const replyToCid = isValidCid(replyToCidInput) ? replyToCidInput : undefined;
       const offer = this.#createApplicationFileOffer({
         offerId,
         fileId,
         metadata,
         ...(replyToCid ? { replyToCid } : {}),
+        ...(voiceNoteDurationMs !== undefined ? { voiceNoteDurationMs } : {}),
       });
 
       // Register the served file (snapshot the recipient's app signing key) before persistence and
@@ -1897,6 +1988,7 @@ export class FileHandler {
         file_checksum: metadata.checksum,
         file_total_chunks: metadata.totalChunks,
         file_protocol_version: MESSAGE_ENVELOPE_VERSION,
+        ...(voiceNoteDurationMs !== undefined ? { file_kind: FILE_KIND_VOICE_NOTE, file_duration_ms: voiceNoteDurationMs } : {}),
         transfer_status: 'awaiting_acceptance',
         transfer_progress: 0,
         timestamp: new Date(),

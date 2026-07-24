@@ -16,6 +16,7 @@ import type { ChatNode } from '../types.js';
 import type { PendingFileOfferDeferredEvent } from '../types.js';
 import type { MessageHandler } from './message-handler.js';
 import type { InboundApplicationMessageContext } from '../protocol/application-message.js';
+import { VOICE_NOTE_MAX_DURATION_MS_WIRE, MAX_VOICE_NOTE_FILE_SIZE, CHUNK_SIZE } from '../constants.js';
 
 const LOCAL_PEER = 'local_peer';
 const RECIPIENT_PEER = 'recipient_peer';
@@ -317,16 +318,24 @@ function offerContext(input: {
   fileId: string;
   chatId: number;
   route?: InboundApplicationMessageContext['route'];
+  // Matches the wire payload's deliberately unconstrained voiceNote field, so tests can sign
+  // offers carrying wrong-typed metadata and prove they degrade instead of dropping.
+  voiceNote?: unknown;
+  filename?: string;
+  mimeType?: string;
+  size?: number;
+  totalChunks?: number;
 }): InboundApplicationMessageContext {
   const unsignedOffer = {
     type: 'file_offer' as const,
     offerId: input.offerId,
     fileId: input.fileId,
-    filename: 'incoming.txt',
-    mimeType: 'text/plain',
-    size: 5,
+    filename: input.filename ?? (input.voiceNote ? 'incoming.webm' : 'incoming.txt'),
+    mimeType: input.mimeType ?? (input.voiceNote ? 'audio/webm' : 'text/plain'),
+    size: input.size ?? 5,
     checksum: 'a'.repeat(64),
-    totalChunks: 1,
+    totalChunks: input.totalChunks ?? 1,
+    ...(input.voiceNote ? { voiceNote: input.voiceNote } : {}),
     timestamp: Date.now(),
   };
   const signature = Buffer.from(
@@ -366,6 +375,171 @@ test('sendFile reserves a serving slot and a terminal NACK frees it through the 
   assert.equal(handled, true);
   assert.equal(fileHandler.hasActiveOffer(offerId), false);
   assert.equal(database.getFileMessageById('file_1')?.transfer_status, 'rejected');
+});
+
+test('sendFile with a voice-note duration signs it into the offer and persists file_kind/file_duration_ms', async (t) => {
+  const { database, fileHandler, sentApplicationMessages } = await createHarness(t);
+  const filePath = join(tmpdir(), `kiyeovo-test-${randomUUID()}.webm`);
+  await writeFile(filePath, 'fake opus bytes');
+  t.after(() => rm(filePath, { force: true }));
+
+  await fileHandler.sendFile(RECIPIENT_PEER, filePath, 'voice_file_1', undefined, 12_000);
+
+  const row = database.getFileMessageById('voice_file_1');
+  assert.equal(row?.file_kind, 'voice_note');
+  assert.equal(row?.file_duration_ms, 12_000);
+  const sentOffer = sentApplicationMessages.find((m) => m.cid === 'voice_file_1');
+  assert.deepEqual((sentOffer?.payload as { voiceNote?: { durationMs: number } }).voiceNote, { durationMs: 12_000 });
+});
+
+test('sendFile rejects a nonsensical voice-note duration and reserves no offer', async (t) => {
+  const { database, fileHandler } = await createHarness(t);
+  const filePath = join(tmpdir(), `kiyeovo-test-${randomUUID()}.webm`);
+  await writeFile(filePath, 'fake opus bytes');
+  t.after(() => rm(filePath, { force: true }));
+
+  await assert.rejects(
+    fileHandler.sendFile(RECIPIENT_PEER, filePath, 'voice_file_bad', undefined, VOICE_NOTE_MAX_DURATION_MS_WIRE + 1),
+    /Invalid voice note duration/,
+  );
+  assert.equal(database.getFileMessageById('voice_file_bad'), null);
+});
+
+test('an inbound offer with a plausible voiceNote is persisted and emitted as a voice note', async (t) => {
+  const { database, fileHandler, chatId, pendingFileEvents } = await createHarness(t);
+
+  const handled = await fileHandler.handleApplicationMessage(offerContext({
+    offerId: 'incoming_offer_voice',
+    fileId: 'incoming_voice_file',
+    chatId,
+    voiceNote: { durationMs: 9_000 },
+  }));
+
+  assert.equal(handled, true);
+  const row = database.getFileMessageById('incoming_voice_file');
+  assert.equal(row?.file_kind, 'voice_note');
+  assert.equal(row?.file_duration_ms, 9_000);
+  const event = pendingFileEvents.find((e) => e.fileId === 'incoming_voice_file') as
+    { isVoiceNote?: boolean; voiceDurationMs?: number } | undefined;
+  assert.equal(event?.isVoiceNote, true);
+  assert.equal(event?.voiceDurationMs, 9_000);
+});
+
+test('an inbound offer with an out-of-range voiceNote degrades to a plain file instead of being dropped', async (t) => {
+  const { database, fileHandler, chatId, pendingFileEvents } = await createHarness(t);
+
+  const handled = await fileHandler.handleApplicationMessage(offerContext({
+    offerId: 'incoming_offer_bad_voice',
+    fileId: 'incoming_bad_voice_file',
+    chatId,
+    voiceNote: { durationMs: VOICE_NOTE_MAX_DURATION_MS_WIRE + 60_000 },
+  }));
+
+  assert.equal(handled, true);
+  const row = database.getFileMessageById('incoming_bad_voice_file');
+  assert.ok(row, 'offer must still be persisted as a plain file, not dropped');
+  assert.equal(row?.file_kind, null);
+  assert.equal(row?.file_duration_ms, null);
+  const event = pendingFileEvents.find((e) => e.fileId === 'incoming_bad_voice_file') as
+    { isVoiceNote?: boolean } | undefined;
+  assert.equal(event?.isVoiceNote, undefined);
+});
+
+test('an inbound offer with a negative voiceNote duration degrades to a plain file instead of being dropped', async (t) => {
+  // Regression coverage for the degrade-don't-drop contract across both layers: the envelope
+  // check now tolerates durationMs:-1 (see message-envelope.test.ts), and FileHandler must still
+  // refuse to honor it as a voice note rather than crash or persist a negative duration.
+  const { database, fileHandler, chatId, pendingFileEvents } = await createHarness(t);
+
+  const handled = await fileHandler.handleApplicationMessage(offerContext({
+    offerId: 'incoming_offer_negative_voice',
+    fileId: 'incoming_negative_voice_file',
+    chatId,
+    voiceNote: { durationMs: -1 },
+  }));
+
+  assert.equal(handled, true);
+  const row = database.getFileMessageById('incoming_negative_voice_file');
+  assert.ok(row, 'offer must still be persisted as a plain file, not dropped');
+  assert.equal(row?.file_kind, null);
+  assert.equal(row?.file_duration_ms, null);
+  const event = pendingFileEvents.find((e) => e.fileId === 'incoming_negative_voice_file') as
+    { isVoiceNote?: boolean } | undefined;
+  assert.equal(event?.isVoiceNote, undefined);
+});
+
+test('an inbound offer with a wrong-typed voiceNote degrades to a plain file instead of being dropped', async (t) => {
+  // The envelope layer imposes no shape on voiceNote at all (it must reach signature
+  // reconstruction verbatim), so wrong-typed metadata — a string durationMs, or a non-object
+  // voiceNote — lands here with a VALID signature and must degrade, not drop or crash.
+  const { database, fileHandler, chatId, pendingFileEvents } = await createHarness(t);
+
+  const wrongShapes: Array<{ fileId: string; voiceNote: unknown }> = [
+    { fileId: 'incoming_string_duration_file', voiceNote: { durationMs: 'twelve seconds' } },
+    { fileId: 'incoming_nonobject_voice_file', voiceNote: 'not-an-object' },
+  ];
+  for (const { fileId, voiceNote } of wrongShapes) {
+    const handled = await fileHandler.handleApplicationMessage(offerContext({
+      offerId: `offer_${fileId}`,
+      fileId,
+      chatId,
+      voiceNote,
+    }));
+
+    assert.equal(handled, true);
+    const row = database.getFileMessageById(fileId);
+    assert.ok(row, 'offer must still be persisted as a plain file, not dropped');
+    assert.equal(row?.file_kind, null);
+    assert.equal(row?.file_duration_ms, null);
+    const event = pendingFileEvents.find((e) => e.fileId === fileId) as
+      { isVoiceNote?: boolean } | undefined;
+    assert.equal(event?.isVoiceNote, undefined);
+  }
+});
+
+test('an inbound offer with a plausible duration but a non-webm filename/mimeType degrades to a plain file', async (t) => {
+  const { database, fileHandler, chatId, pendingFileEvents } = await createHarness(t);
+
+  const handled = await fileHandler.handleApplicationMessage(offerContext({
+    offerId: 'incoming_offer_fake_voice',
+    fileId: 'incoming_fake_voice_file',
+    chatId,
+    voiceNote: { durationMs: 9_000 },
+    filename: 'report.pdf',
+    mimeType: 'application/pdf',
+  }));
+
+  assert.equal(handled, true);
+  const row = database.getFileMessageById('incoming_fake_voice_file');
+  assert.ok(row, 'offer must still be persisted as a plain file, not dropped');
+  assert.equal(row?.file_kind, null);
+  assert.equal(row?.file_duration_ms, null);
+  const event = pendingFileEvents.find((e) => e.fileId === 'incoming_fake_voice_file') as
+    { isVoiceNote?: boolean } | undefined;
+  assert.equal(event?.isVoiceNote, undefined);
+});
+
+test('an inbound offer with a plausible duration and webm filename but oversized declared size degrades to a plain file', async (t) => {
+  const { database, fileHandler, chatId, pendingFileEvents } = await createHarness(t);
+  const oversizedForVoiceNote = MAX_VOICE_NOTE_FILE_SIZE + CHUNK_SIZE;
+
+  const handled = await fileHandler.handleApplicationMessage(offerContext({
+    offerId: 'incoming_offer_oversized_voice',
+    fileId: 'incoming_oversized_voice_file',
+    chatId,
+    voiceNote: { durationMs: 9_000 },
+    size: oversizedForVoiceNote,
+    totalChunks: Math.ceil(oversizedForVoiceNote / CHUNK_SIZE),
+  }));
+
+  assert.equal(handled, true);
+  const row = database.getFileMessageById('incoming_oversized_voice_file');
+  assert.ok(row, 'offer must still be persisted as a plain file, not dropped');
+  assert.equal(row?.file_kind, null);
+  assert.equal(row?.file_duration_ms, null);
+  const event = pendingFileEvents.find((e) => e.fileId === 'incoming_oversized_voice_file') as
+    { isVoiceNote?: boolean } | undefined;
+  assert.equal(event?.isVoiceNote, undefined);
 });
 
 test('a duplicate/late NACK after the slot is freed is a no-op', async (t) => {

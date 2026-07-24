@@ -673,6 +673,7 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
         transferStatus: 'incoming_pending_user',
         transferProgress: 0,
         ...(data.replyToClientId ? { replyToClientId: data.replyToClientId } : {}),
+        ...(data.isVoiceNote ? { isVoiceNote: true, voiceDurationMs: data.voiceDurationMs } : {}),
       }));
       dispatch(updateChat({
         id: data.chatId,

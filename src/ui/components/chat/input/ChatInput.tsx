@@ -1,6 +1,6 @@
 import { useState, useEffect, useLayoutEffect, useRef, type FC } from "react";
 import { Button } from "../../ui/Button";
-import { Paperclip, Reply, Send, Smile, X } from "lucide-react";
+import { Check, Mic, Paperclip, Reply, Send, Smile, X } from "lucide-react";
 import { useToast } from "../../ui/use-toast";
 import { useOfflineSendWarning } from "../../../hooks/useOfflineSendWarning";
 import { useDispatch, useSelector } from "react-redux";
@@ -16,6 +16,8 @@ import EmojiPicker, { EmojiStyle, Theme, type EmojiClickData } from "emoji-picke
 import { useConnectivityGuidance } from "../../../hooks/useConnectivityGuidance";
 import { ACCEPTED_IMAGE_MIME } from "../../../../shared/file-types";
 import { UPLOADS_QUOTA_WARN_BYTES } from "../../../../core/constants";
+import { useVoiceRecorder, type VoiceRecorderResult } from "../../../hooks/useVoiceRecorder";
+import type { NetworkMode } from "../../../../core/types";
 
 type PendingSendJob =
     | { type: 'direct'; chatId: number; peerId: string; content: string; localMessageId: string; replyToCid?: string }
@@ -52,6 +54,7 @@ type FileSendTarget = {
 type FileSendOptions = {
     target?: FileSendTarget;
     replyTarget?: ReplyTarget;
+    voiceNote?: { durationMs: number };
 };
 
 type FileDialogSource = FileSendTarget & {
@@ -69,6 +72,23 @@ const createPastedImageName = (date: Date, extension: string): string => {
     const minutes = String(date.getMinutes()).padStart(2, '0');
     const seconds = String(date.getSeconds()).padStart(2, '0');
     return `pasted-image-${year}${month}${day}-${hours}${minutes}${seconds}.${extension}`;
+};
+
+const createVoiceNoteName = (date: Date): string => {
+    const year = String(date.getFullYear());
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    const seconds = String(date.getSeconds()).padStart(2, '0');
+    return `voice-note-${year}${month}${day}-${hours}${minutes}${seconds}.webm`;
+};
+
+const formatRecordingTime = (ms: number): string => {
+    const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${String(seconds).padStart(2, '0')}`;
 };
 
 const createLongMessageName = (date: Date): string => {
@@ -207,6 +227,101 @@ export const ChatInput: FC<ChatInputProps> = ({
             ...(activeChat.peerId ? { peerId: activeChat.peerId } : {}),
             ...(replyTarget ? { replyTarget } : {}),
         };
+    };
+
+    const voiceRecordTargetRef = useRef<FileDialogSource | null>(null);
+
+    // Voice notes are Fast-mode only (like calls) — hide the mic entirely in Anonymous mode.
+    const [networkMode, setNetworkMode] = useState<NetworkMode | null>(null);
+    useEffect(() => {
+        let cancelled = false;
+        const loadNetworkMode = async () => {
+            try {
+                const result = await window.kiyeovoAPI.getNetworkMode();
+                if (!cancelled && result.success) {
+                    setNetworkMode(result.mode);
+                }
+            } catch (error) {
+                console.error('Failed to fetch network mode for voice notes:', error);
+            }
+        };
+        void loadNetworkMode();
+        return () => {
+            cancelled = true;
+        };
+    }, []);
+    const canRecordVoiceNotes = networkMode === 'fast';
+
+    // Shared completion path for a finished recording, used both by the manual stop-and-send
+    // button and by the recorder hook's 60s hard-cap auto-stop (see the onAutoStop argument
+    // below) — hitting the cap must send exactly like a manual stop, not silently drop the note.
+    const finishRecordingAndSend = async (result: VoiceRecorderResult | null) => {
+        // The null-result guard must run BEFORE the target ref is consumed: when the 60s
+        // auto-stop and a manual stop-and-send race, exactly one caller gets the recording and
+        // the other gets null — the null caller must not steal (and discard) the target chat,
+        // or the real recording falls back to whatever chat is currently active.
+        if (!result) return;
+        const recordedTarget = voiceRecordTargetRef.current;
+        voiceRecordTargetRef.current = null;
+
+        const { bytes, durationMs } = result;
+        const fileName = createVoiceNoteName(new Date());
+        try {
+            const saveResult = await window.kiyeovoAPI.saveVoiceNoteUpload(bytes, fileName, durationMs);
+            if (!saveResult.success || !saveResult.filePath) {
+                toast.error(saveResult.error || 'Failed to save voice message');
+                return;
+            }
+            if (!uploadsQuotaWarnedThisSession && saveResult.uploadsDirSizeBytes > UPLOADS_QUOTA_WARN_BYTES) {
+                uploadsQuotaWarnedThisSession = true;
+                setQuotaFilePath(saveResult.filePath);
+                setQuotaDialogOpen(true);
+            }
+
+            await handleSendFile(
+                saveResult.filePath,
+                saveResult.fileName || fileName,
+                saveResult.fileSize,
+                saveResult.mediaToken,
+                {
+                    ...(recordedTarget ? {
+                        target: {
+                            chatId: recordedTarget.chatId,
+                            ...(recordedTarget.peerId ? { peerId: recordedTarget.peerId } : {}),
+                        },
+                        ...(recordedTarget.replyTarget ? { replyTarget: recordedTarget.replyTarget } : {}),
+                    } : {}),
+                    voiceNote: { durationMs },
+                },
+            );
+        } catch (error) {
+            console.error('Error sending voice message:', error);
+            toast.error(errStr(error, 'Failed to send voice message'));
+        }
+    };
+
+    const voiceRecorder = useVoiceRecorder(undefined, finishRecordingAndSend);
+
+    useEffect(() => {
+        if (voiceRecorder.error) {
+            toast.error(voiceRecorder.error);
+        }
+    }, [voiceRecorder.error, toast]);
+
+    const handleMicClick = async () => {
+        if (!canRecordVoiceNotes || isDisabled || hasActiveFileTransfer || voiceRecorder.state !== 'idle') return;
+        voiceRecordTargetRef.current = createCurrentFileDialogSource();
+        await voiceRecorder.start();
+    };
+
+    const handleCancelRecording = () => {
+        voiceRecordTargetRef.current = null;
+        voiceRecorder.cancel();
+    };
+
+    const handleStopAndSendRecording = async () => {
+        const result = await voiceRecorder.stopAndFinish();
+        await finishRecordingAndSend(result);
     };
 
     const clearReplyTargetIfUnchanged = (chatId: number, target?: ReplyTarget): boolean => {
@@ -813,6 +928,7 @@ export const ChatInput: FC<ChatInputProps> = ({
         const target = options?.target;
         const replyTargetForSend = options?.replyTarget;
         const replyToCid = replyTargetForSend?.cid;
+        const voiceNote = options?.voiceNote;
         const targetChat = target
             ? chats.find((chat) => chat.id === target.chatId)
             : activeChat;
@@ -851,12 +967,13 @@ export const ChatInput: FC<ChatInputProps> = ({
                 transferStatus: 'connecting',
                 transferProgress: 0,
                 ...(replyToCid ? { replyToClientId: replyToCid } : {}),
+                ...(voiceNote ? { isVoiceNote: true, voiceDurationMs: voiceNote.durationMs } : {}),
             }));
             clearReplyTargetIfUnchanged(chatId, replyTargetForSend);
 
             const result = targetChat.type === 'group'
-                ? await window.kiyeovoAPI.sendGroupFile(targetChat.id, filePath, pendingMessageId, replyToCid)
-                : await window.kiyeovoAPI.sendFile(targetChat.peerId!, filePath, pendingMessageId, replyToCid);
+                ? await window.kiyeovoAPI.sendGroupFile(targetChat.id, filePath, pendingMessageId, replyToCid, voiceNote?.durationMs)
+                : await window.kiyeovoAPI.sendFile(targetChat.peerId!, filePath, pendingMessageId, replyToCid, voiceNote?.durationMs);
             if (!result.success) {
                 console.error(result.error);
                 toast.error(result.error || 'Failed to send file');
@@ -979,6 +1096,20 @@ export const ChatInput: FC<ChatInputProps> = ({
                     >
                         <Smile className="w-4 h-4" />
                     </Button>
+                    {canRecordVoiceNotes && (
+                        <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            disabled={isDisabled || hasActiveFileTransfer || voiceRecorder.state !== 'idle'}
+                            onClick={() => void handleMicClick()}
+                            className="text-sidebar-foreground hover:text-foreground"
+                            aria-label="Record voice message"
+                            title="Record voice message"
+                        >
+                            <Mic className="w-4 h-4" />
+                        </Button>
+                    )}
                     {emojiPickerOpen && (
                         <div className="chat-emoji-picker-panel absolute bottom-full left-0 mb-3 z-40">
                             <EmojiPicker
@@ -998,37 +1129,71 @@ export const ChatInput: FC<ChatInputProps> = ({
                         </div>
                     )}
                 </div>
-                <div className="flex flex-1 items-end gap-4">
-                    <textarea
-                        ref={inputRef}
-                        rows={1}
-                        placeholder={isBlocked ? "Cannot send messages to blocked users" : groupBlockedReason ?? "Type a message..."}
-                        value={inputQuery}
-                        disabled={isDisabled}
-                        className="flex w-full resize-none overflow-hidden rounded-md border border-border bg-input px-4 py-2 text-sm font-mono leading-6 placeholder:text-muted-foreground/60 transition-[height,border-color,box-shadow] duration-150 ease-out focus:outline-none focus-visible:border-primary focus-visible:ring-1 focus-visible:ring-primary/50 disabled:cursor-not-allowed disabled:opacity-50"
-                        onChange={(e) => {
-                            if (!activeChat) return;
-                            setDraftForChat(activeChat.id, e.target.value);
-                            syncSelectionFromInput(e.target);
-                        }}
-                        onClick={(e) => syncSelectionFromInput(e.currentTarget)}
-                        onFocus={(e) => syncSelectionFromInput(e.currentTarget)}
-                        onKeyDown={handleComposerKeyDown}
-                        onKeyUp={(e) => syncSelectionFromInput(e.currentTarget)}
-                        onPaste={handleComposerPaste}
-                        onSelect={(e) => syncSelectionFromInput(e.currentTarget)}
-                    />
-                    <Button
-                        ref={sendButtonRef}
-                        type="submit"
-                        disabled={!inputQuery.trim() || isDisabled}
-                        size="icon"
-                        className={`shrink-0 self-end ${isTorActive ? 'bg-[#5a3184] hover:bg-[#4d2a72] text-white' : ''}`}
-                        aria-label="Send message"
-                    >
-                        <Send className="w-4 h-4" />
-                    </Button>
-                </div>
+                {voiceRecorder.state === 'idle' ? (
+                    <div className="flex flex-1 items-end gap-4">
+                        <textarea
+                            ref={inputRef}
+                            rows={1}
+                            placeholder={isBlocked ? "Cannot send messages to blocked users" : groupBlockedReason ?? "Type a message..."}
+                            value={inputQuery}
+                            disabled={isDisabled}
+                            className="flex w-full resize-none overflow-hidden rounded-md border border-border bg-input px-4 py-2 text-sm font-mono leading-6 placeholder:text-muted-foreground/60 transition-[height,border-color,box-shadow] duration-150 ease-out focus:outline-none focus-visible:border-primary focus-visible:ring-1 focus-visible:ring-primary/50 disabled:cursor-not-allowed disabled:opacity-50"
+                            onChange={(e) => {
+                                if (!activeChat) return;
+                                setDraftForChat(activeChat.id, e.target.value);
+                                syncSelectionFromInput(e.target);
+                            }}
+                            onClick={(e) => syncSelectionFromInput(e.currentTarget)}
+                            onFocus={(e) => syncSelectionFromInput(e.currentTarget)}
+                            onKeyDown={handleComposerKeyDown}
+                            onKeyUp={(e) => syncSelectionFromInput(e.currentTarget)}
+                            onPaste={handleComposerPaste}
+                            onSelect={(e) => syncSelectionFromInput(e.currentTarget)}
+                        />
+                        <Button
+                            ref={sendButtonRef}
+                            type="submit"
+                            disabled={!inputQuery.trim() || isDisabled}
+                            size="icon"
+                            className={`shrink-0 self-end ${isTorActive ? 'bg-[#5a3184] hover:bg-[#4d2a72] text-white' : ''}`}
+                            aria-label="Send message"
+                        >
+                            <Send className="w-4 h-4" />
+                        </Button>
+                    </div>
+                ) : (
+                    <div className="flex flex-1 items-center gap-3 self-end rounded-md border border-border bg-input px-4 py-2">
+                        <span className="flex h-2.5 w-2.5 shrink-0 animate-pulse rounded-full bg-destructive" aria-hidden="true" />
+                        <span className="flex-1 text-sm font-mono text-muted-foreground">
+                            {voiceRecorder.state === 'finalizing'
+                                ? 'Sending voice message…'
+                                : `Recording… ${formatRecordingTime(voiceRecorder.elapsedMs)} / ${formatRecordingTime(voiceRecorder.maxDurationMs)}`}
+                        </span>
+                        <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            onClick={handleCancelRecording}
+                            disabled={voiceRecorder.state === 'finalizing'}
+                            className="shrink-0 text-muted-foreground hover:text-destructive"
+                            aria-label="Cancel recording"
+                            title="Cancel"
+                        >
+                            <X className="w-4 h-4" />
+                        </Button>
+                        <Button
+                            type="button"
+                            size="icon"
+                            onClick={() => void handleStopAndSendRecording()}
+                            disabled={voiceRecorder.state === 'finalizing'}
+                            className="shrink-0"
+                            aria-label="Stop and send voice message"
+                            title="Send"
+                        >
+                            <Check className="w-4 h-4" />
+                        </Button>
+                    </div>
+                )}
             </form>
         </div>
 

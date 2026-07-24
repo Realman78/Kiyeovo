@@ -95,3 +95,17 @@ test('rejects a file offer whose file id differs from the envelope cid', () => {
     reason: 'cid_mismatch',
   });
 });
+
+test('accepts a valid signed voice-note offer (voiceNote covered by the signature)', () => {
+  assert.deepEqual(
+    validate(createOffer({ filename: 'clip.webm', mimeType: 'audio/webm', voiceNote: { durationMs: 12_000 } })),
+    { ok: true },
+  );
+});
+
+test('rejects a voice-note offer whose voiceNote metadata was tampered with after signing', () => {
+  const offer = createOffer({ voiceNote: { durationMs: 12_000 } });
+  // Simulate a MITM altering the duration post-signature: the signed payload no longer matches.
+  const tampered = { ...offer, voiceNote: { durationMs: 60_000 } };
+  assert.deepEqual(validate(tampered), { ok: false, reason: 'invalid_signature' });
+});

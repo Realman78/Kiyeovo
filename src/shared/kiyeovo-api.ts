@@ -110,6 +110,16 @@ export type SaveTextUploadResponse = {
   error: string | null;
 };
 
+export type SaveVoiceNoteUploadResponse = {
+  success: boolean;
+  filePath: string | null;
+  fileName: string | null;
+  fileSize: number;
+  mediaToken: string | null;
+  uploadsDirSizeBytes: number;
+  error: string | null;
+};
+
 export type ScreenShareSupportResponse = {
   success: boolean;
   supported: boolean;
@@ -545,8 +555,30 @@ export interface KiyeovoAPI {
     text: string,
     fileName: string,
   ) => Promise<SaveTextUploadResponse>;
-  sendFile: (peerId: string, filePath: string, fileId?: string, replyToCid?: string) => Promise<{ success: boolean; error: string | null }>;
-  sendGroupFile: (chatId: number, filePath: string, fileId?: string, replyToCid?: string) => Promise<{ success: boolean; error: string | null }>;
+  saveVoiceNoteUpload: (
+    bytes: Uint8Array,
+    fileName: string,
+    durationMs: number,
+  ) => Promise<SaveVoiceNoteUploadResponse>;
+  registerVoiceNoteMedia: (messageId: string) => Promise<{
+    success: boolean;
+    token: string | null;
+    error: string | null;
+  }>;
+  sendFile: (
+    peerId: string,
+    filePath: string,
+    fileId?: string,
+    replyToCid?: string,
+    voiceNoteDurationMs?: number,
+  ) => Promise<{ success: boolean; error: string | null }>;
+  sendGroupFile: (
+    chatId: number,
+    filePath: string,
+    fileId?: string,
+    replyToCid?: string,
+    voiceNoteDurationMs?: number,
+  ) => Promise<{ success: boolean; error: string | null }>;
   acceptFile: (fileId: string) => Promise<{ success: boolean; error: string | null }>;
   rejectFile: (fileId: string) => Promise<{ success: boolean; error: string | null }>;
   getPendingFileInbox: () => Promise<{ success: boolean; snapshot: PendingFileInboxSnapshot | null; error: string | null }>;

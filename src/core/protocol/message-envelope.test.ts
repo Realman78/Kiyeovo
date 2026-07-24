@@ -81,6 +81,104 @@ test('validates typed envelope identifiers and payload bounds', () => {
   })), { ok: false, reason: 'invalid_envelope' });
 });
 
+function baseFileOfferPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    type: 'file_offer',
+    offerId: 'offer_1',
+    fileId: 'file_1',
+    filename: 'clip.webm',
+    mimeType: 'audio/webm',
+    size: 1024,
+    checksum: 'a'.repeat(64),
+    totalChunks: 1,
+    timestamp: 1_750_000_000_000,
+    signature: 'sig',
+    ...overrides,
+  };
+}
+
+test('accepts a file_offer whose optional voiceNote metadata is well-formed', () => {
+  const result = decodeEnvelope(JSON.stringify({
+    v: MESSAGE_ENVELOPE_VERSION,
+    cid: 'file_1',
+    kind: 'file_offer',
+    payload: baseFileOfferPayload({ voiceNote: { durationMs: 12_000 } }),
+  }));
+  assert.equal(result.ok, true);
+  if (result.ok && result.message.kind === 'file_offer') {
+    assert.deepEqual(result.message.payload.voiceNote, { durationMs: 12_000 });
+  }
+});
+
+// The envelope layer imposes nothing on voiceNote — not the business-level 60s cap, and not even
+// its shape. An out-of-range (or absurd) durationMs must NOT invalidate the whole offer here —
+// FileHandler re-validates the value and decides separately whether to honor it as a voice note
+// or silently fall back to a plain file.
+test('tolerates an out-of-range voiceNote duration at the envelope layer (business cap is enforced elsewhere)', () => {
+  const result = decodeEnvelope(JSON.stringify({
+    v: MESSAGE_ENVELOPE_VERSION,
+    cid: 'file_1',
+    kind: 'file_offer',
+    payload: baseFileOfferPayload({ voiceNote: { durationMs: 999_999_999 } }),
+  }));
+  assert.equal(result.ok, true);
+});
+
+// Degrade-don't-drop applies to the *type* of voiceNote too, not just its range: a signed offer
+// must never be dropped because of this field, and the malformed value must survive parsing
+// verbatim — the offer signature is reconstructed over the received voiceNote value, so
+// normalizing or stripping it here would turn a verifiable offer into a signature failure.
+test('tolerates a wrong-shaped voiceNote at the envelope layer and passes it through verbatim', () => {
+  const wrongShapes: unknown[] = [
+    { durationMs: 'twelve seconds' },
+    'not-an-object',
+    { durationMs: Number.POSITIVE_INFINITY },
+  ];
+  for (const voiceNote of wrongShapes) {
+    const result = decodeEnvelope(JSON.stringify({
+      v: MESSAGE_ENVELOPE_VERSION,
+      cid: 'file_1',
+      kind: 'file_offer',
+      payload: baseFileOfferPayload({ voiceNote }),
+    }));
+    assert.equal(result.ok, true);
+    if (result.ok && result.message.kind === 'file_offer') {
+      // JSON round-trip note: Infinity serializes to null, so compare against the round-tripped value.
+      assert.deepEqual(result.message.payload.voiceNote, JSON.parse(JSON.stringify({ voiceNote })).voiceNote);
+    }
+  }
+});
+
+// Degrade-don't-drop: a negative durationMs is nonsensical as a voice-note length, but the
+// envelope layer must not use that as grounds to drop the whole signed offer. FileHandler is the
+// layer that treats an out-of-range (or wrong-typed) value as "not a voice note" and persists
+// the offer as a plain file instead.
+test('tolerates a negative voiceNote duration at the envelope layer (degrade-not-drop is enforced by FileHandler)', () => {
+  const result = decodeEnvelope(JSON.stringify({
+    v: MESSAGE_ENVELOPE_VERSION,
+    cid: 'file_1',
+    kind: 'file_offer',
+    payload: baseFileOfferPayload({ voiceNote: { durationMs: -1 } }),
+  }));
+  assert.equal(result.ok, true);
+  if (result.ok && result.message.kind === 'file_offer') {
+    assert.deepEqual(result.message.payload.voiceNote, { durationMs: -1 });
+  }
+});
+
+test('a plain file_offer with no voiceNote field still validates (old-client compatibility)', () => {
+  const result = decodeEnvelope(JSON.stringify({
+    v: MESSAGE_ENVELOPE_VERSION,
+    cid: 'file_1',
+    kind: 'file_offer',
+    payload: baseFileOfferPayload(),
+  }));
+  assert.equal(result.ok, true);
+  if (result.ok && result.message.kind === 'file_offer') {
+    assert.equal(result.message.payload.voiceNote, undefined);
+  }
+});
+
 test('dispatches by kind and leaves recognized-but-unregistered kinds unhandled', async () => {
   const encoded = encodeApplicationEnvelope({
     cid: 'control_1',

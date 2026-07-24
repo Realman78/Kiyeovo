@@ -549,6 +549,8 @@ export const MessageRow = memo(({
                   fileGroupDownloadTotal={message.fileGroupDownloadTotal}
                   fileGroupDownloadCompleted={message.fileGroupDownloadCompleted}
                   isFromCurrentUser={message.senderPeerId === myPeerId}
+                  isVoiceNote={message.isVoiceNote}
+                  voiceDurationMs={message.voiceDurationMs}
                 />
               ) : (
                 <div className="text-left text-sm leading-relaxed whitespace-pre-wrap wrap-anywhere">

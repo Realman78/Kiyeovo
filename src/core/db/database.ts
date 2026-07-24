@@ -193,6 +193,10 @@ export interface Message {
     file_protocol_version?: number
     file_group_download_total?: number
     file_group_download_completed?: number
+    // Additive file-offer sub-kind (e.g. 'voice_note') and its display-only duration.
+    // Never trust file_duration_ms for anything beyond a UI label (see FILE_KIND_VOICE_NOTE).
+    file_kind?: string | null
+    file_duration_ms?: number | null
     transfer_status?: FileTransferStatus
     transfer_progress?: number
     transfer_error?: string
@@ -515,6 +519,8 @@ export class ChatDatabase {
                 file_protocol_version INTEGER,
                 file_group_download_total INTEGER,
                 file_group_download_completed INTEGER,
+                file_kind TEXT,
+                file_duration_ms INTEGER,
                 transfer_status TEXT,
                 transfer_progress INTEGER,
                 transfer_error TEXT,
@@ -1050,6 +1056,9 @@ export class ChatDatabase {
         this.ensureColumnExists('messages', 'file_protocol_version', 'INTEGER');
         this.ensureColumnExists('messages', 'file_group_download_total', 'INTEGER');
         this.ensureColumnExists('messages', 'file_group_download_completed', 'INTEGER');
+        // Voice notes: additive file-offer sub-kind + display-only duration (see FILE_KIND_VOICE_NOTE).
+        this.ensureColumnExists('messages', 'file_kind', 'TEXT');
+        this.ensureColumnExists('messages', 'file_duration_ms', 'INTEGER');
         this.db.prepare(`UPDATE messages SET client_msg_id = id WHERE client_msg_id IS NULL`).run();
         this.db.prepare(`UPDATE bootstrap_nodes SET network_mode = ? WHERE address LIKE '%/onion%'`).run(NETWORK_MODES.ANONYMOUS);
         this.db.prepare(`UPDATE bootstrap_nodes SET network_mode = ? WHERE address NOT LIKE '%/onion%'`).run(NETWORK_MODES.FAST);
@@ -2882,9 +2891,10 @@ export class ChatDatabase {
     getCompletedFileMediaById(messageId: string): {
         filePath: string;
         fileName: string;
+        fileKind: string | null;
     } | null {
         const row = this.db.prepare(`
-            SELECT m.file_path, m.file_name
+            SELECT m.file_path, m.file_name, m.file_kind
             FROM messages m
             JOIN chats c ON c.id = m.chat_id
             WHERE m.id = ?
@@ -2897,6 +2907,7 @@ export class ChatDatabase {
         `).get(messageId, this.sessionNetworkMode) as {
             file_path: string;
             file_name: string | null;
+            file_kind: string | null;
         } | undefined;
 
         if (!row) {
@@ -2906,6 +2917,7 @@ export class ChatDatabase {
         return {
             filePath: row.file_path,
             fileName: row.file_name || path.basename(row.file_path),
+            fileKind: row.file_kind,
         };
     }
 
@@ -3004,11 +3016,12 @@ export class ChatDatabase {
                 id, chat_id, sender_peer_id, content, message_type, timestamp,
                 file_name, file_size, file_path, file_offer_id, file_checksum,
                 file_total_chunks, file_protocol_version, file_group_download_total,
-                file_group_download_completed, transfer_status, transfer_progress, transfer_error,
+                file_group_download_completed, file_kind, file_duration_ms,
+                transfer_status, transfer_progress, transfer_error,
                 local_send_state, failed_reason, retry_after_ts, event_timestamp, client_msg_id,
                 reply_to_client_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ${conflictClause}
         `).run(
             message.id,
@@ -3026,6 +3039,8 @@ export class ChatDatabase {
             message.file_protocol_version ?? null,
             message.file_group_download_total ?? null,
             message.file_group_download_completed ?? null,
+            message.file_kind ?? null,
+            message.file_duration_ms ?? null,
             message.transfer_status ?? null,
             message.transfer_progress ?? null,
             message.transfer_error ?? null,

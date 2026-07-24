@@ -19,6 +19,13 @@ export interface TextApplicationPayload {
   reply_to?: string;
 }
 
+// The well-formed shape of a file_offer's optional voice-note metadata, as this app's sender
+// mints it. Old clients that don't know this field simply never send it, so a plain file offer
+// is unaffected.
+export interface FileOfferVoiceNoteMetadata {
+  durationMs: number;
+}
+
 export interface FileOfferApplicationPayload {
   type: 'file_offer';
   offerId: string;
@@ -29,6 +36,12 @@ export interface FileOfferApplicationPayload {
   checksum: string;
   totalChunks: number;
   replyToCid?: string;
+  // Deliberately `unknown`, not FileOfferVoiceNoteMetadata: the envelope layer imposes NO shape
+  // on this field. It must survive parsing verbatim regardless of shape — the offer signature is
+  // reconstructed over the received value (see createFileOfferSignaturePayload), and a malformed
+  // voiceNote degrades the offer to a plain file in FileHandler
+  // (resolveIncomingVoiceNoteDurationMs) instead of dropping it here.
+  voiceNote?: unknown;
   timestamp: number;
   signature: string;
 }
@@ -223,6 +236,10 @@ function isTextPayload(value: unknown): value is TextApplicationPayload {
     && (value.reply_to === undefined || isValidCid(value.reply_to));
 }
 
+// `voiceNote` is intentionally NOT validated here — not even its shape. A wrong-typed voiceNote
+// must degrade to a plain file in FileHandler (never drop the signed offer), and the value has to
+// reach signature reconstruction verbatim for verification to succeed. See the field's comment on
+// FileOfferApplicationPayload.
 function isFileOfferPayload(value: unknown): value is FileOfferApplicationPayload {
   return isRecord(value)
     && value.type === 'file_offer'
