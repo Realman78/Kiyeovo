@@ -5,6 +5,11 @@ import { Button } from '../../ui/Button';
 interface InlineVoiceNoteMessageProps {
   fileId: string;
   initialMediaToken?: string;
+  // Sender-declared (and receiver-revalidated) duration from the offer metadata. MediaRecorder
+  // WebM/Opus — the app's own recording format — reports `duration === Infinity` on the <audio>
+  // element, so loadedmetadata alone never yields a usable duration for our own notes; this is
+  // the fallback that keeps the progress bar, time label, and seeking functional.
+  voiceDurationMs?: number;
   fallback: ReactNode;
 }
 
@@ -22,13 +27,18 @@ function formatDuration(ms: number): string {
 export const InlineVoiceNoteMessage: React.FC<InlineVoiceNoteMessageProps> = ({
   fileId,
   initialMediaToken,
+  voiceDurationMs,
   fallback,
 }) => {
   const [mediaToken, setMediaToken] = useState<string | null>(initialMediaToken ?? null);
   const [failed, setFailed] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTimeMs, setCurrentTimeMs] = useState(0);
-  const [durationMs, setDurationMs] = useState<number | null>(null);
+  const [metadataDurationMs, setMetadataDurationMs] = useState<number | null>(null);
+  // Prefer the decoder's own duration when it reports a finite one (it is the value seeks are
+  // resolved against), and fall back to the offer's declared duration otherwise.
+  const durationMs = metadataDurationMs
+    ?? (voiceDurationMs !== undefined && voiceDurationMs > 0 ? voiceDurationMs : null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
@@ -93,7 +103,7 @@ export const InlineVoiceNoteMessage: React.FC<InlineVoiceNoteMessageProps> = ({
         onLoadedMetadata={(event) => {
           const audioDuration = event.currentTarget.duration;
           if (Number.isFinite(audioDuration) && audioDuration > 0) {
-            setDurationMs(audioDuration * 1000);
+            setMetadataDurationMs(audioDuration * 1000);
           }
         }}
         onTimeUpdate={(event) => setCurrentTimeMs(event.currentTarget.currentTime * 1000)}

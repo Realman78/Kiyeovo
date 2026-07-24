@@ -98,3 +98,25 @@ test('writeFileWithCopySuffix byte-budgets the collision suffix for locally-gene
   assert.equal(await readFile(firstPath, 'utf8'), 'first');
   assert.equal(await readFile(secondPath, 'utf8'), 'second');
 });
+
+test('writeFileWithCopySuffix byte-budgets a near-limit extension so a collision candidate still fits', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'kiyeovo-download-test-'));
+  t.after(() => { void rm(dir, { recursive: true, force: true }); });
+
+  // A 1-byte stem with a ~249-byte single-segment extension is a valid ≤255-byte name on its
+  // own, but the extension alone leaves no room for the mandatory `_copy_<timestamp>` suffix.
+  // Budgeting only the stem (the old behavior) yields a >255-byte collision candidate and
+  // ENAMETOOLONG; the extension has to shrink too, with the suffix kept intact.
+  const fileName = `a.${'x'.repeat(MAX_PORTABLE_FILENAME_BYTES - 7)}`;
+  assert.equal(exceedsMaxPortableFilenameBytes(fileName), false);
+
+  const firstPath = await writeFileWithCopySuffix(dir, fileName, Buffer.from('first'));
+  const secondPath = await writeFileWithCopySuffix(dir, fileName, Buffer.from('second'));
+
+  assert.equal(firstPath, join(dir, fileName));
+  assert.notEqual(secondPath, firstPath);
+  assert.equal(exceedsMaxPortableFilenameBytes(basename(secondPath)), false);
+  assert.ok(basename(secondPath).includes('_copy_'), 'collision disambiguator must survive the byte budget');
+  assert.equal(await readFile(firstPath, 'utf8'), 'first');
+  assert.equal(await readFile(secondPath, 'utf8'), 'second');
+});

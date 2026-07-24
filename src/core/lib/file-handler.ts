@@ -91,20 +91,25 @@ const SUPPORTED_VOICE_NOTE_MIME_TYPES = new Set(['audio/webm', 'video/webm']);
 
 /**
  * Receiver-side gate for whether an incoming, already-signature-verified file_offer should be
- * treated as a voice note. The wire-shape check in message-envelope.ts is deliberately loose (it
- * only checks that voiceNote.durationMs is a finite number), so a signed offer for report.pdf —
- * or a 10MB file — with an in-range voiceNote.durationMs must NOT be accepted as a voice note
- * here. Every one of these has to hold, or the offer degrades to a plain file instead of being
- * dropped: an in-range integer duration, a declared size within the voice-note byte cap, and a
- * filename/mimeType that actually look like the recorded webm format.
+ * treated as a voice note. The envelope layer imposes NO shape on voiceNote (a malformed value
+ * must never drop the signed offer, and it must reach signature reconstruction verbatim), so the
+ * full shape check lives here — a wrong-typed voiceNote, like an out-of-range one, degrades the
+ * offer to a plain file. And a signed offer for report.pdf — or a 10MB file — with an in-range
+ * voiceNote.durationMs must NOT be accepted as a voice note either. Every one of these has to
+ * hold, or the offer degrades to a plain file instead of being dropped: an in-range integer
+ * duration, a declared size within the voice-note byte cap, and a filename/mimeType that
+ * actually look like the recorded webm format.
  */
 function resolveIncomingVoiceNoteDurationMs(offer: FileOfferApplicationPayload): number | undefined {
   const { voiceNote } = offer;
+  const durationMs = typeof voiceNote === 'object' && voiceNote !== null
+    ? (voiceNote as { durationMs?: unknown }).durationMs
+    : undefined;
   if (
-    !voiceNote
-    || !Number.isInteger(voiceNote.durationMs)
-    || voiceNote.durationMs <= 0
-    || voiceNote.durationMs > VOICE_NOTE_MAX_DURATION_MS_WIRE
+    typeof durationMs !== 'number'
+    || !Number.isInteger(durationMs)
+    || durationMs <= 0
+    || durationMs > VOICE_NOTE_MAX_DURATION_MS_WIRE
     || offer.size <= 0
     || offer.size > MAX_VOICE_NOTE_FILE_SIZE
     || !offer.filename.toLowerCase().endsWith('.webm')
@@ -112,7 +117,7 @@ function resolveIncomingVoiceNoteDurationMs(offer: FileOfferApplicationPayload):
   ) {
     return undefined;
   }
-  return voiceNote.durationMs;
+  return durationMs;
 }
 
 interface FileMetadata {

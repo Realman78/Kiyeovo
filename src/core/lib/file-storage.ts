@@ -34,15 +34,22 @@ export function safeDownloadBasename(fileName: string): string {
  * sits near the 255-byte ceiling (post-sanitization, or a locally-generated upload name close to
  * the cap) can save successfully on the first attempt but push a later collision candidate over
  * the limit once the suffix is appended, turning what should be a `_copy_...` retry into an
- * ENAMETOOLONG failure. Truncating the stem here — not the suffix or extension — keeps the
- * timestamp/attempt-count disambiguator and the file's extension intact.
+ * ENAMETOOLONG failure. The suffix is never truncated (it is the collision disambiguator); the
+ * extension is kept intact whenever it fits and only byte-truncated for a pathological
+ * near-limit extension that alone would blow the budget; the stem absorbs the rest.
  */
 function buildCopySuffixedName(nameWithoutExtension: string, extension: string, attempt: number): string {
   const suffix = `_copy_${formatCopyTimestamp(new Date())}${attempt > 1 ? `_${attempt - 1}` : ''}`;
-  const reservedBytes = Buffer.byteLength(suffix, 'utf8') + Buffer.byteLength(extension, 'utf8');
-  const stemBudget = Math.max(0, MAX_PORTABLE_FILENAME_BYTES - reservedBytes);
+  const suffixBytes = Buffer.byteLength(suffix, 'utf8');
+  let keptExtension = truncateStringToByteBudget(extension, Math.max(0, MAX_PORTABLE_FILENAME_BYTES - suffixBytes));
+  if (keptExtension !== extension) {
+    // A byte-cut extension can end on what used to be an internal dot/space, and the extension
+    // is the last thing in the name — strip it so the result stays Windows-creatable.
+    keptExtension = keptExtension.replace(/[. ]+$/, '');
+  }
+  const stemBudget = Math.max(0, MAX_PORTABLE_FILENAME_BYTES - suffixBytes - Buffer.byteLength(keptExtension, 'utf8'));
   const truncatedStem = truncateStringToByteBudget(nameWithoutExtension, stemBudget);
-  return `${truncatedStem}${suffix}${extension}`;
+  return `${truncatedStem}${suffix}${keptExtension}`;
 }
 
 /**

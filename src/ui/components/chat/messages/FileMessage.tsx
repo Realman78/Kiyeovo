@@ -558,6 +558,7 @@ export const FileMessage: React.FC<FileMessageProps> = ({
           key={`${fileId}:${previewMediaToken ?? filePath}`}
           fileId={fileId}
           initialMediaToken={hasSenderVoicePreview ? previewMediaToken : undefined}
+          voiceDurationMs={voiceDurationMs}
           fallback={voiceCard}
         />
       );

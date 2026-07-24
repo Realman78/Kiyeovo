@@ -1810,6 +1810,10 @@ function setupUploadHandlers(
         return voiceNoteUploadFailure('P2P core not initialized');
       }
 
+      if (p2pCore.networkMode !== NETWORK_MODES.FAST) {
+        return voiceNoteUploadFailure('Voice messages are available only in Fast mode');
+      }
+
       // Voice notes get their own (smaller) cap in addition to the general file-size setting —
       // whichever is stricter wins, so lowering the general limit still constrains voice notes.
       const maxFileSize = Math.min(getConfiguredMaxFileSize(p2pCore.database), MAX_VOICE_NOTE_FILE_SIZE);

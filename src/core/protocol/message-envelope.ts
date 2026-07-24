@@ -19,11 +19,9 @@ export interface TextApplicationPayload {
   reply_to?: string;
 }
 
-// Additive, optional voice-note metadata carried on a file_offer. Old clients that don't know
-// this field simply never send it, so a plain file offer is unaffected. `durationMs` is
-// display-only — receivers must re-validate it (see FILE_KIND_VOICE_NOTE handling in
-// FileHandler) before trusting it for anything beyond a UI label, and treat an out-of-range
-// value as "not a voice note" (plain file fallback) rather than rejecting the whole offer.
+// The well-formed shape of a file_offer's optional voice-note metadata, as this app's sender
+// mints it. Old clients that don't know this field simply never send it, so a plain file offer
+// is unaffected.
 export interface FileOfferVoiceNoteMetadata {
   durationMs: number;
 }
@@ -38,7 +36,12 @@ export interface FileOfferApplicationPayload {
   checksum: string;
   totalChunks: number;
   replyToCid?: string;
-  voiceNote?: FileOfferVoiceNoteMetadata;
+  // Deliberately `unknown`, not FileOfferVoiceNoteMetadata: the envelope layer imposes NO shape
+  // on this field. It must survive parsing verbatim regardless of shape — the offer signature is
+  // reconstructed over the received value (see createFileOfferSignaturePayload), and a malformed
+  // voiceNote degrades the offer to a plain file in FileHandler
+  // (resolveIncomingVoiceNoteDurationMs) instead of dropping it here.
+  voiceNote?: unknown;
   timestamp: number;
   signature: string;
 }
@@ -233,16 +236,10 @@ function isTextPayload(value: unknown): value is TextApplicationPayload {
     && (value.reply_to === undefined || isValidCid(value.reply_to));
 }
 
-// Deliberately loose: only shape/type safety, not the business-level 60s cap (and not even sign
-// or range). A malformed, negative, or oversized durationMs must NOT invalidate the entire offer — FileHandler decides separately
-// whether to honor it as a voice note or silently fall back to a plain file (see
-// FILE_KIND_VOICE_NOTE handling), so the offer is never dropped just because of this field.
-function isPlausibleVoiceNoteMetadata(value: unknown): value is { durationMs: number } {
-  return isRecord(value)
-    && typeof value.durationMs === 'number'
-    && Number.isFinite(value.durationMs);
-}
-
+// `voiceNote` is intentionally NOT validated here — not even its shape. A wrong-typed voiceNote
+// must degrade to a plain file in FileHandler (never drop the signed offer), and the value has to
+// reach signature reconstruction verbatim for verification to succeed. See the field's comment on
+// FileOfferApplicationPayload.
 function isFileOfferPayload(value: unknown): value is FileOfferApplicationPayload {
   return isRecord(value)
     && value.type === 'file_offer'
@@ -254,7 +251,6 @@ function isFileOfferPayload(value: unknown): value is FileOfferApplicationPayloa
     && isBoundedString(value.checksum, MAX_CHECKSUM_LENGTH)
     && isNonNegativeSafeInteger(value.totalChunks)
     && (value.replyToCid === undefined || isValidCid(value.replyToCid))
-    && (value.voiceNote === undefined || isPlausibleVoiceNoteMetadata(value.voiceNote))
     && typeof value.timestamp === 'number'
     && Number.isFinite(value.timestamp)
     && value.timestamp > 0

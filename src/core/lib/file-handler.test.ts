@@ -318,7 +318,9 @@ function offerContext(input: {
   fileId: string;
   chatId: number;
   route?: InboundApplicationMessageContext['route'];
-  voiceNote?: { durationMs: number };
+  // Matches the wire payload's deliberately unconstrained voiceNote field, so tests can sign
+  // offers carrying wrong-typed metadata and prove they degrade instead of dropping.
+  voiceNote?: unknown;
   filename?: string;
   mimeType?: string;
   size?: number;
@@ -464,6 +466,35 @@ test('an inbound offer with a negative voiceNote duration degrades to a plain fi
   const event = pendingFileEvents.find((e) => e.fileId === 'incoming_negative_voice_file') as
     { isVoiceNote?: boolean } | undefined;
   assert.equal(event?.isVoiceNote, undefined);
+});
+
+test('an inbound offer with a wrong-typed voiceNote degrades to a plain file instead of being dropped', async (t) => {
+  // The envelope layer imposes no shape on voiceNote at all (it must reach signature
+  // reconstruction verbatim), so wrong-typed metadata — a string durationMs, or a non-object
+  // voiceNote — lands here with a VALID signature and must degrade, not drop or crash.
+  const { database, fileHandler, chatId, pendingFileEvents } = await createHarness(t);
+
+  const wrongShapes: Array<{ fileId: string; voiceNote: unknown }> = [
+    { fileId: 'incoming_string_duration_file', voiceNote: { durationMs: 'twelve seconds' } },
+    { fileId: 'incoming_nonobject_voice_file', voiceNote: 'not-an-object' },
+  ];
+  for (const { fileId, voiceNote } of wrongShapes) {
+    const handled = await fileHandler.handleApplicationMessage(offerContext({
+      offerId: `offer_${fileId}`,
+      fileId,
+      chatId,
+      voiceNote,
+    }));
+
+    assert.equal(handled, true);
+    const row = database.getFileMessageById(fileId);
+    assert.ok(row, 'offer must still be persisted as a plain file, not dropped');
+    assert.equal(row?.file_kind, null);
+    assert.equal(row?.file_duration_ms, null);
+    const event = pendingFileEvents.find((e) => e.fileId === fileId) as
+      { isVoiceNote?: boolean } | undefined;
+    assert.equal(event?.isVoiceNote, undefined);
+  }
 });
 
 test('an inbound offer with a plausible duration but a non-webm filename/mimeType degrades to a plain file', async (t) => {

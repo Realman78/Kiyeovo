@@ -17,6 +17,7 @@ import { useConnectivityGuidance } from "../../../hooks/useConnectivityGuidance"
 import { ACCEPTED_IMAGE_MIME } from "../../../../shared/file-types";
 import { UPLOADS_QUOTA_WARN_BYTES } from "../../../../core/constants";
 import { useVoiceRecorder, type VoiceRecorderResult } from "../../../hooks/useVoiceRecorder";
+import type { NetworkMode } from "../../../../core/types";
 
 type PendingSendJob =
     | { type: 'direct'; chatId: number; peerId: string; content: string; localMessageId: string; replyToCid?: string }
@@ -230,13 +231,38 @@ export const ChatInput: FC<ChatInputProps> = ({
 
     const voiceRecordTargetRef = useRef<FileDialogSource | null>(null);
 
+    // Voice notes are Fast-mode only (like calls) — hide the mic entirely in Anonymous mode.
+    const [networkMode, setNetworkMode] = useState<NetworkMode | null>(null);
+    useEffect(() => {
+        let cancelled = false;
+        const loadNetworkMode = async () => {
+            try {
+                const result = await window.kiyeovoAPI.getNetworkMode();
+                if (!cancelled && result.success) {
+                    setNetworkMode(result.mode);
+                }
+            } catch (error) {
+                console.error('Failed to fetch network mode for voice notes:', error);
+            }
+        };
+        void loadNetworkMode();
+        return () => {
+            cancelled = true;
+        };
+    }, []);
+    const canRecordVoiceNotes = networkMode === 'fast';
+
     // Shared completion path for a finished recording, used both by the manual stop-and-send
     // button and by the recorder hook's 60s hard-cap auto-stop (see the onAutoStop argument
     // below) — hitting the cap must send exactly like a manual stop, not silently drop the note.
     const finishRecordingAndSend = async (result: VoiceRecorderResult | null) => {
+        // The null-result guard must run BEFORE the target ref is consumed: when the 60s
+        // auto-stop and a manual stop-and-send race, exactly one caller gets the recording and
+        // the other gets null — the null caller must not steal (and discard) the target chat,
+        // or the real recording falls back to whatever chat is currently active.
+        if (!result) return;
         const recordedTarget = voiceRecordTargetRef.current;
         voiceRecordTargetRef.current = null;
-        if (!result) return;
 
         const { bytes, durationMs } = result;
         const fileName = createVoiceNoteName(new Date());
@@ -283,7 +309,7 @@ export const ChatInput: FC<ChatInputProps> = ({
     }, [voiceRecorder.error, toast]);
 
     const handleMicClick = async () => {
-        if (isDisabled || hasActiveFileTransfer || voiceRecorder.state !== 'idle') return;
+        if (!canRecordVoiceNotes || isDisabled || hasActiveFileTransfer || voiceRecorder.state !== 'idle') return;
         voiceRecordTargetRef.current = createCurrentFileDialogSource();
         await voiceRecorder.start();
     };
@@ -1070,18 +1096,20 @@ export const ChatInput: FC<ChatInputProps> = ({
                     >
                         <Smile className="w-4 h-4" />
                     </Button>
-                    <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        disabled={isDisabled || hasActiveFileTransfer || voiceRecorder.state !== 'idle'}
-                        onClick={() => void handleMicClick()}
-                        className="text-sidebar-foreground hover:text-foreground"
-                        aria-label="Record voice message"
-                        title="Record voice message"
-                    >
-                        <Mic className="w-4 h-4" />
-                    </Button>
+                    {canRecordVoiceNotes && (
+                        <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            disabled={isDisabled || hasActiveFileTransfer || voiceRecorder.state !== 'idle'}
+                            onClick={() => void handleMicClick()}
+                            className="text-sidebar-foreground hover:text-foreground"
+                            aria-label="Record voice message"
+                            title="Record voice message"
+                        >
+                            <Mic className="w-4 h-4" />
+                        </Button>
+                    )}
                     {emojiPickerOpen && (
                         <div className="chat-emoji-picker-panel absolute bottom-full left-0 mb-3 z-40">
                             <EmojiPicker
