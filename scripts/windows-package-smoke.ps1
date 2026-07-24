@@ -38,7 +38,15 @@ function Assert-ValidSignature {
 function Stop-KiyeovoProcesses {
     $processes = @(Get-Process -Name "Kiyeovo" -ErrorAction SilentlyContinue)
     foreach ($process in $processes) {
-        & taskkill.exe /PID $process.Id /T /F | Out-Host
+        # The process can exit between Get-Process and taskkill; taskkill then
+        # prints 'ERROR: The process "<pid>" not found.' and exits 128, which
+        # leaves a nonzero $LASTEXITCODE that fails the workflow step AFTER
+        # every smoke assertion passed. Already-dead counts as success here.
+        & taskkill.exe /PID $process.Id /T /F 2>&1 | Out-Host
+        if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 128) {
+            Write-Warning "taskkill for PID $($process.Id) exited with $LASTEXITCODE"
+        }
+        $global:LASTEXITCODE = 0
     }
 }
 

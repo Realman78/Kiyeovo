@@ -169,6 +169,15 @@ export const IPC_CHANNELS = {
   SET_MISSING_ICE_WARNING_ACKNOWLEDGED: 'settings:setMissingIceWarningAcknowledged',
   GET_PREDEFINED_NODES_SUNSET_DISMISSED: 'settings:getPredefinedNodesSunsetDismissed',
   SET_PREDEFINED_NODES_SUNSET_DISMISSED: 'settings:setPredefinedNodesSunsetDismissed',
+
+  // System tray settings
+  GET_CLOSE_TO_TRAY_ENABLED: 'settings:getCloseToTrayEnabled',
+  SET_CLOSE_TO_TRAY_ENABLED: 'settings:setCloseToTrayEnabled',
+  GET_MINIMIZE_TO_TRAY_ENABLED: 'settings:getMinimizeToTrayEnabled',
+  SET_MINIMIZE_TO_TRAY_ENABLED: 'settings:setMinimizeToTrayEnabled',
+  GET_LAUNCH_ON_LOGIN_ENABLED: 'settings:getLaunchOnLoginEnabled',
+  SET_LAUNCH_ON_LOGIN_ENABLED: 'settings:setLaunchOnLoginEnabled',
+
   RESTART_APP: 'app:restart',
   QUIT_APP: 'app:quit',
   DELETE_ACCOUNT_AND_DATA: 'app:deleteAccountAndData',

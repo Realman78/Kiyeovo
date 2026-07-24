@@ -7,11 +7,14 @@ import {
   Database,
   FolderOpen,
   Info,
+  LogIn,
+  Minimize2,
   Power,
   RefreshCw,
   Settings,
   SlidersHorizontal,
   Trash2,
+  X,
 } from 'lucide-react';
 import type { RootState } from '../../../state/store';
 import { TimeFormatDialog } from './TimeFormatDialog';
@@ -93,6 +96,12 @@ export const SettingsPage: FC = () => {
   const [quittingApp, setQuittingApp] = useState(false);
   const [timeFormatOpen, setTimeFormatOpen] = useState(false);
   const timeFormat = useSelector((state: RootState) => state.uiPrefs.timeFormat);
+  const [closeToTrayEnabled, setCloseToTrayEnabledState] = useState<boolean | null>(null);
+  const [updatingCloseToTray, setUpdatingCloseToTray] = useState(false);
+  const [minimizeToTrayEnabled, setMinimizeToTrayEnabledState] = useState<boolean | null>(null);
+  const [updatingMinimizeToTray, setUpdatingMinimizeToTray] = useState(false);
+  const [launchOnLoginEnabled, setLaunchOnLoginEnabledState] = useState<boolean | null>(null);
+  const [updatingLaunchOnLogin, setUpdatingLaunchOnLogin] = useState(false);
 
   useEffect(() => {
     let disposed = false;
@@ -104,11 +113,22 @@ export const SettingsPage: FC = () => {
     });
 
     const loadSettings = async () => {
-      const [notificationsResult, downloadsResult, modeResult, torResult] = await Promise.allSettled([
+      const [
+        notificationsResult,
+        downloadsResult,
+        modeResult,
+        torResult,
+        closeToTrayResult,
+        minimizeToTrayResult,
+        launchOnLoginResult,
+      ] = await Promise.allSettled([
         window.kiyeovoAPI.getNotificationsEnabled(),
         window.kiyeovoAPI.getDownloadsDir(),
         window.kiyeovoAPI.getNetworkMode(),
         window.kiyeovoAPI.getTorSettings(),
+        window.kiyeovoAPI.getCloseToTrayEnabled(),
+        window.kiyeovoAPI.getMinimizeToTrayEnabled(),
+        window.kiyeovoAPI.getLaunchOnLoginEnabled(),
       ]);
       if (disposed) return;
 
@@ -119,6 +139,33 @@ export const SettingsPage: FC = () => {
           ? notificationsResult.value.error
           : errStr(notificationsResult.reason);
         toast.error(message || 'Failed to load notification settings');
+      }
+
+      if (closeToTrayResult.status === 'fulfilled' && closeToTrayResult.value.success) {
+        setCloseToTrayEnabledState(closeToTrayResult.value.enabled);
+      } else {
+        const message = closeToTrayResult.status === 'fulfilled'
+          ? closeToTrayResult.value.error
+          : errStr(closeToTrayResult.reason);
+        toast.error(message || 'Failed to load close-to-tray setting');
+      }
+
+      if (minimizeToTrayResult.status === 'fulfilled' && minimizeToTrayResult.value.success) {
+        setMinimizeToTrayEnabledState(minimizeToTrayResult.value.enabled);
+      } else {
+        const message = minimizeToTrayResult.status === 'fulfilled'
+          ? minimizeToTrayResult.value.error
+          : errStr(minimizeToTrayResult.reason);
+        toast.error(message || 'Failed to load minimize-to-tray setting');
+      }
+
+      if (launchOnLoginResult.status === 'fulfilled' && launchOnLoginResult.value.success) {
+        setLaunchOnLoginEnabledState(launchOnLoginResult.value.enabled);
+      } else {
+        const message = launchOnLoginResult.status === 'fulfilled'
+          ? launchOnLoginResult.value.error
+          : errStr(launchOnLoginResult.reason);
+        toast.error(message || 'Failed to load launch-on-login setting');
       }
 
       if (downloadsResult.status === 'fulfilled' && downloadsResult.value.success) {
@@ -216,6 +263,75 @@ export const SettingsPage: FC = () => {
       toast.error('Failed to update notification settings');
     } finally {
       setUpdatingNotifications(false);
+    }
+  };
+
+  const handleToggleCloseToTray = async () => {
+    if (closeToTrayEnabled === null || updatingCloseToTray) return;
+
+    const previousValue = closeToTrayEnabled;
+    const nextValue = !previousValue;
+    setCloseToTrayEnabledState(nextValue);
+    setUpdatingCloseToTray(true);
+
+    try {
+      const result = await window.kiyeovoAPI.setCloseToTrayEnabled(nextValue);
+      if (!result.success) {
+        setCloseToTrayEnabledState(previousValue);
+        toast.error(result.error || 'Failed to update close-to-tray setting');
+      }
+    } catch (error) {
+      console.error('Failed to update close-to-tray setting:', error);
+      setCloseToTrayEnabledState(previousValue);
+      toast.error('Failed to update close-to-tray setting');
+    } finally {
+      setUpdatingCloseToTray(false);
+    }
+  };
+
+  const handleToggleMinimizeToTray = async () => {
+    if (minimizeToTrayEnabled === null || updatingMinimizeToTray) return;
+
+    const previousValue = minimizeToTrayEnabled;
+    const nextValue = !previousValue;
+    setMinimizeToTrayEnabledState(nextValue);
+    setUpdatingMinimizeToTray(true);
+
+    try {
+      const result = await window.kiyeovoAPI.setMinimizeToTrayEnabled(nextValue);
+      if (!result.success) {
+        setMinimizeToTrayEnabledState(previousValue);
+        toast.error(result.error || 'Failed to update minimize-to-tray setting');
+      }
+    } catch (error) {
+      console.error('Failed to update minimize-to-tray setting:', error);
+      setMinimizeToTrayEnabledState(previousValue);
+      toast.error('Failed to update minimize-to-tray setting');
+    } finally {
+      setUpdatingMinimizeToTray(false);
+    }
+  };
+
+  const handleToggleLaunchOnLogin = async () => {
+    if (launchOnLoginEnabled === null || updatingLaunchOnLogin) return;
+
+    const previousValue = launchOnLoginEnabled;
+    const nextValue = !previousValue;
+    setLaunchOnLoginEnabledState(nextValue);
+    setUpdatingLaunchOnLogin(true);
+
+    try {
+      const result = await window.kiyeovoAPI.setLaunchOnLoginEnabled(nextValue);
+      if (!result.success) {
+        setLaunchOnLoginEnabledState(previousValue);
+        toast.error(result.error || 'Failed to update launch-on-login setting');
+      }
+    } catch (error) {
+      console.error('Failed to update launch-on-login setting:', error);
+      setLaunchOnLoginEnabledState(previousValue);
+      toast.error('Failed to update launch-on-login setting');
+    } finally {
+      setUpdatingLaunchOnLogin(false);
     }
   };
 
@@ -652,6 +768,78 @@ export const SettingsPage: FC = () => {
                   disabled={deletingAccount}
                 >
                   {deletingAccount ? 'Deleting...' : 'Delete'}
+                </Button>
+              )}
+            />
+
+            <h2 className="pt-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              System
+            </h2>
+
+            <SettingsActionRow
+              icon={<X className="h-5 w-5 shrink-0 text-primary" />}
+              title="Close to Tray"
+              description={closeToTrayEnabled === null
+                ? 'Loading current preference...'
+                : `${closeToTrayEnabled ? 'Closing the window hides it to the tray' : 'Closing the window quits Kiyeovo'} (Windows/Linux only)`}
+              action={(
+                <Button
+                  variant={closeToTrayEnabled === false ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => { void handleToggleCloseToTray(); }}
+                  disabled={closeToTrayEnabled === null || updatingCloseToTray}
+                >
+                  {updatingCloseToTray
+                    ? 'Saving...'
+                    : closeToTrayEnabled === false
+                      ? 'Enable'
+                      : 'Disable'}
+                </Button>
+              )}
+            />
+
+            <SettingsActionRow
+              icon={<Minimize2 className="h-5 w-5 shrink-0 text-primary" />}
+              title="Minimize to Tray"
+              description={minimizeToTrayEnabled === null
+                ? 'Loading current preference...'
+                : `${minimizeToTrayEnabled ? 'Minimizing the window hides it to the tray' : 'Minimizing uses the normal taskbar behavior'} (Windows/Linux only)`}
+              action={(
+                <Button
+                  variant={minimizeToTrayEnabled ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => { void handleToggleMinimizeToTray(); }}
+                  disabled={minimizeToTrayEnabled === null || updatingMinimizeToTray}
+                >
+                  {updatingMinimizeToTray
+                    ? 'Saving...'
+                    : minimizeToTrayEnabled
+                      ? 'Disable'
+                      : 'Enable'}
+                </Button>
+              )}
+            />
+
+            <SettingsActionRow
+              icon={<LogIn className="h-5 w-5 shrink-0 text-primary" />}
+              title="Launch on Login"
+              description={launchOnLoginEnabled === null
+                ? 'Loading current preference...'
+                : launchOnLoginEnabled
+                  ? 'Kiyeovo starts automatically (hidden in the tray) when you log in'
+                  : 'Kiyeovo does not start automatically at login'}
+              action={(
+                <Button
+                  variant={launchOnLoginEnabled ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => { void handleToggleLaunchOnLogin(); }}
+                  disabled={launchOnLoginEnabled === null || updatingLaunchOnLogin}
+                >
+                  {updatingLaunchOnLogin
+                    ? 'Saving...'
+                    : launchOnLoginEnabled
+                      ? 'Disable'
+                      : 'Enable'}
                 </Button>
               )}
             />
