@@ -370,7 +370,7 @@ Protections:
 - rate limits (per peer + global)
 - max pending offers (per peer + global)
 - malformed, unauthorized, duplicate, over-limit, and rate-limited offers are dropped without creating a row
-- path traversal and file-size guards
+- path traversal and file-size guards; wire-protocol filename rules are unchanged so legal POSIX filenames still transfer between non-Windows peers and offers from existing 1.0 clients are never dropped. Portable-filename sanitization (no Windows DOS device names, control/Win32-invalid characters, trailing dot/space, UTF-8 basename above 255 bytes) happens at the receiver's disk-write boundary instead of on the wire; that save-time sanitizer lands via the `feature/voice-notes` branch
 - backend remains authoritative even if UI pre-checks exist
 
 Local image delivery foundation:
@@ -437,7 +437,7 @@ Camera and screen-share implementation notes:
 - display capture is requested at up to 1920x1080 and 30fps, with `contentHint = "detail"` for screen/text readability
 - screen-share sender parameters currently cap bitrate at 4 Mbps and prefer maintaining resolution
 - remote screen-share UI is driven by signed STARTED/STOPPED call signals, not only by WebRTC track `ended`/`mute` state
-- macOS and supported portal-backed Linux environments can use the system picker; Linux fallback uses Electron `desktopCapturer` plus Kiyeovo's in-app source picker
+- macOS 15+ can use the system picker; Linux and Windows use Electron `desktopCapturer` plus Kiyeovo's trusted in-app source picker (older macOS versions also fall back through that handler)
 - if the source picker is cancelled or the call ends while it is open, captured tracks are stopped and no sharing state is committed
 
 #### 8.2 Group calls
@@ -660,6 +660,7 @@ Anonymous desktop clients use the bundled Tor binary stored under `resources/tor
 Practical notes:
 - `npm run download:tor` downloads Tor for the current platform
 - `npm run setup` performs install + Tor download together
+- Tor Expert Bundle 15.0.18 archives are checked against repository-pinned SHA-256 values before extraction; the lookup intentionally stays Bash-3-compatible because stock macOS runners use Bash 3.2
 - the desktop app runs its bundled Tor instance on ports `9550/9551` by default to avoid clashing with system Tor / Tor Browser
 - bootstrap infrastructure for anonymous mode is still a separate node process plus an onion service in front of it; the desktop client bundle only covers the client-side Tor dependency
 
@@ -946,6 +947,19 @@ otherwise it labels the onion as stale/last-known (an onion is unreachable witho
 Tor even if the bootstrap is up). Anonymous and Fast stacks can run concurrently
 because their Compose project names and host state subtrees are distinct.
 
+#### 11.10 Desktop packaging and Windows release contract
+
+Electron Builder owns desktop packaging. Windows currently targets x64 and emits two executables:
+
+- an assisted NSIS installer (`oneClick:false`) that installs per user, never elevates, allows choosing the install directory, and creates desktop/Start Menu shortcuts
+- a portable NSIS executable that extracts and runs without installation
+
+The Windows package includes `resources/tor/win32-x64` as an extra resource. `TorManager` starts `tor.exe` with its directory as `cwd`; Windows resolves the bundled runtime DLLs beside the executable. Windows source setup requires Bash (Git Bash or WSL) for the repository setup/download scripts, but the installed application has no Bash runtime dependency.
+
+Windows CI runs on pushes to `main`/the Windows feature branch, on pull requests, and manually. It performs a clean install, downloads verified Tor, builds/transpiles, runs unit tests, creates both Windows targets, silently installs and uninstalls NSIS, launches the installed and portable apps, and executes the installed Tor binary. This is a package/startup smoke test, not a full network/Tor-bootstrap E2E test.
+
+Tagged `kiyeovo-*` releases warn (a `::warning::` annotation plus a log message) rather than fail when `WINDOWS_CSC_LINK` and `WINDOWS_CSC_KEY_PASSWORD` repository secrets are missing, and still publish unsigned Windows executables. When both secrets are present, Electron Builder signs with SHA-256, and the smoke script requires valid signatures on the setup, portable app, installed app, and bundled Tor executable before artifacts reach the draft release. Manual non-tag builds remain unsigned so pull-request code never receives signing credentials.
+
 ---
 
 ### 12. UI and state management
@@ -1069,7 +1083,7 @@ Call UI state:
    - explicit session permission handling:
      - deny renderer permission requests by default
      - allow only trusted main-frame requests for `media`, `display-capture`, `speaker-selection`, and sanitized clipboard writes, preserving calls, screen sharing, output-device switching, and copy actions without broad renderer permission grants
-     - display-media requests are additionally routed through Electron's display-media handling; the Linux fallback source selection uses trusted IPC and source IDs produced by main process enumeration
+     - display-media requests are additionally routed through Electron's display-media handling; Linux/Windows fallback source selection uses trusted IPC and source IDs produced by main process enumeration
 
 ---
 
@@ -1096,6 +1110,7 @@ Current resilience layers:
 - Group-call writer failover is deterministic, not consensus-based; a brief divergent-roster window can transiently disagree but is recovered by query conflict detection and roster reconciliation.
 - Calls (1:1 and group) are currently fast-mode only.
 - Screen sharing currently sends display video only; system/window audio sharing is intentionally out of scope for the current phase.
+- Windows packages currently target x64 only; Windows ARM64 is not built.
 - STUN/TURN reachability tests are manual point-in-time snapshots; there is no continuous ICE health monitoring.
 - On some Linux environments, sandboxed unpackaged Electron runs may still require host-specific sandbox-helper setup during development.
 - Unpackaged restart uses an explicit relaunch path for Linux development robustness; packaged releases still target the standard Electron relaunch behavior.

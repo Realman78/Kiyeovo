@@ -480,6 +480,13 @@ export interface KiyeovoAPI {
     dnsResolution: 'tor' | 'system';
   }) => Promise<{ success: boolean; error: string | null }>;
 
+  getCloseToTrayEnabled: () => Promise<{ success: boolean; enabled: boolean; error: string | null }>;
+  setCloseToTrayEnabled: (enabled: boolean) => Promise<{ success: boolean; error: string | null }>;
+  getMinimizeToTrayEnabled: () => Promise<{ success: boolean; enabled: boolean; error: string | null }>;
+  setMinimizeToTrayEnabled: (enabled: boolean) => Promise<{ success: boolean; error: string | null }>;
+  getLaunchOnLoginEnabled: () => Promise<{ success: boolean; enabled: boolean; error: string | null }>;
+  setLaunchOnLoginEnabled: (enabled: boolean) => Promise<{ success: boolean; error: string | null }>;
+
   restartApp: () => Promise<{ success: boolean; error: string | null }>;
   quitApp: () => Promise<{ success: boolean; error: string | null }>;
   deleteAccountAndData: () => Promise<{ success: boolean; error: string | null }>;

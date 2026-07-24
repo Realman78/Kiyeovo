@@ -51,6 +51,24 @@
     },
     "win": {
         "target": ["nsis", "portable"],
-        "icon": "resources/icons/app-icon.ico"
+        "icon": "resources/icons/app-icon.ico",
+        "signtoolOptions": {
+            "signingHashAlgorithms": ["sha256"]
+        },
+        "extraResources": [
+            {
+                "from": "resources/tor/win32-x64",
+                "to": "tor/win32-x64",
+                "filter": ["**/*"]
+            }
+        ]
+    },
+    "nsis": {
+        "oneClick": false,
+        "perMachine": false,
+        "allowElevation": false,
+        "allowToChangeInstallationDirectory": true,
+        "createDesktopShortcut": true,
+        "createStartMenuShortcut": true
     }
 }

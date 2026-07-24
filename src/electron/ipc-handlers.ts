@@ -61,26 +61,20 @@ import {
 } from './dialog-path-grants.js';
 import { getDefaultDownloadsDirectory, writeFileWithCopySuffix } from '../core/lib/file-storage.js';
 import type { InitialSetupStatus, SaveTextUploadResponse, SaveVoiceNoteUploadResponse } from '../shared/kiyeovo-api.js';
+import { withSettingsDatabase } from './settings-db.js';
+import {
+  getCloseToTrayEnabled,
+  setCloseToTrayEnabled,
+  getMinimizeToTrayEnabled,
+  setMinimizeToTrayEnabled,
+} from './tray-settings.js';
+import { getLaunchOnLoginEnabled, setLaunchOnLoginEnabled } from './launch-on-login.js';
+import { isScreenShareSupported } from './screen-share-support.js';
 
 function requestAppRestart(): void {
   scheduleAppRelaunch();
   (app as typeof app & { __kiyeovoRestartRequested?: boolean }).__kiyeovoRestartRequested = true;
   app.quit();
-}
-
-function withSettingsDatabase<T>(getP2PCore: () => P2PCore | null, run: (db: ChatDatabase) => T): T {
-  const p2pCore = getP2PCore();
-  if (p2pCore) {
-    return run(p2pCore.database);
-  }
-
-  const dbPath = join(ensureAppDataDir(), 'chat.db');
-  const tempDb = new ChatDatabase(dbPath);
-  try {
-    return run(tempDb);
-  } finally {
-    tempDb.close();
-  }
 }
 
 function getConfiguredMaxFileSize(db: ChatDatabase): number {
@@ -124,10 +118,6 @@ const INITIAL_SETUP_STATUSES: InitialSetupStatus[] = [
   'skipped',
 ];
 const SCREEN_SHARE_UNSUPPORTED_MESSAGE = 'Screen sharing is not supported yet';
-
-function isScreenShareSupported(): boolean {
-  return process.platform === 'darwin' || process.platform === 'linux';
-}
 
 function isIceServerType(value: string): value is IceServerType {
   return ICE_SERVER_TYPES.includes(value as IceServerType);
@@ -3439,6 +3429,63 @@ function setupAppHandlers(ipcMain: IpcMainHandleRegistrar, getP2PCore: () => P2P
     } catch (error) {
       console.error('[IPC] Failed to quit app:', error);
       return { success: false, error: errStr(error, 'Failed to quit app') };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.GET_CLOSE_TO_TRAY_ENABLED, async () => {
+    try {
+      return { success: true, enabled: getCloseToTrayEnabled(getP2PCore), error: null };
+    } catch (error) {
+      console.error('[IPC] Failed to get close-to-tray setting:', error);
+      return { success: false, enabled: true, error: errStr(error, 'Failed to get setting') };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SET_CLOSE_TO_TRAY_ENABLED, async (_event, enabled: boolean) => {
+    try {
+      setCloseToTrayEnabled(getP2PCore, enabled);
+      return { success: true, error: null };
+    } catch (error) {
+      console.error('[IPC] Failed to set close-to-tray setting:', error);
+      return { success: false, error: errStr(error, 'Failed to set setting') };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.GET_MINIMIZE_TO_TRAY_ENABLED, async () => {
+    try {
+      return { success: true, enabled: getMinimizeToTrayEnabled(getP2PCore), error: null };
+    } catch (error) {
+      console.error('[IPC] Failed to get minimize-to-tray setting:', error);
+      return { success: false, enabled: false, error: errStr(error, 'Failed to get setting') };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SET_MINIMIZE_TO_TRAY_ENABLED, async (_event, enabled: boolean) => {
+    try {
+      setMinimizeToTrayEnabled(getP2PCore, enabled);
+      return { success: true, error: null };
+    } catch (error) {
+      console.error('[IPC] Failed to set minimize-to-tray setting:', error);
+      return { success: false, error: errStr(error, 'Failed to set setting') };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.GET_LAUNCH_ON_LOGIN_ENABLED, async () => {
+    try {
+      return { success: true, enabled: getLaunchOnLoginEnabled(), error: null };
+    } catch (error) {
+      console.error('[IPC] Failed to get launch-on-login setting:', error);
+      return { success: false, enabled: false, error: errStr(error, 'Failed to get setting') };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.SET_LAUNCH_ON_LOGIN_ENABLED, async (_event, enabled: boolean) => {
+    try {
+      setLaunchOnLoginEnabled(enabled);
+      return { success: true, error: null };
+    } catch (error) {
+      console.error('[IPC] Failed to set launch-on-login setting:', error);
+      return { success: false, error: errStr(error, 'Failed to set setting') };
     }
   });
 

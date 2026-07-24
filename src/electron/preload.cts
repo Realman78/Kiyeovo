@@ -165,6 +165,13 @@ const kiyeovoAPI: KiyeovoAPI = {
   registerVoiceNoteMedia: (messageId) => invoke(IPC_CHANNELS.REGISTER_VOICE_NOTE_MEDIA, messageId),
   getTorSettings: () => invoke(IPC_CHANNELS.GET_TOR_SETTINGS),
   setTorSettings: (settings) => invoke(IPC_CHANNELS.SET_TOR_SETTINGS, settings),
+  getCloseToTrayEnabled: () => invoke(IPC_CHANNELS.GET_CLOSE_TO_TRAY_ENABLED),
+  setCloseToTrayEnabled: (enabled) => invoke(IPC_CHANNELS.SET_CLOSE_TO_TRAY_ENABLED, enabled),
+  getMinimizeToTrayEnabled: () => invoke(IPC_CHANNELS.GET_MINIMIZE_TO_TRAY_ENABLED),
+  setMinimizeToTrayEnabled: (enabled) => invoke(IPC_CHANNELS.SET_MINIMIZE_TO_TRAY_ENABLED, enabled),
+  getLaunchOnLoginEnabled: () => invoke(IPC_CHANNELS.GET_LAUNCH_ON_LOGIN_ENABLED),
+  setLaunchOnLoginEnabled: (enabled) => invoke(IPC_CHANNELS.SET_LAUNCH_ON_LOGIN_ENABLED, enabled),
+
   restartApp: () => invoke(IPC_CHANNELS.RESTART_APP),
   quitApp: () => invoke(IPC_CHANNELS.QUIT_APP),
   deleteAccountAndData: () => invoke(IPC_CHANNELS.DELETE_ACCOUNT_AND_DATA),
