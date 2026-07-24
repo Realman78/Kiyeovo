@@ -68,12 +68,101 @@ jobs:
             dist/latest-mac.yml
           if-no-files-found: error
 
+  build-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - run: npm ci
+
+      - name: Download bundled Tor (win32-x64)
+        shell: bash
+        run: bash scripts/download-tor.sh win32-x64
+
+      - run: npm run build
+
+      - run: npm run transpile:electron
+
+      - name: Run unit tests
+        run: npm run test:unit
+
+      - name: Check Windows signing credentials for tagged releases
+        id: signing-check
+        if: startsWith(github.ref, 'refs/tags/kiyeovo-')
+        shell: pwsh
+        env:
+          WIN_CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+        run: |
+          # Maintainer decision: missing signing credentials must not block a
+          # tagged release. Warn loudly and publish unsigned artifacts instead
+          # of throwing; signing activates automatically once the secrets are
+          # configured (see the credential pass-through on the next step).
+          $missing = @()
+          if ([string]::IsNullOrWhiteSpace($env:WIN_CSC_LINK)) {
+            $missing += "WINDOWS_CSC_LINK"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WIN_CSC_KEY_PASSWORD)) {
+            $missing += "WINDOWS_CSC_KEY_PASSWORD"
+          }
+          if ($missing.Count -gt 0) {
+            $message = "Missing $($missing -join ', ') repository secret(s); this tagged release will publish UNSIGNED Windows executables."
+            Write-Host "::warning::$message"
+            Write-Warning $message
+            "has-credentials=false" >> $env:GITHUB_OUTPUT
+          } else {
+            "has-credentials=true" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Build Windows installers
+        env:
+          # Keep credentials out of manual non-tag builds. electron-builder
+          # accepts raw base64 PFX/P12 content or a protected certificate URL.
+          # Passing these through unconditionally on tagged builds means
+          # signing activates automatically once the secrets exist, with no
+          # further workflow changes needed.
+          WIN_CSC_LINK: ${{ startsWith(github.ref, 'refs/tags/kiyeovo-') && secrets.WINDOWS_CSC_LINK || '' }}
+          WIN_CSC_KEY_PASSWORD: ${{ startsWith(github.ref, 'refs/tags/kiyeovo-') && secrets.WINDOWS_CSC_KEY_PASSWORD || '' }}
+        run: npx electron-builder --win --x64 --publish never
+
+      - name: Smoke-test Windows packages and signatures
+        shell: pwsh
+        run: |
+          if ("${{ steps.signing-check.outputs.has-credentials }}" -eq "true") {
+            ./scripts/windows-package-smoke.ps1 -DistDir dist -RequireSignedArtifacts
+          } else {
+            ./scripts/windows-package-smoke.ps1 -DistDir dist
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-dist
+          path: dist/*.exe
+          if-no-files-found: error
+
+      - name: Upload auto-update metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-dist-metadata
+          path: dist/latest.yml
+          if-no-files-found: warn
+
   release:
     if: startsWith(github.ref, 'refs/tags/kiyeovo-')
     runs-on: ubuntu-latest
     needs:
       - build-linux
       - build-mac
+      - build-windows
     permissions:
       contents: write
     steps:
@@ -95,4 +184,5 @@ jobs:
             release-artifacts/*.deb
             release-artifacts/*.dmg
             release-artifacts/*.zip
+            release-artifacts/*.exe
             release-artifacts/*.yml

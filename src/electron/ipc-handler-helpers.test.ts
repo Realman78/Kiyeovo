@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 import { getDefaultDownloadsDirectory, resolveConfiguredDownloadsDirectory } from '../core/lib/file-storage.js';
 import type {
@@ -96,13 +96,17 @@ test('validateUploadImageFileName accepts image basenames and rejects paths or u
 });
 
 test('resolveUploadsDirectoryFromSetting derives the app-owned uploads sibling directory', () => {
+  // Expected values are derived with the same 'node:path' helpers the
+  // implementation uses (rather than hardcoded POSIX-style literals) so this
+  // assertion holds on both POSIX (forward-slash join) and Windows
+  // (backslash join) CI runners.
   assert.equal(
     resolveUploadsDirectoryFromSetting('/home/user/Downloads', '/repo'),
-    '/home/user/kiyeovo-uploads',
+    join(dirname('/home/user/Downloads'), 'kiyeovo-uploads'),
   );
   assert.equal(
     resolveUploadsDirectoryFromSetting('downloads', '/repo'),
-    '/repo/kiyeovo-uploads',
+    join(dirname(resolve('/repo', 'downloads')), 'kiyeovo-uploads'),
   );
   // No configured value: sibling of the absolute home-based downloads default,
   // never cwd-relative.

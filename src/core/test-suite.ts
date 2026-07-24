@@ -24,6 +24,7 @@ import '../electron/text-upload.test.js';
 import '../electron/trusted-ipc.test.js';
 import '../electron/electron-security-smoke.test.js';
 import '../electron/session-security.test.js';
+import '../electron/screen-share-support.test.js';
 import '../ui/state/slices/chatSlice.test.js';
 import '../ui/state/slices/setupNodesSlice.test.js';
 import './db/database.persistence.test.js';

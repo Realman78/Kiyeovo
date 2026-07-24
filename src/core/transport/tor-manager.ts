@@ -31,6 +31,24 @@ export interface TorManagerConfig {
 }
 
 /**
+ * Normalize a filesystem path for embedding in torrc — win32 only. Tor
+ * accepts forward slashes on Windows, so converting `path.sep`-joined
+ * Windows paths avoids any risk of a trailing/embedded backslash being read
+ * as an escape by Tor's config parser; after that conversion no backslash
+ * can remain, so quoting whitespace-containing paths is safe (Tor treats
+ * backslashes inside QUOTED values as escape sequences and rejects invalid
+ * ones — verified against the bundled tor binary). On POSIX the path is
+ * returned unchanged: unquoted torrc values take the rest of the line
+ * verbatim (spaces and literal backslashes both parse correctly), so any
+ * transformation here could only introduce regressions.
+ */
+function normalizeTorrcPath(dirPath: string): string {
+  if (process.platform !== 'win32') return dirPath;
+  const normalized = dirPath.split(path.sep).join('/');
+  return normalized.includes(' ') ? `"${normalized}"` : normalized;
+}
+
+/**
  * Build the torrc file contents. Pure function so it can be tested without
  * spawning Tor.
  */
@@ -45,7 +63,7 @@ SocksPort ${socksPort}
 ControlPort ${controlPort}
 
 # Data directory
-DataDirectory ${dataDir}
+DataDirectory ${normalizeTorrcPath(dataDir)}
 
 # Performance tuning
 CircuitBuildTimeout 30
@@ -132,7 +150,11 @@ export class TorManager {
     // libraries (e.g. libevent-2.1.so.7 on Linux, *.dylib on macOS) that ship
     // beside it via scripts/download-tor.sh. Point the dynamic linker at the
     // binary's own directory so those libs are found even when they're absent
-    // from system paths. Windows resolves DLLs next to the .exe natively.
+    // from system paths. Windows resolves DLLs next to the .exe natively, as
+    // long as the exe's own directory is searched - which the OS loader does
+    // for the directory containing the running executable image, but we also
+    // set `cwd` below as belt-and-suspenders so a relative DLL lookup never
+    // falls back to some unrelated working directory.
     const torBinaryDir = path.dirname(torBinaryPath);
     const spawnEnv: NodeJS.ProcessEnv = { ...process.env };
     const prependLibPath = (key: string) => {
@@ -148,6 +170,7 @@ export class TorManager {
     this.torProcess = spawn(torBinaryPath, ['-f', torrcPath], {
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: false,
+      cwd: torBinaryDir,
       env: spawnEnv,
     });
 
