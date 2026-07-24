@@ -39,8 +39,15 @@ test('generateDesktopEntryContent doubles percent signs so they cannot start Exe
 });
 
 test('getAutostartFilePath / getAutostartDirPath point at ~/.config/autostart/kiyeovo.desktop', () => {
-  assert.equal(getAutostartDirPath('/home/alice'), '/home/alice/.config/autostart');
-  assert.equal(getAutostartFilePath('/home/alice'), '/home/alice/.config/autostart/kiyeovo.desktop');
+  // Computed via join() rather than POSIX literals: on a win32 test runner
+  // path.join emits backslashes, but the runtime code only ever executes on
+  // Linux, so the SHAPE (home + .config/autostart/kiyeovo.desktop) is what
+  // this test asserts - not the separator.
+  assert.equal(getAutostartDirPath('/home/alice'), join('/home/alice', '.config', 'autostart'));
+  assert.equal(
+    getAutostartFilePath('/home/alice'),
+    join('/home/alice', '.config', 'autostart', 'kiyeovo.desktop'),
+  );
 });
 
 test('enableLinuxAutostart / isLinuxAutostartEnabled / disableLinuxAutostart round-trip', () => {
