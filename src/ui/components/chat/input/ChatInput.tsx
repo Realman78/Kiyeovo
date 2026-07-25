@@ -1,6 +1,10 @@
 import { useState, useEffect, useLayoutEffect, useRef, type FC } from "react";
 import { Button } from "../../ui/Button";
-import { Check, Mic, Paperclip, Reply, Send, Smile, X } from "lucide-react";
+// AudioLines (not Mic) for the voice-note record button: during a call the
+// in-call MUTE control renders a Mic icon, and two identical mic icons with
+// opposite meanings on screen at once is both confusing UX and an ambiguous
+// e2e locator (calls.spec.ts selects button:has(svg.lucide-mic)).
+import { AudioLines, Check, Paperclip, Reply, Send, Smile, X } from "lucide-react";
 import { useToast } from "../../ui/use-toast";
 import { useOfflineSendWarning } from "../../../hooks/useOfflineSendWarning";
 import { useDispatch, useSelector } from "react-redux";
@@ -1107,7 +1111,7 @@ export const ChatInput: FC<ChatInputProps> = ({
                             aria-label="Record voice message"
                             title="Record voice message"
                         >
-                            <Mic className="w-4 h-4" />
+                            <AudioLines className="w-4 h-4" />
                         </Button>
                     )}
                     {emojiPickerOpen && (

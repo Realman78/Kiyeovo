@@ -1,6 +1,9 @@
-const INVALID_PORTABLE_FILENAME_CHARACTERS = /[<>:"/\\|?*]/;
-const WINDOWS_RESERVED_BASENAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
-const MAX_PORTABLE_FILENAME_BYTES = 255;
+import {
+  containsUnsupportedFileNameCharacter,
+  exceedsMaxPortableFilenameBytes,
+  isWindowsReservedBasename,
+  windowsBasenameOf,
+} from '../core/utils/portable-filename.js';
 
 export type PreparedTextUpload =
   | {
@@ -15,21 +18,6 @@ export type PreparedTextUpload =
       bytes: null;
       error: string;
     };
-
-function containsUnsupportedFileNameCharacter(value: string): boolean {
-  for (const character of value) {
-    const codePoint = character.codePointAt(0);
-    if (
-      INVALID_PORTABLE_FILENAME_CHARACTERS.test(character)
-      || codePoint === undefined
-      || codePoint <= 0x1F
-      || codePoint === 0x7F
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
 
 function validateTextFileName(value: unknown): { fileName: string } | { error: string } {
   if (typeof value !== 'string' || !value.trim()) {
@@ -59,16 +47,12 @@ function validateTextFileName(value: unknown): { fileName: string } | { error: s
     return { error: 'Text upload filename is invalid' };
   }
 
-  const firstDotIndex = stem.indexOf('.');
-  const windowsBasename = firstDotIndex === -1
-    ? stem
-    : stem.slice(0, firstDotIndex);
-  if (WINDOWS_RESERVED_BASENAME.test(windowsBasename)) {
+  if (isWindowsReservedBasename(windowsBasenameOf(stem))) {
     return { error: 'Text upload filename is reserved by the operating system' };
   }
 
   const normalizedFileName = `${stem}.txt`;
-  if (Buffer.byteLength(normalizedFileName, 'utf8') > MAX_PORTABLE_FILENAME_BYTES) {
+  if (exceedsMaxPortableFilenameBytes(normalizedFileName)) {
     return { error: 'Text upload filename is too long' };
   }
 
