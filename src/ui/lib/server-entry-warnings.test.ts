@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { getServerEntryWarning, parseMultiaddr } from './server-entry-warnings.js';
+import { buildWarningDismissalKey, getServerEntryWarning, parseMultiaddr } from './server-entry-warnings.js';
 
 const BOOTSTRAP_A = '/ip4/203.0.113.10/tcp/9000/p2p/12D3KooWKDrpSzWYyCaJ4gfNGY5XUjUYN9tVZe8t9biMMY9HxU8K';
 const RELAY_A = '/ip4/203.0.113.10/tcp/4002/p2p/12D3KooWDfn9gv6mQsb8CBCmXRPLbBzDaZrcZD8HiQ4a3rgNp4MM';
@@ -113,4 +113,54 @@ test('STUN/TURN: a well-formed stun:/turn:/turns: URL produces no warning', () =
   assert.equal(getServerEntryWarning('stun:stun.l.google.com:19302', 'stun', {}), null);
   assert.equal(getServerEntryWarning('turn:turn.example.com:3478', 'turn', {}), null);
   assert.equal(getServerEntryWarning('turns:turn.example.com:5349', 'turns', {}), null);
+});
+
+test('STUN/TURN: a pasted multiaddr without a /tcp/ or /udp/ segment is still flagged (portless /dnsaddr/ form)', () => {
+  const warning = getServerEntryWarning(
+    '/dnsaddr/bootstrap.example.com/p2p/12D3KooWKDrpSzWYyCaJ4gfNGY5XUjUYN9tVZe8t9biMMY9HxU8K',
+    'stun',
+    {},
+  );
+  assert.equal(warning?.code, 'wrong-format');
+});
+
+test('STUN/TURN: a bare /ip4/ address without a /tcp/ or /udp/ segment is still flagged', () => {
+  const warning = getServerEntryWarning('/ip4/203.0.113.10/p2p/12D3KooWKDrpSzWYyCaJ4gfNGY5XUjUYN9tVZe8t9biMMY9HxU8K', 'turn', {});
+  assert.equal(warning?.code, 'wrong-format');
+});
+
+test('cross-list duplicate: matches on shared /p2p/ peer ID even when the entry is portless (host/port unresolvable)', () => {
+  // /dnsaddr/ entries are dialed by resolving DNS TXT records at connect
+  // time and legitimately carry no /tcp//udp/ port segment — parseMultiaddr
+  // returns null for these, but the peer ID should still be comparable.
+  const portlessDuplicate = '/dnsaddr/bootstrap.example.com/p2p/12D3KooWKDrpSzWYyCaJ4gfNGY5XUjUYN9tVZe8t9biMMY9HxU8K';
+  assert.equal(parseMultiaddr(portlessDuplicate), null);
+
+  const warning = getServerEntryWarning(portlessDuplicate, 'relay', { bootstrap: [BOOTSTRAP_A] });
+  assert.equal(warning?.code, 'cross-list-duplicate');
+});
+
+test('cross-list duplicate: matches on shared /p2p/ peer ID when the SAVED other-list entry is portless', () => {
+  const portlessBootstrap = '/dnsaddr/bootstrap.example.com/p2p/12D3KooWKDrpSzWYyCaJ4gfNGY5XUjUYN9tVZe8t9biMMY9HxU8K';
+  assert.equal(parseMultiaddr(portlessBootstrap), null);
+
+  const warning = getServerEntryWarning(RELAY_SAME_PEER_ID_AS_BOOTSTRAP_A, 'relay', {
+    bootstrap: [portlessBootstrap],
+  });
+  assert.equal(warning?.code, 'cross-list-duplicate');
+});
+
+test('negative: portless entry with no peer-ID match and no host/port produces no warning', () => {
+  const warning = getServerEntryWarning('/dnsaddr/unrelated.example.com', 'bootstrap', { relay: [RELAY_A] });
+  assert.equal(warning, null);
+});
+
+test('buildWarningDismissalKey: trims the value and includes the warning code', () => {
+  assert.equal(buildWarningDismissalKey('  /ip4/1.2.3.4/tcp/9000  ', 'port-heuristic'), '/ip4/1.2.3.4/tcp/9000::port-heuristic');
+});
+
+test('buildWarningDismissalKey: different codes for the same value produce different keys', () => {
+  const portHeuristicKey = buildWarningDismissalKey(BOOTSTRAP_A, 'port-heuristic');
+  const crossListKey = buildWarningDismissalKey(BOOTSTRAP_A, 'cross-list-duplicate');
+  assert.notEqual(portHeuristicKey, crossListKey);
 });

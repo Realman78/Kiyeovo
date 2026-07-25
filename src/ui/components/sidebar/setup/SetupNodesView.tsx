@@ -15,7 +15,7 @@ import {
 import { Button } from '../../ui/Button';
 import { Input } from '../../ui/Input';
 import { ServerEntryWarningRow } from './ServerEntryWarningRow';
-import type { ServerEntryWarning } from '../../../lib/server-entry-warnings';
+import { buildWarningDismissalKey, type ServerEntryWarning } from '../../../lib/server-entry-warnings';
 
 export type SetupNodeEntry = {
   key: string;
@@ -161,12 +161,17 @@ export function SetupNodesView({
   }
 
   const [isAdding, setIsAdding] = useState(false);
-  // Session-scoped, per-entry-value dismissal — not persisted, matches the
-  // "dismissable, not a blocker" nature of these hints.
+  // Session-scoped, per-(entry-value, warning-code) dismissal — not
+  // persisted, matches the "dismissable, not a blocker" nature of these
+  // hints. Keying by code (not just value) means a dismissal only suppresses
+  // that exact warning: if a lower-priority warning (e.g. port-heuristic) is
+  // dismissed and later upgrades to a higher-priority one (e.g.
+  // cross-list-duplicate, once the other list's fetch resolves), the
+  // upgraded warning still surfaces.
   const [dismissedWarnings, setDismissedWarnings] = useState<Set<string>>(new Set());
 
-  const dismissWarning = (address: string) => {
-    setDismissedWarnings((current) => new Set(current).add(address));
+  const dismissWarning = (key: string) => {
+    setDismissedWarnings((current) => new Set(current).add(key));
   };
 
   const handleCancelAdd = () => {
@@ -247,7 +252,10 @@ export function SetupNodesView({
                       ? 'bg-success'
                       : 'bg-destructive';
                   const entryWarning = getEntryWarning?.(node.address) ?? null;
-                  const showEntryWarning = !!entryWarning && !dismissedWarnings.has(node.address);
+                  const entryWarningKey = entryWarning
+                    ? buildWarningDismissalKey(node.address, entryWarning.code)
+                    : null;
+                  const showEntryWarning = !!entryWarning && !!entryWarningKey && !dismissedWarnings.has(entryWarningKey);
 
                   return (
                     <div key={node.key} className="px-4 py-3">
@@ -318,7 +326,7 @@ export function SetupNodesView({
                       {showEntryWarning && (
                         <ServerEntryWarningRow
                           warning={entryWarning!}
-                          onDismiss={() => dismissWarning(node.address)}
+                          onDismiss={() => dismissWarning(entryWarningKey!)}
                         />
                       )}
                     </div>
@@ -342,11 +350,13 @@ export function SetupNodesView({
                     {(() => {
                       const trimmedNewAddress = newAddress.trim();
                       const addWarning = trimmedNewAddress ? getEntryWarning?.(trimmedNewAddress) ?? null : null;
-                      if (!addWarning || dismissedWarnings.has(trimmedNewAddress)) return null;
+                      if (!addWarning) return null;
+                      const addWarningKey = buildWarningDismissalKey(trimmedNewAddress, addWarning.code);
+                      if (dismissedWarnings.has(addWarningKey)) return null;
                       return (
                         <ServerEntryWarningRow
                           warning={addWarning}
-                          onDismiss={() => dismissWarning(trimmedNewAddress)}
+                          onDismiss={() => dismissWarning(addWarningKey)}
                         />
                       );
                     })()}

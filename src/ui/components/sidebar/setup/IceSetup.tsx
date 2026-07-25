@@ -33,7 +33,7 @@ import { Button } from '../../ui/Button';
 import { Input } from '../../ui/Input';
 import { testIceServer } from './iceServerTest';
 import { ServerEntryWarningRow } from './ServerEntryWarningRow';
-import { getServerEntryWarning } from '../../../lib/server-entry-warnings';
+import { buildWarningDismissalKey, getServerEntryWarning } from '../../../lib/server-entry-warnings';
 
 type IceServerDraft = {
   id: string | null;
@@ -113,13 +113,15 @@ export function IceSetup() {
   const [reordering, setReordering] = useState(false);
   const [acknowledged, setAcknowledged] = useState(false);
   const [now, setNow] = useState(() => Date.now());
-  // Session-scoped, per-URL dismissal for misconfiguration hints — not
-  // persisted, matches the "dismissable, not a blocker" nature of these hints.
+  // Session-scoped, per-(URL, warning-code) dismissal for misconfiguration
+  // hints — not persisted, matches the "dismissable, not a blocker" nature
+  // of these hints. Keying by code means a dismissed lower-priority warning
+  // still resurfaces if it's later upgraded to a higher-priority one.
   const [dismissedWarnings, setDismissedWarnings] = useState<Set<string>>(new Set());
   const reorderInFlightRef = useRef(false);
 
-  const dismissWarning = (url: string) => {
-    setDismissedWarnings((current) => new Set(current).add(url));
+  const dismissWarning = (key: string) => {
+    setDismissedWarnings((current) => new Set(current).add(key));
   };
 
   useEffect(() => {
@@ -431,7 +433,10 @@ export function IceSetup() {
                 {servers.map((server, index) => {
                   const testState = testResults[server.id];
                   const entryWarning = getServerEntryWarning(server.url, server.type, {});
-                  const showEntryWarning = !!entryWarning && !dismissedWarnings.has(server.url);
+                  const entryWarningKey = entryWarning
+                    ? buildWarningDismissalKey(server.url, entryWarning.code)
+                    : null;
+                  const showEntryWarning = !!entryWarning && !!entryWarningKey && !dismissedWarnings.has(entryWarningKey);
                   return (
                     <div key={server.id} className="px-4 py-3">
                       <div className="group flex items-center gap-3">
@@ -533,7 +538,7 @@ export function IceSetup() {
                       {showEntryWarning && (
                         <ServerEntryWarningRow
                           warning={entryWarning!}
-                          onDismiss={() => dismissWarning(server.url)}
+                          onDismiss={() => dismissWarning(entryWarningKey!)}
                         />
                       )}
                     </div>
@@ -570,11 +575,13 @@ export function IceSetup() {
                     {(() => {
                       const trimmedUrl = draft.url.trim();
                       const draftWarning = trimmedUrl ? getServerEntryWarning(trimmedUrl, draft.type, {}) : null;
-                      if (!draftWarning || dismissedWarnings.has(trimmedUrl)) return null;
+                      if (!draftWarning) return null;
+                      const draftWarningKey = buildWarningDismissalKey(trimmedUrl, draftWarning.code);
+                      if (dismissedWarnings.has(draftWarningKey)) return null;
                       return (
                         <ServerEntryWarningRow
                           warning={draftWarning}
-                          onDismiss={() => dismissWarning(trimmedUrl)}
+                          onDismiss={() => dismissWarning(draftWarningKey)}
                         />
                       );
                     })()}
