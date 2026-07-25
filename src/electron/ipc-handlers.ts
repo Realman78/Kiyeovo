@@ -2175,13 +2175,19 @@ function setupPendingKeyExchangeHandlers(
 }
 
 /**
- * Generate cache key from chat IDs (sorted for consistency)
+ * Generate cache key from chat IDs (sorted for consistency). `immediate`
+ * is folded into the key so a latency-sensitive request (e.g. the manual
+ * "Check missed messages" action) never shares/waits on a paced background
+ * sweep's in-flight promise for the same chats — that would silently defeat
+ * the immediate exemption by making the caller wait out the paced scan's
+ * added delay anyway. Immediate and paced requests for the same chats are
+ * therefore separate single-flight lanes that can run concurrently.
  */
-function getOfflineCheckCacheKey(chatIds?: number[]): string {
-  if (!chatIds || chatIds.length === 0) {
-    return '__TOP_10__'; // Sentinel value for "check top 10"
-  }
-  return chatIds.slice().sort((a, b) => a - b).join(',');
+function getOfflineCheckCacheKey(chatIds: number[] | undefined, immediate: boolean): string {
+  const base = !chatIds || chatIds.length === 0
+    ? '__TOP_10__' // Sentinel value for "check top 10"
+    : chatIds.slice().sort((a, b) => a - b).join(',');
+  return `${base}:${immediate ? 'immediate' : 'paced'}`;
 }
 
 /**
@@ -2199,7 +2205,7 @@ function setupOfflineMessageHandlers(
         return { success: false, checkedChatIds: [], error: 'P2P core not initialized' };
       }
 
-      const cacheKey = getOfflineCheckCacheKey(chatIds);
+      const cacheKey = getOfflineCheckCacheKey(chatIds, false);
 
       // Check if there's already an in-flight request for this key
       const inFlightPromise = OfflineMessageManager.inFlightOfflineChecks.get(cacheKey);
@@ -2251,7 +2257,7 @@ function setupOfflineMessageHandlers(
         return { success: false, checkedChatIds: [], error: 'P2P core not initialized' };
       }
 
-      const cacheKey = getOfflineCheckCacheKey([chatId]);
+      const cacheKey = getOfflineCheckCacheKey([chatId], true);
 
       // Check if there's already an in-flight request for this key
       const inFlightPromise = OfflineMessageManager.inFlightOfflineChecks.get(cacheKey);
@@ -2266,7 +2272,8 @@ function setupOfflineMessageHandlers(
       const checkPromise = (async () => {
         try {
           log(`[IPC] Checking offline messages for chat: ${chatId}`);
-          const {checkedChatIds, unreadFromChats} = await p2pCore.messageHandler.checkOfflineMessages([chatId]);
+          // Manual, user-waited action ("Check missed messages"): latency-sensitive.
+          const {checkedChatIds, unreadFromChats} = await p2pCore.messageHandler.checkOfflineMessages([chatId], { immediate: true });
           log(`[IPC] Offline message check complete for chat: ${chatId}`);
 
           event.sender.send(IPC_CHANNELS.OFFLINE_MESSAGES_FETCH_COMPLETE, { chatIds: checkedChatIds });
@@ -2996,7 +3003,8 @@ function setupGroupHandlers(
         return { success: false, checkedChatIds: [], failedChatIds: [], unreadFromChats: new Map(), gapWarnings: [], error: 'P2P core not initialized' };
       }
 
-      const result = await p2pCore.messageHandler.checkGroupOfflineMessages([chatId]);
+      // Manual, user-waited action ("Check missed messages"): latency-sensitive.
+      const result = await p2pCore.messageHandler.checkGroupOfflineMessages([chatId], { immediate: true });
       return { success: true, ...result, error: null };
     } catch (error) {
       console.error('[IPC] Failed to check group offline messages for chat:', error);
@@ -3282,7 +3290,8 @@ function setupGroupHandlers(
               log(
                 `[IPC][GROUP_ACCEPT][FETCH][START] group=${groupId} phase=${phase} directChatId=${creatorDirectChat.id} creator=${creatorPeerId.slice(-8)}`,
               );
-              const { checkedChatIds } = await p2pCore.messageHandler.checkOfflineMessages([creatorDirectChat.id]);
+              // Join-completion gating (awaiting_activation -> active): latency-sensitive.
+              const { checkedChatIds } = await p2pCore.messageHandler.checkOfflineMessages([creatorDirectChat.id], { immediate: true });
               const afterStatus = p2pCore.database.getChatByGroupId(groupId)?.group_status ?? 'missing';
               log(
                 `[IPC][GROUP_ACCEPT][FETCH][DONE] group=${groupId} phase=${phase} checked=${checkedChatIds.length} status=${afterStatus}`,

@@ -79,6 +79,8 @@ import {
   RESUME_RELAY_GRACE_MS,
   RESUME_RELAY_READY_WAIT_MS,
   RESUME_RELAY_READY_POLL_MS,
+  OFFLINE_BUCKET_SCAN_PACING_BUDGET_MS,
+  OFFLINE_BUCKET_SCAN_PACING_MIN_BUCKET_COUNT,
 } from '../constants.js';
 import { triggerFastRelayRefresh } from '../network/relay-keepalive.js';
 import { SessionManager } from '../direct/session-manager.js';
@@ -130,6 +132,17 @@ type OfflineReadBucketInfo = ReturnType<ChatDatabase['getOfflineReadBucketInfo']
 type OfflineReadBucketInfoForChats = ReturnType<ChatDatabase['getOfflineReadBucketInfoForChats']>[number];
 type OfflineReadBucketInfoAny = OfflineReadBucketInfo | OfflineReadBucketInfoForChats;
 type OfflineCheckResult = { checkedChatIds: number[]; unreadFromChats: Map<number, number> };
+export interface OfflineCheckOptions {
+  /**
+   * Metadata mitigation opt-out (Task B): when true, this scan's bucket
+   * fetches are NOT shuffled/paced even for a multi-bucket scope. Set by
+   * latency-sensitive call sites (manual "check missed messages", join-flow
+   * recovery, nudge/recovery triggers) where a human or UI-gating state is
+   * waiting synchronously. The background periodic sweep and the
+   * renderer's on-reconnect/wake sync leave this unset (paced by default).
+   */
+  immediate?: boolean;
+}
 const OFFLINE_DHT_UNAVAILABLE_MARKER = 'no DHT connection';
 const OFFLINE_DHT_UNAVAILABLE_MARKER_LOWER = OFFLINE_DHT_UNAVAILABLE_MARKER.toLowerCase();
 
@@ -553,7 +566,8 @@ export class MessageHandler {
       return;
     }
 
-    await this.checkOfflineMessages([chatId]);
+    // Latency-sensitive: gates offline-inbox capacity recovery on the send path.
+    await this.checkOfflineMessages([chatId], { immediate: true });
     if (this.checkOfflineCapacity(peerId)) {
       log(`[OFFLINE][RECOVERY][DONE] peer=${peerId.slice(-8)} chatId=${chatId} cleared=true stage=initial_fetch`);
       this.notifyOfflineInboxCapacityChanged(chatId);
@@ -573,7 +587,7 @@ export class MessageHandler {
     );
 
     await new Promise((resolve) => setTimeout(resolve, DIRECT_OFFLINE_INBOX_RECOVERY_RECHECK_DELAY_MS));
-    await this.checkOfflineMessages([chatId]);
+    await this.checkOfflineMessages([chatId], { immediate: true });
     const cleared = this.checkOfflineCapacity(peerId);
     log(
       `[OFFLINE][RECOVERY][DONE] peer=${peerId.slice(-8)} chatId=${chatId} cleared=${String(cleared)} stage=final_fetch`,
@@ -1904,7 +1918,8 @@ export class MessageHandler {
     try {
       const beforeTimestamp = this.database.getOfflineLastReadTimestampByPeerId(remoteId);
       log(`[NUDGE][CHECK][START] peer=${remoteId.slice(-8)} chatId=${chatId} isRetry=${isRetry} allowRetry=${allowRetry} beforeTs=${beforeTimestamp}`);
-      const { checkedChatIds } = await this.checkOfflineMessages([chatId]);
+      // Event-triggered (bucket-nudge received): latency-sensitive.
+      const { checkedChatIds } = await this.checkOfflineMessages([chatId], { immediate: true });
       const afterTimestamp = this.database.getOfflineLastReadTimestampByPeerId(remoteId);
       const hasNewData = afterTimestamp > beforeTimestamp;
       log(`[NUDGE][CHECK][DONE] peer=${remoteId.slice(-8)} chatId=${chatId} isRetry=${isRetry} checkedChats=${checkedChatIds.length} beforeTs=${beforeTimestamp} afterTs=${afterTimestamp} hasNewData=${hasNewData}`);
@@ -3246,7 +3261,8 @@ export class MessageHandler {
         `[GROUP][RESYNC_REQ][PREFETCH][START] group=${chat.group_id} creator=${creatorPeerId.slice(-8)} ` +
         `directChatId=${creatorDirectChat.id} prevKeyVersion=${previousKeyVersion}`,
       );
-      await this.checkOfflineMessages([creatorDirectChat.id]);
+      // Latency-sensitive: user is awaiting requestGroupUpdate() synchronously.
+      await this.checkOfflineMessages([creatorDirectChat.id], { immediate: true });
       const refreshed = this.database.getChatByGroupId(chat.group_id);
       const refreshedKeyVersion = refreshed?.key_version ?? previousKeyVersion;
       if (refreshedKeyVersion > previousKeyVersion) {
@@ -3498,7 +3514,7 @@ export class MessageHandler {
   }
 
   // Check offline messages (direct)
-  private async performOfflineMessageCheck(chatIds?: number[]): Promise<{ checkedChatIds: number[], unreadFromChats: Map<number, number> }> {
+  private async performOfflineMessageCheck(chatIds?: number[], options?: OfflineCheckOptions): Promise<{ checkedChatIds: number[], unreadFromChats: Map<number, number> }> {
     const runId = ++this.offlineCheckRunSeq;
     log(chatIds
       ? `Checking for offline messages in ${chatIds.length} chat${chatIds.length > 1 ? 's' : ''}...`
@@ -3555,7 +3571,13 @@ export class MessageHandler {
     log(
       `[OFFLINE][CHECK][BUCKETS] run=${runId} count=${readBuckets.length} peers=${readBuckets.map(b => b.peerId.slice(-8)).join(',')}`,
     );
-    const store = await OfflineMessageManager.getOfflineMessages(this.node, bucketKeys);
+    // Metadata mitigation (Task B): pace bucket fetches for non-latency-
+    // sensitive scans (background periodic sweep, reconnect/wake sync).
+    // Latency-sensitive call sites pass `immediate: true` to opt out.
+    const pacing = options?.immediate
+      ? undefined
+      : { totalBudgetMs: OFFLINE_BUCKET_SCAN_PACING_BUDGET_MS, minCount: OFFLINE_BUCKET_SCAN_PACING_MIN_BUCKET_COUNT };
+    const store = await OfflineMessageManager.getOfflineMessages(this.node, bucketKeys, true, pacing);
 
     if (store.messages.length === 0) {
       log('No offline direct messages found');
@@ -3757,14 +3779,22 @@ export class MessageHandler {
     return { checkedChatIds: checkedChats, unreadFromChats: unreadFromChats };
   }
 
-  async checkOfflineMessages(chatIds?: number[]): Promise<OfflineCheckResult> {
-    const scopeKey = chatIds && chatIds.length > 0
+  async checkOfflineMessages(chatIds?: number[], options?: OfflineCheckOptions): Promise<OfflineCheckResult> {
+    const baseScopeKey = chatIds && chatIds.length > 0
       ? [...chatIds].sort((a, b) => a - b).join(',')
       : 'default';
+    // Fold `immediate` into the single-flight scope: a latency-sensitive
+    // caller (nudge/manual/join-gating) must never share or queue behind a
+    // paced background sweep's promise for the same chats — that would
+    // silently defeat the immediate exemption by making it wait out the
+    // paced scan's added delay anyway. Immediate and paced requests for the
+    // same chats are separate lanes that can run concurrently.
+    const immediate = options?.immediate === true;
+    const scopeKey = `${baseScopeKey}:${immediate ? 'immediate' : 'paced'}`;
 
     const inFlight = this.offlineCheckInFlight.get(scopeKey);
     if (!inFlight) {
-      return this.runGuardedOfflineCheck(scopeKey, chatIds);
+      return this.runGuardedOfflineCheck(scopeKey, chatIds, options);
     }
 
     // A run for this scope is already in flight
@@ -3774,7 +3804,7 @@ export class MessageHandler {
         .catch(() => undefined)
         .then(() => {
           this.offlineCheckPending.delete(scopeKey);
-          return this.runGuardedOfflineCheck(scopeKey, chatIds);
+          return this.runGuardedOfflineCheck(scopeKey, chatIds, options);
         });
       this.offlineCheckPending.set(scopeKey, pending);
     }
@@ -3782,10 +3812,10 @@ export class MessageHandler {
     return pending;
   }
 
-  private runGuardedOfflineCheck(scopeKey: string, chatIds?: number[]): Promise<OfflineCheckResult> {
+  private runGuardedOfflineCheck(scopeKey: string, chatIds?: number[], options?: OfflineCheckOptions): Promise<OfflineCheckResult> {
     const run = (async (): Promise<OfflineCheckResult> => {
       try {
-        return await this.performOfflineMessageCheck(chatIds);
+        return await this.performOfflineMessageCheck(chatIds, options);
       } catch (error: unknown) {
         generalErrorHandler(error);
         return { checkedChatIds: [], unreadFromChats: new Map() };

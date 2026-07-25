@@ -4,7 +4,8 @@ import { ed25519 } from '@noble/curves/ed25519';
 import type { ChatNode, MessageReceivedEvent, SendMessageResponse, StrippedMessage } from '../../types.js';
 import {
   GROUP_HEARTBEAT_MAX_AGE_MS,
-  GROUP_GOSSIPSUB_HEARTBEAT_INTERVAL,
+  GROUP_GOSSIPSUB_HEARTBEAT_MIN_INTERVAL_MS,
+  GROUP_GOSSIPSUB_HEARTBEAT_MAX_INTERVAL_MS,
   GROUP_MESSAGE_MAX_AGE_MS,
   GROUP_MESSAGE_MAX_FUTURE_SKEW_MS,
   GROUP_OFFLINE_MESSAGE_TTL_MS,
@@ -37,6 +38,7 @@ import type {
 import { toBase64Url } from '../../utils/miscellaneous.js';
 import { errStr, generalErrorHandler } from '../../utils/general-error.js';
 import { GroupOfflineManager } from './group-offline-manager.js';
+import { computeJitteredHeartbeatDelayMs } from '../../lib/heartbeat-jitter.js';
 import { log } from '../../../shared/logger.js';
 
 export const GROUP_OFFLINE_BACKUP_FAILED_MARKER = 'no online peers and offline backup failed';
@@ -72,7 +74,7 @@ export class GroupMessaging {
   private readonly groupGraceContexts = new Map<string, GroupGraceContext[]>();
   private readonly graceTopicTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private reconcileTimer: ReturnType<typeof setInterval> | null = null;
-  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   private peerConnectDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private started = false;
   private reconcileInFlight = false;
@@ -103,9 +105,25 @@ export class GroupMessaging {
     this.reconcileTimer = setInterval(() => {
       void this.reconcileSubscriptions();
     }, GROUP_TOPIC_RECONCILE_INTERVAL);
-    this.heartbeatTimer = setInterval(() => {
-      void this.publishHeartbeats();
-    }, GROUP_GOSSIPSUB_HEARTBEAT_INTERVAL);
+    this.scheduleNextHeartbeat();
+  }
+
+  // Jittered, self-re-arming heartbeat: each tick draws a fresh random delay
+  // for the NEXT tick instead of reusing one fixed period (see
+  // computeJitteredHeartbeatDelayMs). A plain setInterval(..., FIXED_MS) is a
+  // metronome an observer can fingerprint; redrawing per tick avoids that
+  // while the upper bound keeps gossipsub mesh warming intact.
+  private scheduleNextHeartbeat(): void {
+    if (!this.started) return;
+    const delay = computeJitteredHeartbeatDelayMs(
+      GROUP_GOSSIPSUB_HEARTBEAT_MIN_INTERVAL_MS,
+      GROUP_GOSSIPSUB_HEARTBEAT_MAX_INTERVAL_MS,
+    );
+    this.heartbeatTimer = setTimeout(() => {
+      void this.publishHeartbeats().finally(() => {
+        this.scheduleNextHeartbeat();
+      });
+    }, delay);
   }
 
   cleanup(): void {
@@ -120,7 +138,7 @@ export class GroupMessaging {
       this.reconcileTimer = null;
     }
     if (this.heartbeatTimer) {
-      clearInterval(this.heartbeatTimer);
+      clearTimeout(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
     if (this.peerConnectDebounceTimer) {
