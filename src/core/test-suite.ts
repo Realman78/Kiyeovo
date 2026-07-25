@@ -31,6 +31,7 @@ import '../electron/autostart-linux.test.js';
 import '../electron/screen-share-support.test.js';
 import '../ui/state/slices/chatSlice.test.js';
 import '../ui/state/slices/setupNodesSlice.test.js';
+import '../ui/lib/server-entry-warnings.test.js';
 import './db/database.persistence.test.js';
 import './username/username-dht-validator.test.js';
 import './username/username-record.test.js';
