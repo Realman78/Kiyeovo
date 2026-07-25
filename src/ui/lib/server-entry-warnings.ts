@@ -98,14 +98,14 @@ function sameHostPort(a: ParsedMultiaddr, b: ParsedMultiaddr): boolean {
 
 function crossListDuplicateMessage(listKind: 'bootstrap' | 'relay'): string {
   return listKind === 'bootstrap'
-    ? "This address is already configured as a relay server — bootstrap and relay are different services (a relay address here will not work as a bootstrap)."
-    : "This address is already configured as a bootstrap server — bootstrap and relay are different services (a bootstrap address here will not work as a relay).";
+    ? "This address is already configured as a relay server. Bootstrap and relay are different services (a relay address here will not work as a bootstrap)."
+    : "This address is already configured as a bootstrap server. Bootstrap and relay are different services (a bootstrap address here will not work as a relay).";
 }
 
 function portHeuristicMessage(listKind: 'bootstrap' | 'relay'): string {
   return listKind === 'relay'
-    ? "Port 9000 is Kiyeovo's bootstrap convention — if this is a Kiyeovo infra node, its relay runs on port 4002."
-    : "Port 4002 is Kiyeovo's relay convention — if this is a Kiyeovo infra node, its bootstrap runs on port 9000.";
+    ? "Port 9000 is Kiyeovo's bootstrap convention. If this is a Kiyeovo infra node, its relay runs on port 4002."
+    : "Port 4002 is Kiyeovo's relay convention. If this is a Kiyeovo infra node, its bootstrap runs on port 9000.";
 }
 
 function getBootstrapOrRelayWarning(
@@ -158,7 +158,7 @@ function getIceEntryWarning(entryValue: string): ServerEntryWarning | null {
   if (firstSegment && MULTIADDR_SHAPE_PROTOCOLS.has(firstSegment)) {
     return {
       code: 'wrong-format',
-      message: 'This looks like a bootstrap/relay multiaddr, not a STUN/TURN URL — STUN/TURN entries use a stun:/turn:/turns: URL (e.g. stun:host:3478).',
+      message: 'This looks like a bootstrap/relay multiaddr, not a STUN/TURN URL. STUN/TURN entries use a stun:/turn:/turns: URL (e.g. stun:host:3478).',
     };
   }
   return null;
