@@ -1,6 +1,8 @@
 # Kiyeovo
 
-> Kiyeovo 1.1 is here — now with Windows support, a system tray, and voice notes. It's a single-developer project, so if something breaks or a platform isn't supported, [report it](https://github.com/Realman78/Kiyeovo/issues). For security reports, email doroxhr [at] gmail [dot] com.
+> Kiyeovo 1.1 is here. What's new: Windows support, a system tray, and voice notes.
+>
+> It's a single-developer project, so if something breaks or a platform isn't supported, [report it](https://github.com/Realman78/Kiyeovo/issues). For security reports, email doroxhr [at] gmail [dot] com.
 >
 > Tested on: Linux (Debian, Ubuntu, Lubuntu, EndeavourOS) and macOS. Windows x64 builds are continuously build/install/startup-smoke-tested on a GitHub-hosted Windows runner.
 
