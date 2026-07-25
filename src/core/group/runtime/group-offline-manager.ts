@@ -18,6 +18,8 @@ import {
   GROUP_ROTATION_GRACE_WINDOW_MS,
   getNetworkModeRuntime,
   GROUP_MISSING_USED_UNTIL_SCAN_EPOCH_CAP,
+  OFFLINE_BUCKET_SCAN_PACING_BUDGET_MS,
+  OFFLINE_BUCKET_SCAN_PACING_MIN_BUCKET_COUNT,
 } from '../../constants.js';
 import {
   type GroupContentMessage,
@@ -35,6 +37,7 @@ import type {
 } from '../../protocol/application-message.js';
 import { toBase64Url } from '../../utils/miscellaneous.js';
 import { errStr, generalErrorHandler } from '../../utils/general-error.js';
+import { shuffleAndPaceExecute, shuffleCopy } from '../../lib/bucket-scan-pacing.js';
 import { log } from '../../../shared/logger.js';
 
 const gzipAsync = promisify(gzip);
@@ -69,6 +72,9 @@ interface GroupChatCheckResult {
   completed: boolean;
   unreadAdded: number;
   gapWarnings: GroupOfflineGapWarning[];
+  /** Bucket-scan pacing (Task B): sender-store fetches paced for this chat. */
+  bucketsScanned: number;
+  pacingSpreadMs: number;
 }
 
 interface EpochSkipDecision {
@@ -85,6 +91,15 @@ export type GroupOfflineCheckMode = 'periodic' | 'nudge';
 
 export interface GroupOfflineCheckOptions {
   mode?: GroupOfflineCheckMode;
+  /**
+   * Metadata mitigation opt-out (Task B): when true, bucket-store fetches for
+   * this call are NOT shuffled/paced even in 'periodic' mode. Set by
+   * latency-sensitive call sites where a human or UI-gating state is waiting
+   * synchronously (e.g. the manual "Check missed messages" action) — pacing
+   * already only applies in 'periodic' mode, so 'nudge' (event-triggered,
+   * join-completion/rotation) call sites never need this. Default false.
+   */
+  immediate?: boolean;
 }
 
 export interface GroupOfflineCheckResult {
@@ -323,12 +338,143 @@ export class GroupOfflineManager {
     });
   }
 
+  /**
+   * Batched sibling of storeGroupMessage: appends multiple messages to their
+   * shared own-bucket in a SINGLE read-modify-write-put cycle, instead of one
+   * DHT put per message. Used by the Task C coalesced-backstop-write flush,
+   * where several sends accumulated during one coalescing window all need to
+   * land in the bucket together. All messages MUST share the same
+   * (groupId, keyVersion) — callers coalesce per own-bucket-key, so this
+   * always holds in practice; it is asserted defensively.
+   *
+   * Mirrors storeGroupMessage's dedupe-by-id / connectivity-retry / remote-merge
+   * recovery shape, just generalized from one new message to N.
+   */
+  async storeGroupMessages(messages: GroupContentMessage[]): Promise<void> {
+    if (messages.length === 0) return;
+    if (messages.length === 1) {
+      await this.storeGroupMessage(messages[0]!);
+      return;
+    }
+
+    const first = messages[0]!;
+    const bucketKey = this.getOwnBucketKey(first.groupId, first.keyVersion);
+    const bucketTag = bucketKey.slice(-12);
+    for (const message of messages) {
+      if (message.groupId !== first.groupId || message.keyVersion !== first.keyVersion) {
+        throw new Error(
+          `storeGroupMessages: batch spans multiple buckets (expected group=${first.groupId} ` +
+          `keyVersion=${first.keyVersion}, got group=${message.groupId} keyVersion=${message.keyVersion})`,
+        );
+      }
+    }
+    const highestIncomingSeq = messages.reduce((max, m) => Math.max(max, m.seq), 0);
+
+    log(
+      `[GROUP-OFFLINE][STORE][BATCH][ENQUEUE] group=${first.groupId.slice(0, 8)} keyVersion=${first.keyVersion} ` +
+      `bucket=*${bucketTag} batch=${messages.length}`,
+    );
+
+    await this.withBucketMutationLock(bucketKey, async () => {
+      const local = this.deps.database.getGroupOfflineSentMessages(bucketKey);
+      const { messages: normalizedExistingMessages } = this.normalizeStoreMessages(
+        this.filterLiveMessages(local.messages),
+        bucketKey,
+        'Local mirror overflow',
+      );
+
+      const existingIds = new Set(normalizedExistingMessages.map((m) => m.messageId));
+      const newOnes = messages.filter((m) => !existingIds.has(m.messageId));
+      if (newOnes.length === 0) {
+        log(`[GROUP-OFFLINE][STORE][BATCH][SKIP] bucket=*${bucketTag} reason=all_already_present`);
+        return;
+      }
+
+      const { messages: nextMessages } = this.normalizeStoreMessages(
+        [...normalizedExistingMessages, ...newOnes],
+        bucketKey,
+        'Bucket overflow',
+      );
+      const { signedStore, version } = this.buildSignedStore(
+        nextMessages,
+        bucketKey,
+        local.version,
+        highestIncomingSeq,
+      );
+
+      try {
+        await this.putStore(bucketKey, signedStore);
+        this.deps.database.saveGroupOfflineSentMessages(bucketKey, nextMessages, version);
+        this.notifyGroupInboxCapacityChangedByGroupId(first.groupId);
+        log(`[GROUP-OFFLINE][STORE][BATCH][DONE] bucket=*${bucketTag} batch=${newOnes.length}`);
+        return;
+      } catch (firstError: unknown) {
+        if (this.isStoreTooLargeError(firstError)) {
+          throw firstError;
+        }
+
+        if (this.isConnectivityFailureError(firstError)) {
+          const reconnected = await this.triggerReconnect();
+          if (!reconnected) {
+            throw firstError;
+          }
+          await this.putStore(bucketKey, signedStore);
+          this.deps.database.saveGroupOfflineSentMessages(bucketKey, nextMessages, version);
+          this.notifyGroupInboxCapacityChangedByGroupId(first.groupId);
+          return;
+        }
+
+        const remote = await this.getLatestStore(bucketKey);
+        if (!remote) {
+          throw firstError;
+        }
+
+        const remoteMessages = this.filterLiveMessages(remote.messages);
+        const mergedById = new Map<string, GroupContentMessage>();
+        for (const msg of remoteMessages) {
+          mergedById.set(msg.messageId, msg);
+        }
+        for (const msg of normalizedExistingMessages) {
+          mergedById.set(msg.messageId, msg);
+        }
+        for (const msg of newOnes) {
+          mergedById.set(msg.messageId, msg);
+        }
+
+        const { messages: mergedMessages } = this.normalizeStoreMessages(
+          Array.from(mergedById.values()),
+          bucketKey,
+          'Bucket overflow',
+          false,
+        );
+        const { signedStore: mergedStore, version: mergedVersion } = this.buildSignedStore(
+          mergedMessages,
+          bucketKey,
+          remote.version,
+          highestIncomingSeq,
+          remote.highestSeq,
+        );
+        await this.putStore(bucketKey, mergedStore);
+        this.deps.database.saveGroupOfflineSentMessages(bucketKey, mergedMessages, mergedVersion);
+        this.notifyGroupInboxCapacityChangedByGroupId(first.groupId);
+      }
+    });
+  }
+
   resolveRecentlyActiveGroupChats(sinceMs: number, limit: number): Chat[] {
     return this.deps.database.getRecentlyActiveGroupChats(sinceMs, limit);
   }
 
   async checkGroupOfflineMessages(chatIds?: number[], options?: GroupOfflineCheckOptions): Promise<GroupOfflineCheckResult> {
     const mode: GroupOfflineCheckMode = options?.mode ?? 'periodic';
+    const immediate = options?.immediate === true;
+    // Bucket-scan pacing (Task B) only applies to the non-latency-sensitive
+    // 'periodic' path (background backstop sweep, reconnect/wake sync).
+    // Event-triggered 'nudge' catch-ups (join-completion, rotation-applied)
+    // and any call site that explicitly opts out via `immediate: true` (e.g.
+    // the manual "Check missed messages" action) keep the old immediate,
+    // unshuffled behavior — see GroupOfflineCheckOptions.immediate.
+    const shouldPace = mode === 'periodic' && !immediate;
     const runId = ++this.offlineCheckRunCounter;
     const runStart = Date.now();
     this.pruneLocalCaches();
@@ -337,13 +483,19 @@ export class GroupOfflineManager {
     const gapWarnings: GroupOfflineGapWarning[] = [];
     const checkedChatIds: number[] = [];
     const failedChatIds: number[] = [];
-    const targetChats = this.resolveTargetChats(chatIds);
+    const resolvedChats = this.resolveTargetChats(chatIds);
+    // Metadata mitigation: a multi-chat sweep otherwise always visits chats
+    // in the same fixed (recency) order. Shuffle it for the same
+    // non-latency-sensitive paths that get bucket pacing below.
+    const targetChats = shouldPace ? shuffleCopy(resolvedChats) : resolvedChats;
     log(
       `[GROUP-OFFLINE][TIMING][RUN:${runId}] start targetChats=${targetChats.length} ` +
-      `chatIds=${targetChats.map((c) => c.id).join(',') || 'none'} mode=${mode}`
+      `chatIds=${targetChats.map((c) => c.id).join(',') || 'none'} mode=${mode} paced=${shouldPace}`
     );
 
-    const checks = await this.runTargetChatChecksWithConcurrency(targetChats, mode, 3);
+    const checks = await this.runTargetChatChecksWithConcurrency(targetChats, mode, shouldPace, 3);
+    let totalBucketsScanned = 0;
+    let maxPacingSpreadMs = 0;
     for (const { chat, result, tookMs } of checks) {
       const processed = result.processed;
 
@@ -354,6 +506,8 @@ export class GroupOfflineManager {
       if (result.gapWarnings.length > 0) {
         gapWarnings.push(...result.gapWarnings);
       }
+      totalBucketsScanned += result.bucketsScanned;
+      maxPacingSpreadMs = Math.max(maxPacingSpreadMs, result.pacingSpreadMs);
 
       log(
         `[GROUP-OFFLINE][TIMING][RUN:${runId}] chat=${chat.id} processed=${processed} ` +
@@ -375,6 +529,11 @@ export class GroupOfflineManager {
       `[GROUP-OFFLINE][TIMING][RUN:${runId}] done checkedChats=${checkedChatIds.length} ` +
       `totalUnread=${totalUnread} gaps=${gapWarnings.length} took=${Date.now() - runStart}ms`
     );
+    // Measurable recovery-delay cost of the Task B pacing mitigation for this sweep.
+    log(
+      `[GROUP-OFFLINE][BUCKET-SCAN][PACING][RUN:${runId}] mode=${mode} paced=${shouldPace} ` +
+      `buckets=${totalBucketsScanned} maxSpreadMs=${maxPacingSpreadMs}`
+    );
 
     return {
       checkedChatIds,
@@ -387,6 +546,7 @@ export class GroupOfflineManager {
   private async runTargetChatChecksWithConcurrency(
     chats: Chat[],
     mode: GroupOfflineCheckMode,
+    shouldPace: boolean,
     concurrency: number,
   ): Promise<Array<{ chat: Chat; result: GroupChatCheckResult; tookMs: number }>> {
     if (chats.length === 0) return [];
@@ -404,7 +564,7 @@ export class GroupOfflineManager {
         if (!chat) continue;
         const startedAt = Date.now();
         try {
-          const result = await this.runGroupCheckWithSingleFlight(chat, mode);
+          const result = await this.runGroupCheckWithSingleFlight(chat, mode, shouldPace);
           results[current] = { chat, result, tookMs: Date.now() - startedAt };
         } catch (error: unknown) {
           generalErrorHandler(
@@ -413,7 +573,7 @@ export class GroupOfflineManager {
           );
           results[current] = {
             chat,
-            result: { processed: false, completed: false, unreadAdded: 0, gapWarnings: [] },
+            result: { processed: false, completed: false, unreadAdded: 0, gapWarnings: [], bucketsScanned: 0, pacingSpreadMs: 0 },
             tookMs: Date.now() - startedAt,
           };
         }
@@ -448,12 +608,12 @@ export class GroupOfflineManager {
     return groups.filter(c => wanted.has(c.id));
   }
 
-  private async runGroupCheckWithSingleFlight(chat: Chat, mode: GroupOfflineCheckMode): Promise<GroupChatCheckResult> {
+  private async runGroupCheckWithSingleFlight(chat: Chat, mode: GroupOfflineCheckMode, shouldPace: boolean): Promise<GroupChatCheckResult> {
     if (!chat.group_id) {
-      return { processed: false, completed: false, unreadAdded: 0, gapWarnings: [] };
+      return { processed: false, completed: false, unreadAdded: 0, gapWarnings: [], bucketsScanned: 0, pacingSpreadMs: 0 };
     }
 
-    const inFlightKey = `${chat.group_id}:${mode}`;
+    const inFlightKey = `${chat.group_id}:${mode}:${shouldPace}`;
     const existing = this.groupCheckInFlight.get(inFlightKey);
     if (existing) {
       log(
@@ -462,7 +622,7 @@ export class GroupOfflineManager {
       return existing;
     }
 
-    const checkPromise = this.checkGroupChat(chat, mode)
+    const checkPromise = this.checkGroupChat(chat, mode, shouldPace)
       .finally(() => {
         if (this.groupCheckInFlight.get(inFlightKey) === checkPromise) {
           this.groupCheckInFlight.delete(inFlightKey);
@@ -476,13 +636,16 @@ export class GroupOfflineManager {
   private async checkGroupChat(
     chat: Chat,
     mode: GroupOfflineCheckMode,
+    shouldPace: boolean,
   ): Promise<GroupChatCheckResult> {
-    if (!chat.group_id) return { processed: false, completed: false, unreadAdded: 0, gapWarnings: [] };
+    if (!chat.group_id) return { processed: false, completed: false, unreadAdded: 0, gapWarnings: [], bucketsScanned: 0, pacingSpreadMs: 0 };
     const chatStart = Date.now();
 
     let sawAnyStore = false;
     let epochsProcessed = 0;
     let unreadAdded = 0;
+    let bucketsScanned = 0;
+    let pacingSpreadMs = 0;
     const gapWarnings: GroupOfflineGapWarning[] = [];
     const history = this.deps.database.getGroupKeyHistory(chat.group_id)
       .filter(h => h.key_version <= (chat.key_version ?? 0))
@@ -526,10 +689,24 @@ export class GroupOfflineManager {
         })
         .filter(item => item !== null)
 
-      const senderStores = await Promise.all(senderDescriptors.map(async (desc) => ({
+      const fetchStore = async (desc: typeof senderDescriptors[number]) => ({
         ...desc,
         store: await this.getLatestStore(desc.bucketKey),
-      })));
+      });
+
+      let senderStores: Array<Awaited<ReturnType<typeof fetchStore>>>;
+      if (shouldPace) {
+        const paced = await shuffleAndPaceExecute(senderDescriptors, fetchStore, {
+          totalBudgetMs: OFFLINE_BUCKET_SCAN_PACING_BUDGET_MS,
+          minCount: OFFLINE_BUCKET_SCAN_PACING_MIN_BUCKET_COUNT,
+        });
+        senderStores = paced.results;
+        bucketsScanned += paced.bucketCount;
+        pacingSpreadMs = Math.max(pacingSpreadMs, paced.totalSpreadMs);
+      } else {
+        senderStores = await Promise.all(senderDescriptors.map(fetchStore));
+        bucketsScanned += senderDescriptors.length;
+      }
 
       for (const { senderPeerId, sender, store } of senderStores) {
         if (!store || store.messages.length === 0) continue;
@@ -742,12 +919,18 @@ export class GroupOfflineManager {
       `[GROUP-OFFLINE][TIMING][CHAT:${chat.id}] done epochs=${epochsProcessed} ` +
       `sawAnyStore=${sawAnyStore} totalMs=${Date.now() - chatStart}ms`
     );
+    log(
+      `[GROUP-OFFLINE][BUCKET-SCAN][PACING][CHAT:${chat.id}] paced=${shouldPace} ` +
+      `buckets=${bucketsScanned} spreadMs=${pacingSpreadMs}`
+    );
 
     return {
       processed: sawAnyStore,
       completed: true,
       unreadAdded,
       gapWarnings,
+      bucketsScanned,
+      pacingSpreadMs,
     };
   }
 

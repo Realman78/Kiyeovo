@@ -4,9 +4,11 @@ import { ed25519 } from '@noble/curves/ed25519';
 import type { ChatNode, MessageReceivedEvent, SendMessageResponse, StrippedMessage } from '../../types.js';
 import {
   GROUP_HEARTBEAT_MAX_AGE_MS,
-  GROUP_GOSSIPSUB_HEARTBEAT_INTERVAL,
+  GROUP_GOSSIPSUB_HEARTBEAT_MIN_INTERVAL_MS,
+  GROUP_GOSSIPSUB_HEARTBEAT_MAX_INTERVAL_MS,
   GROUP_MESSAGE_MAX_AGE_MS,
   GROUP_MESSAGE_MAX_FUTURE_SKEW_MS,
+  GROUP_OFFLINE_BACKSTOP_COALESCE_WINDOW_MS,
   GROUP_OFFLINE_MESSAGE_TTL_MS,
   GROUP_OLD_TOPIC_SUBSCRIPTION_GRACE_MS,
   GROUP_PUBLISH_RETRYABLE_ERROR,
@@ -37,6 +39,7 @@ import type {
 import { toBase64Url } from '../../utils/miscellaneous.js';
 import { errStr, generalErrorHandler } from '../../utils/general-error.js';
 import { GroupOfflineManager } from './group-offline-manager.js';
+import { computeJitteredHeartbeatDelayMs } from '../../lib/heartbeat-jitter.js';
 import { log } from '../../../shared/logger.js';
 
 export const GROUP_OFFLINE_BACKUP_FAILED_MARKER = 'no online peers and offline backup failed';
@@ -72,13 +75,18 @@ export class GroupMessaging {
   private readonly groupGraceContexts = new Map<string, GroupGraceContext[]>();
   private readonly graceTopicTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private reconcileTimer: ReturnType<typeof setInterval> | null = null;
-  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   private peerConnectDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private started = false;
   private reconcileInFlight = false;
   private heartbeatInFlight = false;
   private readonly pendingOfflineBackups = new Map<string, GroupContentMessage>();
   private readonly rekeyContextMissTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  // Task C: backstop (redundant, live-delivered) offline-bucket writes are
+  // coalesced per own-bucket-key instead of written on every send. Sole-
+  // delivery writes (no online peers) are untouched and stay immediate.
+  private readonly pendingBackstopBuckets = new Map<string, Set<string>>();
+  private readonly backstopFlushTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   private readonly onPubsubMessage = (evt: CustomEvent<unknown>): void => {
     void this.handleIncomingPubsubEvent(evt.detail);
@@ -103,12 +111,28 @@ export class GroupMessaging {
     this.reconcileTimer = setInterval(() => {
       void this.reconcileSubscriptions();
     }, GROUP_TOPIC_RECONCILE_INTERVAL);
-    this.heartbeatTimer = setInterval(() => {
-      void this.publishHeartbeats();
-    }, GROUP_GOSSIPSUB_HEARTBEAT_INTERVAL);
+    this.scheduleNextHeartbeat();
   }
 
-  cleanup(): void {
+  // Jittered, self-re-arming heartbeat: each tick draws a fresh random delay
+  // for the NEXT tick instead of reusing one fixed period (see
+  // computeJitteredHeartbeatDelayMs). A plain setInterval(..., FIXED_MS) is a
+  // metronome an observer can fingerprint; redrawing per tick avoids that
+  // while the upper bound keeps gossipsub mesh warming intact.
+  private scheduleNextHeartbeat(): void {
+    if (!this.started) return;
+    const delay = computeJitteredHeartbeatDelayMs(
+      GROUP_GOSSIPSUB_HEARTBEAT_MIN_INTERVAL_MS,
+      GROUP_GOSSIPSUB_HEARTBEAT_MAX_INTERVAL_MS,
+    );
+    this.heartbeatTimer = setTimeout(() => {
+      void this.publishHeartbeats().finally(() => {
+        this.scheduleNextHeartbeat();
+      });
+    }, delay);
+  }
+
+  async cleanup(): Promise<void> {
     if (!this.started) return;
     this.started = false;
 
@@ -120,7 +144,7 @@ export class GroupMessaging {
       this.reconcileTimer = null;
     }
     if (this.heartbeatTimer) {
-      clearInterval(this.heartbeatTimer);
+      clearTimeout(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
     if (this.peerConnectDebounceTimer) {
@@ -151,6 +175,13 @@ export class GroupMessaging {
     }
     this.groupTopics.clear();
     this.groupGraceContexts.clear();
+
+    // App quit: any coalesced backstop write still waiting out its window
+    // must land now rather than being silently dropped (its durable row
+    // already survives a crash, but a clean quit should not leave the DHT
+    // copy stale for up to GROUP_OFFLINE_BACKSTOP_COALESCE_WINDOW_MS after
+    // the process is gone).
+    await this.flushAllBackstopBuckets('shutdown');
   }
 
   subscribeToGroupTopic(groupId: string): void {
@@ -358,37 +389,55 @@ export class GroupMessaging {
     let warning = published ? null : 'No online group peers subscribed; queued for offline delivery.';
     let offlineBackupRetry: { chatId: number; messageId: string } | null = null;
 
-    try {
-      log(
-        `[GROUP-MSG][SEND][OFFLINE_BACKUP][START] group=${groupId.slice(0, 8)} ` +
-        `msgId=${signedMessage.messageId} keyVersion=${ctx.keyVersion}`,
-      );
-      await this.deps.groupOfflineManager.storeGroupMessage(signedMessage);
-      this.pendingOfflineBackups.delete(signedMessage.messageId);
-      this.deps.database.deletePendingGroupOfflineBackup(signedMessage.messageId);
-
-      if (!published && request.rekeyRetryHint) {
-        participants
-          .filter(p => p.peer_id !== this.deps.myPeerId)
-          .forEach((p) => this.deps.nudgeGroupRefetch?.(p.peer_id, groupId))
+    if (published) {
+      // Live delivery already reached at least one subscriber, so this bucket
+      // write is a redundant "backstop" for members who are offline/lagging —
+      // not the only delivery path. Coalesce it into the batched write
+      // (Task C) instead of writing on every send. The durable queue write
+      // happens synchronously below, before any delay, so a crash can't lose
+      // it; a genuine flush failure later still surfaces the same
+      // "Retry offline backup" UX as before (see flushBackstopBucket).
+      try {
+        const bucketKey = this.deps.groupOfflineManager.getOwnBucketKey(groupId, ctx.keyVersion);
+        this.queueBackstopWrite(bucketKey, ctx.chatId, signedMessage);
+      } catch (error: unknown) {
+        const errorText = errStr(error);
+        warning = `Message delivered online, but offline group backup failed: ${errorText}`;
+        if (request.persistence.owner !== 'none') {
+          offlineBackupRetry = { chatId: ctx.chatId, messageId: signedMessage.messageId };
+          this.pendingOfflineBackups.set(signedMessage.messageId, signedMessage);
+          this.deps.database.upsertPendingGroupOfflineBackup({
+            messageId: signedMessage.messageId,
+            chatId: ctx.chatId,
+            groupId,
+            payload: JSON.stringify(signedMessage),
+            kind: 'failed_retry',
+          });
+        }
+        console.warn(`[GROUP-OFFLINE] ${warning}`);
       }
-    } catch (error: unknown) {
-      const errorText = errStr(error);
-      if (!published) {
+    } else {
+      // Sole-delivery: no online peers were reachable, so this bucket write
+      // is the ONLY way any member gets the message. Stays synchronous and
+      // immediate — unchanged from before Task C.
+      try {
+        log(
+          `[GROUP-MSG][SEND][OFFLINE_BACKUP][START] group=${groupId.slice(0, 8)} ` +
+          `msgId=${signedMessage.messageId} keyVersion=${ctx.keyVersion}`,
+        );
+        await this.deps.groupOfflineManager.storeGroupMessage(signedMessage);
+        this.pendingOfflineBackups.delete(signedMessage.messageId);
+        this.deps.database.deletePendingGroupOfflineBackup(signedMessage.messageId);
+
+        if (request.rekeyRetryHint) {
+          participants
+            .filter(p => p.peer_id !== this.deps.myPeerId)
+            .forEach((p) => this.deps.nudgeGroupRefetch?.(p.peer_id, groupId))
+        }
+      } catch (error: unknown) {
+        const errorText = errStr(error);
         throw new Error(`Failed to deliver group message: ${GROUP_OFFLINE_BACKUP_FAILED_MARKER}: ${errorText}`);
       }
-      warning = `Message delivered online, but offline group backup failed: ${errorText}`;
-      if (request.persistence.owner !== 'none') {
-        offlineBackupRetry = { chatId: ctx.chatId, messageId: signedMessage.messageId };
-        this.pendingOfflineBackups.set(signedMessage.messageId, signedMessage);
-        this.deps.database.upsertPendingGroupOfflineBackup({
-          messageId: signedMessage.messageId,
-          chatId: ctx.chatId,
-          groupId,
-          payload: JSON.stringify(signedMessage),
-        });
-      }
-      console.warn(`[GROUP-OFFLINE] ${warning}`);
     }
 
     if (request.persistence.owner === 'transport') {
@@ -512,22 +561,217 @@ export class GroupMessaging {
   }
 
   /**
-   * On startup, rehydrate persisted offline backups (published online but the DHT
-   * backup failed before app-close) into the in-memory map, so `retryOfflineBackup`
-   * works again. No auto-retry — the persisted `failed`/`offline_backup` row shows
-   * the "Retry offline backup" button and the user re-stores manually.
+   * On startup, rehydrate persisted pending backups from `pending_group_offline_backups`.
+   * The table serves two distinct purposes, distinguished by `kind`:
+   *  - 'failed_retry': published online, but the DHT backup write itself failed
+   *    before app-close. Rehydrated into the in-memory map so `retryOfflineBackup`
+   *    works again; no auto-retry, the "Retry offline backup" button + failed
+   *    row is the deliberate UX and the user re-stores manually.
+   *  - 'coalescing': a backstop write (Task C) that was durably queued but had
+   *    not yet reached its coalescing window's flush when the app closed
+   *    (i.e. an unclean shutdown — a clean quit already flushes these in
+   *    cleanup()). These are not failures and must not surface a "failed" UI
+   *    state; they are simply flushed now instead of waiting out a window
+   *    that will never otherwise re-arm (no in-memory timer survives restart).
    */
   private recoverPendingOfflineBackups(): void {
     const rows = this.deps.database.getAllPendingGroupOfflineBackups();
     if (rows.length === 0) return;
+
+    const coalescingByBucket = new Map<string, string[]>();
     for (const row of rows) {
+      if (row.kind === 'coalescing') {
+        try {
+          const message = JSON.parse(row.payload) as GroupContentMessage;
+          const bucketKey = this.deps.groupOfflineManager.getOwnBucketKey(message.groupId, message.keyVersion);
+          const messageIds = coalescingByBucket.get(bucketKey) ?? [];
+          messageIds.push(row.message_id);
+          coalescingByBucket.set(bucketKey, messageIds);
+        } catch (error: unknown) {
+          log(`[GROUP-OFFLINE][RECOVER] failed to rehydrate coalescing msgId=${row.message_id}: ${errStr(error)}`);
+        }
+        continue;
+      }
+
       try {
         this.pendingOfflineBackups.set(row.message_id, JSON.parse(row.payload) as GroupContentMessage);
       } catch (error: unknown) {
         log(`[GROUP-OFFLINE][RECOVER] failed to rehydrate msgId=${row.message_id}: ${errStr(error)}`);
       }
     }
+
+    if (coalescingByBucket.size > 0) {
+      log(
+        `[GROUP-OFFLINE][BACKSTOP][RECOVER] buckets=${coalescingByBucket.size} ` +
+        `reason=unflushed_at_prior_shutdown; flushing now`,
+      );
+      for (const [bucketKey, messageIds] of coalescingByBucket) {
+        this.pendingBackstopBuckets.set(bucketKey, new Set(messageIds));
+        void this.flushBackstopBucket(bucketKey).catch((error: unknown) => {
+          generalErrorHandler(error, '[GROUP-OFFLINE] Startup backstop flush failed for a recovered bucket');
+        });
+      }
+    }
+
     log(`[GROUP-OFFLINE][RECOVER] rehydrated ${this.pendingOfflineBackups.size} pending backup(s) for manual retry`);
+  }
+
+  /**
+   * Queue a live-delivered ("backstop") message's offline-bucket write for
+   * coalesced, batched delivery instead of writing it immediately. Persists
+   * the payload durably FIRST (so a crash mid-window loses nothing on
+   * restart), then arms a flush timer only for the first message to join an
+   * otherwise-empty window — later arrivals in the same window just join the
+   * batch the already-armed timer will pick up, bounding the added delay at
+   * GROUP_OFFLINE_BACKSTOP_COALESCE_WINDOW_MS regardless of send volume.
+   */
+  private queueBackstopWrite(bucketKey: string, chatId: number, message: GroupContentMessage): void {
+    this.deps.database.upsertPendingGroupOfflineBackup({
+      messageId: message.messageId,
+      chatId,
+      groupId: message.groupId,
+      payload: JSON.stringify(message),
+      kind: 'coalescing',
+    });
+
+    let queued = this.pendingBackstopBuckets.get(bucketKey);
+    if (!queued) {
+      queued = new Set<string>();
+      this.pendingBackstopBuckets.set(bucketKey, queued);
+    }
+    queued.add(message.messageId);
+
+    if (this.backstopFlushTimers.has(bucketKey)) {
+      log(
+        `[GROUP-OFFLINE][BACKSTOP][QUEUE] bucket=*${bucketKey.slice(-12)} msgId=${message.messageId} ` +
+        `pending=${queued.size} reason=window_already_armed`,
+      );
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      this.backstopFlushTimers.delete(bucketKey);
+      void this.flushBackstopBucket(bucketKey).catch((error: unknown) => {
+        generalErrorHandler(error, '[GROUP-OFFLINE] Backstop coalesced flush failed');
+      });
+    }, GROUP_OFFLINE_BACKSTOP_COALESCE_WINDOW_MS);
+    this.backstopFlushTimers.set(bucketKey, timer);
+    log(
+      `[GROUP-OFFLINE][BACKSTOP][QUEUE] bucket=*${bucketKey.slice(-12)} msgId=${message.messageId} pending=1 ` +
+      `windowMs=${GROUP_OFFLINE_BACKSTOP_COALESCE_WINDOW_MS} reason=window_armed`,
+    );
+  }
+
+  /**
+   * Flush a bucket's coalesced batch in a single DHT put. On success the
+   * durable rows are cleared. On genuine failure, falls back to exactly the
+   * pre-existing "backup failed after online delivery" UX for each affected
+   * message (durable row kept + reclassified, message row marked
+   * failed/offline_backup, manual "Retry offline backup" available) — the
+   * same outcome the old immediate-write path produced on a failed put.
+   */
+  private async flushBackstopBucket(bucketKey: string): Promise<void> {
+    const queued = this.pendingBackstopBuckets.get(bucketKey);
+    if (!queued || queued.size === 0) return;
+    this.pendingBackstopBuckets.delete(bucketKey);
+
+    const messageIds = new Set(queued);
+    const rows = this.deps.database.getAllPendingGroupOfflineBackups()
+      .filter((row) => messageIds.has(row.message_id) && row.kind === 'coalescing');
+    if (rows.length === 0) return;
+
+    // Only rows that parse successfully participate below (an unparseable
+    // payload is dropped + its durable row removed immediately — it can
+    // never become writable, so keeping it around would wedge the batch).
+    const messages: GroupContentMessage[] = [];
+    const parsedRows: typeof rows = [];
+    for (const row of rows) {
+      try {
+        messages.push(JSON.parse(row.payload) as GroupContentMessage);
+        parsedRows.push(row);
+      } catch (error: unknown) {
+        log(`[GROUP-OFFLINE][BACKSTOP][FLUSH][DROP] msgId=${row.message_id} reason=payload_parse_failed: ${errStr(error)}`);
+        this.deps.database.deletePendingGroupOfflineBackup(row.message_id);
+      }
+    }
+    if (messages.length === 0) return;
+
+    try {
+      await this.deps.groupOfflineManager.storeGroupMessages(messages);
+      for (const row of parsedRows) {
+        this.deps.database.deletePendingGroupOfflineBackup(row.message_id);
+      }
+      log(`[GROUP-OFFLINE][BACKSTOP][FLUSH][DONE] bucket=*${bucketKey.slice(-12)} count=${messages.length}`);
+    } catch (error: unknown) {
+      const errorText = errStr(error);
+      console.warn(
+        `[GROUP-OFFLINE] Backstop coalesced write failed bucket=*${bucketKey.slice(-12)} count=${messages.length}: ${errorText}`,
+      );
+      for (const row of parsedRows) {
+        const message = messages.find((m) => m.messageId === row.message_id);
+        if (!message) continue;
+        this.pendingOfflineBackups.set(row.message_id, message);
+        this.deps.database.upsertPendingGroupOfflineBackup({
+          messageId: row.message_id,
+          chatId: row.chat_id,
+          groupId: row.group_id,
+          payload: row.payload,
+          kind: 'failed_retry',
+        });
+        this.deps.database.updateMessageSendState(row.message_id, 'failed', 'offline_backup');
+      }
+    }
+  }
+
+  /** Flush every currently-pending backstop bucket (used on app quit). */
+  private async flushAllBackstopBuckets(reason: string): Promise<void> {
+    const bucketKeys = new Set<string>([
+      ...this.pendingBackstopBuckets.keys(),
+      ...this.backstopFlushTimers.keys(),
+    ]);
+    if (bucketKeys.size === 0) return;
+
+    log(`[GROUP-OFFLINE][BACKSTOP][FLUSH][ALL] reason=${reason} buckets=${bucketKeys.size}`);
+    for (const timer of this.backstopFlushTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.backstopFlushTimers.clear();
+
+    await Promise.all(
+      Array.from(bucketKeys).map((bucketKey) => this.flushBackstopBucket(bucketKey).catch((error: unknown) => {
+        generalErrorHandler(error, `[GROUP-OFFLINE] ${reason} backstop flush failed for a bucket`);
+      })),
+    );
+  }
+
+  /**
+   * Rotation-triggered flush: the offline bucket is epoch-scoped, so a
+   * backstop write still waiting out its coalescing window when the group
+   * rotates to a new epoch must land in ITS (the old) epoch's bucket before
+   * the old epoch is torn down. Called for both self-initiated rotations
+   * (creator, via onRegisterPrevEpochGrace) and rotations learned from an
+   * incoming GROUP_STATE_UPDATE (existing member). A no-op when nothing is
+   * pending for that epoch's bucket. The GROUP_ROTATION_GRACE_WINDOW_MS
+   * (60s) old-epoch grace period comfortably covers the coalescing window
+   * (20s) even without this hook; this makes the guarantee explicit instead
+   * of relying on that margin.
+   */
+  flushBackstopForEpoch(groupId: string, keyVersion: number): void {
+    const bucketKey = this.deps.groupOfflineManager.getOwnBucketKey(groupId, keyVersion);
+    const timer = this.backstopFlushTimers.get(bucketKey);
+    if (!timer && !this.pendingBackstopBuckets.has(bucketKey)) return;
+
+    if (timer) {
+      clearTimeout(timer);
+      this.backstopFlushTimers.delete(bucketKey);
+    }
+    log(
+      `[GROUP-OFFLINE][BACKSTOP][FLUSH][ROTATION] group=${groupId.slice(0, 8)} keyVersion=${keyVersion} ` +
+      `bucket=*${bucketKey.slice(-12)}`,
+    );
+    void this.flushBackstopBucket(bucketKey).catch((error: unknown) => {
+      generalErrorHandler(error, `[GROUP-OFFLINE] Rotation-triggered backstop flush failed for group=${groupId}`);
+    });
   }
 
   private scheduleReconcile(delayMs: number): void {

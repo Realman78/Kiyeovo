@@ -302,6 +302,12 @@ export interface OfflineSentMessages {
 
 export type OfflineMessageCategory = 'regular' | 'control' | 'ack';
 
+// See the pending_group_offline_backups CREATE TABLE comment: 'failed_retry'
+// rows are genuinely-failed backup writes awaiting manual retry (pre-existing
+// behavior); 'coalescing' rows are Task C batched-backstop-write queue
+// entries, not failures.
+export type PendingGroupOfflineBackupKind = 'failed_retry' | 'coalescing';
+
 export interface OfflineSentMessageCategoryEntry {
     bucket_key: string
     message_id: string
@@ -706,9 +712,18 @@ export class ChatDatabase {
         `);
         this.db.exec(`CREATE INDEX IF NOT EXISTS idx_pending_offline_sends_bucket ON pending_offline_sends(bucket_key, status)`);
 
-        // Durable mirror of group messages that were published online but whose
-        // offline DHT backup failed — so an app-close mid-backup doesn't lose them.
-        // payload is the serialized GroupContentMessage; retried on startup.
+        // Durable mirror of pending group offline-bucket backup writes, so an
+        // app-close mid-write doesn't lose them. payload is the serialized
+        // GroupContentMessage. `kind` distinguishes two unrelated purposes
+        // sharing this table (see ensureColumnExists('pending_group_offline_backups', 'kind', ...)
+        // below for the migration on existing installs):
+        //  - 'failed_retry': published online, but the DHT backup write itself
+        //    failed — rehydrated for the manual "Retry offline backup" UI, no
+        //    auto-retry.
+        //  - 'coalescing': a live-delivered backstop write queued durably for
+        //    batched, delayed delivery (Task C metadata mitigation) — not a
+        //    failure; flushed automatically after its coalescing window (or
+        //    immediately on quit/rotation/startup-recovery).
         this.db.exec(`
             CREATE TABLE IF NOT EXISTS pending_group_offline_backups (
                 message_id TEXT PRIMARY KEY NOT NULL,
@@ -1037,6 +1052,10 @@ export class ChatDatabase {
         this.ensureColumnExists('encrypted_user_identities', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
         this.ensureColumnExists('encrypted_user_identities', 'identity_kind', `TEXT NOT NULL DEFAULT 'primary'`);
         this.ensureColumnExists('group_key_history', 'group_info_metadata_key', "TEXT NOT NULL DEFAULT ''");
+        // Task C metadata mitigation: distinguishes genuinely-failed backup
+        // retries (existing rows, default) from queued-for-coalesced-flush
+        // backstop writes. See the CREATE TABLE comment above.
+        this.ensureColumnExists('pending_group_offline_backups', 'kind', "TEXT NOT NULL DEFAULT 'failed_retry'");
         this.ensureColumnExists('contact_attempts', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
         this.ensureColumnExists('blocked_peers', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
         this.ensureColumnExists('failed_key_exchanges', 'network_mode', `TEXT NOT NULL DEFAULT '${DEFAULT_NETWORK_MODE}'`);
@@ -2409,19 +2428,19 @@ export class ChatDatabase {
 
     // --- Pending group offline backups (durable retry across restart) ---
 
-    upsertPendingGroupOfflineBackup(row: { messageId: string; chatId: number; groupId: string; payload: string }): void {
+    upsertPendingGroupOfflineBackup(row: { messageId: string; chatId: number; groupId: string; payload: string; kind?: PendingGroupOfflineBackupKind }): void {
         this.db.prepare(`
-            INSERT OR REPLACE INTO pending_group_offline_backups (message_id, chat_id, group_id, payload, created_at)
-            VALUES (?, ?, ?, ?, ?)
-        `).run(row.messageId, row.chatId, row.groupId, row.payload, Date.now());
+            INSERT OR REPLACE INTO pending_group_offline_backups (message_id, chat_id, group_id, payload, created_at, kind)
+            VALUES (?, ?, ?, ?, ?, ?)
+        `).run(row.messageId, row.chatId, row.groupId, row.payload, Date.now(), row.kind ?? 'failed_retry');
     }
 
     deletePendingGroupOfflineBackup(messageId: string): void {
         this.db.prepare('DELETE FROM pending_group_offline_backups WHERE message_id = ?').run(messageId);
     }
 
-    getAllPendingGroupOfflineBackups(): Array<{ message_id: string; chat_id: number; group_id: string; payload: string }> {
-        return this.db.prepare('SELECT message_id, chat_id, group_id, payload FROM pending_group_offline_backups').all() as Array<{ message_id: string; chat_id: number; group_id: string; payload: string }>;
+    getAllPendingGroupOfflineBackups(): Array<{ message_id: string; chat_id: number; group_id: string; payload: string; kind: PendingGroupOfflineBackupKind }> {
+        return this.db.prepare('SELECT message_id, chat_id, group_id, payload, kind FROM pending_group_offline_backups').all() as Array<{ message_id: string; chat_id: number; group_id: string; payload: string; kind: PendingGroupOfflineBackupKind }>;
     }
 
     deleteGroupOfflineSentMessagesByPrefix(bucketKeyPrefix: string): void {

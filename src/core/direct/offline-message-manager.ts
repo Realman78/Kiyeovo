@@ -17,6 +17,7 @@ import type { ChatDatabase, OfflineMessageCategory } from '../db/database.js';
 import { QueryEvent } from '@libp2p/kad-dht';
 import { log } from '../../shared/logger.js';
 import { isStructurallyStorableOfflineMessage } from './offline-message-storable.js';
+import { shuffleAndPaceExecute } from '../lib/bucket-scan-pacing.js';
 
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
@@ -201,9 +202,14 @@ export class OfflineMessageManager {
     static async getOfflineMessages(
         node: ChatNode,
         bucketKeys: string[],
-        appendBucketKey: boolean = true
+        appendBucketKey: boolean = true,
+        // Metadata mitigation (Task B): when set, bucket fetches are shuffled
+        // and each given a small random start-delay bounded by totalBudgetMs
+        // instead of firing as one fixed-order, back-to-back burst. Omitted
+        // (undefined) by latency-sensitive callers — see OFFLINE_BUCKET_SCAN_PACING_*.
+        pacing?: { totalBudgetMs: number; minCount?: number },
     ): Promise<OfflineMessageStore> {
-        const fetchPromises = bucketKeys.map(async (bucketKey) => {
+        const fetchOne = async (bucketKey: string): Promise<OfflineMessage[]> => {
             log('fetching messages for bucket', redactBucketKey(bucketKey));
             const key = new TextEncoder().encode(bucketKey);
             const bucketMessages: OfflineMessage[] = [];
@@ -280,9 +286,24 @@ export class OfflineMessageManager {
             }
 
             return bucketMessages;
-        });
+        };
 
-        const results = await Promise.all(fetchPromises);
+        let results: OfflineMessage[][];
+        let totalSpreadMs = 0;
+        if (pacing) {
+            const paced = await shuffleAndPaceExecute(bucketKeys, fetchOne, {
+                totalBudgetMs: pacing.totalBudgetMs,
+                minCount: pacing.minCount,
+            });
+            results = paced.results;
+            totalSpreadMs = paced.totalSpreadMs;
+        } else {
+            results = await Promise.all(bucketKeys.map(fetchOne));
+        }
+        log(
+            `[OFFLINE][BUCKET-SCAN][PACING] bucketCount=${bucketKeys.length} ` +
+            `paced=${!!pacing} totalSpreadMs=${totalSpreadMs}`
+        );
         const messages = results.flat();
 
         // Return structure with placeholder signature fields

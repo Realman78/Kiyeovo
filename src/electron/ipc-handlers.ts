@@ -2266,7 +2266,8 @@ function setupOfflineMessageHandlers(
       const checkPromise = (async () => {
         try {
           log(`[IPC] Checking offline messages for chat: ${chatId}`);
-          const {checkedChatIds, unreadFromChats} = await p2pCore.messageHandler.checkOfflineMessages([chatId]);
+          // Manual, user-waited action ("Check missed messages"): latency-sensitive.
+          const {checkedChatIds, unreadFromChats} = await p2pCore.messageHandler.checkOfflineMessages([chatId], { immediate: true });
           log(`[IPC] Offline message check complete for chat: ${chatId}`);
 
           event.sender.send(IPC_CHANNELS.OFFLINE_MESSAGES_FETCH_COMPLETE, { chatIds: checkedChatIds });
@@ -2996,7 +2997,8 @@ function setupGroupHandlers(
         return { success: false, checkedChatIds: [], failedChatIds: [], unreadFromChats: new Map(), gapWarnings: [], error: 'P2P core not initialized' };
       }
 
-      const result = await p2pCore.messageHandler.checkGroupOfflineMessages([chatId]);
+      // Manual, user-waited action ("Check missed messages"): latency-sensitive.
+      const result = await p2pCore.messageHandler.checkGroupOfflineMessages([chatId], { immediate: true });
       return { success: true, ...result, error: null };
     } catch (error) {
       console.error('[IPC] Failed to check group offline messages for chat:', error);
@@ -3282,7 +3284,8 @@ function setupGroupHandlers(
               log(
                 `[IPC][GROUP_ACCEPT][FETCH][START] group=${groupId} phase=${phase} directChatId=${creatorDirectChat.id} creator=${creatorPeerId.slice(-8)}`,
               );
-              const { checkedChatIds } = await p2pCore.messageHandler.checkOfflineMessages([creatorDirectChat.id]);
+              // Join-completion gating (awaiting_activation -> active): latency-sensitive.
+              const { checkedChatIds } = await p2pCore.messageHandler.checkOfflineMessages([creatorDirectChat.id], { immediate: true });
               const afterStatus = p2pCore.database.getChatByGroupId(groupId)?.group_status ?? 'missing';
               log(
                 `[IPC][GROUP_ACCEPT][FETCH][DONE] group=${groupId} phase=${phase} checked=${checkedChatIds.length} status=${afterStatus}`,

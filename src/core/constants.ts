@@ -445,7 +445,15 @@ export const GROUP_ACK_REPUBLISH_STARTUP_DELAY = 1 * MINUTE; // 60 seconds
 export const GROUP_ACK_REPUBLISH_INTERVAL = 30 * MINUTE; // 30 minutes
 export const GROUP_ACK_REPUBLISH_JITTER = 5 * MINUTE; // ±5 minutes
 export const GROUP_PENDING_ACK_RETIRE_AGE_MS = 14 * DAY; // 14 days
-export const GROUP_GOSSIPSUB_HEARTBEAT_INTERVAL = 90 * SECOND; // 90 seconds
+export const GROUP_GOSSIPSUB_HEARTBEAT_INTERVAL = 90 * SECOND; // 90 seconds (legacy fixed cadence, superseded by the jittered bounds below)
+// Metadata mitigation: a fixed 90s heartbeat period is a per-member liveness
+// metronome an observer can fingerprint. Each tick now redraws its own delay
+// uniformly within these bounds instead of reusing one fixed interval (or even
+// one fixed random offset, which would still be a metronome). The upper bound
+// stays well under the ~3 minute ceiling gossipsub mesh maintenance tolerates,
+// so mesh warming is unaffected.
+export const GROUP_GOSSIPSUB_HEARTBEAT_MIN_INTERVAL_MS = 60 * SECOND; // 60 seconds
+export const GROUP_GOSSIPSUB_HEARTBEAT_MAX_INTERVAL_MS = 150 * SECOND; // 150 seconds (2.5 min, under the ~3 min mesh-maintenance ceiling)
 export const GROUP_TOPIC_RECONCILE_INTERVAL = 10 * MINUTE; // 10 minutes
 export const GROUP_PUBLISH_RETRY_DELAY_MS = 750; // Retry shortly after re-subscribing
 export const GROUP_PUBLISH_RETRYABLE_ERROR = 'PublishError.NoPeersSubscribedToTopic';
@@ -476,6 +484,40 @@ export const GROUP_OFFLINE_LOCAL_CACHE_TTL_MS = 15 * MINUTE; // 15 minutes
 export const GROUP_OFFLINE_LOCAL_CACHE_MAX_ENTRIES = 256; // Max cached group offline snapshots
 export const GROUP_OFFLINE_CLEANUP_INTERVAL_MS = 30 * MINUTE; // 30 minutes
 export const GROUP_OFFLINE_MESSAGE_TTL_MS = MESSAGE_TTL;
+
+/**
+ * Metadata mitigation: shuffled + paced offline-bucket scans.
+ *
+ * A reconnect/periodic offline-message sweep otherwise queries every
+ * `groups x members x epochs` (or, for direct, every peer) DHT bucket in a
+ * fixed order as a tight back-to-back burst, which is an identifiable query
+ * fingerprint to a network observer. Non-latency-sensitive scans (the
+ * background periodic backstop and reconnect/wake sync) now fetch buckets in
+ * a Fisher-Yates-shuffled order with a small random start-delay per bucket,
+ * capped so the total added spread never exceeds this budget no matter how
+ * many buckets are involved. Latency-sensitive, event-triggered catch-ups
+ * (join-completion, rotation-applied, manual "check missed messages", and
+ * other single-bucket recovery/nudge paths) opt out via `immediate: true` so
+ * they are not slowed down. Shared by both the direct and group scan paths.
+ */
+export const OFFLINE_BUCKET_SCAN_PACING_BUDGET_MS = 30 * SECOND; // Hard cap on total added spread per paced batch, regardless of bucket count
+export const OFFLINE_BUCKET_SCAN_PACING_MIN_BUCKET_COUNT = 2; // At or below this many buckets, pacing is skipped (zero added delay)
+
+/**
+ * Metadata mitigation: batched backstop offline-bucket writes.
+ *
+ * Every group send also writes the sender's own epoch bucket so lagging or
+ * offline members can recover it later. When the message was already
+ * delivered live (via GossipSub), that bucket write is pure redundancy
+ * ("backstop") rather than the only delivery path ("sole-delivery" - no
+ * online peers were reachable). Writing the backstop copy immediately on
+ * every send reveals exact send times to a network observer, so backstop
+ * writes are queued durably and coalesced into at most one DHT put per
+ * bucket within this window. Sole-delivery writes are unaffected and stay
+ * immediate. Absent members only poll on the ~5 minute offline sweep, so a
+ * sub-30s delay here is not user-visible.
+ */
+export const GROUP_OFFLINE_BACKSTOP_COALESCE_WINDOW_MS = 20 * SECOND;
 
 export const GROUP_MISSING_USED_UNTIL_SCAN_EPOCH_CAP = 10; // Max historical epochs scanned for missing used-until markers
 export const MAX_BOOTSTRAP_NODES_FAST = 3; // Target bootstrap connection count in fast mode
