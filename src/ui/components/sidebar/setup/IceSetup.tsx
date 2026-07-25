@@ -32,6 +32,8 @@ import { useToast } from '../../ui/use-toast';
 import { Button } from '../../ui/Button';
 import { Input } from '../../ui/Input';
 import { testIceServer } from './iceServerTest';
+import { ServerEntryWarningRow } from './ServerEntryWarningRow';
+import { getServerEntryWarning } from '../../../lib/server-entry-warnings';
 
 type IceServerDraft = {
   id: string | null;
@@ -111,7 +113,14 @@ export function IceSetup() {
   const [reordering, setReordering] = useState(false);
   const [acknowledged, setAcknowledged] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  // Session-scoped, per-URL dismissal for misconfiguration hints — not
+  // persisted, matches the "dismissable, not a blocker" nature of these hints.
+  const [dismissedWarnings, setDismissedWarnings] = useState<Set<string>>(new Set());
   const reorderInFlightRef = useRef(false);
+
+  const dismissWarning = (url: string) => {
+    setDismissedWarnings((current) => new Set(current).add(url));
+  };
 
   useEffect(() => {
     const hasCompletedTest = Object.values(testResults).some((result) => result.testedAt !== null);
@@ -421,102 +430,112 @@ export function IceSetup() {
 
                 {servers.map((server, index) => {
                   const testState = testResults[server.id];
+                  const entryWarning = getServerEntryWarning(server.url, server.type, {});
+                  const showEntryWarning = !!entryWarning && !dismissedWarnings.has(server.url);
                   return (
-                    <div key={server.id} className="group flex items-center gap-3 px-4 py-3">
-                      {renderStatus(testState)}
-                      <div className="min-w-0 flex-1 pl-2">
-                        <div className="truncate text-sm font-mono text-foreground text-left" title={server.url}>
-                          {server.url}
+                    <div key={server.id} className="px-4 py-3">
+                      <div className="group flex items-center gap-3">
+                        {renderStatus(testState)}
+                        <div className="min-w-0 flex-1 pl-2">
+                          <div className="truncate text-sm font-mono text-foreground text-left" title={server.url}>
+                            {server.url}
+                          </div>
+                          <div className="mt-0.5 flex min-w-0 items-center gap-1.5 overflow-hidden text-xs">
+                            <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] font-mono font-medium uppercase tracking-wide text-muted-foreground">
+                              {server.type}
+                            </span>
+                            {server.type !== 'stun' && server.username && (
+                              <>
+                                <span className="shrink-0 text-muted-foreground/50">·</span>
+                                <span
+                                  className="min-w-0 truncate text-muted-foreground"
+                                  title={`user: ${server.username}`}
+                                >
+                                  user: {server.username}
+                                </span>
+                              </>
+                            )}
+                            <span className="shrink-0 text-muted-foreground/50">·</span>
+                            <span className="shrink-0 text-muted-foreground">
+                              {testState?.status === 'testing'
+                                ? 'Testing…'
+                                : testState?.testedAt !== null && testState?.testedAt !== undefined
+                                  ? `Last tested ${formatTestAge(testState.testedAt, now)}`
+                                  : 'Not tested'}
+                            </span>
+                          </div>
                         </div>
-                        <div className="mt-0.5 flex min-w-0 items-center gap-1.5 overflow-hidden text-xs">
-                          <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] font-mono font-medium uppercase tracking-wide text-muted-foreground">
-                            {server.type}
-                          </span>
-                          {server.type !== 'stun' && server.username && (
+
+                        <div className="flex shrink-0 items-center opacity-70 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => handleTestOne(server)}
+                            disabled={testingAll || testState?.status === 'testing'}
+                            className="h-8"
+                          >
+                            {testState?.status === 'testing' ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+                            Test
+                          </Button>
+                          {servers.length > 1 && (
                             <>
-                              <span className="shrink-0 text-muted-foreground/50">·</span>
-                              <span
-                                className="min-w-0 truncate text-muted-foreground"
-                                title={`user: ${server.username}`}
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => handleMove(index, 'up')}
+                                disabled={reordering || index === 0}
+                                className="h-8 w-8"
+                                aria-label="Move server up"
                               >
-                                user: {server.username}
-                              </span>
+                                <ChevronUp />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => handleMove(index, 'down')}
+                                disabled={reordering || index === servers.length - 1}
+                                className="h-8 w-8"
+                                aria-label="Move server down"
+                              >
+                                <ChevronDown />
+                              </Button>
                             </>
                           )}
-                          <span className="shrink-0 text-muted-foreground/50">·</span>
-                          <span className="shrink-0 text-muted-foreground">
-                            {testState?.status === 'testing'
-                              ? 'Testing…'
-                              : testState?.testedAt !== null && testState?.testedAt !== undefined
-                                ? `Last tested ${formatTestAge(testState.testedAt, now)}`
-                                : 'Not tested'}
-                          </span>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => handleCopy(server)}
+                            className="h-8 w-8"
+                            aria-label="Copy server URL"
+                          >
+                            {copiedId === server.id ? <Check className="text-success" /> : <Copy />}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => handleEdit(server)}
+                            className="h-8 w-8"
+                            aria-label="Edit server"
+                          >
+                            <Pencil />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => handleRemove(server.id)}
+                            className="h-8 w-8 hover:text-destructive"
+                            aria-label="Remove server"
+                          >
+                            <Trash2 />
+                          </Button>
                         </div>
                       </div>
-
-                      <div className="flex shrink-0 items-center opacity-70 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => handleTestOne(server)}
-                          disabled={testingAll || testState?.status === 'testing'}
-                          className="h-8"
-                        >
-                          {testState?.status === 'testing' ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-                          Test
-                        </Button>
-                        {servers.length > 1 && (
-                          <>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={() => handleMove(index, 'up')}
-                              disabled={reordering || index === 0}
-                              className="h-8 w-8"
-                              aria-label="Move server up"
-                            >
-                              <ChevronUp />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={() => handleMove(index, 'down')}
-                              disabled={reordering || index === servers.length - 1}
-                              className="h-8 w-8"
-                              aria-label="Move server down"
-                            >
-                              <ChevronDown />
-                            </Button>
-                          </>
-                        )}
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => handleCopy(server)}
-                          className="h-8 w-8"
-                          aria-label="Copy server URL"
-                        >
-                          {copiedId === server.id ? <Check className="text-success" /> : <Copy />}
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => handleEdit(server)}
-                          className="h-8 w-8"
-                          aria-label="Edit server"
-                        >
-                          <Pencil />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => handleRemove(server.id)}
-                          className="h-8 w-8 hover:text-destructive"
-                          aria-label="Remove server"
-                        >
-                          <Trash2 />
-                        </Button>
-                      </div>
+                      {showEntryWarning && (
+                        <ServerEntryWarningRow
+                          warning={entryWarning!}
+                          onDismiss={() => dismissWarning(server.url)}
+                        />
+                      )}
                     </div>
                   );
                 })}
@@ -548,6 +567,17 @@ export function IceSetup() {
                       onChange={(event) => setDraft((current) => ({ ...current, url: event.target.value }))}
                       parentClassName="w-full"
                     />
+                    {(() => {
+                      const trimmedUrl = draft.url.trim();
+                      const draftWarning = trimmedUrl ? getServerEntryWarning(trimmedUrl, draft.type, {}) : null;
+                      if (!draftWarning || dismissedWarnings.has(trimmedUrl)) return null;
+                      return (
+                        <ServerEntryWarningRow
+                          warning={draftWarning}
+                          onDismiss={() => dismissWarning(trimmedUrl)}
+                        />
+                      );
+                    })()}
 
                     {!isStun && (
                       <div className="flex flex-col gap-3 sm:flex-row">

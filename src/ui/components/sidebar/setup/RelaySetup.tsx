@@ -10,6 +10,7 @@ import { store, type RootState } from '../../../state/store';
 import { applyLiveness, bumpSetupGeneration, mergeConfiguredNodes, setSetupNodes } from '../../../state/slices/setupNodesSlice';
 import { PREDEFINED_NODES_OFFERING_LABELS, isOfferingActive } from '../../../../core/predefined-nodes';
 import { PredefinedNodesOfferingLink } from './PredefinedNodesOfferingLink';
+import { getServerEntryWarning } from '../../../lib/server-entry-warnings';
 
 const SECTION = 'relay' as const;
 
@@ -37,6 +38,7 @@ export function RelaySetup() {
   const dispatch = useDispatch();
   const nodes = useSelector((state: RootState) => state.setupNodes.relay.nodes);
   const loadedOnce = useSelector((state: RootState) => state.setupNodes.relay.loadedOnce);
+  const bootstrapAddresses = useSelector((state: RootState) => state.setupNodes.bootstrap.nodes.map((node) => node.address));
   const [newAddress, setNewAddress] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [copiedAddress, setCopiedAddress] = useState<string | null>(null);
@@ -109,6 +111,26 @@ export function RelaySetup() {
       clearInterval(timerId);
     };
   }, []);
+
+  useEffect(() => {
+    // One-time (non-polling) peek at the bootstrap list so cross-list-duplicate
+    // warnings are correct even if this page is opened before Bootstrap Setup
+    // has been visited this session — the whole point of the check is catching
+    // an address that's already saved in the OTHER list.
+    const requestGeneration = store.getState().setupNodes.bootstrap.generation;
+    window.kiyeovoAPI.getBootstrapNodes()
+      .then((result) => {
+        if (!result.success) return;
+        dispatch(mergeConfiguredNodes({
+          section: 'bootstrap',
+          configured: result.nodes.map((node) => ({ address: node.address, connected: node.connected })),
+          requestGeneration,
+        }));
+      })
+      .catch(() => {
+        // Best-effort only; the warning just has no bootstrap data to compare against yet.
+      });
+  }, [dispatch]);
 
   const showError = (message: string) => {
     setError(message);
@@ -262,6 +284,7 @@ export function RelaySetup() {
       retrying={retrying}
       reordering={reordering}
       retryDisabled={retrying || loading || nodes.length === 0}
+      getEntryWarning={(address) => getServerEntryWarning(address, 'relay', { bootstrap: bootstrapAddresses })}
       onNewAddressChange={setNewAddress}
       onAdd={handleAdd}
       onRetry={handleRetry}

@@ -14,6 +14,7 @@ import {
   isOfferingActive,
 } from '../../../../core/predefined-nodes';
 import { PredefinedNodesOfferingLink } from './PredefinedNodesOfferingLink';
+import { getServerEntryWarning } from '../../../lib/server-entry-warnings';
 
 const SECTION = 'bootstrap' as const;
 const BOOTSTRAP_AUTO_RETRY_VISIBLE_MS = 12_000;
@@ -42,6 +43,7 @@ export function BootstrapSetup() {
   const dispatch = useDispatch();
   const nodes = useSelector((state: RootState) => state.setupNodes.bootstrap.nodes);
   const loadedOnce = useSelector((state: RootState) => state.setupNodes.bootstrap.loadedOnce);
+  const relayAddresses = useSelector((state: RootState) => state.setupNodes.relay.nodes.map((node) => node.address));
   const [newAddress, setNewAddress] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [copiedAddress, setCopiedAddress] = useState<string | null>(null);
@@ -140,6 +142,26 @@ export function BootstrapSetup() {
       clearAutoRetryTimer();
     };
   }, []);
+
+  useEffect(() => {
+    // One-time (non-polling) peek at the relay list so cross-list-duplicate
+    // warnings are correct even if this page is opened before Relay Setup has
+    // been visited this session — the whole point of the check is catching an
+    // address that's already saved in the OTHER list.
+    const requestGeneration = store.getState().setupNodes.relay.generation;
+    window.kiyeovoAPI.getRelayStatus()
+      .then((result) => {
+        if (!result.success) return;
+        dispatch(mergeConfiguredNodes({
+          section: 'relay',
+          configured: result.nodes.map((node) => ({ address: node.address, connected: node.connected })),
+          requestGeneration,
+        }));
+      })
+      .catch(() => {
+        // Best-effort only; the warning just has no relay data to compare against yet.
+      });
+  }, [dispatch]);
 
   useEffect(() => {
     if (!autoRetrying || !nodes.some((node) => node.connected === true)) {
@@ -340,6 +362,7 @@ export function BootstrapSetup() {
       retryingLabel={autoRetrying && !retrying ? 'Connecting…' : undefined}
       reordering={reordering}
       retryDisabled={retrying || autoRetrying || loading || nodes.length === 0}
+      getEntryWarning={(address) => getServerEntryWarning(address, 'bootstrap', { relay: relayAddresses })}
       onNewAddressChange={setNewAddress}
       onAdd={handleAdd}
       onRetry={handleRetry}

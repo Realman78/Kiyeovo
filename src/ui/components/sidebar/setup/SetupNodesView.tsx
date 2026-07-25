@@ -14,6 +14,8 @@ import {
 } from 'lucide-react';
 import { Button } from '../../ui/Button';
 import { Input } from '../../ui/Input';
+import { ServerEntryWarningRow } from './ServerEntryWarningRow';
+import type { ServerEntryWarning } from '../../../lib/server-entry-warnings';
 
 export type SetupNodeEntry = {
   key: string;
@@ -48,6 +50,10 @@ type SetupNodesViewProps = {
   reordering?: boolean;
   addDisabled?: boolean;
   retryDisabled?: boolean;
+  // Optional misconfiguration hint for a given address (cross-list duplicate,
+  // Kiyeovo's port convention, etc.) — see src/ui/lib/server-entry-warnings.ts.
+  // Applied both to already-saved entries and live to the add-server input.
+  getEntryWarning?: (address: string) => ServerEntryWarning | null;
   onNewAddressChange: (value: string) => void;
   onAdd: () => Promise<boolean>;
   onRetry: () => void;
@@ -127,6 +133,7 @@ export function SetupNodesView({
   reordering = false,
   addDisabled = false,
   retryDisabled = false,
+  getEntryWarning,
   onNewAddressChange,
   onAdd,
   onRetry,
@@ -154,6 +161,13 @@ export function SetupNodesView({
   }
 
   const [isAdding, setIsAdding] = useState(false);
+  // Session-scoped, per-entry-value dismissal — not persisted, matches the
+  // "dismissable, not a blocker" nature of these hints.
+  const [dismissedWarnings, setDismissedWarnings] = useState<Set<string>>(new Set());
+
+  const dismissWarning = (address: string) => {
+    setDismissedWarnings((current) => new Set(current).add(address));
+  };
 
   const handleCancelAdd = () => {
     setIsAdding(false);
@@ -232,71 +246,81 @@ export function SetupNodesView({
                     : node.connected
                       ? 'bg-success'
                       : 'bg-destructive';
+                  const entryWarning = getEntryWarning?.(node.address) ?? null;
+                  const showEntryWarning = !!entryWarning && !dismissedWarnings.has(node.address);
 
                   return (
-                    <div key={node.key} className="group flex items-center gap-3 px-4 py-3">
-                      <span className="flex h-4 w-4 shrink-0 items-center justify-center">
-                        {node.connected === null ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" aria-label="Checking connectivity" />
-                        ) : (
-                          <span className={`h-2 w-2 rounded-full ${dotClass}`} role="img" aria-label={statusLabel} title={statusLabel} />
-                        )}
-                      </span>
+                    <div key={node.key} className="px-4 py-3">
+                      <div className="group flex items-center gap-3">
+                        <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+                          {node.connected === null ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" aria-label="Checking connectivity" />
+                          ) : (
+                            <span className={`h-2 w-2 rounded-full ${dotClass}`} role="img" aria-label={statusLabel} title={statusLabel} />
+                          )}
+                        </span>
 
-                      <div className="min-w-0 flex-1 flex flex-col items-start">
-                        <div title={node.address} className={`truncate max-w-full text-sm ${summary.isRaw ? 'font-mono' : 'font-medium'} text-foreground`}>
-                          {summary.primary}
+                        <div className="min-w-0 flex-1 flex flex-col items-start">
+                          <div title={node.address} className={`truncate max-w-full text-sm ${summary.isRaw ? 'font-mono' : 'font-medium'} text-foreground`}>
+                            {summary.primary}
+                          </div>
+                          <div className="mt-0.5 truncate font-mono text-xs text-muted-foreground w-full text-left" title={node.address}>
+                            <span className="lg:hidden max-w-[50%]">{summary.peerId ?? node.address}</span>
+                            <span className="hidden lg:inline max-w-[50%]">{node.address}</span>
+                          </div>
                         </div>
-                        <div className="mt-0.5 truncate font-mono text-xs text-muted-foreground w-full text-left" title={node.address}>
-                          <span className="lg:hidden max-w-[50%]">{summary.peerId ?? node.address}</span>
-                          <span className="hidden lg:inline max-w-[50%]">{node.address}</span>
+
+                        <div className="flex shrink-0 items-center opacity-70 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+                          {total > 1 && (
+                            <>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => onMoveUp(index)}
+                                disabled={reordering || index === 0}
+                                className="h-8 w-8"
+                                aria-label={`Move ${nodeSingular} up`}
+                              >
+                                <ChevronUp />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => onMoveDown(index)}
+                                disabled={reordering || index === total - 1}
+                                className="h-8 w-8"
+                                aria-label={`Move ${nodeSingular} down`}
+                              >
+                                <ChevronDown />
+                              </Button>
+                            </>
+                          )}
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => onCopy(node.address)}
+                            className="h-8 w-8"
+                            aria-label={`Copy ${nodeSingular} address`}
+                          >
+                            {copiedAddress === node.address ? <Check className="text-success" /> : <Copy />}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => onRemove(node.address)}
+                            className="h-8 w-8 hover:text-destructive"
+                            aria-label={`Remove ${nodeSingular}`}
+                          >
+                            <Trash2 />
+                          </Button>
                         </div>
                       </div>
-
-                      <div className="flex shrink-0 items-center opacity-70 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-                        {total > 1 && (
-                          <>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={() => onMoveUp(index)}
-                              disabled={reordering || index === 0}
-                              className="h-8 w-8"
-                              aria-label={`Move ${nodeSingular} up`}
-                            >
-                              <ChevronUp />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={() => onMoveDown(index)}
-                              disabled={reordering || index === total - 1}
-                              className="h-8 w-8"
-                              aria-label={`Move ${nodeSingular} down`}
-                            >
-                              <ChevronDown />
-                            </Button>
-                          </>
-                        )}
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => onCopy(node.address)}
-                          className="h-8 w-8"
-                          aria-label={`Copy ${nodeSingular} address`}
-                        >
-                          {copiedAddress === node.address ? <Check className="text-success" /> : <Copy />}
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => onRemove(node.address)}
-                          className="h-8 w-8 hover:text-destructive"
-                          aria-label={`Remove ${nodeSingular}`}
-                        >
-                          <Trash2 />
-                        </Button>
-                      </div>
+                      {showEntryWarning && (
+                        <ServerEntryWarningRow
+                          warning={entryWarning!}
+                          onDismiss={() => dismissWarning(node.address)}
+                        />
+                      )}
                     </div>
                   );
                 })}
@@ -315,6 +339,17 @@ export function SetupNodesView({
                       }}
                       parentClassName="w-full"
                     />
+                    {(() => {
+                      const trimmedNewAddress = newAddress.trim();
+                      const addWarning = trimmedNewAddress ? getEntryWarning?.(trimmedNewAddress) ?? null : null;
+                      if (!addWarning || dismissedWarnings.has(trimmedNewAddress)) return null;
+                      return (
+                        <ServerEntryWarningRow
+                          warning={addWarning}
+                          onDismiss={() => dismissWarning(trimmedNewAddress)}
+                        />
+                      );
+                    })()}
                     <div className="flex items-center justify-end gap-2">
                       <Button variant="ghost" size="sm" onClick={handleCancelAdd}>
                         <X />
