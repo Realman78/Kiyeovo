@@ -125,7 +125,7 @@ function makeStore(bucketKey: string, messages: GroupContentMessage[]): GroupOff
   };
 }
 
-function makeNode(storesByKey: Map<string, GroupOfflineStore>, puts?: Array<{ key: string; count: number }>): unknown {
+function makeNode(storesByKey: Map<string, GroupOfflineStore>): unknown {
   return {
     services: {
       dht: {
@@ -137,11 +137,6 @@ function makeNode(storesByKey: Map<string, GroupOfflineStore>, puts?: Array<{ ke
             name: 'VALUE',
             value: gzipSync(Buffer.from(JSON.stringify(store), 'utf8')),
           };
-        },
-        put: async function* (keyBytes: Uint8Array) {
-          const key = decoder.decode(keyBytes);
-          puts?.push({ key, count: 1 });
-          yield { name: 'PEER_RESPONSE' };
         },
       },
     },
@@ -160,7 +155,6 @@ async function createFixture(input: {
   manager: GroupOfflineManager;
   chatId: number;
   received: unknown[];
-  puts: Array<{ key: string; count: number }>;
 }> {
   const currentKeyVersion = input.currentKeyVersion ?? 2;
   const database = new ChatDatabase(':memory:');
@@ -211,9 +205,8 @@ async function createFixture(input: {
   }
 
   const received: unknown[] = [];
-  const puts: Array<{ key: string; count: number }> = [];
   const manager = new GroupOfflineManager({
-    node: makeNode(storesByKey, puts) as unknown as ChatNode,
+    node: makeNode(storesByKey) as unknown as ChatNode,
     database,
     userIdentity: {
       signingPrivateKey: LOCAL_PRIVATE,
@@ -224,7 +217,7 @@ async function createFixture(input: {
     onApplicationMessage: async () => false,
   });
 
-  return { database, manager, chatId, received, puts };
+  return { database, manager, chatId, received };
 }
 
 test('closed epoch with missing boundary defers seq beyond local high-water mark', async (t) => {
@@ -299,78 +292,4 @@ test('live epoch without boundary remains uncapped by the closed-epoch ceiling',
   assert.equal(messages.find((message) => message.id === 'msg_live_epoch_seq_advance')?.content, 'live delivery');
   assert.equal(fixture.database.getMemberSeq(GROUP_ID, 1, REMOVED_PEER_ID), 3);
   assert.equal(fixture.received.length, 1);
-});
-
-// --- Task C: storeGroupMessages (batched backstop write) -----------------
-//
-// GroupMessaging coalesces several live-delivered "backstop" sends into one
-// batch and flushes them via storeGroupMessages instead of one
-// storeGroupMessage call per send. These tests exercise the batching
-// primitive itself: N queued messages must land via a SINGLE DHT put (the
-// whole point of coalescing), messages already present must be skipped
-// without writing at all, and a single-item batch must behave exactly like
-// storeGroupMessage.
-
-function ownBucketKey(keyVersion: number): string {
-  return bucketKeyForSender(GROUP_ID, keyVersion, LOCAL_PUBLIC);
-}
-
-test('storeGroupMessages batches multiple messages into a single DHT put', async (t) => {
-  const fixture = await createFixture({ messages: [] });
-  t.after(() => fixture.database.close());
-
-  const batch = [
-    makeGroupMessage({ messageId: 'batch_msg_1', seq: 1, timestamp: Date.now(), text: 'one', keyVersion: 2, senderPeerId: LOCAL_PEER_ID, senderPrivateKey: LOCAL_PRIVATE }),
-    makeGroupMessage({ messageId: 'batch_msg_2', seq: 2, timestamp: Date.now(), text: 'two', keyVersion: 2, senderPeerId: LOCAL_PEER_ID, senderPrivateKey: LOCAL_PRIVATE }),
-    makeGroupMessage({ messageId: 'batch_msg_3', seq: 3, timestamp: Date.now(), text: 'three', keyVersion: 2, senderPeerId: LOCAL_PEER_ID, senderPrivateKey: LOCAL_PRIVATE }),
-  ];
-
-  await fixture.manager.storeGroupMessages(batch);
-
-  const bucketKey = ownBucketKey(2);
-  assert.equal(fixture.puts.filter((p) => p.key === bucketKey).length, 1, 'exactly one DHT put for the whole batch');
-
-  const local = fixture.database.getGroupOfflineSentMessages(bucketKey);
-  assert.equal(local.messages.length, 3);
-  assert.deepEqual(
-    local.messages.map((m) => m.messageId).sort(),
-    ['batch_msg_1', 'batch_msg_2', 'batch_msg_3'],
-  );
-});
-
-test('storeGroupMessages is a no-op DHT write when every message is already present', async (t) => {
-  const fixture = await createFixture({ messages: [] });
-  t.after(() => fixture.database.close());
-
-  const bucketKey = ownBucketKey(2);
-  const existing = makeGroupMessage({ messageId: 'already_there', seq: 1, timestamp: Date.now(), text: 'x', keyVersion: 2, senderPeerId: LOCAL_PEER_ID, senderPrivateKey: LOCAL_PRIVATE });
-  fixture.database.saveGroupOfflineSentMessages(bucketKey, [existing], 1);
-
-  await fixture.manager.storeGroupMessages([existing]);
-
-  assert.equal(fixture.puts.filter((p) => p.key === bucketKey).length, 0, 'dedupe skips the DHT write entirely');
-});
-
-test('storeGroupMessages rejects a batch spanning more than one bucket', async (t) => {
-  const fixture = await createFixture({ messages: [] });
-  t.after(() => fixture.database.close());
-
-  const batch = [
-    makeGroupMessage({ messageId: 'epoch2_msg', seq: 1, timestamp: Date.now(), text: 'a', keyVersion: 2, senderPeerId: LOCAL_PEER_ID, senderPrivateKey: LOCAL_PRIVATE }),
-    makeGroupMessage({ messageId: 'epoch3_msg', seq: 1, timestamp: Date.now(), text: 'b', keyVersion: 3, senderPeerId: LOCAL_PEER_ID, senderPrivateKey: LOCAL_PRIVATE }),
-  ];
-
-  await assert.rejects(() => fixture.manager.storeGroupMessages(batch), /multiple buckets/);
-});
-
-test('storeGroupMessages([single]) behaves like storeGroupMessage', async (t) => {
-  const fixture = await createFixture({ messages: [] });
-  t.after(() => fixture.database.close());
-
-  const message = makeGroupMessage({ messageId: 'solo_msg', seq: 1, timestamp: Date.now(), text: 'solo', keyVersion: 2, senderPeerId: LOCAL_PEER_ID, senderPrivateKey: LOCAL_PRIVATE });
-  await fixture.manager.storeGroupMessages([message]);
-
-  const bucketKey = ownBucketKey(2);
-  assert.equal(fixture.puts.filter((p) => p.key === bucketKey).length, 1);
-  assert.equal(fixture.database.getGroupOfflineSentMessages(bucketKey).messages.length, 1);
 });

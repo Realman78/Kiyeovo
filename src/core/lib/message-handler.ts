@@ -635,10 +635,6 @@ export class MessageHandler {
       nudgeGroupRefetch: this.nudgePeerGroupRefetch.bind(this),
       onRegisterPrevEpochGrace: (groupId: string, keyVersion: number) => {
         this.groupMessaging.registerGraceContextForEpoch(groupId, keyVersion);
-        // Task C: a coalesced backstop write still waiting out its window for
-        // the epoch that just closed must land before that epoch is torn
-        // down, not wait out the rest of its window.
-        this.groupMessaging.flushBackstopForEpoch(groupId, keyVersion);
       },
     };
   }
@@ -3784,9 +3780,17 @@ export class MessageHandler {
   }
 
   async checkOfflineMessages(chatIds?: number[], options?: OfflineCheckOptions): Promise<OfflineCheckResult> {
-    const scopeKey = chatIds && chatIds.length > 0
+    const baseScopeKey = chatIds && chatIds.length > 0
       ? [...chatIds].sort((a, b) => a - b).join(',')
       : 'default';
+    // Fold `immediate` into the single-flight scope: a latency-sensitive
+    // caller (nudge/manual/join-gating) must never share or queue behind a
+    // paced background sweep's promise for the same chats — that would
+    // silently defeat the immediate exemption by making it wait out the
+    // paced scan's added delay anyway. Immediate and paced requests for the
+    // same chats are separate lanes that can run concurrently.
+    const immediate = options?.immediate === true;
+    const scopeKey = `${baseScopeKey}:${immediate ? 'immediate' : 'paced'}`;
 
     const inFlight = this.offlineCheckInFlight.get(scopeKey);
     if (!inFlight) {
@@ -4193,7 +4197,7 @@ export class MessageHandler {
   async cleanup(): Promise<void> {
     await this.endActiveCallForShutdown();
     await this.fileHandler.cleanup(); // drains in-flight serves before the DB is closed
-    await this.groupMessaging.cleanup(); // flushes any still-pending coalesced backstop writes (Task C)
+    this.groupMessaging.cleanup();
 
     if (this.groupAckStartupTimer) {
       clearTimeout(this.groupAckStartupTimer);
@@ -4351,13 +4355,6 @@ export class MessageHandler {
           const updatedChat = this.database.getChatByGroupId(groupId);
           const keyVersionAdvanced = (updatedChat?.key_version ?? 0) > previousKeyVersion;
           const becameRemoved = updatedChat?.group_status === 'removed';
-          if (keyVersionAdvanced && previousKeyVersion > 0) {
-            // Task C: this member's own view of the group just rotated past
-            // previousKeyVersion — flush any still-pending coalesced backstop
-            // write for that now-closing epoch's bucket immediately instead
-            // of waiting out its window.
-            this.groupMessaging.flushBackstopForEpoch(groupId, previousKeyVersion);
-          }
           if (updatedChat && (keyVersionAdvanced || becameRemoved || previousGroupStatus === 'rekeying')) {
             const trigger = keyVersionAdvanced
               ? 'key_version_advanced'

@@ -503,22 +503,6 @@ export const GROUP_OFFLINE_MESSAGE_TTL_MS = MESSAGE_TTL;
 export const OFFLINE_BUCKET_SCAN_PACING_BUDGET_MS = 30 * SECOND; // Hard cap on total added spread per paced batch, regardless of bucket count
 export const OFFLINE_BUCKET_SCAN_PACING_MIN_BUCKET_COUNT = 2; // At or below this many buckets, pacing is skipped (zero added delay)
 
-/**
- * Metadata mitigation: batched backstop offline-bucket writes.
- *
- * Every group send also writes the sender's own epoch bucket so lagging or
- * offline members can recover it later. When the message was already
- * delivered live (via GossipSub), that bucket write is pure redundancy
- * ("backstop") rather than the only delivery path ("sole-delivery" - no
- * online peers were reachable). Writing the backstop copy immediately on
- * every send reveals exact send times to a network observer, so backstop
- * writes are queued durably and coalesced into at most one DHT put per
- * bucket within this window. Sole-delivery writes are unaffected and stay
- * immediate. Absent members only poll on the ~5 minute offline sweep, so a
- * sub-30s delay here is not user-visible.
- */
-export const GROUP_OFFLINE_BACKSTOP_COALESCE_WINDOW_MS = 20 * SECOND;
-
 export const GROUP_MISSING_USED_UNTIL_SCAN_EPOCH_CAP = 10; // Max historical epochs scanned for missing used-until markers
 export const MAX_BOOTSTRAP_NODES_FAST = 3; // Target bootstrap connection count in fast mode
 export const MAX_BOOTSTRAP_NODES_TOR = 2; // Target bootstrap connection count in anonymous mode

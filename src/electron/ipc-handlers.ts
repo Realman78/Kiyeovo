@@ -2175,13 +2175,19 @@ function setupPendingKeyExchangeHandlers(
 }
 
 /**
- * Generate cache key from chat IDs (sorted for consistency)
+ * Generate cache key from chat IDs (sorted for consistency). `immediate`
+ * is folded into the key so a latency-sensitive request (e.g. the manual
+ * "Check missed messages" action) never shares/waits on a paced background
+ * sweep's in-flight promise for the same chats — that would silently defeat
+ * the immediate exemption by making the caller wait out the paced scan's
+ * added delay anyway. Immediate and paced requests for the same chats are
+ * therefore separate single-flight lanes that can run concurrently.
  */
-function getOfflineCheckCacheKey(chatIds?: number[]): string {
-  if (!chatIds || chatIds.length === 0) {
-    return '__TOP_10__'; // Sentinel value for "check top 10"
-  }
-  return chatIds.slice().sort((a, b) => a - b).join(',');
+function getOfflineCheckCacheKey(chatIds: number[] | undefined, immediate: boolean): string {
+  const base = !chatIds || chatIds.length === 0
+    ? '__TOP_10__' // Sentinel value for "check top 10"
+    : chatIds.slice().sort((a, b) => a - b).join(',');
+  return `${base}:${immediate ? 'immediate' : 'paced'}`;
 }
 
 /**
@@ -2199,7 +2205,7 @@ function setupOfflineMessageHandlers(
         return { success: false, checkedChatIds: [], error: 'P2P core not initialized' };
       }
 
-      const cacheKey = getOfflineCheckCacheKey(chatIds);
+      const cacheKey = getOfflineCheckCacheKey(chatIds, false);
 
       // Check if there's already an in-flight request for this key
       const inFlightPromise = OfflineMessageManager.inFlightOfflineChecks.get(cacheKey);
@@ -2251,7 +2257,7 @@ function setupOfflineMessageHandlers(
         return { success: false, checkedChatIds: [], error: 'P2P core not initialized' };
       }
 
-      const cacheKey = getOfflineCheckCacheKey([chatId]);
+      const cacheKey = getOfflineCheckCacheKey([chatId], true);
 
       // Check if there's already an in-flight request for this key
       const inFlightPromise = OfflineMessageManager.inFlightOfflineChecks.get(cacheKey);

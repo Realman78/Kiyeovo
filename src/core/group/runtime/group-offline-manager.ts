@@ -338,129 +338,6 @@ export class GroupOfflineManager {
     });
   }
 
-  /**
-   * Batched sibling of storeGroupMessage: appends multiple messages to their
-   * shared own-bucket in a SINGLE read-modify-write-put cycle, instead of one
-   * DHT put per message. Used by the Task C coalesced-backstop-write flush,
-   * where several sends accumulated during one coalescing window all need to
-   * land in the bucket together. All messages MUST share the same
-   * (groupId, keyVersion) — callers coalesce per own-bucket-key, so this
-   * always holds in practice; it is asserted defensively.
-   *
-   * Mirrors storeGroupMessage's dedupe-by-id / connectivity-retry / remote-merge
-   * recovery shape, just generalized from one new message to N.
-   */
-  async storeGroupMessages(messages: GroupContentMessage[]): Promise<void> {
-    if (messages.length === 0) return;
-    if (messages.length === 1) {
-      await this.storeGroupMessage(messages[0]!);
-      return;
-    }
-
-    const first = messages[0]!;
-    const bucketKey = this.getOwnBucketKey(first.groupId, first.keyVersion);
-    const bucketTag = bucketKey.slice(-12);
-    for (const message of messages) {
-      if (message.groupId !== first.groupId || message.keyVersion !== first.keyVersion) {
-        throw new Error(
-          `storeGroupMessages: batch spans multiple buckets (expected group=${first.groupId} ` +
-          `keyVersion=${first.keyVersion}, got group=${message.groupId} keyVersion=${message.keyVersion})`,
-        );
-      }
-    }
-    const highestIncomingSeq = messages.reduce((max, m) => Math.max(max, m.seq), 0);
-
-    log(
-      `[GROUP-OFFLINE][STORE][BATCH][ENQUEUE] group=${first.groupId.slice(0, 8)} keyVersion=${first.keyVersion} ` +
-      `bucket=*${bucketTag} batch=${messages.length}`,
-    );
-
-    await this.withBucketMutationLock(bucketKey, async () => {
-      const local = this.deps.database.getGroupOfflineSentMessages(bucketKey);
-      const { messages: normalizedExistingMessages } = this.normalizeStoreMessages(
-        this.filterLiveMessages(local.messages),
-        bucketKey,
-        'Local mirror overflow',
-      );
-
-      const existingIds = new Set(normalizedExistingMessages.map((m) => m.messageId));
-      const newOnes = messages.filter((m) => !existingIds.has(m.messageId));
-      if (newOnes.length === 0) {
-        log(`[GROUP-OFFLINE][STORE][BATCH][SKIP] bucket=*${bucketTag} reason=all_already_present`);
-        return;
-      }
-
-      const { messages: nextMessages } = this.normalizeStoreMessages(
-        [...normalizedExistingMessages, ...newOnes],
-        bucketKey,
-        'Bucket overflow',
-      );
-      const { signedStore, version } = this.buildSignedStore(
-        nextMessages,
-        bucketKey,
-        local.version,
-        highestIncomingSeq,
-      );
-
-      try {
-        await this.putStore(bucketKey, signedStore);
-        this.deps.database.saveGroupOfflineSentMessages(bucketKey, nextMessages, version);
-        this.notifyGroupInboxCapacityChangedByGroupId(first.groupId);
-        log(`[GROUP-OFFLINE][STORE][BATCH][DONE] bucket=*${bucketTag} batch=${newOnes.length}`);
-        return;
-      } catch (firstError: unknown) {
-        if (this.isStoreTooLargeError(firstError)) {
-          throw firstError;
-        }
-
-        if (this.isConnectivityFailureError(firstError)) {
-          const reconnected = await this.triggerReconnect();
-          if (!reconnected) {
-            throw firstError;
-          }
-          await this.putStore(bucketKey, signedStore);
-          this.deps.database.saveGroupOfflineSentMessages(bucketKey, nextMessages, version);
-          this.notifyGroupInboxCapacityChangedByGroupId(first.groupId);
-          return;
-        }
-
-        const remote = await this.getLatestStore(bucketKey);
-        if (!remote) {
-          throw firstError;
-        }
-
-        const remoteMessages = this.filterLiveMessages(remote.messages);
-        const mergedById = new Map<string, GroupContentMessage>();
-        for (const msg of remoteMessages) {
-          mergedById.set(msg.messageId, msg);
-        }
-        for (const msg of normalizedExistingMessages) {
-          mergedById.set(msg.messageId, msg);
-        }
-        for (const msg of newOnes) {
-          mergedById.set(msg.messageId, msg);
-        }
-
-        const { messages: mergedMessages } = this.normalizeStoreMessages(
-          Array.from(mergedById.values()),
-          bucketKey,
-          'Bucket overflow',
-          false,
-        );
-        const { signedStore: mergedStore, version: mergedVersion } = this.buildSignedStore(
-          mergedMessages,
-          bucketKey,
-          remote.version,
-          highestIncomingSeq,
-          remote.highestSeq,
-        );
-        await this.putStore(bucketKey, mergedStore);
-        this.deps.database.saveGroupOfflineSentMessages(bucketKey, mergedMessages, mergedVersion);
-        this.notifyGroupInboxCapacityChangedByGroupId(first.groupId);
-      }
-    });
-  }
-
   resolveRecentlyActiveGroupChats(sinceMs: number, limit: number): Chat[] {
     return this.deps.database.getRecentlyActiveGroupChats(sinceMs, limit);
   }
@@ -651,6 +528,13 @@ export class GroupOfflineManager {
       .filter(h => h.key_version <= (chat.key_version ?? 0))
       .sort((a, b) => a.key_version - b.key_version);
     const scopedHistory = this.selectHistoryForMode(history, chat.key_version ?? 0, mode);
+    // Epochs are scanned sequentially below, so a fresh OFFLINE_BUCKET_SCAN_PACING_BUDGET_MS
+    // budget per epoch would stack additively (10 eligible epochs could add
+    // ~5 minutes). Share one deadline across the whole chat scan instead: each
+    // epoch's pacing call gets whatever budget remains, so the total added
+    // spread for this chat never exceeds OFFLINE_BUCKET_SCAN_PACING_BUDGET_MS
+    // regardless of how many epochs it has to catch up.
+    const pacingDeadline = chatStart + OFFLINE_BUCKET_SCAN_PACING_BUDGET_MS;
 
     for (const epoch of scopedHistory) {
       epochsProcessed++;
@@ -696,8 +580,9 @@ export class GroupOfflineManager {
 
       let senderStores: Array<Awaited<ReturnType<typeof fetchStore>>>;
       if (shouldPace) {
+        const remainingBudgetMs = Math.max(0, pacingDeadline - Date.now());
         const paced = await shuffleAndPaceExecute(senderDescriptors, fetchStore, {
-          totalBudgetMs: OFFLINE_BUCKET_SCAN_PACING_BUDGET_MS,
+          totalBudgetMs: remainingBudgetMs,
           minCount: OFFLINE_BUCKET_SCAN_PACING_MIN_BUCKET_COUNT,
         });
         senderStores = paced.results;
