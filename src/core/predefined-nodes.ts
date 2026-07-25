@@ -30,7 +30,7 @@ export interface PredefinedNode {
 // Represented as epoch milliseconds so comparison is a trivial number compare.
 // Date.parse keeps the source human-readable while parsing once at module load.
 // ---------------------------------------------------------------------------
-export const PREDEFINED_NODES_SUNSET_TS: number = Date.parse('2026-07-25T00:00:00Z');
+export const PREDEFINED_NODES_SUNSET_TS: number = Date.parse('2026-08-02T00:00:00Z');
 
 // ---------------------------------------------------------------------------
 // IMPORTANT: this same string must ALSO appear in the external-URL allowlist so
@@ -43,13 +43,21 @@ export const PREDEFINED_NODES_README_URL =
   'https://github.com/Realman78/Kiyeovo/blob/main/README.md#servers';
 
 // ---------------------------------------------------------------------------
-// The real Kiyeovo fleet (see README#servers). Used ONLY for post-sunset
-// matching — detecting whether a user still has one of these saved so the
-// sunset notice fires for them. NOT shown in a picker (the offering is a link
-// to README#servers where users copy these manually). Must stay in sync with
-// the README#servers list so every address a user could have copied matches.
-// STUN is available on all 9 nodes; TURN only on the 5 fast-call nodes; every
-// node also runs an onion bootstrap (onions are independent, not federated).
+// The real Kiyeovo fleet (see README#servers) — historical, full 9-region
+// list. 7 of the 9 regional nodes (Toronto, Sydney, Singapore, New York,
+// Oregon, Helsinki, Ashburn) were RETIRED on 2026-07-25. Only SFO
+// (167.172.115.233) and Nuremberg (178.104.248.235) remain live, and those
+// two shut down at the 2026-08-02 sunset above.
+//
+// The full 9-region list is kept here — do NOT prune it — because this array
+// is used ONLY for post-sunset matching: detecting whether a user still has
+// one of these saved so the sunset notice fires for them. Since the 1.0
+// README once advertised all 9 regions, a user could have copied any of
+// them, so every entry must stay matchable even after its own node is
+// retired. NOT shown in a picker (the offering is a link to README#servers
+// where users copy the two still-live entries manually).
+// STUN was available on all 9 nodes; TURN only on 5 fast-call nodes; every
+// node also ran an onion bootstrap (onions are independent, not federated).
 // ---------------------------------------------------------------------------
 export const PREDEFINED_NODES: readonly PredefinedNode[] = [
   // --- Fast bootstraps (all 9 regions; federated into one DHT) ---
