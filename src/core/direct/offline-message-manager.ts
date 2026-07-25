@@ -203,10 +203,7 @@ export class OfflineMessageManager {
         node: ChatNode,
         bucketKeys: string[],
         appendBucketKey: boolean = true,
-        // Metadata mitigation (Task B): when set, bucket fetches are shuffled
-        // and each given a small random start-delay bounded by totalBudgetMs
-        // instead of firing as one fixed-order, back-to-back burst. Omitted
-        // (undefined) by latency-sensitive callers — see OFFLINE_BUCKET_SCAN_PACING_*.
+        // bucket fetches are shuffled and each given a small random start-delay
         pacing?: { totalBudgetMs: number; minCount?: number },
     ): Promise<OfflineMessageStore> {
         const fetchOne = async (bucketKey: string): Promise<OfflineMessage[]> => {

@@ -446,12 +446,9 @@ export const GROUP_ACK_REPUBLISH_INTERVAL = 30 * MINUTE; // 30 minutes
 export const GROUP_ACK_REPUBLISH_JITTER = 5 * MINUTE; // ±5 minutes
 export const GROUP_PENDING_ACK_RETIRE_AGE_MS = 14 * DAY; // 14 days
 export const GROUP_GOSSIPSUB_HEARTBEAT_INTERVAL = 90 * SECOND; // 90 seconds (legacy fixed cadence, superseded by the jittered bounds below)
-// Metadata mitigation: a fixed 90s heartbeat period is a per-member liveness
-// metronome an observer can fingerprint. Each tick now redraws its own delay
-// uniformly within these bounds instead of reusing one fixed interval (or even
-// one fixed random offset, which would still be a metronome). The upper bound
-// stays well under the ~3 minute ceiling gossipsub mesh maintenance tolerates,
-// so mesh warming is unaffected.
+// a fixed 90s heartbeat period is a per-member liveness metronome an observer can fingerprint.
+// Each tick now redraws its own delay uniformly within these bounds instead of reusing one fixed interval (or even one fixed random offset, which would still be a metronome).
+// The upper bound stays well under the ~3 minute ceiling gossipsub mesh maintenance tolerates, so mesh warming is unaffected.
 export const GROUP_GOSSIPSUB_HEARTBEAT_MIN_INTERVAL_MS = 60 * SECOND; // 60 seconds
 export const GROUP_GOSSIPSUB_HEARTBEAT_MAX_INTERVAL_MS = 150 * SECOND; // 150 seconds (2.5 min, under the ~3 min mesh-maintenance ceiling)
 export const GROUP_TOPIC_RECONCILE_INTERVAL = 10 * MINUTE; // 10 minutes
@@ -498,7 +495,7 @@ export const GROUP_OFFLINE_MESSAGE_TTL_MS = MESSAGE_TTL;
  * many buckets are involved. Latency-sensitive, event-triggered catch-ups
  * (join-completion, rotation-applied, manual "check missed messages", and
  * other single-bucket recovery/nudge paths) opt out via `immediate: true` so
- * they are not slowed down. Shared by both the direct and group scan paths.
+ * they are not slowed down
  */
 export const OFFLINE_BUCKET_SCAN_PACING_BUDGET_MS = 30 * SECOND; // Hard cap on total added spread per paced batch, regardless of bucket count
 export const OFFLINE_BUCKET_SCAN_PACING_MIN_BUCKET_COUNT = 2; // At or below this many buckets, pacing is skipped (zero added delay)

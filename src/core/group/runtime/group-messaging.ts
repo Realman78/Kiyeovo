@@ -109,10 +109,7 @@ export class GroupMessaging {
   }
 
   // Jittered, self-re-arming heartbeat: each tick draws a fresh random delay
-  // for the NEXT tick instead of reusing one fixed period (see
-  // computeJitteredHeartbeatDelayMs). A plain setInterval(..., FIXED_MS) is a
-  // metronome an observer can fingerprint; redrawing per tick avoids that
-  // while the upper bound keeps gossipsub mesh warming intact.
+  // for the NEXT tick instead of reusing one fixed period
   private scheduleNextHeartbeat(): void {
     if (!this.started) return;
     const delay = computeJitteredHeartbeatDelayMs(

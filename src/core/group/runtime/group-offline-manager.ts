@@ -72,7 +72,7 @@ interface GroupChatCheckResult {
   completed: boolean;
   unreadAdded: number;
   gapWarnings: GroupOfflineGapWarning[];
-  /** Bucket-scan pacing (Task B): sender-store fetches paced for this chat. */
+  // sender-store fetches paced for this chat
   bucketsScanned: number;
   pacingSpreadMs: number;
 }
@@ -91,14 +91,7 @@ export type GroupOfflineCheckMode = 'periodic' | 'nudge';
 
 export interface GroupOfflineCheckOptions {
   mode?: GroupOfflineCheckMode;
-  /**
-   * Metadata mitigation opt-out (Task B): when true, bucket-store fetches for
-   * this call are NOT shuffled/paced even in 'periodic' mode. Set by
-   * latency-sensitive call sites where a human or UI-gating state is waiting
-   * synchronously (e.g. the manual "Check missed messages" action) — pacing
-   * already only applies in 'periodic' mode, so 'nudge' (event-triggered,
-   * join-completion/rotation) call sites never need this. Default false.
-   */
+  // bucket-store fetches for this call are NOT shuffled/paced even in 'periodic' mode
   immediate?: boolean;
 }
 
@@ -345,12 +338,8 @@ export class GroupOfflineManager {
   async checkGroupOfflineMessages(chatIds?: number[], options?: GroupOfflineCheckOptions): Promise<GroupOfflineCheckResult> {
     const mode: GroupOfflineCheckMode = options?.mode ?? 'periodic';
     const immediate = options?.immediate === true;
-    // Bucket-scan pacing (Task B) only applies to the non-latency-sensitive
-    // 'periodic' path (background backstop sweep, reconnect/wake sync).
-    // Event-triggered 'nudge' catch-ups (join-completion, rotation-applied)
-    // and any call site that explicitly opts out via `immediate: true` (e.g.
-    // the manual "Check missed messages" action) keep the old immediate,
-    // unshuffled behavior — see GroupOfflineCheckOptions.immediate.
+    // bucket-scan pacing only applies to the non-latency-sensitive
+    // 'periodic' path (background backstop sweep, reconnect/wake sync)
     const shouldPace = mode === 'periodic' && !immediate;
     const runId = ++this.offlineCheckRunCounter;
     const runStart = Date.now();
@@ -361,9 +350,7 @@ export class GroupOfflineManager {
     const checkedChatIds: number[] = [];
     const failedChatIds: number[] = [];
     const resolvedChats = this.resolveTargetChats(chatIds);
-    // Metadata mitigation: a multi-chat sweep otherwise always visits chats
-    // in the same fixed (recency) order. Shuffle it for the same
-    // non-latency-sensitive paths that get bucket pacing below.
+    // multi-chat sweep otherwise always visits chats in the same fixed recency order
     const targetChats = shouldPace ? shuffleCopy(resolvedChats) : resolvedChats;
     log(
       `[GROUP-OFFLINE][TIMING][RUN:${runId}] start targetChats=${targetChats.length} ` +
@@ -406,7 +393,7 @@ export class GroupOfflineManager {
       `[GROUP-OFFLINE][TIMING][RUN:${runId}] done checkedChats=${checkedChatIds.length} ` +
       `totalUnread=${totalUnread} gaps=${gapWarnings.length} took=${Date.now() - runStart}ms`
     );
-    // Measurable recovery-delay cost of the Task B pacing mitigation for this sweep.
+    // measurable recovery-delay cost of the bucket-scan pacing for this sweep
     log(
       `[GROUP-OFFLINE][BUCKET-SCAN][PACING][RUN:${runId}] mode=${mode} paced=${shouldPace} ` +
       `buckets=${totalBucketsScanned} maxSpreadMs=${maxPacingSpreadMs}`

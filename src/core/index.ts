@@ -564,10 +564,10 @@ export async function initializeP2PCore(config: P2PCoreConfig): Promise<P2PCore>
   });
 
   // Periodic offline backstop: while the app is online, pull direct offline buckets
-  // and run the recency-bounded group offline check every ~5 min (jittered). This
-  // makes the tech doc's periodic-reconciliation guarantee real — event-only healing
-  // (startup/reconnect/wake/manual) otherwise leaves control messages and group
-  // content unread indefinitely for a peer who stays online but disconnected from us.
+  // and run the recency-bounded group offline check every ~5 min (jittered).
+  // This makes the tech doc's periodic-reconciliation guarantee real — event-only healing
+  // (startup/reconnect/wake/manual) otherwise leaves control messages and group content 
+  // unread indefinitely for a peer who stays online but disconnected from us.
   // Runs in the main process so it survives the renderer window being backgrounded.
   const periodicOfflineSweeper = createPeriodicOfflineSweeper({
     intervalMs: OFFLINE_MESSAGE_CHECK_INTERVAL,

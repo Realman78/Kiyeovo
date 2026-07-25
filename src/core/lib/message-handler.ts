@@ -133,14 +133,7 @@ type OfflineReadBucketInfoForChats = ReturnType<ChatDatabase['getOfflineReadBuck
 type OfflineReadBucketInfoAny = OfflineReadBucketInfo | OfflineReadBucketInfoForChats;
 type OfflineCheckResult = { checkedChatIds: number[]; unreadFromChats: Map<number, number> };
 export interface OfflineCheckOptions {
-  /**
-   * Metadata mitigation opt-out (Task B): when true, this scan's bucket
-   * fetches are NOT shuffled/paced even for a multi-bucket scope. Set by
-   * latency-sensitive call sites (manual "check missed messages", join-flow
-   * recovery, nudge/recovery triggers) where a human or UI-gating state is
-   * waiting synchronously. The background periodic sweep and the
-   * renderer's on-reconnect/wake sync leave this unset (paced by default).
-   */
+  // when true, this scan's bucket fetches are NOT shuffled/paced even for a multi-bucket scope
   immediate?: boolean;
 }
 const OFFLINE_DHT_UNAVAILABLE_MARKER = 'no DHT connection';
@@ -3571,9 +3564,7 @@ export class MessageHandler {
     log(
       `[OFFLINE][CHECK][BUCKETS] run=${runId} count=${readBuckets.length} peers=${readBuckets.map(b => b.peerId.slice(-8)).join(',')}`,
     );
-    // Metadata mitigation (Task B): pace bucket fetches for non-latency-
-    // sensitive scans (background periodic sweep, reconnect/wake sync).
-    // Latency-sensitive call sites pass `immediate: true` to opt out.
+    // pace bucket fetches for non-latency-sensitive scans (background periodic sweep, reconnect/wake sync).
     const pacing = options?.immediate
       ? undefined
       : { totalBudgetMs: OFFLINE_BUCKET_SCAN_PACING_BUDGET_MS, minCount: OFFLINE_BUCKET_SCAN_PACING_MIN_BUCKET_COUNT };
