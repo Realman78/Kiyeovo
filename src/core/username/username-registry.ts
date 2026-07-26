@@ -17,6 +17,7 @@ import { multiaddr, type Multiaddr } from '@multiformats/multiaddr';
 import { EncryptedUserIdentity } from '../identity/encrypted-user-identity.js';
 import { errStr, generalErrorHandler } from '../utils/general-error.js';
 import { hashUsingSha256 } from '../utils/crypto.js';
+import { filterAddressesForMode } from '../utils/mode-address-policy.js';
 import { QueryEvent } from '@libp2p/kad-dht';
 import {
   isUsernameRegistrationRecord,
@@ -387,9 +388,25 @@ export class UsernameRegistry {
     if (record.peerID === this.node.peerId.toString()) return; // never our own
     try {
       const peerId = peerIdFromString(record.peerID);
-      const multiaddrs = record.multiaddrs
+      const parsed = record.multiaddrs
         .map((addr) => { try { return multiaddr(addr); } catch { return null; } })
         .filter((ma): ma is Multiaddr => ma !== null);
+
+      // These addresses are attacker-chosen: the record's signature proves only that
+      // the publisher owns that peer ID, not that the address is safe to dial. In
+      // anonymous mode a clearnet address here would be dialed outside Tor and leak
+      // the real IP, so apply the same mode rule getPublishableAddresses applies to
+      // our own announced addresses. The connection gater enforces this too (it is
+      // the peer store's addressFilter); filtering here keeps the intent visible at
+      // the point of use and holds if that wiring ever changes.
+      const multiaddrs = filterAddressesForMode(parsed, this.networkMode);
+      if (multiaddrs.length < parsed.length) {
+        log(
+          `[USERNAME][LOOKUP] Dropped ${parsed.length - multiaddrs.length} disallowed ` +
+          `address(es) from record for ${record.peerID.slice(0, 8)}... (mode=${this.networkMode})`,
+        );
+      }
+
       if (multiaddrs.length > 0) {
         await this.node.peerStore.merge(peerId, { multiaddrs });
       }
