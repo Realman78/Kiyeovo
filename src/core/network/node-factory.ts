@@ -392,7 +392,11 @@ export async function createChatNode(
         },
         abortConnectionOnPingFailure: false,
       },
-      connectionGater: createConnectionGater(database, peerIdFromPrivateKey(privateKey)),
+      connectionGater: createConnectionGater(
+        database,
+        peerIdFromPrivateKey(privateKey),
+        runtimeConfig.networkMode,
+      ),
       services: createChatNodeServices(runtimeConfig),
     });
 
