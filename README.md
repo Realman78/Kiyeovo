@@ -36,16 +36,16 @@ For technical readers, contributors, and coding agents, start with [Kiyeovo_desk
 
 ## Installation
 
-Most people should just grab the appropriate installer from the [Releases page](https://github.com/Realman78/Kiyeovo/releases). If you run into issues, take a look at the [notes below](#general-installation-notes) that cover platform quirks you may hit with the released **1.1.0** installers. These are documented workarounds for OS-level packaging/security behavior, not app bugs. If you run into something not covered here, please [open an issue](https://github.com/Realman78/Kiyeovo/issues).
+Most people should just grab the appropriate installer from the [Releases page](https://github.com/Realman78/Kiyeovo/releases). If you run into issues, take a look at the [notes below](#general-installation-notes) that cover platform quirks you may hit with the released **1.1.1** installers. These are documented workarounds for OS-level packaging/security behavior, not app bugs. If you run into something not covered here, please [open an issue](https://github.com/Realman78/Kiyeovo/issues).
 
 ### Linux
 
-Two Linux artifacts are published: `Kiyeovo_1.1.0_amd64.deb` and `Kiyeovo-1.1.0.AppImage`.
+Two Linux artifacts are published: `Kiyeovo_1.1.1_amd64.deb` and `Kiyeovo-1.1.1.AppImage`.
 
 **Installing the .deb.** Install it with apt (this also pulls any dependencies):
 
 ```bash
-sudo apt install ./Kiyeovo_1.1.0_amd64.deb
+sudo apt install ./Kiyeovo_1.1.1_amd64.deb
 ```
 
 After that, the app should be installed and ready for use.
@@ -53,8 +53,8 @@ After that, the app should be installed and ready for use.
 **Installing the AppImage**
 
 ```bash
-chmod +x Kiyeovo-1.1.0.AppImage
-./Kiyeovo-1.1.0.AppImage
+chmod +x Kiyeovo-1.1.1.AppImage
+./Kiyeovo-1.1.1.AppImage
 ```
 
 
@@ -63,14 +63,14 @@ chmod +x Kiyeovo-1.1.0.AppImage
 
 Download the build for your Mac:
 
-- Apple Silicon: `Kiyeovo-1.1.0-arm64.dmg`
-- Intel: `Kiyeovo-1.1.0-x64.dmg`
+- Apple Silicon: `Kiyeovo-1.1.1-arm64.dmg`
+- Intel: `Kiyeovo-1.1.1-x64.dmg`
 
 Open the DMG and drag Kiyeovo into Applications.
 
 ### Windows
 
-Download `Kiyeovo Setup 1.1.0.exe` (x64 installer; installs per-user by default, never asks for administrator rights) or the portable `Kiyeovo 1.1.0.exe` (x64, no install, just run) from the Releases page, then run it.
+Download `Kiyeovo Setup 1.1.1.exe` (x64 installer; installs per-user by default, never asks for administrator rights) or the portable `Kiyeovo 1.1.1.exe` (x64, no install, just run) from the Releases page, then run it.
 
 ### General installation notes
 
@@ -82,7 +82,7 @@ Download `Kiyeovo Setup 1.1.0.exe` (x64 installer; installs per-user by default,
 - Run with the sandbox disabled:
 
 ```bash
-./Kiyeovo-1.1.0.AppImage --no-sandbox
+./Kiyeovo-1.1.1.AppImage --no-sandbox
 ```
 
 - Or enable unprivileged user namespaces on your system (distro-specific).
@@ -96,7 +96,7 @@ sudo apt install libfuse2
 Or run it without FUSE (extracts to a temp dir and runs):
 
 ```bash
-./Kiyeovo-1.1.0.AppImage --appimage-extract-and-run
+./Kiyeovo-1.1.1.AppImage --appimage-extract-and-run
 ```
 
 **macOS**
