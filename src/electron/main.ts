@@ -744,15 +744,28 @@ async function initializeP2PAfterWindow() {
     let torConfig: TorConfig | undefined;
 
     if (startupNetworkMode === 'anonymous') {
+      const torBinaryPath = getTorBinaryPath(
+        process.resourcesPath,
+        app.getAppPath(),
+        app.isPackaged
+      );
+
+      // Some builds ship no bundled Tor at all - notably arm64 Linux, which
+      // upstream publishes no Tor Expert Bundle for. Report that directly
+      // instead of letting the spawn below fail as a missing-file error, which
+      // reads like a broken install rather than an unsupported mode.
+      if (!torBinaryPath) {
+        const detail =
+          `Anonymous mode is not available in this build (${process.platform}-${process.arch}): ` +
+          'it does not include a bundled Tor daemon. Switch to fast mode to continue.';
+        log(`[Electron] ${detail}`);
+        sendInitStatus(detail, 'tor');
+        throw new Error(detail);
+      }
+
       // Start bundled Tor for anonymous mode only.
       sendInitStatus('Starting Tor daemon...', 'tor');
       try {
-        const torBinaryPath = getTorBinaryPath(
-          process.resourcesPath,
-          app.getAppPath(),
-          app.isPackaged
-        );
-
         torManager = new TorManager({
           dataDir,
           libp2pPort,

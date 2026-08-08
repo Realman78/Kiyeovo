@@ -26,8 +26,8 @@
         "executableName": "kiyeovo",
         "extraResources": [
             {
-                "from": "resources/tor/linux-x64",
-                "to": "tor/linux-x64",
+                "from": "resources/tor/linux-${arch}",
+                "to": "tor/linux-${arch}",
                 "filter": ["**/*"]
             }
         ]

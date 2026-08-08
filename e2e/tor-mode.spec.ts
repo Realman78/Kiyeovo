@@ -7,6 +7,7 @@ import {
     completeAnonymousRegisterStep,
     assertAnonymousWizardStepsOnly,
     onboardAnonymous,
+    BUNDLED_TOR_AVAILABLE_FOR_ARCH,
     type OnionFrontedBootstrap,
 } from './tor';
 import {
@@ -63,6 +64,15 @@ import { uniqueRunSuffix } from './config';
 // relaunch/reconnect pattern is comparatively low. Left as a documented
 // follow-up rather than a padded, rushed addition.
 test.setTimeout(12 * 60_000);
+
+// arm64 Linux ships no bundled Tor (upstream publishes no linux-aarch64 expert
+// bundle — see resources/tor/README.md), so anonymous mode does not exist there
+// to test. Skip rather than fail: on those machines this is the app behaving as
+// designed, not a broken environment.
+test.skip(
+    !BUNDLED_TOR_AVAILABLE_FOR_ARCH,
+    `no bundled Tor for linux-${process.arch}; anonymous mode is unavailable on this architecture`,
+);
 
 const PASSWORD = 'Correct-Horse-Battery-Staple9!';
 

@@ -87,8 +87,18 @@ detect_platform() {
                 x86_64)
                     echo "linux-x64"
                     ;;
+                aarch64|arm64)
+                    # Upstream builds the Tor Expert Bundle for linux-x86_64 and
+                    # linux-i686 only - aarch64 exists for macOS and Android, but
+                    # not for Linux. There is nothing to download here, so arm64
+                    # Linux builds ship without Tor and run fast mode only. The
+                    # app mirrors this in getBundledTorPlatformDir().
+                    echo -e "${RED}No Tor Expert Bundle is published for linux-aarch64.${NC}" >&2
+                    echo -e "${YELLOW}arm64 Linux builds ship without bundled Tor; anonymous mode is unavailable there.${NC}" >&2
+                    exit 1
+                    ;;
                 *)
-                    echo -e "${RED}Unsupported Linux architecture: $arch${NC}"
+                    echo -e "${RED}Unsupported Linux architecture: $arch${NC}" >&2
                     exit 1
                     ;;
             esac

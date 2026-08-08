@@ -7,10 +7,18 @@ This directory contains the Tor daemon binaries bundled with Kiyeovo Desktop.
 ```
 tor/
 ├── linux-x64/tor         # Linux x86_64
+├── linux-arm64/          # Linux aarch64 - intentionally empty, see below
 ├── darwin-x64/tor        # macOS Intel
 ├── darwin-arm64/tor      # macOS Apple Silicon
 └── win32-x64/tor.exe     # Windows x64
 ```
+
+`linux-arm64/` stays empty: upstream publishes the Tor Expert Bundle for
+linux-x86_64 and linux-i686 only, with no aarch64 Linux build (macOS and Android
+do get aarch64, Linux does not). The directory exists so packaging can resolve
+`resources/tor/linux-${arch}` on both architectures. arm64 Linux builds
+therefore ship without Tor and support fast mode only; the app reports this via
+`getBundledTorPlatformDir()` in `src/core/transport/tor-manager.ts`.
 
 ## Downloading Binaries
 

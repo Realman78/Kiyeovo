@@ -32,6 +32,14 @@ const TOR_BINARY_PATH = path.join(TOR_DIR, 'tor');
 const TOR_LIBEVENT_PATH = path.join(TOR_DIR, 'libevent-2.1.so.7');
 
 /**
+ * Whether this machine's architecture has a bundled Tor at all. Upstream
+ * publishes no linux-aarch64 Tor Expert Bundle (see resources/tor/README.md), so
+ * on arm64 there is nothing to download and nothing for the Tor specs to
+ * exercise — they skip instead of failing on a file that cannot exist.
+ */
+export const BUNDLED_TOR_AVAILABLE_FOR_ARCH = process.arch === 'x64';
+
+/**
  * Fails fast with clear setup instructions (mirrors electron.ts's dist-electron
  * missing-build check) rather than let a spawn() silently hang or crash deep
  * inside a test. Deliberately does NOT attempt to download anything — the
@@ -40,6 +48,13 @@ const TOR_LIBEVENT_PATH = path.join(TOR_DIR, 'libevent-2.1.so.7');
  * this helper should self-heal it.
  */
 function ensureTorResourcesAvailable(): void {
+    if (!BUNDLED_TOR_AVAILABLE_FOR_ARCH) {
+        throw new Error(
+            `No bundled Tor exists for linux-${process.arch} — upstream ships no aarch64 Linux ` +
+            'Tor Expert Bundle, so "npm run download:tor" cannot fetch one. These specs should ' +
+            'have been skipped via BUNDLED_TOR_AVAILABLE_FOR_ARCH before reaching this helper.',
+        );
+    }
     if (!existsSync(TOR_BINARY_PATH)) {
         throw new Error(
             `Bundled tor binary not found at ${TOR_BINARY_PATH}. Run "npm run download:tor" ` +

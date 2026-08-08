@@ -1,6 +1,6 @@
 import { test, expect, type Page, type TestInfo } from '@playwright/test';
 import { type LaunchedApp } from './electron';
-import { launchAnonymousApp, completeAnonymousRegisterStep } from './tor';
+import { launchAnonymousApp, completeAnonymousRegisterStep, BUNDLED_TOR_AVAILABLE_FOR_ARCH } from './tor';
 import { beginIdentityCreation, addBootstrapServer, getDhtConnected, finishWizard, readPeerId, timedStage } from './onboard';
 import { ONION_BOOTSTRAP_MULTIADDR, uniqueRunSuffix } from './config';
 
@@ -82,6 +82,13 @@ import { ONION_BOOTSTRAP_MULTIADDR, uniqueRunSuffix } from './config';
 // depend on, and must not disturb, any other test's state on the shared
 // deployed infra.
 test.setTimeout(12 * 60_000);
+
+// See tor-mode.spec.ts: arm64 Linux ships no bundled Tor, so anonymous mode
+// does not exist there to test.
+test.skip(
+    !BUNDLED_TOR_AVAILABLE_FOR_ARCH,
+    `no bundled Tor for linux-${process.arch}; anonymous mode is unavailable on this architecture`,
+);
 
 const PASSWORD = 'Correct-Horse-Battery-Staple9!';
 

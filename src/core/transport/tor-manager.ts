@@ -501,44 +501,58 @@ export function createTorManager(
 }
 
 /**
- * Get the path to the bundled Tor binary based on platform/arch
- * This should be called from Electron main process where app paths are available
+ * Name of the `resources/tor/<dir>` folder holding the bundled Tor binary for a
+ * platform/arch pair, or `null` when upstream publishes no Tor Expert Bundle we
+ * can ship for it.
+ *
+ * The notable gap is arm64 Linux: upstream builds the expert bundle for
+ * linux-x86_64 and linux-i686 only (macOS and Android get aarch64, Linux does
+ * not), so an arm64 Linux build ships without Tor and cannot offer anonymous
+ * mode. Keep this the single source of truth for that question - the download
+ * script mirrors the same platform list.
  */
-export function getTorBinaryPath(resourcesPath: string, appPath: string, isPackaged: boolean): string {
-  const platform = process.platform;
-  const arch = process.arch;
-
-  let binaryName: string;
-  let platformDir: string;
-
+export function getBundledTorPlatformDir(
+  platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch
+): string | null {
   switch (platform) {
     case 'win32':
-      binaryName = 'tor.exe';
-      platformDir = 'win32-x64';
-      break;
+      return arch === 'x64' ? 'win32-x64' : null;
     case 'darwin':
-      binaryName = 'tor';
-      platformDir = arch === 'arm64' ? 'darwin-arm64' : 'darwin-x64';
-      break;
+      if (arch === 'arm64') return 'darwin-arm64';
+      return arch === 'x64' ? 'darwin-x64' : null;
     case 'linux':
-      binaryName = 'tor';
-      platformDir = 'linux-x64';
-      break;
+      return arch === 'x64' ? 'linux-x64' : null;
     default:
-      throw new Error(`Unsupported platform: ${platform}`);
+      return null;
   }
+}
+
+/**
+ * Get the path to the bundled Tor binary based on platform/arch, or `null` when
+ * this build ships no Tor for the current platform/arch.
+ *
+ * This should be called from Electron main process where app paths are available.
+ * Returning `null` rather than a path that cannot exist lets callers report the
+ * real reason ("this build has no Tor") instead of surfacing a spawn failure.
+ */
+export function getTorBinaryPath(
+  resourcesPath: string,
+  appPath: string,
+  isPackaged: boolean
+): string | null {
+  const platformDir = getBundledTorPlatformDir();
+  if (!platformDir) {
+    return null;
+  }
+
+  const binaryName = process.platform === 'win32' ? 'tor.exe' : 'tor';
 
   // In development, look in resources/tor
   // In production (packaged), look in resources folder (unpacked from asar)
-  let basePath: string;
-
-  if (isPackaged) {
-    // Production: use resources folder (unpacked)
-    basePath = path.join(resourcesPath, 'tor', platformDir);
-  } else {
-    // Development: use project resources folder
-    basePath = path.join(appPath, 'resources', 'tor', platformDir);
-  }
+  const basePath = isPackaged
+    ? path.join(resourcesPath, 'tor', platformDir)
+    : path.join(appPath, 'resources', 'tor', platformDir);
 
   return path.join(basePath, binaryName);
 }

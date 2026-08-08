@@ -5,6 +5,7 @@ import {
     launchAnonymousApp,
     onboardAnonymous,
     waitForRealDhtConnectionAnonymous,
+    BUNDLED_TOR_AVAILABLE_FOR_ARCH,
     type OnionFrontedBootstrap,
 } from './tor';
 import {
@@ -148,6 +149,13 @@ import { chatMessage, sidebarChatEntry, openChat, attach, attachLogs } from './w
 // pattern as tor-mode.spec.ts's T2 vs this file's extra instance) plus TWO
 // cold-dial contact exchanges plus a forced-dial group invite round trip.
 test.setTimeout(12 * 60_000);
+
+// See tor-mode.spec.ts: arm64 Linux ships no bundled Tor, so anonymous mode
+// does not exist there to test.
+test.skip(
+    !BUNDLED_TOR_AVAILABLE_FOR_ARCH,
+    `no bundled Tor for linux-${process.arch}; anonymous mode is unavailable on this architecture`,
+);
 
 const PASSWORD = 'Correct-Horse-Battery-Staple9!';
 
