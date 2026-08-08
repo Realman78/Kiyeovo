@@ -20,6 +20,7 @@ import {
     startOnionFrontedBootstrap,
     launchAnonymousApp,
     onboardAnonymous,
+    BUNDLED_TOR_AVAILABLE_FOR_ARCH,
     type OnionFrontedBootstrap,
 } from './tor';
 import { BOOTSTRAP_MULTIADDR, RELAY_MULTIADDR, STUN_URL, uniqueRunSuffix } from './config';
@@ -727,6 +728,14 @@ async function closeAndReopenImportDialog(page: Page): Promise<boolean> {
 // run.
 // ---------------------------------------------------------------------------
 test('trusted profile export/import over Tor: peer-ID-only dial reaches the exporter via DHT peer routing (A never registers) @slow', async () => {
+    // The one anonymous-mode test in an otherwise fast-mode file, so this skips
+    // per-test rather than per-file (see tor-mode.spec.ts for the file-level
+    // form): arm64 Linux ships no bundled Tor, so there is no anonymous mode
+    // here to exercise.
+    test.skip(
+        !BUNDLED_TOR_AVAILABLE_FOR_ARCH,
+        `no bundled Tor for linux-${process.arch}; anonymous mode is unavailable on this architecture`,
+    );
     test.setTimeout(12 * 60_000);
     const testInfo = test.info();
     const testStart = Date.now();
