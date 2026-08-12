@@ -54,7 +54,13 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
   // derive this from, since activeSetupSection always has a value.
   const [setupDetailOpen, setSetupDetailOpen] = useState(false);
   const isNarrow = useIsNarrowViewport();
+  // The chat pane shows three kinds of thing, not just an open chat: a pending
+  // contact attempt (whose Accept button lives there) and an in-flight key
+  // exchange render in it too. Treating only activeChat as "opened" would leave
+  // the pane hidden on a narrow viewport with no way to accept a request.
   const activeChat = useSelector((state: RootState) => state.chat.activeChat);
+  const activeContactAttempt = useSelector((state: RootState) => state.chat.activeContactAttempt);
+  const activePendingKeyExchange = useSelector((state: RootState) => state.chat.activePendingKeyExchange);
   const initialSetupTransitionInFlightRef = useRef(false);
   const recentOfflineSyncGenerationRef = useRef(0);
   const dispatch = useDispatch();
@@ -1091,7 +1097,7 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
   // "Detail" means: an open chat, a chosen setup page, or a section like
   // settings/profile/help whose sidebar pane is empty anyway.
   const narrowDetailOpen = isChatSection
-    ? activeChat !== null
+    ? activeChat !== null || activeContactAttempt !== null || activePendingKeyExchange !== null
     : activeSection === 'setup'
       ? setupDetailOpen
       : true;

@@ -1068,7 +1068,10 @@ export const ChatInput: FC<ChatInputProps> = ({
             )}
             <form
                 onSubmit={handleSubmit}
-                className={`flex min-h-20 items-end justify-between gap-4 px-4 py-3 ${replyTarget ? '' : 'border-t border-border'}`}
+                // Below `sm` the icon buttons and the composer cannot share a row
+                // without crushing the textarea to a few characters wide, so the
+                // composer wraps onto its own line beneath them.
+                className={`flex min-h-20 flex-wrap items-end justify-between gap-2 px-4 py-3 sm:flex-nowrap sm:gap-4 ${replyTarget ? '' : 'border-t border-border'}`}
             >
                 <div ref={emojiPickerRef} className="relative flex shrink-0 items-center gap-2 self-end">
                     <Button
@@ -1134,7 +1137,7 @@ export const ChatInput: FC<ChatInputProps> = ({
                     )}
                 </div>
                 {voiceRecorder.state === 'idle' ? (
-                    <div className="flex flex-1 items-end gap-4">
+                    <div className="flex min-w-0 flex-1 basis-full items-end gap-2 sm:basis-auto sm:gap-4">
                         <textarea
                             ref={inputRef}
                             rows={1}

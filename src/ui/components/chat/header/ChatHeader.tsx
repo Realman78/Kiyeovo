@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { useSelector, useDispatch } from "react-redux";
 import type { RootState } from "../../../state/store";
 import { UserPlus, AlertCircle, Users, Clock, Phone, PhoneOff, Loader2, X, ArrowLeft } from "lucide-react";
-import { updateChat, clearMessages, removeChat, setOfflineFetchStatus, markOfflineFetched, markOfflineFetchFailed, setActiveChat } from "../../../state/slices/chatSlice";
+import { updateChat, clearMessages, removeChat, setOfflineFetchStatus, markOfflineFetched, markOfflineFetchFailed, setActiveChat, setActiveContactAttempt, setActivePendingKeyExchange } from "../../../state/slices/chatSlice";
 import { useIsNarrowViewport } from "../../../hooks/useIsNarrowViewport";
 import { AboutUserModal } from "./AboutUserModal";
 import { useToast } from "../../ui/use-toast";
@@ -1108,7 +1108,13 @@ export const ChatHeader = ({
       {isNarrow && (
         <button
           type="button"
-          onClick={() => dispatch(setActiveChat(null))}
+          onClick={() => {
+            // Clear every "detail" the chat pane can be showing, or going back
+            // from a contact attempt / key exchange would leave the pane open.
+            dispatch(setActiveChat(null));
+            dispatch(setActiveContactAttempt(null));
+            dispatch(setActivePendingKeyExchange(null));
+          }}
           aria-label="Back to conversations"
           className="-ml-2 flex h-10 w-10 shrink-0 cursor-pointer items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
         >
