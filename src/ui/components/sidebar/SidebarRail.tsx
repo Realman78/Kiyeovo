@@ -4,6 +4,7 @@ import { useSelector } from 'react-redux';
 import { Logo } from '../icons/Logo';
 import { KiyeovoDialog } from './header/KiyeovoDialog';
 import { useSetupReadiness, type SetupSeverity } from '../../hooks/useSetupReadiness';
+import { useIsNarrowViewport } from '../../hooks/useIsNarrowViewport';
 import type { RootState } from '../../state/store';
 import type { SidebarSection } from './navigation';
 
@@ -89,7 +90,13 @@ export const SidebarRail: FC<SidebarRailProps> = ({
   isTorEnabled,
 }) => {
   const [kiyeovoDialogOpen, setKiyeovoDialogOpen] = useState(false);
-  const [expanded, setExpanded] = useState(false);
+  const [expandedByPointer, setExpanded] = useState(false);
+  const isNarrow = useIsNarrowViewport();
+  // The 176px flyout is a hover affordance with no touch equivalent: selecting a
+  // section leaves focus inside the rail, so it stays open, and on a 360px screen
+  // it covers half the content. Keep it collapsed there — the icons alone carry
+  // the navigation.
+  const expanded = expandedByPointer && !isNarrow;
   const setupReadiness = useSetupReadiness();
   const isRegistered = useSelector((state: RootState) => state.user.registered);
 

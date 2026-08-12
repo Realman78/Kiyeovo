@@ -257,8 +257,13 @@ function createMainWindow(options: { startHidden?: boolean } = {}) {
       x: savedBounds.x,
       y: savedBounds.y,
     }),
-    minWidth: 880,
-    minHeight: 600,
+    // Sized for a phone-class display rather than a desktop one: a PinePhone
+    // class screen is 720x1440 at scale 2, i.e. 360x720 CSS px, and on Phosh a
+    // window whose minimum exceeds the screen is clipped rather than merely
+    // cramped. The layout goes single-pane below the `narrow` breakpoint (see
+    // useIsNarrowViewport), so these are usable sizes, not just permitted ones.
+    minWidth: 360,
+    minHeight: 480,
     autoHideMenuBar: true,
     title: branding.title,
     icon: branding.icon,

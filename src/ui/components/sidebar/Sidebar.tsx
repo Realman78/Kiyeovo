@@ -23,6 +23,14 @@ type SidebarProps = {
   activeSetupSection: SetupSection;
   onSelectSection: (section: SidebarSection) => void;
   onSelectSetupSection: (section: SetupSection) => void;
+  /**
+   * Collapse to the rail even in a section that normally shows a list. Set by
+   * the shell on a narrow viewport once a detail pane is open, so the rail (and
+   * with it, section navigation) survives when there is only room for one pane.
+   */
+  forceRailOnly?: boolean;
+  /** Narrow viewport: the list pane fills the width left by the rail. */
+  isNarrow?: boolean;
 };
 
 export const Sidebar: FC<SidebarProps> = ({
@@ -30,6 +38,8 @@ export const Sidebar: FC<SidebarProps> = ({
   activeSetupSection,
   onSelectSection,
   onSelectSetupSection,
+  forceRailOnly = false,
+  isNarrow = false,
 }) => {
   const [isLoadingContactAttempts, setIsLoadingContactAttempts] = useState(true);
   const [contactAttemptsError, setContactAttemptsError] = useState<string | null>(null);
@@ -38,7 +48,8 @@ export const Sidebar: FC<SidebarProps> = ({
   const [networkMode, setNetworkMode] = useState<NetworkMode>('fast');
   const networkOnline = useSelector((state: RootState) => state.user.networkOnline);
   const statusSuffix = networkOnline === false ? ' (local)' : isTorEnabled ? ' (tor)' : '';
-  const isRailOnly = activeSection === 'settings' || activeSection === 'profile' || activeSection === 'help';
+  const isRailOnly = forceRailOnly
+    || activeSection === 'settings' || activeSection === 'profile' || activeSection === 'help';
   const openProfile = () => onSelectSection('profile');
 
   const contactAttempts = useSelector((state: RootState) => state.chat.contactAttempts)
@@ -223,7 +234,7 @@ export const Sidebar: FC<SidebarProps> = ({
 
   return (
     <div className={`relative z-10 h-full overflow-visible ${activeSection === 'setup' || isRailOnly ? '' : 'border-r'} border-sidebar-border bg-sidebar-background transition-[width] duration-300 ease-in-out ${
-      isRailOnly ? 'w-14' : isCollapsed ? 'w-30' : 'w-110'
+      isRailOnly ? 'w-14' : isCollapsed ? 'w-30' : isNarrow ? 'w-full' : 'w-110'
     }`}>
       <div className="flex h-full">
         <SidebarRail
@@ -240,7 +251,8 @@ export const Sidebar: FC<SidebarProps> = ({
           </div>
         )}
       </div>
-      {!isRailOnly && (
+      {/* Collapsing is meaningless when the pane already fills the screen. */}
+      {!isRailOnly && !isNarrow && (
         <button
           type="button"
           onClick={() => setIsCollapsed((prev) => !prev)}

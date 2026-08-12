@@ -46,7 +46,9 @@ const SettingsActionRow: FC<SettingsActionRowProps> = ({
   description,
   action,
 }) => (
-  <div className="flex items-center justify-between gap-6 rounded-lg border border-border bg-background/60 p-4">
+  // Below `sm` the label and a wide action (e.g. "Switch to anonymous") cannot
+  // share a row without colliding, so the action drops beneath the text.
+  <div className="flex flex-col items-stretch gap-3 rounded-lg border border-border bg-background/60 p-4 sm:flex-row sm:items-center sm:justify-between sm:gap-6">
     <div className="flex min-w-0 items-center gap-3">
       {icon}
       <div className="min-w-0 text-left">

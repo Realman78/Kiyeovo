@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef } from "react";
 import { useSelector, useDispatch } from "react-redux";
 import type { RootState } from "../../../state/store";
-import { UserPlus, AlertCircle, Users, Clock, Phone, PhoneOff, Loader2, X } from "lucide-react";
-import { updateChat, clearMessages, removeChat, setOfflineFetchStatus, markOfflineFetched, markOfflineFetchFailed } from "../../../state/slices/chatSlice";
+import { UserPlus, AlertCircle, Users, Clock, Phone, PhoneOff, Loader2, X, ArrowLeft } from "lucide-react";
+import { updateChat, clearMessages, removeChat, setOfflineFetchStatus, markOfflineFetched, markOfflineFetchFailed, setActiveChat } from "../../../state/slices/chatSlice";
+import { useIsNarrowViewport } from "../../../hooks/useIsNarrowViewport";
 import { AboutUserModal } from "./AboutUserModal";
 import { useToast } from "../../ui/use-toast";
 import { validateUsername } from "../../../utils/general";
@@ -70,6 +71,7 @@ export const ChatHeader = ({
   const myPeerId = useSelector((state: RootState) => state.user.peerId);
   const activeCall = useSelector((state: RootState) => state.call.activeCall);
   const dispatch = useDispatch();
+  const isNarrow = useIsNarrowViewport();
   const hour12 = useHour12();
   const { toast } = useToast();
   const { confirmCallAttempt } = useConnectivityGuidance();
@@ -1101,6 +1103,18 @@ export const ChatHeader = ({
 
   return <div className={`${showGroupStateMessage || showDirectInactivityWarning ? 'h-20' : 'h-16'} px-6 flex items-center justify-between border-b border-border ${activeChat?.status === 'pending' ? "" : "bg-card/50"}`}>
     <div className="flex min-w-12 flex-1 items-center gap-3">
+      {/* Narrow viewports show one pane at a time, so closing the chat is the
+          only way back to the conversation list. */}
+      {isNarrow && (
+        <button
+          type="button"
+          onClick={() => dispatch(setActiveChat(null))}
+          aria-label="Back to conversations"
+          className="-ml-2 flex h-10 w-10 shrink-0 cursor-pointer items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+        >
+          <ArrowLeft className="h-5 w-5" />
+        </button>
+      )}
       {isGroup ? (
         <div className="w-10 h-10 shrink-0 rounded-full bg-primary/20 flex items-center justify-center">
           <Users className="w-5 h-5 text-primary" />

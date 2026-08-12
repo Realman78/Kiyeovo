@@ -10,6 +10,7 @@ import { useToast } from '../components/ui/use-toast';
 import type { RootState } from '../state/store';
 import { useNotifications } from '../hooks/useNotifications';
 import { useCallRingtone } from '../hooks/useCallRingtone';
+import { useIsNarrowViewport } from '../hooks/useIsNarrowViewport';
 import { store } from '../state/store';
 import { callService } from '../lib/call/callService';
 import { groupCallService } from '../lib/call/groupCallService';
@@ -48,6 +49,12 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
   const [persistedInitialSetupStatus, setPersistedInitialSetupStatus] =
     useState<InitialSetupStatus | null>(null);
   const [initialSetupSaving, setInitialSetupSaving] = useState(false);
+  // Narrow-viewport only: whether the chosen setup page is showing instead of
+  // the setup nav list. Unlike chats there is no "nothing selected" state to
+  // derive this from, since activeSetupSection always has a value.
+  const [setupDetailOpen, setSetupDetailOpen] = useState(false);
+  const isNarrow = useIsNarrowViewport();
+  const activeChat = useSelector((state: RootState) => state.chat.activeChat);
   const initialSetupTransitionInFlightRef = useRef(false);
   const recentOfflineSyncGenerationRef = useRef(0);
   const dispatch = useDispatch();
@@ -1078,6 +1085,20 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
   const navigationReady = !onboardingLoading;
   const isChatSection = navigationReady
     && (activeSection === 'chats' || activeSection === 'groups');
+  // Below `sm` the sidebar (w-110 + a 56px rail) and the content pane cannot
+  // share the width, so the shell shows one at a time. The rail always stays
+  // visible so section navigation survives; only the list pane gives way.
+  // "Detail" means: an open chat, a chosen setup page, or a section like
+  // settings/profile/help whose sidebar pane is empty anyway.
+  const narrowDetailOpen = isChatSection
+    ? activeChat !== null
+    : activeSection === 'setup'
+      ? setupDetailOpen
+      : true;
+  // The sidebar itself always renders; on a narrow viewport it shrinks to the
+  // rail (forceRailOnly) rather than unmounting, so navigation is never lost.
+  const showContentPane = !isNarrow || narrowDetailOpen;
+
   const showInitialSetupWelcome = initialSetupSessionPhase === 'welcome';
   const showInitialSetupWizard = initialSetupSessionPhase === 'guided';
   const onboardingActive =
@@ -1137,10 +1158,21 @@ export const Main = ({ wakeRecoveryToken, onWakeRecoveryOfflineSyncSettled }: Ma
         <Sidebar
           activeSection={activeSection}
           activeSetupSection={activeSetupSection}
-          onSelectSection={setActiveSection}
-          onSelectSetupSection={setActiveSetupSection}
+          onSelectSection={(section) => {
+            // Leaving a section closes its detail pane, so a narrow viewport
+            // lands on the new section's list rather than a stale detail view.
+            setSetupDetailOpen(false);
+            if (section !== activeSection) dispatch(setActiveChat(null));
+            setActiveSection(section);
+          }}
+          onSelectSetupSection={(section) => {
+            setActiveSetupSection(section);
+            setSetupDetailOpen(true);
+          }}
+          forceRailOnly={isNarrow && narrowDetailOpen}
+          isNarrow={isNarrow}
         />
-        <div className='relative min-w-12 flex-1'>
+        <div className={`relative min-w-12 flex-1 ${showContentPane ? '' : 'hidden'}`}>
           <div
             className={`absolute inset-0 flex ${isChatSection ? 'visible pointer-events-auto' : 'invisible pointer-events-none'}`}
             aria-hidden={!isChatSection}
