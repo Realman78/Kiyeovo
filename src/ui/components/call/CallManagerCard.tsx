@@ -528,7 +528,10 @@ export const CallManagerCard = () => {
       )}
 
       <div
-        className={`fixed ${positionClassName} z-100 ${isVisualCall ? 'w-[360px]' : 'w-fit'} rounded-lg border border-border bg-card/95 backdrop-blur px-4 py-3 shadow-xl transition-opacity duration-500 ${shouldFadeCallCard ? 'pointer-events-none opacity-0' : 'opacity-100'}`}
+        // A flat w-[360px] is wider than the whole viewport on a phone once the
+        // anchor's 16px inset is counted, so cap it to the space actually
+        // available and only take the fixed width where there is room.
+        className={`fixed ${positionClassName} z-100 ${isVisualCall ? 'w-[calc(100vw-2rem)] sm:w-[360px]' : 'w-fit max-w-[calc(100vw-2rem)]'} rounded-lg border border-border bg-card/95 backdrop-blur px-4 py-3 shadow-xl transition-opacity duration-500 ${shouldFadeCallCard ? 'pointer-events-none opacity-0' : 'opacity-100'}`}
         onPointerEnter={() => setIsCallCardHovered(true)}
         onPointerLeave={() => setIsCallCardHovered(false)}
       >

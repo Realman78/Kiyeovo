@@ -99,7 +99,7 @@ export const IncomingCallCard = () => {
   };
 
   return (
-    <div className={`fixed ${positionClassName} z-110 w-[320px] rounded-lg border border-border bg-card/95 backdrop-blur px-4 py-3 shadow-xl`}>
+    <div className={`fixed ${positionClassName} z-110 w-[320px] max-w-[calc(100vw-2rem)] rounded-lg border border-border bg-card/95 backdrop-blur px-4 py-3 shadow-xl`}>
       <button
         type="button"
         className={`absolute top-1 left-1 z-10 h-5 w-5 rounded text-muted-foreground transition hover:bg-accent/70 hover:text-foreground cursor-move ${isDraggingAnchor ? 'bg-accent/80 text-foreground' : ''}`}

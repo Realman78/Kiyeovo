@@ -436,7 +436,7 @@ export const GroupCallManagerCard = () => {
   const { visible: compactVisibleTiles, overflow: compactOverflow } = selectVisibleTiles(tiles, COMPACT_TILE_LIMIT);
 
   return (
-    <div className={`fixed ${positionClassName} z-100 w-80 rounded-xl border border-primary/30 bg-background/95 p-4 shadow-2xl backdrop-blur`}>
+    <div className={`fixed ${positionClassName} z-100 w-80 max-w-[calc(100vw-2rem)] rounded-xl border border-primary/30 bg-background/95 p-4 shadow-2xl backdrop-blur`}>
       <button
         type="button"
         className={`absolute top-1 left-1 z-10 h-5 w-5 cursor-move rounded text-muted-foreground transition hover:bg-accent/70 hover:text-foreground ${isDraggingAnchor ? 'bg-accent/80 text-foreground' : ''}`}
