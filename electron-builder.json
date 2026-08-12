@@ -63,6 +63,25 @@
             }
         ]
     },
+    "flatpak": {
+        "runtimeVersion": "24.08",
+        "baseVersion": "24.08",
+        "useWaylandFlags": true,
+        "finishArgs": [
+            "--socket=wayland",
+            "--socket=x11",
+            "--share=ipc",
+            "--device=dri",
+            "--socket=pulseaudio",
+            "--filesystem=home",
+            "--share=network",
+            "--talk-name=org.freedesktop.Notifications",
+            "--talk-name=org.freedesktop.secrets",
+            "--talk-name=org.kde.StatusNotifierWatcher",
+            "--device=all",
+            "--filesystem=xdg-run/pipewire-0"
+        ]
+    },
     "nsis": {
         "oneClick": false,
         "perMachine": false,

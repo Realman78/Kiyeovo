@@ -31,6 +31,7 @@
     "transpile:electron": "npm run clean:electron && tsc -p src/electron/tsconfig.json && node scripts/build-preload.mjs",
     "dist:linux": "npm run transpile:electron && npm run build && electron-builder --linux --x64 --publish never",
     "dist:linux:arm64": "npm run transpile:electron && npm run build && electron-builder --linux --arm64 --publish never",
+    "dist:linux:arm64:flatpak": "npm run transpile:electron && npm run build && electron-builder --linux flatpak --arm64 --publish never",
     "dist:mac": "npm run transpile:electron && npm run build && electron-builder --mac --publish never",
     "dist:win": "npm run transpile:electron && npm run build && electron-builder --win --x64 --publish never",
     "download:tor": "bash scripts/download-tor.sh",
