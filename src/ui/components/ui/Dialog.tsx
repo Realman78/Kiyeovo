@@ -32,7 +32,10 @@ const DialogContent = React.forwardRef<
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>
 >(({ className = "", children, ...props }, ref) => {
   const classes = [
-    "fixed left-[50%] top-[50%] z-[121] w-full max-w-xl translate-x-[-50%] translate-y-[-50%]",
+    // w-full left the dialog flush against both screen edges on a phone (and
+    // clipped the corner accents); the height cap plus a scrollable body keeps a
+    // tall dialog's footer buttons reachable instead of pushed off-screen.
+    "fixed left-[50%] top-[50%] z-[121] flex max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-xl translate-x-[-50%] translate-y-[-50%] flex-col",
     "bg-card border border-border rounded-lg shadow-lg",
     "glow-border",
     "dialog-content-animate",
@@ -70,7 +73,7 @@ const DialogHeader = ({
   ...props
 }: React.HTMLAttributes<HTMLDivElement>) => {
   const classes = [
-    "flex flex-col space-y-2 p-6 pb-4 border-b border-border/50",
+    "flex shrink-0 flex-col space-y-2 p-6 pb-4 border-b border-border/50",
     className,
   ].filter(Boolean).join(" ");
 
@@ -83,7 +86,7 @@ const DialogFooter = ({
   ...props
 }: React.HTMLAttributes<HTMLDivElement>) => {
   const classes = [
-    "flex flex-col-reverse sm:flex-row sm:justify-end sm:space-x-2 p-6 pt-4 border-t border-border/50",
+    "flex shrink-0 flex-col-reverse sm:flex-row sm:justify-end sm:space-x-2 p-6 pt-4 border-t border-border/50",
     className,
   ].filter(Boolean).join(" ");
 
@@ -133,7 +136,9 @@ const DialogBody = ({
   className = "",
   ...props
 }: React.HTMLAttributes<HTMLDivElement>) => {
-  const classes = ["p-6", className].filter(Boolean).join(" ");
+  // min-h-0 so this flex child may shrink below its content and actually scroll,
+  // leaving the header and footer pinned.
+  const classes = ["min-h-0 overflow-y-auto p-6", className].filter(Boolean).join(" ");
   return <div className={classes} {...props} />;
 };
 DialogBody.displayName = "DialogBody";
