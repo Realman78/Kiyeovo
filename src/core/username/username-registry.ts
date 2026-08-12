@@ -56,6 +56,15 @@ export class UsernameRegistry {
   private static readonly MAX_REGISTRATION_AGE = REREGISTRATION_INTERVAL * 2;
   private static readonly FAST_PUBLISH_EARLY_RETURN_MS = 10_000;
   private static readonly FAST_PUBLISH_POLL_MS = 1000;
+  // Hard upper bound on one DHT publish. Without it, a put whose query neither
+  // completes nor draws a single PEER_RESPONSE leaves publishRecord's wait loop
+  // spinning forever: register() never settles, and RegisterDialog's button
+  // stays disabled with no error and nothing logged. Observed against a DHT
+  // whose closest peers were all unreachable — DIAL_PEER/QUERY_ERROR past 78s,
+  // zero PEER_RESPONSE. Anonymous mode gets the longer budget for the same
+  // reason its ping timeout does: onion circuits are legitimately slower.
+  private static readonly FAST_PUBLISH_HARD_TIMEOUT_MS = 30_000;
+  private static readonly ANONYMOUS_PUBLISH_HARD_TIMEOUT_MS = 60_000;
   private static readonly LOOKUP_RETRYABLE_ERRORS = [
     'Could not send correction',
     'No peers found',
@@ -903,8 +912,15 @@ export class UsernameRegistry {
     let acceptedCount = 0;
     let rejectedCount = 0;
 
+    const publishBudgetMs = this.isFastMode
+      ? UsernameRegistry.FAST_PUBLISH_HARD_TIMEOUT_MS
+      : UsernameRegistry.ANONYMOUS_PUBLISH_HARD_TIMEOUT_MS;
+    // Cancels the underlying query rather than abandoning it to keep dialing in
+    // the background (same idiom as offline-message-manager's put).
+    const putSignal = AbortSignal.timeout(publishBudgetMs);
+
     const consumePut = async (): Promise<void> => {
-      for await (const event of this.node.services.dht.put(key, valueBytes) as AsyncIterable<QueryEvent>) {
+      for await (const event of this.node.services.dht.put(key, valueBytes, { signal: putSignal }) as AsyncIterable<QueryEvent>) {
         if (event.name === 'QUERY_ERROR') {
           errorCount++;
           continue;
@@ -923,7 +939,13 @@ export class UsernameRegistry {
     let consumeError: unknown = null;
     const consumePromise = consumePut()
       .catch((error: unknown) => {
-        consumeError = error;
+        // Exhausting the budget is an expected outcome, not a failure worth
+        // throwing: fall through with whatever counts were gathered and let
+        // wasPublishAccepted() judge them (0 accepted => the caller reports a
+        // failed registration). Anything else is a real error.
+        if (!putSignal.aborted) {
+          consumeError = error;
+        }
       })
       .finally(() => {
         finished = true;
@@ -931,8 +953,16 @@ export class UsernameRegistry {
 
     if (this.isFastMode) {
       const deadline = startedAt + UsernameRegistry.FAST_PUBLISH_EARLY_RETURN_MS;
+      // One poll interval past the budget, so the putSignal path above normally
+      // wins and this only fires if the query ignores the abort entirely.
+      const hardDeadline = startedAt + publishBudgetMs + UsernameRegistry.FAST_PUBLISH_POLL_MS;
       while (!finished) {
         if (Date.now() >= deadline && acceptedCount >= 1) {
+          void consumePromise;
+          return { errorCount, acceptedCount, rejectedCount };
+        }
+
+        if (Date.now() >= hardDeadline) {
           void consumePromise;
           return { errorCount, acceptedCount, rejectedCount };
         }
