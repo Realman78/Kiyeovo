@@ -30,9 +30,23 @@ export const ensureAppDataDir = (): string => {
         case 'darwin':
             appDataDir = path.join(home, 'Library', 'Application Support', 'kiyeovo');
             break;
-        case 'linux':
-            appDataDir = path.join(home, '.config', 'kiyeovo');
+        case 'linux': {
+            // Honour XDG_CONFIG_HOME, mirroring the APPDATA fallback above. Outside
+            // a sandbox it is normally unset, so this stays ~/.config/kiyeovo and
+            // existing installs keep their data untouched. Inside a Flatpak it points
+            // at ~/.var/app/<app-id>/config, which is where a sandboxed app's data
+            // belongs: without this the app writes straight through --filesystem=home
+            // into the real ~/.config/kiyeovo, so a Flatpak and a .deb install would
+            // share one database and identity (corrupting it if both run at once) and
+            // the data would outlive `flatpak uninstall`.
+            // Per the XDG spec a relative XDG_CONFIG_HOME is invalid and ignored.
+            const xdgConfigHome = process.env.XDG_CONFIG_HOME;
+            const configHome = xdgConfigHome && path.isAbsolute(xdgConfigHome)
+                ? xdgConfigHome
+                : path.join(home, '.config');
+            appDataDir = path.join(configHome, 'kiyeovo');
             break;
+        }
         default:
             appDataDir = path.join('.kiyeovo');
             break;
