@@ -36,11 +36,16 @@ if (existsSync(envLocalPath)) {
     dotenv.config({ path: envLocalPath });
 }
 
+// San Francisco fleet member. These were repointed when the SFO box was
+// rebuilt on a new IP: the previous 143.198.137.240 host no longer answers on
+// any port (TCP 9000/4002 or STUN 3478), which stalled every spec that needs
+// live infra. federation-live.spec.ts already carried the current addresses;
+// only these defaults were left behind.
 const DEFAULT_BOOTSTRAP_MULTIADDR =
-    '/ip4/143.198.137.240/tcp/9000/p2p/12D3KooWL9V168N9rzJ2HP5aWKdJMUDtbYWca5ojDtELWWggddVu';
+    '/ip4/167.172.115.233/tcp/9000/p2p/12D3KooWKDrpSzWYyCaJ4gfNGY5XUjUYN9tVZe8t9biMMY9HxU8K';
 const DEFAULT_RELAY_MULTIADDR =
-    '/ip4/143.198.137.240/tcp/4002/p2p/12D3KooWKx9xPFweD6isahRpjkNR6BxEtJKpbZvvfskb44E8q83x';
-const DEFAULT_STUN_URL = 'stun:143.198.137.240:3478';
+    '/ip4/167.172.115.233/tcp/4002/p2p/12D3KooWDfn9gv6mQsb8CBCmXRPLbBzDaZrcZD8HiQ4a3rgNp4MM';
+const DEFAULT_STUN_URL = 'stun:167.172.115.233:3478';
 
 /** Real bootstrap address. Ignored when USE_LOCAL_BOOTSTRAP is set. */
 export const BOOTSTRAP_MULTIADDR = process.env.KIYEOVO_E2E_BOOTSTRAP ?? DEFAULT_BOOTSTRAP_MULTIADDR;
